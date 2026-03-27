@@ -23,7 +23,7 @@ toml = "0.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tui-term = "0.3"
+vt100 = "0.16"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
-vt100 = "0.16"

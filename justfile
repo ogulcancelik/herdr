@@ -37,7 +37,7 @@ release version:
     sed -i.bak 's/^version = ".*"/version = "{{version}}"/' Cargo.toml && rm -f Cargo.toml.bak
     cargo test --quiet
     git add Cargo.toml Cargo.lock
-    git commit -m "release: v{{version}}"
+    git diff --cached --quiet || git commit -m "release: v{{version}}"
     git tag v{{version}}
     git push --follow-tags
     @echo "v{{version}} released — GitHub Actions building binaries"
