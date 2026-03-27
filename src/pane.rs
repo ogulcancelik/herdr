@@ -15,6 +15,38 @@ use crate::events::AppEvent;
 use crate::layout::PaneId;
 use crate::pty_callbacks::PtyResponses;
 
+const CLAUDE_BUSY_HOLD: std::time::Duration = std::time::Duration::from_millis(1200);
+
+fn stabilize_agent_state(
+    agent: Option<Agent>,
+    previous: AgentState,
+    raw: AgentState,
+    now: std::time::Instant,
+    last_claude_busy_at: &mut Option<std::time::Instant>,
+) -> AgentState {
+    if agent != Some(Agent::Claude) {
+        return raw;
+    }
+
+    match raw {
+        AgentState::Busy => {
+            *last_claude_busy_at = Some(now);
+            AgentState::Busy
+        }
+        AgentState::Waiting => AgentState::Waiting,
+        AgentState::Idle if previous == AgentState::Busy => {
+            if last_claude_busy_at
+                .is_some_and(|last_busy| now.duration_since(last_busy) < CLAUDE_BUSY_HOLD)
+            {
+                AgentState::Busy
+            } else {
+                AgentState::Idle
+            }
+        }
+        _ => raw,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PaneState — pure data, constructable without PTYs, testable
 // ---------------------------------------------------------------------------
@@ -210,6 +242,7 @@ impl PaneRuntime {
                 let mut agent: Option<Agent> = None;
                 let mut state = AgentState::Unknown;
                 let mut last_process_check = Instant::now();
+                let mut last_claude_busy_at = None;
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -257,16 +290,24 @@ impl PaneRuntime {
                         }
                     }
 
-                    let new_state = if let Ok(content) = screen_content.read() {
+                    let raw_state = if let Ok(content) = screen_content.read() {
                         detect::detect_state(agent, &content)
                     } else {
                         continue;
                     };
+                    let new_state = stabilize_agent_state(
+                        agent,
+                        state,
+                        raw_state,
+                        now,
+                        &mut last_claude_busy_at,
+                    );
 
                     if new_state != state || agent_changed {
                         debug!(
                             pane = pane_id.raw(),
                             ?state,
+                            ?raw_state,
                             ?new_state,
                             ?agent,
                             "state changed"
@@ -380,5 +421,64 @@ impl PaneRuntime {
     pub fn cwd(&self) -> Option<std::path::PathBuf> {
         let pid = self.child_pid.load(Ordering::Relaxed);
         crate::platform::process_cwd(pid)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_busy_is_sticky_for_short_gap() {
+        let now = std::time::Instant::now();
+        let mut last_busy = None;
+
+        let busy = stabilize_agent_state(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            AgentState::Busy,
+            now,
+            &mut last_busy,
+        );
+        assert_eq!(busy, AgentState::Busy);
+
+        let still_busy = stabilize_agent_state(
+            Some(Agent::Claude),
+            AgentState::Busy,
+            AgentState::Idle,
+            now + std::time::Duration::from_millis(400),
+            &mut last_busy,
+        );
+        assert_eq!(still_busy, AgentState::Busy);
+    }
+
+    #[test]
+    fn claude_transitions_to_idle_after_hold_expires() {
+        let now = std::time::Instant::now();
+        let mut last_busy = Some(now);
+
+        let state = stabilize_agent_state(
+            Some(Agent::Claude),
+            AgentState::Busy,
+            AgentState::Idle,
+            now + CLAUDE_BUSY_HOLD + std::time::Duration::from_millis(1),
+            &mut last_busy,
+        );
+        assert_eq!(state, AgentState::Idle);
+    }
+
+    #[test]
+    fn non_claude_states_are_unchanged() {
+        let now = std::time::Instant::now();
+        let mut last_busy = None;
+
+        let state = stabilize_agent_state(
+            Some(Agent::Codex),
+            AgentState::Busy,
+            AgentState::Idle,
+            now,
+            &mut last_busy,
+        );
+        assert_eq!(state, AgentState::Idle);
     }
 }

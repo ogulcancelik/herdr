@@ -453,8 +453,9 @@ fn has_interrupt_pattern(lower_content: &str) -> bool {
         || (lower_content.contains("esc") && lower_content.contains("interrupt"))
 }
 
-/// Claude Code spinner characters + activity label
-/// Pattern: one of ✱✲✳... followed by a word ending in "ing" and "…"
+/// Claude Code spinner characters + activity label.
+/// The verb changes frequently ("Processing…", "Pouncing…", etc.), so rely
+/// on the spinner glyph + trailing ellipsis rather than specific wording.
 fn has_spinner_activity(content: &str) -> bool {
     const SPINNER_CHARS: &str = "✱✲✳✴✵✶✷✸✹✺✻✼✽✾✿❀❁❂❃❇❈❉❊❋✢✣✤✥✦✧✨⊛⊕⊙◉◎◍⁂⁕※⍟☼★☆";
     for line in content.lines() {
@@ -462,9 +463,11 @@ fn has_spinner_activity(content: &str) -> bool {
         let mut chars = trimmed.chars();
         if let Some(first) = chars.next() {
             if SPINNER_CHARS.contains(first) {
-                // Next should be a space, then a word ending in "ing", then "…"
                 let rest: String = chars.collect();
-                if rest.starts_with(' ') && rest.contains("ing") && rest.contains('\u{2026}') {
+                if rest.starts_with(' ')
+                    && rest.contains('\u{2026}')
+                    && rest.chars().any(|c| c.is_alphanumeric())
+                {
                     return true;
                 }
             }
@@ -1071,12 +1074,15 @@ mod tests {
         assert!(has_spinner_activity("✽ Tempering…"));
         assert!(has_spinner_activity("✳ Simplifying recompute_tangents…"));
         assert!(has_spinner_activity("  ✶ Reading…")); // with leading whitespace
+        assert!(has_spinner_activity("✻ Pouncing…"));
+        assert!(has_spinner_activity("✽ Processing…"));
     }
 
     #[test]
     fn spinner_activity_not_false_positive() {
         assert!(!has_spinner_activity("normal text"));
         assert!(!has_spinner_activity("✽ no ellipsis here"));
+        assert!(!has_spinner_activity("✽ …"));
         assert!(!has_spinner_activity("some ✽ in the middle"));
     }
 
