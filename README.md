@@ -164,6 +164,10 @@ accent = "cyan"
 
 # ask for confirmation before closing a workspace
 confirm_close = true
+
+# play sounds when agents change state in background workspaces
+# a chime when an agent finishes, an alert when one needs input
+sound = true
 ```
 
 ### environment variables

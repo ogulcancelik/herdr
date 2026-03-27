@@ -8,7 +8,7 @@ repository = "https://github.com/ogulcancelik/herdr"
 homepage = "https://herdr.dev"
 keywords = ["terminal", "tui", "ai", "agents", "multiplexer"]
 categories = ["command-line-utilities"]
-include = ["src/**/*", "README.md", "LICENSE", "Cargo.toml"]
+include = ["src/**/*", "assets/sounds/*", "README.md", "LICENSE", "Cargo.toml"]
 
 [dependencies]
 base64 = "0.22.1"

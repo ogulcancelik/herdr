@@ -18,6 +18,7 @@ mod persist;
 mod platform;
 mod pty_callbacks;
 mod selection;
+mod sound;
 mod ui;
 mod update;
 mod workspace;
@@ -82,6 +83,9 @@ const DEFAULT_CONFIG: &str = r#"# herdr configuration
 # Accent color for highlights, borders, and navigation UI.
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"
+
+# Play sounds when agents change state in background workspaces
+# sound = true
 "#;
 
 fn main() -> io::Result<()> {

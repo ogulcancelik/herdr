@@ -157,12 +157,29 @@ impl AppState {
                 for (ws_idx, ws) in self.workspaces.iter_mut().enumerate() {
                     if let Some(pane) = ws.panes.get_mut(&pane_id) {
                         let is_active_ws = self.active == Some(ws_idx);
+                        let prev_state = pane.state;
+
+                        // Mark unseen when transitioning to Idle in background
                         if state == AgentState::Idle
-                            && pane.state != AgentState::Idle
+                            && prev_state != AgentState::Idle
                             && !is_active_ws
                         {
                             pane.seen = false;
                         }
+
+                        // Sound notifications for background state changes
+                        if self.sound && !is_active_ws && state != prev_state {
+                            match state {
+                                AgentState::Idle if prev_state != AgentState::Idle => {
+                                    crate::sound::play(crate::sound::Sound::Done);
+                                }
+                                AgentState::Waiting => {
+                                    crate::sound::play(crate::sound::Sound::Request);
+                                }
+                                _ => {}
+                            }
+                        }
+
                         pane.detected_agent = agent;
                         pane.state = state;
                         break;

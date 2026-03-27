@@ -35,6 +35,8 @@ pub struct UiConfig {
     /// Accent color for highlights, borders, and navigation UI.
     /// Accepts hex (#89b4fa), named colors (cyan, blue), or RGB (rgb(137,180,250)).
     pub accent: String,
+    /// Play sounds when agents change state in background workspaces.
+    pub sound: bool,
 }
 
 impl Default for KeysConfig {
@@ -55,6 +57,7 @@ impl Default for UiConfig {
             sidebar_width: 26,
             confirm_close: true,
             accent: "cyan".into(),
+            sound: true,
         }
     }
 }

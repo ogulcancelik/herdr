@@ -85,6 +85,7 @@ impl App {
             sidebar_collapsed: false,
             confirm_close: config.ui.confirm_close,
             accent: crate::config::parse_color(&config.ui.accent),
+            sound: config.ui.sound,
             keybinds: config.keybinds(),
         };
 
