@@ -102,6 +102,50 @@ impl Drop for PaneRuntime {
     }
 }
 
+fn trim_trailing_blank_rows(rows: &mut Vec<String>) {
+    while rows.last().is_some_and(|row| row.trim().is_empty()) {
+        rows.pop();
+    }
+}
+
+fn recent_text_from_parser(parser: &mut vt100::Parser<PtyResponses>, lines: usize) -> String {
+    let screen = parser.screen_mut();
+    let original_scrollback = screen.scrollback();
+
+    screen.set_scrollback(usize::MAX);
+    let max_scrollback = screen.scrollback();
+
+    let (_, cols) = screen.size();
+    screen.set_scrollback(0);
+    let visible_rows: Vec<String> = screen
+        .rows(0, cols)
+        .map(|row| row.trim_end().to_string())
+        .collect();
+    let extra_rows = lines.saturating_sub(visible_rows.len()).min(max_scrollback);
+
+    let mut rows = Vec::with_capacity(extra_rows + visible_rows.len());
+    if extra_rows > 0 {
+        for offset in (1..=extra_rows).rev() {
+            screen.set_scrollback(offset);
+            if let Some(row) = screen.rows(0, cols).next() {
+                rows.push(row.trim_end().to_string());
+            }
+        }
+    }
+
+    screen.set_scrollback(original_scrollback);
+    rows.extend(visible_rows);
+    trim_trailing_blank_rows(&mut rows);
+
+    let start = rows.len().saturating_sub(lines);
+    let text = rows[start..].join("\n");
+    if text.is_empty() {
+        text
+    } else {
+        format!("{text}\n")
+    }
+}
+
 impl PaneRuntime {
     pub fn spawn(
         pane_id: PaneId,
@@ -418,6 +462,30 @@ impl PaneRuntime {
         }
     }
 
+    pub fn visible_text(&self) -> String {
+        let Ok(content) = self.screen_content.read() else {
+            return String::new();
+        };
+        let mut rows: Vec<String> = content
+            .lines()
+            .map(|line| line.trim_end().to_string())
+            .collect();
+        trim_trailing_blank_rows(&mut rows);
+        let text = rows.join("\n");
+        if text.is_empty() {
+            text
+        } else {
+            format!("{text}\n")
+        }
+    }
+
+    pub fn recent_text(&self, lines: usize) -> String {
+        self.parser
+            .write()
+            .map(|mut parser| recent_text_from_parser(&mut parser, lines))
+            .unwrap_or_default()
+    }
+
     /// Get the current working directory of the child shell process.
     pub fn cwd(&self) -> Option<std::path::PathBuf> {
         let pid = self.child_pid.load(Ordering::Relaxed);
@@ -428,6 +496,23 @@ impl PaneRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recent_text_reconstructs_scrollback_tail() {
+        let responses = PtyResponses::new();
+        let mut parser = vt100::Parser::new_with_callbacks(3, 10, 100, responses);
+        parser.process(b"a\r\nb\r\nc\r\nd\r\ne");
+
+        let recent = recent_text_from_parser(&mut parser, 4);
+        assert_eq!(recent, "b\nc\nd\ne\n");
+    }
+
+    #[test]
+    fn trim_trailing_blank_rows_drops_empty_viewport_tail() {
+        let mut rows = vec!["hello".to_string(), "".to_string(), "   ".to_string()];
+        trim_trailing_blank_rows(&mut rows);
+        assert_eq!(rows, vec!["hello".to_string()]);
+    }
 
     #[test]
     fn claude_busy_is_sticky_for_short_gap() {

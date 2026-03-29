@@ -459,6 +459,7 @@ dependencies = [
  "libc",
  "portable-pty",
  "ratatui",
+ "regex",
  "serde",
  "serde_json",
  "tokio",
