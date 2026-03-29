@@ -51,7 +51,7 @@ error responses:
   "id": "req_1",
   "error": {
     "code": "pane_not_found",
-    "message": "pane p_1_99 not found"
+    "message": "pane 1-99 not found"
   }
 }
 ```
@@ -60,18 +60,20 @@ error responses:
 
 workspace ids look like:
 
-- `w_1`
-- `w_2`
+- `1`
+- `2`
 
 pane ids look like:
 
-- `p_1_1`
-- `p_1_2`
-- `p_2_1`
+- `1-1`
+- `1-2`
+- `2-1`
 
 that means:
-- first number = workspace number
-- second number = pane id inside that workspace
+- first number = current workspace number
+- second number = current pane number within that workspace
+
+these are compact public ids for the current live session. if a workspace or pane is closed, numbering compacts.
 
 ## core request methods
 
@@ -122,7 +124,7 @@ example response:
   "result": {
     "type": "workspace_info",
     "workspace": {
-      "workspace_id": "w_1",
+      "workspace_id": "1",
       "number": 1,
       "label": "herdr",
       "focused": true,
@@ -140,7 +142,7 @@ example response:
   "id": "req_read",
   "method": "pane.read",
   "params": {
-    "pane_id": "p_1_1",
+    "pane_id": "1-1",
     "source": "recent",
     "lines": 80
   }
@@ -160,7 +162,7 @@ low-level input is intentionally explicit:
   "id": "req_send_text",
   "method": "pane.send_text",
   "params": {
-    "pane_id": "p_1_1",
+    "pane_id": "1-1",
     "text": "bun run dev"
   }
 }
@@ -173,7 +175,7 @@ then:
   "id": "req_send_keys",
   "method": "pane.send_keys",
   "params": {
-    "pane_id": "p_1_1",
+    "pane_id": "1-1",
     "keys": ["Enter"]
   }
 }
@@ -190,7 +192,7 @@ a future CLI wrapper will likely offer a more ergonomic `pane run` style command
   "id": "req_wait",
   "method": "pane.wait_for_output",
   "params": {
-    "pane_id": "p_1_1",
+    "pane_id": "1-1",
     "source": "recent",
     "lines": 200,
     "match": { "type": "substring", "value": "ready" },
@@ -268,7 +270,7 @@ example pushed event:
   "event": "workspace_created",
   "data": {
     "workspace": {
-      "workspace_id": "w_1",
+      "workspace_id": "1",
       "number": 1,
       "label": "herdr",
       "focused": true,
@@ -289,14 +291,14 @@ example pushed event:
     "subscriptions": [
       {
         "type": "pane.output_matched",
-        "pane_id": "p_1_1",
+        "pane_id": "1-1",
         "source": "recent",
         "lines": 200,
         "match": { "type": "substring", "value": "ready" }
       },
       {
         "type": "pane.agent_state_changed",
-        "pane_id": "p_1_1",
+        "pane_id": "1-1",
         "state": "idle"
       }
     ]
@@ -310,11 +312,11 @@ example pushed `pane.output_matched` event:
 {
   "event": "pane.output_matched",
   "data": {
-    "pane_id": "p_1_1",
+    "pane_id": "1-1",
     "matched_line": "server ready",
     "read": {
-      "pane_id": "p_1_1",
-      "workspace_id": "w_1",
+      "pane_id": "1-1",
+      "workspace_id": "1",
       "source": "recent",
       "text": "...server ready...",
       "revision": 0,
@@ -330,8 +332,8 @@ example pushed `pane.agent_state_changed` event:
 {
   "event": "pane.agent_state_changed",
   "data": {
-    "pane_id": "p_1_1",
-    "workspace_id": "w_1",
+    "pane_id": "1-1",
+    "workspace_id": "1",
     "state": "idle",
     "agent": "pi"
   }
@@ -371,4 +373,4 @@ current wrapper commands include:
 
 those commands sit on top of this socket surface rather than replacing it.
 
-for convenience, the CLI accepts pane ids in either raw socket form (`p_1_1`) or short human form (`1-1`).
+for convenience, the CLI accepts pane ids in either raw socket form (`1-1`) or short human form (`1-1`).

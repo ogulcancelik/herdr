@@ -187,10 +187,19 @@ fn restore_workspace(
         .or_else(|| pane_ids.first().copied())
         .unwrap_or(PaneId::from_raw(0));
 
+    let public_pane_numbers = layout
+        .pane_ids()
+        .into_iter()
+        .enumerate()
+        .map(|(index, pane_id)| (pane_id, index + 1))
+        .collect();
+
     Some(Workspace {
         custom_name: snap.custom_name.clone(),
         root_pane,
         layout,
+        public_pane_numbers,
+        next_public_pane_number: panes.len() + 1,
         panes,
         runtimes,
         zoomed: snap.zoomed,

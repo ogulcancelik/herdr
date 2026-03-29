@@ -662,24 +662,10 @@ fn send_request(request: &Request) -> std::io::Result<serde_json::Value> {
 }
 
 fn normalize_workspace_id(value: &str) -> String {
-    if value.starts_with("w_") {
-        return value.to_string();
-    }
-    if let Ok(number) = value.parse::<usize>() {
-        return format!("w_{number}");
-    }
     value.to_string()
 }
 
 fn normalize_pane_id(value: &str) -> String {
-    if value.starts_with("p_") {
-        return value.to_string();
-    }
-    if let Some((workspace, pane)) = value.split_once('-') {
-        if workspace.parse::<usize>().is_ok() && pane.parse::<u32>().is_ok() {
-            return format!("p_{workspace}_{pane}");
-        }
-    }
     value.to_string()
 }
 

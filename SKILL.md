@@ -24,7 +24,7 @@ the `herdr` binary is available in your PATH. all commands talk to the running h
 - `waiting` — agent needs user input
 - `unknown` — no recognized agent, or just a shell
 
-**ids** — workspace ids look like `w_1`, `w_2`. pane ids look like `p_1_1`, `p_1_5` (workspace number + pane number). you can also use short human form: `1` for workspace, `1-1` for pane.
+**ids** — workspace ids look like `1`, `2`. pane ids look like `1-1`, `1-2`, `2-1`. these are the public ids you should use.
 
 ## discover yourself
 
@@ -36,8 +36,8 @@ herdr pane list
 
 ```json
 {"id":"cli:pane:list","result":{"panes":[
-  {"agent":"claude","agent_state":"waiting","cwd":"/home/user/project","focused":true,"pane_id":"p_1_5","workspace_id":"w_1"},
-  {"agent":"pi","agent_state":"idle","cwd":"/home/user/project","focused":false,"pane_id":"p_1_1","workspace_id":"w_1"}
+  {"agent":"claude","agent_state":"waiting","cwd":"/home/user/project","focused":true,"pane_id":"1-2","workspace_id":"1"},
+  {"agent":"pi","agent_state":"idle","cwd":"/home/user/project","focused":false,"pane_id":"1-1","workspace_id":"1"}
 ],"type":"pane_list"}}
 ```
 
@@ -49,7 +49,7 @@ herdr workspace list
 
 ```json
 {"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":[
-  {"workspace_id":"w_1","number":1,"label":"project","focused":true,"pane_count":2,"agent_state":"waiting"}
+  {"workspace_id":"1","number":1,"label":"project","focused":true,"pane_count":2,"agent_state":"waiting"}
 ]}}
 ```
 
@@ -58,7 +58,7 @@ herdr workspace list
 see what's on another pane's screen:
 
 ```bash
-herdr pane read p_1_1 --source recent --lines 50
+herdr pane read 1-1 --source recent --lines 50
 ```
 
 `--source visible` shows the current viewport. `--source recent` shows recent scrollback (default).
@@ -68,13 +68,13 @@ herdr pane read p_1_1 --source recent --lines 50
 split your pane to the right and run a dev server:
 
 ```bash
-herdr pane split p_1_5 --direction right --no-focus
+herdr pane split 1-2 --direction right --no-focus
 ```
 
 this returns the new pane's id. then run a command in it:
 
 ```bash
-herdr pane run p_1_7 "npm run dev"
+herdr pane run 1-3 "npm run dev"
 ```
 
 `pane run` sends the text and presses Enter. use `--no-focus` on split to keep focus on your pane.
@@ -82,7 +82,7 @@ herdr pane run p_1_7 "npm run dev"
 split downward instead:
 
 ```bash
-herdr pane split p_1_5 --direction down --no-focus
+herdr pane split 1-2 --direction down --no-focus
 ```
 
 ## wait for output
@@ -90,13 +90,13 @@ herdr pane split p_1_5 --direction down --no-focus
 block until specific text appears in a pane. useful for waiting on servers, builds, tests:
 
 ```bash
-herdr wait output p_1_7 --match "ready on port 3000" --timeout 30000
+herdr wait output 1-3 --match "ready on port 3000" --timeout 30000
 ```
 
 with regex:
 
 ```bash
-herdr wait output p_1_7 --match "server.*ready" --regex --timeout 30000
+herdr wait output 1-3 --match "server.*ready" --regex --timeout 30000
 ```
 
 timeout is in milliseconds. if it times out, exit code is 1.
@@ -106,7 +106,7 @@ timeout is in milliseconds. if it times out, exit code is 1.
 block until another agent reaches a specific state:
 
 ```bash
-herdr wait agent-state p_1_1 --state idle --timeout 60000
+herdr wait agent-state 1-1 --state idle --timeout 60000
 ```
 
 useful when you need another agent to finish before you proceed.
@@ -116,19 +116,19 @@ useful when you need another agent to finish before you proceed.
 send text without pressing Enter:
 
 ```bash
-herdr pane send-text p_1_1 "hello from claude"
+herdr pane send-text 1-1 "hello from claude"
 ```
 
 press Enter (or other keys):
 
 ```bash
-herdr pane send-keys p_1_1 Enter
+herdr pane send-keys 1-1 Enter
 ```
 
 `pane run` combines both — sends text then Enter:
 
 ```bash
-herdr pane run p_1_1 "echo hello"
+herdr pane run 1-1 "echo hello"
 ```
 
 ## workspace management
@@ -146,25 +146,25 @@ herdr workspace create --no-focus
 focus a workspace:
 
 ```bash
-herdr workspace focus w_2
+herdr workspace focus 2
 ```
 
 rename:
 
 ```bash
-herdr workspace rename w_1 "api server"
+herdr workspace rename 1 "api server"
 ```
 
 close:
 
 ```bash
-herdr workspace close w_2
+herdr workspace close 2
 ```
 
 ## close a pane
 
 ```bash
-herdr pane close p_1_7
+herdr pane close 1-3
 ```
 
 ## recipes
@@ -173,14 +173,14 @@ herdr pane close p_1_7
 
 ```bash
 # split a pane for the server
-herdr pane split p_1_5 --direction right --no-focus
-# assume new pane is p_1_7 from the response
+herdr pane split 1-2 --direction right --no-focus
+# assume new pane is 1-3 from the response
 
 # start the server
-herdr pane run p_1_7 "npm run dev"
+herdr pane run 1-3 "npm run dev"
 
 # wait until it's ready
-herdr wait output p_1_7 --match "ready" --timeout 30000
+herdr wait output 1-3 --match "ready" --timeout 30000
 
 # now read the output to confirm
 herdr pane read p_1_7 --source recent --lines 20
@@ -189,9 +189,9 @@ herdr pane read p_1_7 --source recent --lines 20
 ### run tests in a separate pane and check results
 
 ```bash
-herdr pane split p_1_5 --direction down --no-focus
-herdr pane run p_1_7 "cargo test"
-herdr wait output p_1_7 --match "test result" --timeout 60000
+herdr pane split 1-2 --direction down --no-focus
+herdr pane run 1-3 "cargo test"
+herdr wait output 1-3 --match "test result" --timeout 60000
 herdr pane read p_1_7 --source recent --lines 30
 ```
 
@@ -199,28 +199,28 @@ herdr pane read p_1_7 --source recent --lines 30
 
 ```bash
 herdr pane list
-herdr pane read p_1_1 --source recent --lines 80
+herdr pane read 1-1 --source recent --lines 80
 ```
 
 ### spawn a new agent and give it a task
 
 ```bash
-herdr pane split p_1_5 --direction right --no-focus
-herdr pane run p_1_7 "claude"
+herdr pane split 1-2 --direction right --no-focus
+herdr pane run 1-3 "claude"
 # wait for it to start
-herdr wait output p_1_7 --match ">" --timeout 15000
+herdr wait output 1-3 --match ">" --timeout 15000
 # send it a task
-herdr pane run p_1_7 "review the test coverage in src/api/"
+herdr pane run 1-3 "review the test coverage in src/api/"
 ```
 
 ### coordinate with another agent
 
 ```bash
 # wait for the other agent to finish its current work
-herdr wait agent-state p_1_1 --state idle --timeout 120000
+herdr wait agent-state 1-1 --state idle --timeout 120000
 
 # read what it produced
-herdr pane read p_1_1 --source recent --lines 100
+herdr pane read 1-1 --source recent --lines 100
 ```
 
 ## notes
@@ -229,4 +229,4 @@ herdr pane read p_1_1 --source recent --lines 100
 - `pane run` = `pane send-text` + `pane send-keys Enter`. use the separate commands when you need finer control.
 - pane ids from split responses are the source of truth — don't guess pane ids, read them from the response.
 - `--no-focus` on split keeps your terminal focused. without it, herdr focuses the new pane.
-- if you're running inside herdr, the `HERDR_ENV` environment variable is set to `1`.
+- if you're running inside herdr, the `HERDR_ENV` environment variable is set to `1`. ids are compact and can change when panes/workspaces are closed.

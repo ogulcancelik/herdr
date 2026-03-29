@@ -111,7 +111,7 @@ fn workspace_and_pane_management_commands_work() {
     );
     assert!(created.status.success());
     let created_json: serde_json::Value = serde_json::from_slice(&created.stdout).unwrap();
-    assert_eq!(created_json["result"]["workspace"]["workspace_id"], "w_1");
+    assert_eq!(created_json["result"]["workspace"]["workspace_id"], "1");
 
     let panes = run_cli(&socket_path, &["pane", "list", "--workspace", "1"]);
     assert!(panes.status.success());
@@ -176,14 +176,14 @@ fn pane_run_read_and_wait_commands_work() {
             base.display()
         ),
     );
-    assert_eq!(created["result"]["workspace"]["workspace_id"], "w_1");
+    assert_eq!(created["result"]["workspace"]["workspace_id"], "1");
 
     let create = run_cli(
         &socket_path,
         &[
             "pane",
             "run",
-            "p_1_1",
+            "1-1",
             "echo alpha && echo beta && printf 'ready\\n'",
         ],
     );
@@ -221,6 +221,100 @@ fn pane_run_read_and_wait_commands_work() {
     let text = String::from_utf8(read.stdout).unwrap();
     assert!(text.contains("alpha"));
     assert!(text.contains("ready"));
+
+    let _ = herdr.child.kill();
+    let _ = herdr.child.wait();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn ids_are_compact_and_positional() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let mut herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let ws1 = run_cli(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    assert!(ws1.status.success());
+
+    let split_12 = run_cli(
+        &socket_path,
+        &["pane", "split", "1-1", "--direction", "right", "--no-focus"],
+    );
+    let split_12_json: serde_json::Value = serde_json::from_slice(&split_12.stdout).unwrap();
+    assert_eq!(split_12_json["result"]["pane"]["pane_id"], "1-2");
+
+    let split_13 = run_cli(
+        &socket_path,
+        &["pane", "split", "1-1", "--direction", "down", "--no-focus"],
+    );
+    let split_13_json: serde_json::Value = serde_json::from_slice(&split_13.stdout).unwrap();
+    assert_eq!(split_13_json["result"]["pane"]["pane_id"], "1-3");
+
+    let ws2 = run_cli(
+        &socket_path,
+        &["workspace", "create", "--cwd", "/tmp", "--no-focus"],
+    );
+    let ws2_json: serde_json::Value = serde_json::from_slice(&ws2.stdout).unwrap();
+    assert_eq!(ws2_json["result"]["workspace"]["workspace_id"], "2");
+
+    let ws2_focus = run_cli(&socket_path, &["workspace", "focus", "2"]);
+    assert!(ws2_focus.status.success());
+    let ws2_split = run_cli(
+        &socket_path,
+        &["pane", "split", "2-1", "--direction", "right", "--no-focus"],
+    );
+    let ws2_split_json: serde_json::Value = serde_json::from_slice(&ws2_split.stdout).unwrap();
+    assert_eq!(ws2_split_json["result"]["pane"]["pane_id"], "2-2");
+
+    let ws3 = run_cli(
+        &socket_path,
+        &["workspace", "create", "--cwd", "/", "--no-focus"],
+    );
+    let ws3_json: serde_json::Value = serde_json::from_slice(&ws3.stdout).unwrap();
+    assert_eq!(ws3_json["result"]["workspace"]["workspace_id"], "3");
+
+    let close_ws2 = run_cli(&socket_path, &["workspace", "close", "2"]);
+    assert!(close_ws2.status.success());
+
+    let workspaces = run_cli(&socket_path, &["workspace", "list"]);
+    let workspaces_json: serde_json::Value = serde_json::from_slice(&workspaces.stdout).unwrap();
+    let ids: Vec<String> = workspaces_json["result"]["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|ws| ws["workspace_id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, vec!["1".to_string(), "2".to_string()]);
+
+    let new_ws = run_cli(
+        &socket_path,
+        &["workspace", "create", "--cwd", "/var/tmp", "--no-focus"],
+    );
+    let new_ws_json: serde_json::Value = serde_json::from_slice(&new_ws.stdout).unwrap();
+    assert_eq!(new_ws_json["result"]["workspace"]["workspace_id"], "3");
+
+    let ws3_panes = run_cli(&socket_path, &["pane", "list", "--workspace", "3"]);
+    let ws3_panes_json: serde_json::Value = serde_json::from_slice(&ws3_panes.stdout).unwrap();
+    assert_eq!(ws3_panes_json["result"]["panes"][0]["pane_id"], "3-1");
+
+    let close_middle = run_cli(&socket_path, &["pane", "close", "1-2"]);
+    assert!(close_middle.status.success());
+    let ws1_panes = run_cli(&socket_path, &["pane", "list", "--workspace", "1"]);
+    let ws1_panes_json: serde_json::Value = serde_json::from_slice(&ws1_panes.stdout).unwrap();
+    let pane_ids: Vec<String> = ws1_panes_json["result"]["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|pane| pane["pane_id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(pane_ids, vec!["1-1".to_string(), "1-2".to_string()]);
 
     let _ = herdr.child.kill();
     let _ = herdr.child.wait();
@@ -294,7 +388,7 @@ fn wait_agent_state_exits_when_state_matches() {
             base.display()
         ),
     );
-    assert_eq!(created["result"]["workspace"]["workspace_id"], "w_1");
+    assert_eq!(created["result"]["workspace"]["workspace_id"], "1");
 
     let start_pi = run_cli(&socket_path, &["pane", "run", "1-1", "pi"]);
     assert!(start_pi.status.success());

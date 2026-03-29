@@ -211,13 +211,15 @@ impl App {
             match &ev {
                 AppEvent::PaneDied { pane_id } => {
                     if let Some((ws_idx, _)) = self.find_pane(*pane_id) {
-                        self.emit_event(crate::api::schema::EventEnvelope {
-                            event: crate::api::schema::EventKind::PaneExited,
-                            data: crate::api::schema::EventData::PaneExited {
-                                pane_id: format!("p_{}_{}", ws_idx + 1, pane_id.raw()),
-                                workspace_id: format!("w_{}", ws_idx + 1),
-                            },
-                        });
+                        if let Some(public_pane_id) = self.public_pane_id(ws_idx, *pane_id) {
+                            self.emit_event(crate::api::schema::EventEnvelope {
+                                event: crate::api::schema::EventKind::PaneExited,
+                                data: crate::api::schema::EventData::PaneExited {
+                                    pane_id: public_pane_id,
+                                    workspace_id: self.public_workspace_id(ws_idx),
+                                },
+                            });
+                        }
                     }
                 }
                 AppEvent::StateChanged {
@@ -226,27 +228,28 @@ impl App {
                     state,
                 } => {
                     if let Some((ws_idx, pane)) = self.find_pane(*pane_id) {
-                        let pane_id = format!("p_{}_{}", ws_idx + 1, pane_id.raw());
-                        let workspace_id = format!("w_{}", ws_idx + 1);
-                        if pane.detected_agent != *agent {
-                            self.emit_event(crate::api::schema::EventEnvelope {
-                                event: crate::api::schema::EventKind::PaneAgentDetected,
-                                data: crate::api::schema::EventData::PaneAgentDetected {
-                                    pane_id: pane_id.clone(),
-                                    workspace_id: workspace_id.clone(),
-                                    agent: agent.map(agent_name),
-                                },
-                            });
-                        }
-                        if pane.state != *state {
-                            self.emit_event(crate::api::schema::EventEnvelope {
-                                event: crate::api::schema::EventKind::PaneAgentStateChanged,
-                                data: crate::api::schema::EventData::PaneAgentStateChanged {
-                                    pane_id,
-                                    workspace_id,
-                                    state: pane_agent_state(*state),
-                                },
-                            });
+                        if let Some(pane_id) = self.public_pane_id(ws_idx, *pane_id) {
+                            let workspace_id = self.public_workspace_id(ws_idx);
+                            if pane.detected_agent != *agent {
+                                self.emit_event(crate::api::schema::EventEnvelope {
+                                    event: crate::api::schema::EventKind::PaneAgentDetected,
+                                    data: crate::api::schema::EventData::PaneAgentDetected {
+                                        pane_id: pane_id.clone(),
+                                        workspace_id: workspace_id.clone(),
+                                        agent: agent.map(agent_name),
+                                    },
+                                });
+                            }
+                            if pane.state != *state {
+                                self.emit_event(crate::api::schema::EventEnvelope {
+                                    event: crate::api::schema::EventKind::PaneAgentStateChanged,
+                                    data: crate::api::schema::EventData::PaneAgentStateChanged {
+                                        pane_id,
+                                        workspace_id,
+                                        state: pane_agent_state(*state),
+                                    },
+                                });
+                            }
                         }
                     }
                 }
@@ -286,16 +289,18 @@ impl App {
             self.emit_event(crate::api::schema::EventEnvelope {
                 event: crate::api::schema::EventKind::WorkspaceFocused,
                 data: crate::api::schema::EventData::WorkspaceFocused {
-                    workspace_id: format!("w_{}", ws_idx + 1),
+                    workspace_id: self.public_workspace_id(ws_idx),
                 },
             });
-            self.emit_event(crate::api::schema::EventEnvelope {
-                event: crate::api::schema::EventKind::PaneFocused,
-                data: crate::api::schema::EventData::PaneFocused {
-                    pane_id: format!("p_{}_{}", ws_idx + 1, pane_id.raw()),
-                    workspace_id: format!("w_{}", ws_idx + 1),
-                },
-            });
+            if let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) {
+                self.emit_event(crate::api::schema::EventEnvelope {
+                    event: crate::api::schema::EventKind::PaneFocused,
+                    data: crate::api::schema::EventData::PaneFocused {
+                        pane_id: public_pane_id,
+                        workspace_id: self.public_workspace_id(ws_idx),
+                    },
+                });
+            }
         }
 
         self.last_focus = current_focus;
@@ -310,6 +315,42 @@ impl App {
             .iter()
             .enumerate()
             .find_map(|(ws_idx, ws)| ws.panes.get(&pane_id).map(|pane| (ws_idx, pane)))
+    }
+
+    fn public_workspace_id(&self, ws_idx: usize) -> String {
+        (ws_idx + 1).to_string()
+    }
+
+    fn public_pane_id(&self, ws_idx: usize, pane_id: crate::layout::PaneId) -> Option<String> {
+        let ws = self.state.workspaces.get(ws_idx)?;
+        let pane_number = ws.public_pane_number(pane_id)?;
+        Some(format!("{}-{pane_number}", ws_idx + 1))
+    }
+
+    fn parse_workspace_id(&self, id: &str) -> Option<usize> {
+        if let Some(raw) = id.strip_prefix("w_") {
+            return raw.parse::<usize>().ok()?.checked_sub(1);
+        }
+        id.parse::<usize>().ok()?.checked_sub(1)
+    }
+
+    fn parse_pane_id(&self, id: &str) -> Option<(usize, crate::layout::PaneId)> {
+        if let Some(rest) = id.strip_prefix("p_") {
+            let (ws_raw, pane_raw) = rest.split_once('_')?;
+            let ws_idx = ws_raw.parse::<usize>().ok()?.checked_sub(1)?;
+            let pane_id = crate::layout::PaneId::from_raw(pane_raw.parse::<u32>().ok()?);
+            return Some((ws_idx, pane_id));
+        }
+
+        let (ws_raw, pane_number_raw) = id.split_once('-')?;
+        let ws_idx = ws_raw.parse::<usize>().ok()?.checked_sub(1)?;
+        let pane_number = pane_number_raw.parse::<usize>().ok()?;
+        let ws = self.state.workspaces.get(ws_idx)?;
+        let pane_id = ws
+            .public_pane_numbers
+            .iter()
+            .find_map(|(pane_id, number)| (*number == pane_number).then_some(*pane_id))?;
+        Some((ws_idx, pane_id))
     }
 
     fn handle_api_request(&mut self, request: crate::api::schema::Request) -> String {
@@ -330,12 +371,12 @@ impl App {
                         .workspaces
                         .iter()
                         .enumerate()
-                        .map(|(idx, _)| workspace_info(&self.state, idx))
+                        .map(|(idx, _)| self.workspace_info(idx))
                         .collect(),
                 },
             },
             Method::WorkspaceGet(target) => {
-                let Some(index) = parse_workspace_id(&target.workspace_id) else {
+                let Some(index) = self.parse_workspace_id(&target.workspace_id) else {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
                         error: ErrorBody {
@@ -358,7 +399,7 @@ impl App {
                 SuccessResponse {
                     id: request.id,
                     result: ResponseResult::WorkspaceInfo {
-                        workspace: workspace_info(&self.state, index),
+                        workspace: self.workspace_info(index),
                     },
                 }
             }
@@ -370,7 +411,7 @@ impl App {
                     .unwrap_or_else(|| std::path::PathBuf::from("/"));
                 match self.create_workspace_with_options(cwd, params.focus) {
                     Ok(index) => {
-                        let workspace = workspace_info(&self.state, index);
+                        let workspace = self.workspace_info(index);
                         self.emit_event(crate::api::schema::EventEnvelope {
                             event: crate::api::schema::EventKind::WorkspaceCreated,
                             data: crate::api::schema::EventData::WorkspaceCreated {
@@ -408,7 +449,7 @@ impl App {
                 }
             }
             Method::WorkspaceFocus(target) => {
-                let Some(index) = parse_workspace_id(&target.workspace_id) else {
+                let Some(index) = self.parse_workspace_id(&target.workspace_id) else {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
                         error: ErrorBody {
@@ -432,12 +473,12 @@ impl App {
                 SuccessResponse {
                     id: request.id,
                     result: ResponseResult::WorkspaceInfo {
-                        workspace: workspace_info(&self.state, index),
+                        workspace: self.workspace_info(index),
                     },
                 }
             }
             Method::WorkspaceRename(params) => {
-                let Some(index) = parse_workspace_id(&params.workspace_id) else {
+                let Some(index) = self.parse_workspace_id(&params.workspace_id) else {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
                         error: ErrorBody {
@@ -461,12 +502,12 @@ impl App {
                 SuccessResponse {
                     id: request.id,
                     result: ResponseResult::WorkspaceInfo {
-                        workspace: workspace_info(&self.state, index),
+                        workspace: self.workspace_info(index),
                     },
                 }
             }
             Method::WorkspaceClose(target) => {
-                let Some(index) = parse_workspace_id(&target.workspace_id) else {
+                let Some(index) = self.parse_workspace_id(&target.workspace_id) else {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
                         error: ErrorBody {
@@ -500,7 +541,8 @@ impl App {
                 }
             }
             Method::PaneSplit(params) => {
-                let Some((ws_idx, target_pane_id)) = parse_pane_id(&params.target_pane_id) else {
+                let Some((ws_idx, target_pane_id)) = self.parse_pane_id(&params.target_pane_id)
+                else {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
                         error: ErrorBody {
@@ -577,7 +619,7 @@ impl App {
                 }
             }
             Method::PaneGet(target) => {
-                let Some((ws_idx, pane_id)) = parse_pane_id(&target.pane_id) else {
+                let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
                         error: ErrorBody {
@@ -603,7 +645,7 @@ impl App {
                 }
             }
             Method::PaneRead(params) => {
-                let Some((ws_idx, pane_id)) = parse_pane_id(&params.pane_id) else {
+                let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
                         error: ErrorBody {
@@ -643,7 +685,7 @@ impl App {
                 }
             }
             Method::PaneSendText(params) => {
-                let Some((ws_idx, pane_id)) = parse_pane_id(&params.pane_id) else {
+                let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
                         error: ErrorBody {
@@ -679,7 +721,7 @@ impl App {
                 }
             }
             Method::PaneClose(target) => {
-                let Some((ws_idx, pane_id)) = parse_pane_id(&target.pane_id) else {
+                let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
                         error: ErrorBody {
@@ -731,7 +773,7 @@ impl App {
                 }
             }
             Method::PaneSendKeys(params) => {
-                let Some((ws_idx, pane_id)) = parse_pane_id(&params.pane_id) else {
+                let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
                         error: ErrorBody {
@@ -861,7 +903,7 @@ impl App {
         workspace_id: Option<&str>,
     ) -> Result<Vec<crate::api::schema::PaneInfo>, (String, String)> {
         if let Some(workspace_id) = workspace_id {
-            let Some(ws_idx) = parse_workspace_id(workspace_id) else {
+            let Some(ws_idx) = self.parse_workspace_id(workspace_id) else {
                 return Err((
                     "workspace_not_found".into(),
                     format!("workspace {workspace_id} not found"),
@@ -904,8 +946,8 @@ impl App {
         let pane = ws.panes.get(&pane_id)?;
         let runtime = ws.runtimes.get(&pane_id);
         Some(crate::api::schema::PaneInfo {
-            pane_id: format!("p_{}_{}", ws_idx + 1, pane_id.raw()),
-            workspace_id: format!("w_{}", ws_idx + 1),
+            pane_id: self.public_pane_id(ws_idx, pane_id)?,
+            workspace_id: self.public_workspace_id(ws_idx),
             focused: self.state.active == Some(ws_idx) && ws.layout.focused() == pane_id,
             cwd: runtime
                 .and_then(|rt| rt.cwd())
@@ -923,7 +965,7 @@ impl App {
     ) -> Option<(&crate::pane::PaneRuntime, String)> {
         let ws = self.state.workspaces.get(ws_idx)?;
         let runtime = ws.runtimes.get(&pane_id)?;
-        Some((runtime, format!("w_{}", ws_idx + 1)))
+        Some((runtime, self.public_workspace_id(ws_idx)))
     }
 
     fn lookup_runtime_sender(
@@ -937,6 +979,19 @@ impl App {
         let ws = self.state.workspaces.get(ws_idx)?;
         let runtime = ws.runtimes.get(&pane_id)?;
         Some((&runtime.sender, runtime))
+    }
+
+    fn workspace_info(&self, index: usize) -> crate::api::schema::WorkspaceInfo {
+        let ws = &self.state.workspaces[index];
+        let (agg_state, _) = ws.aggregate_state();
+        crate::api::schema::WorkspaceInfo {
+            workspace_id: self.public_workspace_id(index),
+            number: index + 1,
+            label: ws.display_name(),
+            focused: self.state.active == Some(index),
+            pane_count: ws.panes.len(),
+            agent_state: pane_agent_state(agg_state),
+        }
     }
 }
 
@@ -962,37 +1017,12 @@ fn parse_api_key(key: &str) -> Option<crossterm::event::KeyEvent> {
     }
 }
 
-fn parse_workspace_id(id: &str) -> Option<usize> {
-    id.strip_prefix("w_")?.parse::<usize>().ok()?.checked_sub(1)
-}
-
-fn parse_pane_id(id: &str) -> Option<(usize, crate::layout::PaneId)> {
-    let rest = id.strip_prefix("p_")?;
-    let (ws_raw, pane_raw) = rest.split_once('_')?;
-    let ws_idx = ws_raw.parse::<usize>().ok()?.checked_sub(1)?;
-    let pane_id = crate::layout::PaneId::from_raw(pane_raw.parse::<u32>().ok()?);
-    Some((ws_idx, pane_id))
-}
-
 fn pane_agent_state(state: crate::detect::AgentState) -> crate::api::schema::PaneAgentState {
     match state {
         crate::detect::AgentState::Idle => crate::api::schema::PaneAgentState::Idle,
         crate::detect::AgentState::Busy => crate::api::schema::PaneAgentState::Busy,
         crate::detect::AgentState::Waiting => crate::api::schema::PaneAgentState::Waiting,
         crate::detect::AgentState::Unknown => crate::api::schema::PaneAgentState::Unknown,
-    }
-}
-
-fn workspace_info(state: &AppState, index: usize) -> crate::api::schema::WorkspaceInfo {
-    let ws = &state.workspaces[index];
-    let (agg_state, _) = ws.aggregate_state();
-    crate::api::schema::WorkspaceInfo {
-        workspace_id: format!("w_{}", index + 1),
-        number: index + 1,
-        label: ws.display_name(),
-        focused: state.active == Some(index),
-        pane_count: ws.panes.len(),
-        agent_state: pane_agent_state(agg_state),
     }
 }
 

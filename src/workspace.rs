@@ -17,6 +17,10 @@ pub struct Workspace {
     /// Identity source for this workspace.
     pub root_pane: PaneId,
     pub layout: TileLayout,
+    /// Stable-ish public pane numbers within this workspace.
+    /// New panes append at the end; closing a pane compacts higher numbers down.
+    pub public_pane_numbers: HashMap<PaneId, usize>,
+    pub(crate) next_public_pane_number: usize,
     /// Pane state — always present, testable without PTYs.
     pub panes: HashMap<PaneId, PaneState>,
     /// Pane runtimes — only present in production (empty in tests).
@@ -37,6 +41,8 @@ impl Workspace {
 
         let mut panes = HashMap::new();
         panes.insert(root_id, PaneState::new());
+        let mut public_pane_numbers = HashMap::new();
+        public_pane_numbers.insert(root_id, 1);
         let mut runtimes = HashMap::new();
         runtimes.insert(root_id, runtime);
 
@@ -45,6 +51,8 @@ impl Workspace {
             custom_name: None,
             root_pane: root_id,
             layout,
+            public_pane_numbers,
+            next_public_pane_number: 2,
             panes,
             runtimes,
             zoomed: false,
@@ -65,6 +73,9 @@ impl Workspace {
             cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
         let runtime = PaneRuntime::spawn(new_id, rows, cols, actual_cwd, self.events.clone())?;
         self.panes.insert(new_id, PaneState::new());
+        self.public_pane_numbers
+            .insert(new_id, self.next_public_pane_number);
+        self.next_public_pane_number += 1;
         self.runtimes.insert(new_id, runtime);
         self.zoomed = false;
         Ok(new_id)
@@ -94,6 +105,14 @@ impl Workspace {
             self.layout.focus_pane(prev_focus);
         }
 
+        if let Some(removed_number) = self.public_pane_numbers.remove(&pane_id) {
+            for number in self.public_pane_numbers.values_mut() {
+                if *number > removed_number {
+                    *number -= 1;
+                }
+            }
+            self.next_public_pane_number = self.public_pane_numbers.len() + 1;
+        }
         self.panes.remove(&pane_id);
         self.runtimes.remove(&pane_id);
         self.zoomed = false;
@@ -108,6 +127,10 @@ impl Workspace {
             return None;
         }
         self.layout.pane_ids().into_iter().find(|id| *id != closing)
+    }
+
+    pub fn public_pane_number(&self, pane_id: PaneId) -> Option<usize> {
+        self.public_pane_numbers.get(&pane_id).copied()
     }
 
     /// Get the runtime for the focused pane.
@@ -251,10 +274,14 @@ impl Workspace {
         let (layout, root_id) = TileLayout::new();
         let mut panes = HashMap::new();
         panes.insert(root_id, PaneState::new());
+        let mut public_pane_numbers = HashMap::new();
+        public_pane_numbers.insert(root_id, 1);
         Self {
             custom_name: Some(name.to_string()),
             root_pane: root_id,
             layout,
+            public_pane_numbers,
+            next_public_pane_number: 2,
             panes,
             runtimes: HashMap::new(),
             zoomed: false,
@@ -266,6 +293,9 @@ impl Workspace {
     pub fn test_split(&mut self, direction: Direction) -> PaneId {
         let new_id = self.layout.split_focused(direction);
         self.panes.insert(new_id, PaneState::new());
+        self.public_pane_numbers
+            .insert(new_id, self.next_public_pane_number);
+        self.next_public_pane_number += 1;
         new_id
     }
 }

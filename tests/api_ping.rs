@@ -170,7 +170,7 @@ fn workspace_list_and_create_round_trip() {
     );
     assert_eq!(created["id"], "req_3");
     assert_eq!(created["result"]["type"], "workspace_info");
-    assert_eq!(created["result"]["workspace"]["workspace_id"], "w_1");
+    assert_eq!(created["result"]["workspace"]["workspace_id"], "1");
     assert_eq!(created["result"]["workspace"]["number"], 1);
     assert_eq!(created["result"]["workspace"]["focused"], true);
 
@@ -180,13 +180,13 @@ fn workspace_list_and_create_round_trip() {
     );
     let workspaces = listed["result"]["workspaces"].as_array().unwrap();
     assert_eq!(workspaces.len(), 1);
-    assert_eq!(workspaces[0]["workspace_id"], "w_1");
+    assert_eq!(workspaces[0]["workspace_id"], "1");
 
     let fetched = send_request(
         &socket_path,
-        r#"{"id":"req_5","method":"workspace.get","params":{"workspace_id":"w_1"}}"#,
+        r#"{"id":"req_5","method":"workspace.get","params":{"workspace_id":"1"}}"#,
     );
-    assert_eq!(fetched["result"]["workspace"]["workspace_id"], "w_1");
+    assert_eq!(fetched["result"]["workspace"]["workspace_id"], "1");
 
     let panes = send_request(
         &socket_path,
@@ -194,7 +194,7 @@ fn workspace_list_and_create_round_trip() {
     );
     let panes = panes["result"]["panes"].as_array().unwrap();
     assert_eq!(panes.len(), 1);
-    assert_eq!(panes[0]["workspace_id"], "w_1");
+    assert_eq!(panes[0]["workspace_id"], "1");
     let pane_id = panes[0]["pane_id"].as_str().unwrap().to_string();
 
     let pane = send_request(
@@ -463,7 +463,7 @@ fn events_subscribe_streams_output_and_agent_state_events() {
             base.display()
         ),
     );
-    assert_eq!(created["result"]["workspace"]["workspace_id"], "w_1");
+    assert_eq!(created["result"]["workspace"]["workspace_id"], "1");
 
     let panes = send_request(
         &socket_path,

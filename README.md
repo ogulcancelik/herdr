@@ -231,7 +231,10 @@ herdr --no-session                      start without restoring or saving sessio
 herdr --help                            show help
 ```
 
-pane ids can be passed either as socket ids like `p_1_1` or in a shorter human form like `1-1`.
+workspace ids are compact public ids like `1`, `2`, `3`.
+pane ids are compact public ids like `1-1`, `1-2`, `2-1`.
+
+they are positional within the current live session, so numbering compacts when workspaces or panes are closed.
 
 these commands are thin wrappers over the socket API:
 - [`SOCKET_API.md`](./SOCKET_API.md)
