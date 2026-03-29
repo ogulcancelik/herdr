@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::layout::Direction;
+use ratatui::layout::{Direction, Rect};
 use tracing::warn;
 
 use crate::layout::{NavDirection, PaneInfo, SplitBorder};
@@ -25,6 +25,7 @@ impl App {
             Mode::Resize => handle_resize_key(&mut self.state, key),
             Mode::ConfirmClose => handle_confirm_close_key(&mut self.state, key),
             Mode::ContextMenu => handle_context_menu_key(&mut self.state, key),
+            Mode::Settings => self.handle_settings_key(key),
         }
     }
 
@@ -83,6 +84,16 @@ impl App {
         }
     }
 
+    fn handle_settings_key(&mut self, key: KeyEvent) {
+        if let Some(action) = update_settings_state(&mut self.state, key) {
+            match action {
+                SettingsAction::SaveTheme(name) => self.save_theme(&name),
+                SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
+                SettingsAction::SaveToast(enabled) => self.save_toast(enabled),
+            }
+        }
+    }
+
     async fn handle_terminal_key(&mut self, key: KeyEvent) {
         self.state.clear_selection();
         self.state.update_dismissed = true;
@@ -105,6 +116,123 @@ impl App {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SettingsAction {
+    SaveTheme(String),
+    SaveSound(bool),
+    SaveToast(bool),
+}
+
+fn normalize_theme_name(name: &str) -> String {
+    name.to_lowercase().replace([' ', '_'], "-")
+}
+
+fn current_theme_index(theme_name: &str) -> usize {
+    use crate::app::state::THEME_NAMES;
+
+    let normalized = normalize_theme_name(theme_name);
+    THEME_NAMES
+        .iter()
+        .position(|name| normalize_theme_name(name) == normalized)
+        .unwrap_or(0)
+}
+
+fn preview_selected_theme(state: &mut AppState) {
+    use crate::app::state::{Palette, THEME_NAMES};
+
+    let name = THEME_NAMES[state.settings.selected];
+    if let Some(palette) = Palette::from_name(name) {
+        state.palette = palette;
+        state.theme_name = name.to_string();
+    }
+}
+
+fn cancel_settings(state: &mut AppState) {
+    if let Some(palette) = state.settings.original_palette.take() {
+        state.palette = palette;
+    }
+    if let Some(theme_name) = state.settings.original_theme.take() {
+        state.theme_name = theme_name;
+    }
+    leave_modal(state);
+}
+
+fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Option<SettingsAction> {
+    use crate::app::state::SettingsSection;
+
+    match state.settings.section {
+        SettingsSection::Theme => match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if state.settings.selected > 0 {
+                    state.settings.selected -= 1;
+                    preview_selected_theme(state);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if state.settings.selected + 1 < crate::app::state::THEME_NAMES.len() {
+                    state.settings.selected += 1;
+                    preview_selected_theme(state);
+                }
+            }
+            KeyCode::Enter => {
+                let theme_name = state.theme_name.clone();
+                state.settings.original_palette = None;
+                state.settings.original_theme = None;
+                leave_modal(state);
+                return Some(SettingsAction::SaveTheme(theme_name));
+            }
+            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+                state.settings.section = SettingsSection::Sound;
+                state.settings.selected = usize::from(!state.sound_enabled());
+            }
+            KeyCode::Esc | KeyCode::Char('q') => cancel_settings(state),
+            _ => {}
+        },
+        SettingsSection::Sound => match key.code {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
+                state.settings.selected = 1 - state.settings.selected.min(1);
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                let enabled = state.settings.selected == 0;
+                state.sound.enabled = enabled;
+                return Some(SettingsAction::SaveSound(enabled));
+            }
+            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+                state.settings.section = SettingsSection::Toast;
+                state.settings.selected = usize::from(!state.toast_config.enabled);
+            }
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+                state.settings.section = SettingsSection::Theme;
+                state.settings.selected = current_theme_index(&state.theme_name);
+            }
+            KeyCode::Esc | KeyCode::Char('q') => cancel_settings(state),
+            _ => {}
+        },
+        SettingsSection::Toast => match key.code {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
+                state.settings.selected = 1 - state.settings.selected.min(1);
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                let enabled = state.settings.selected == 0;
+                state.toast_config.enabled = enabled;
+                return Some(SettingsAction::SaveToast(enabled));
+            }
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+                state.settings.section = SettingsSection::Sound;
+                state.settings.selected = usize::from(!state.sound_enabled());
+            }
+            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+                state.settings.section = SettingsSection::Theme;
+                state.settings.selected = current_theme_index(&state.theme_name);
+            }
+            KeyCode::Esc | KeyCode::Char('q') => cancel_settings(state),
+            _ => {}
+        },
+    }
+
+    None
 }
 
 fn handle_navigate_key(state: &mut AppState, key: KeyEvent) {
@@ -134,6 +262,9 @@ fn handle_navigate_key(state: &mut AppState, key: KeyEvent) {
                 state.switch_workspace(idx);
                 leave_navigate_mode(state);
             }
+        }
+        KeyCode::Char('s') => {
+            open_settings(state);
         }
         KeyCode::Up => {
             if state.selected > 0 {
@@ -252,6 +383,27 @@ fn leave_navigate_mode(state: &mut AppState) {
     }
 }
 
+/// Return to the appropriate mode after completing a modal action.
+/// Goes to Terminal if a workspace is active, otherwise Navigate.
+fn leave_modal(state: &mut AppState) {
+    if state.active.is_some() {
+        state.mode = Mode::Terminal;
+    } else {
+        state.mode = Mode::Navigate;
+    }
+}
+
+fn open_settings(state: &mut AppState) {
+    use crate::app::state::SettingsSection;
+
+    // Save current state for cancel
+    state.settings.original_palette = Some(state.palette.clone());
+    state.settings.original_theme = Some(state.theme_name.clone());
+    state.settings.section = SettingsSection::Theme;
+    state.settings.selected = current_theme_index(&state.theme_name);
+    state.mode = Mode::Settings;
+}
+
 fn handle_rename_key(state: &mut AppState, key: KeyEvent) {
     match key.code {
         KeyCode::Enter => {
@@ -306,19 +458,23 @@ fn handle_resize_key(state: &mut AppState, key: KeyEvent) {
     }
 }
 
+fn confirm_close_accept(state: &mut AppState) {
+    state.close_selected_workspace();
+    if state.workspaces.is_empty() {
+        state.mode = Mode::Navigate;
+    } else {
+        state.mode = Mode::Terminal;
+    }
+}
+
+fn confirm_close_cancel(state: &mut AppState) {
+    state.mode = Mode::Navigate;
+}
+
 fn handle_confirm_close_key(state: &mut AppState, key: KeyEvent) {
     match key.code {
-        KeyCode::Char('y') | KeyCode::Enter => {
-            state.close_selected_workspace();
-            if state.workspaces.is_empty() {
-                state.mode = Mode::Navigate;
-            } else {
-                state.mode = Mode::Terminal;
-            }
-        }
-        _ => {
-            state.mode = Mode::Navigate;
-        }
+        KeyCode::Char('y') | KeyCode::Enter => confirm_close_accept(state),
+        _ => confirm_close_cancel(state),
     }
 }
 
@@ -452,6 +608,15 @@ impl AppState {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.selection = None;
 
+                if self.mode == Mode::ConfirmClose {
+                    if self.confirm_close_confirm_button_at(mouse.column, mouse.row) {
+                        confirm_close_accept(self);
+                    } else {
+                        confirm_close_cancel(self);
+                    }
+                    return;
+                }
+
                 if self.mode == Mode::ContextMenu {
                     if let Some(menu) = &self.context_menu {
                         let item_idx = self.context_menu_item_at(mouse.column, mouse.row);
@@ -495,26 +660,33 @@ impl AppState {
                 }
 
                 if in_sidebar {
-                    let bottom_y = sidebar.y + sidebar.height.saturating_sub(1);
-                    let new_row_y = bottom_y.saturating_sub(1);
-
-                    if mouse.row == bottom_y {
-                        self.sidebar_collapsed = !self.sidebar_collapsed;
-                        return;
-                    }
-
-                    if !self.sidebar_collapsed && mouse.row == new_row_y {
-                        self.request_new_workspace = true;
-                        return;
-                    }
-
-                    let inner_y = sidebar.y;
-                    if mouse.row >= inner_y && mouse.row < new_row_y {
-                        let idx = ((mouse.row - inner_y) / 2) as usize;
+                    if self.sidebar_collapsed {
+                        // Collapsed: each workspace is 1 row
+                        let idx = (mouse.row - sidebar.y) as usize;
                         if idx < self.workspaces.len() {
                             self.switch_workspace(idx);
                             self.mode = Mode::Terminal;
                         }
+                        return;
+                    }
+
+                    // Two-section layout: top half is workspaces
+                    let total_h = sidebar.height as usize;
+                    let ws_h = (total_h + 1) / 2;
+                    let ws_bottom = sidebar.y + ws_h as u16;
+
+                    // "new" button is at the last row of workspace section
+                    let new_row = ws_bottom.saturating_sub(1);
+                    if mouse.row == new_row {
+                        self.request_new_workspace = true;
+                        return;
+                    }
+
+                    // Workspace clicks in top section
+                    if let Some(idx) = self.workspace_at_row(mouse.row) {
+                        self.switch_workspace(idx);
+                        self.mode = Mode::Terminal;
+                        return;
                     }
                 } else if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
                     let (row, col) = (
@@ -614,22 +786,16 @@ impl AppState {
                 }
             }
 
-            MouseEventKind::Down(MouseButton::Right) if in_sidebar => {
-                let inner_y = sidebar.y;
-                let bottom_y = sidebar.y + sidebar.height.saturating_sub(1);
-                let new_row_y = bottom_y.saturating_sub(1);
-                if mouse.row >= inner_y && mouse.row < new_row_y {
-                    let idx = ((mouse.row - inner_y) / 2) as usize;
-                    if idx < self.workspaces.len() {
-                        self.selected = idx;
-                        self.context_menu = Some(ContextMenuState {
-                            ws_idx: idx,
-                            x: mouse.column,
-                            y: mouse.row,
-                            selected: 0,
-                        });
-                        self.mode = Mode::ContextMenu;
-                    }
+            MouseEventKind::Down(MouseButton::Right) if in_sidebar && !self.sidebar_collapsed => {
+                if let Some(idx) = self.workspace_at_row(mouse.row) {
+                    self.selected = idx;
+                    self.context_menu = Some(ContextMenuState {
+                        ws_idx: idx,
+                        x: mouse.column,
+                        y: mouse.row,
+                        selected: 0,
+                    });
+                    self.mode = Mode::ContextMenu;
                 }
             }
 
@@ -637,15 +803,89 @@ impl AppState {
         }
     }
 
-    fn context_menu_item_at(&self, col: u16, row: u16) -> Option<usize> {
+    /// Find which workspace index a sidebar row belongs to (two-section layout).
+    fn workspace_at_row(&self, row: u16) -> Option<usize> {
+        let sidebar = self.view.sidebar_rect;
+        let total_h = sidebar.height as usize;
+        let ws_h = (total_h + 1) / 2;
+        let ws_bottom = sidebar.y + ws_h as u16;
+        let new_row = ws_bottom.saturating_sub(1);
+
+        if row < sidebar.y || row >= new_row {
+            return None;
+        }
+
+        let mut row_y = sidebar.y;
+        for (i, ws) in self.workspaces.iter().enumerate() {
+            let has_branch = ws.branch().is_some();
+            let card_h: u16 = if has_branch { 2 } else { 1 };
+            if row >= row_y && row < row_y + card_h {
+                return Some(i);
+            }
+            row_y += card_h + 1; // +1 for gap
+            if row_y >= new_row {
+                break;
+            }
+        }
+        None
+    }
+
+    fn screen_rect(&self) -> Rect {
+        let sidebar = self.view.sidebar_rect;
+        let terminal = self.view.terminal_area;
+        let x = sidebar.x.min(terminal.x);
+        let y = sidebar.y.min(terminal.y);
+        let right = (sidebar.x + sidebar.width).max(terminal.x + terminal.width);
+        let bottom = (sidebar.y + sidebar.height).max(terminal.y + terminal.height);
+        Rect::new(x, y, right.saturating_sub(x), bottom.saturating_sub(y))
+    }
+
+    pub(crate) fn context_menu_rect(&self) -> Option<Rect> {
         let menu = self.context_menu.as_ref()?;
-        let menu_w = 14u16;
-        let inner_x = menu.x;
-        let inner_y = menu.y + 1;
+        let screen = self.screen_rect();
+        let menu_w = 14u16.min(screen.width.max(1));
+        let menu_h = (CONTEXT_MENU_ITEMS.len() as u16 + 2).min(screen.height.max(1));
+        let x = menu.x.min(screen.x + screen.width.saturating_sub(menu_w));
+        let y = menu.y.min(screen.y + screen.height.saturating_sub(menu_h));
+        Some(Rect::new(x, y, menu_w, menu_h))
+    }
+
+    pub(crate) fn confirm_close_rect(&self) -> Rect {
+        let area = self.view.terminal_area;
+        let popup_w = 44u16.min(area.width.saturating_sub(4));
+        let popup_h = 6u16.min(area.height.max(1));
+        let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+        let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+        Rect::new(popup_x, popup_y, popup_w, popup_h)
+    }
+
+    fn confirm_close_confirm_button_at(&self, col: u16, row: u16) -> bool {
+        let popup = self.confirm_close_rect();
+        let inner = Rect::new(
+            popup.x + 1,
+            popup.y + 1,
+            popup.width.saturating_sub(2),
+            popup.height.saturating_sub(2),
+        );
+        let confirm_w = 9u16;
+        let cancel_w = 8u16;
+        let gap = 2u16;
+        let total_w = confirm_w + gap + cancel_w;
+        let x = inner.x + inner.width.saturating_sub(total_w) / 2;
+        let y = inner.y + 2.min(inner.height.saturating_sub(1));
+        col >= x && col < x + confirm_w && row == y
+    }
+
+    fn context_menu_item_at(&self, col: u16, row: u16) -> Option<usize> {
+        let menu_rect = self.context_menu_rect()?;
+        let inner_x = menu_rect.x + 1;
+        let inner_y = menu_rect.y + 1;
+        let inner_w = menu_rect.width.saturating_sub(2);
+        let inner_h = menu_rect.height.saturating_sub(2);
         if col >= inner_x
-            && col < inner_x + menu_w
+            && col < inner_x + inner_w
             && row >= inner_y
-            && row < inner_y + CONTEXT_MENU_ITEMS.len() as u16
+            && row < inner_y + inner_h.min(CONTEXT_MENU_ITEMS.len() as u16)
         {
             Some((row - inner_y) as usize)
         } else {
@@ -823,5 +1063,55 @@ mod tests {
         );
 
         assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn settings_cancel_restores_previewed_theme_from_other_sections() {
+        let mut state = state_with_workspaces(&["test"]);
+        let original_palette = state.palette.clone();
+        let original_theme = state.theme_name.clone();
+
+        open_settings(&mut state);
+        update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+        );
+        assert_ne!(state.theme_name, original_theme);
+
+        update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
+        );
+        assert_eq!(
+            state.settings.section,
+            crate::app::state::SettingsSection::Sound
+        );
+
+        update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.theme_name, original_theme);
+        assert_eq!(state.palette.accent, original_palette.accent);
+        assert_eq!(state.palette.panel_bg, original_palette.panel_bg);
+    }
+
+    #[test]
+    fn settings_sound_toggle_returns_save_action() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_settings(&mut state);
+        state.settings.section = crate::app::state::SettingsSection::Sound;
+        state.settings.selected = 0;
+
+        let action = update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert_eq!(action, Some(SettingsAction::SaveSound(true)));
+        assert!(state.sound.enabled);
+        assert_eq!(state.mode, Mode::Settings);
     }
 }

@@ -13,10 +13,13 @@ use crate::workspace::Workspace;
 
 /// All colors used by the UI. Derived from a base accent color for now,
 /// but structured so a full theme system can replace it later.
+#[derive(Clone)]
 #[allow(dead_code)] // all fields defined for theming — some used later
 pub struct Palette {
     /// Primary accent (highlight, active borders).
     pub accent: Color,
+    /// Background for floating panels, overlays, and modals.
+    pub panel_bg: Color,
     /// Subtle surface background for selected/focused items.
     pub surface0: Color,
     /// Slightly lighter surface for hover/active states.
@@ -52,6 +55,7 @@ impl Palette {
     pub fn catppuccin() -> Self {
         Self {
             accent: Color::Rgb(137, 180, 250), // blue
+            panel_bg: Color::Rgb(24, 24, 37),
             surface0: Color::Rgb(49, 50, 68),
             surface1: Color::Rgb(69, 71, 90),
             surface_dim: Color::Rgb(30, 30, 46),
@@ -73,6 +77,7 @@ impl Palette {
     pub fn tokyo_night() -> Self {
         Self {
             accent: Color::Rgb(122, 162, 247), // blue
+            panel_bg: Color::Rgb(26, 27, 38),
             surface0: Color::Rgb(36, 40, 59),
             surface1: Color::Rgb(65, 72, 104),
             surface_dim: Color::Rgb(26, 27, 38),
@@ -94,6 +99,7 @@ impl Palette {
     pub fn dracula() -> Self {
         Self {
             accent: Color::Rgb(189, 147, 249), // purple
+            panel_bg: Color::Rgb(40, 42, 54),
             surface0: Color::Rgb(68, 71, 90),
             surface1: Color::Rgb(98, 114, 164),
             surface_dim: Color::Rgb(40, 42, 54),
@@ -115,6 +121,7 @@ impl Palette {
     pub fn nord() -> Self {
         Self {
             accent: Color::Rgb(136, 192, 208), // frost
+            panel_bg: Color::Rgb(46, 52, 64),
             surface0: Color::Rgb(59, 66, 82),
             surface1: Color::Rgb(67, 76, 94),
             surface_dim: Color::Rgb(46, 52, 64),
@@ -136,6 +143,7 @@ impl Palette {
     pub fn gruvbox() -> Self {
         Self {
             accent: Color::Rgb(215, 153, 33), // yellow
+            panel_bg: Color::Rgb(40, 40, 40),
             surface0: Color::Rgb(60, 56, 54),
             surface1: Color::Rgb(80, 73, 69),
             surface_dim: Color::Rgb(40, 40, 40),
@@ -157,6 +165,7 @@ impl Palette {
     pub fn one_dark() -> Self {
         Self {
             accent: Color::Rgb(97, 175, 239), // blue
+            panel_bg: Color::Rgb(40, 44, 52),
             surface0: Color::Rgb(44, 49, 58),
             surface1: Color::Rgb(62, 68, 81),
             surface_dim: Color::Rgb(40, 44, 52),
@@ -178,6 +187,7 @@ impl Palette {
     pub fn solarized() -> Self {
         Self {
             accent: Color::Rgb(38, 139, 210), // blue
+            panel_bg: Color::Rgb(0, 43, 54),
             surface0: Color::Rgb(7, 54, 66),
             surface1: Color::Rgb(88, 110, 117),
             surface_dim: Color::Rgb(0, 43, 54),
@@ -199,6 +209,7 @@ impl Palette {
     pub fn kanagawa() -> Self {
         Self {
             accent: Color::Rgb(126, 156, 216), // blue
+            panel_bg: Color::Rgb(31, 31, 40),
             surface0: Color::Rgb(42, 42, 55),
             surface1: Color::Rgb(54, 54, 70),
             surface_dim: Color::Rgb(31, 31, 40),
@@ -220,6 +231,7 @@ impl Palette {
     pub fn rose_pine() -> Self {
         Self {
             accent: Color::Rgb(196, 167, 231), // iris
+            panel_bg: Color::Rgb(25, 23, 36),
             surface0: Color::Rgb(31, 29, 46),
             surface1: Color::Rgb(38, 35, 58),
             surface_dim: Color::Rgb(25, 23, 36),
@@ -258,6 +270,9 @@ impl Palette {
         use crate::config::parse_color;
         if let Some(c) = &custom.accent {
             self.accent = parse_color(c);
+        }
+        if let Some(c) = &custom.panel_bg {
+            self.panel_bg = parse_color(c);
         }
         if let Some(c) = &custom.surface0 {
             self.surface0 = parse_color(c);
@@ -323,6 +338,55 @@ pub enum Mode {
     Resize,
     ConfirmClose,
     ContextMenu,
+    Settings,
+}
+
+// ---------------------------------------------------------------------------
+// Settings UI state
+// ---------------------------------------------------------------------------
+
+/// Which section of the settings panel is focused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsSection {
+    Theme,
+    Sound,
+    Toast,
+}
+
+impl SettingsSection {
+    pub const ALL: &[Self] = &[Self::Theme, Self::Sound, Self::Toast];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Theme => "theme",
+            Self::Sound => "sound",
+            Self::Toast => "toasts",
+        }
+    }
+}
+
+/// All built-in theme names in display order.
+pub const THEME_NAMES: &[&str] = &[
+    "catppuccin",
+    "tokyo-night",
+    "dracula",
+    "nord",
+    "gruvbox",
+    "one-dark",
+    "solarized",
+    "kanagawa",
+    "rose-pine",
+];
+
+pub struct SettingsState {
+    /// Which section tab is active.
+    pub section: SettingsSection,
+    /// Selected item index within the current section.
+    pub selected: usize,
+    /// The palette before opening settings (for cancel/restore).
+    pub original_palette: Option<Palette>,
+    /// The theme name before opening settings.
+    pub original_theme: Option<String>,
 }
 
 /// Active mouse drag on a split border.
@@ -384,6 +448,7 @@ pub struct AppState {
     pub sidebar_width: u16,
     pub sidebar_collapsed: bool,
     pub confirm_close: bool,
+    #[allow(dead_code)] // kept for backward compat; palette.accent is the source of truth
     pub accent: Color,
     pub sound: SoundConfig,
     pub toast_config: ToastConfig,
@@ -392,9 +457,17 @@ pub struct AppState {
     pub spinner_tick: u32,
     /// UI color palette — all sidebar/UI colors centralized for theming.
     pub palette: Palette,
+    /// Currently applied theme name (for settings UI).
+    pub theme_name: String,
+    /// Settings panel state.
+    pub settings: SettingsState,
 }
 
 impl AppState {
+    pub fn sound_enabled(&self) -> bool {
+        self.sound.enabled
+    }
+
     pub fn is_prefix(&self, key: &crossterm::event::KeyEvent) -> bool {
         key_matches(key, self.prefix_code, self.prefix_mods)
     }
@@ -492,6 +565,13 @@ impl AppState {
             },
             spinner_tick: 0,
             palette: Palette::catppuccin(),
+            theme_name: "catppuccin".to_string(),
+            settings: SettingsState {
+                section: SettingsSection::Theme,
+                selected: 0,
+                original_palette: None,
+                original_theme: None,
+            },
         }
     }
 }

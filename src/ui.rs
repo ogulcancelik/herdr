@@ -80,6 +80,7 @@ pub fn render(app: &AppState, frame: &mut Frame) {
             render_navigate_overlay(app, frame, terminal_area);
             render_context_menu(app, frame);
         }
+        Mode::Settings => render_settings_overlay(app, frame, frame.area()),
         Mode::RenameSession => {}
         Mode::Terminal => {}
     }
@@ -87,15 +88,21 @@ pub fn render(app: &AppState, frame: &mut Frame) {
     // Notifications (rendered on top of everything)
     if let Some(version) = &app.update_available {
         if !app.update_dismissed {
-            render_update_notification(frame, terminal_area, version, app.accent);
+            render_update_notification(frame, terminal_area, version, &app.palette);
         }
     }
     let has_config_diagnostic = app.config_diagnostic.is_some();
     if let Some(message) = &app.config_diagnostic {
-        render_config_diagnostic(frame, terminal_area, message);
+        render_config_diagnostic(frame, terminal_area, message, &app.palette);
     }
     if let Some(toast) = &app.toast {
-        render_toast_notification(frame, terminal_area, toast, has_config_diagnostic);
+        render_toast_notification(
+            frame,
+            terminal_area,
+            toast,
+            has_config_diagnostic,
+            &app.palette,
+        );
     }
 }
 
@@ -186,6 +193,7 @@ fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: Rect) {
             | Mode::Resize
             | Mode::ConfirmClose
             | Mode::ContextMenu
+            | Mode::Settings
     );
 
     let p = &app.palette;
@@ -240,7 +248,7 @@ fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: Rect) {
         );
     }
 
-    render_sidebar_toggle(frame, area, true);
+    render_sidebar_toggle(frame, area, true, p);
 }
 
 fn render_sidebar(app: &AppState, frame: &mut Frame, area: Rect) {
@@ -252,6 +260,7 @@ fn render_sidebar(app: &AppState, frame: &mut Frame, area: Rect) {
             | Mode::Resize
             | Mode::ConfirmClose
             | Mode::ContextMenu
+            | Mode::Settings
     );
     let sep_style = if is_navigating {
         Style::default().fg(p.accent)
@@ -299,7 +308,7 @@ fn render_sidebar(app: &AppState, frame: &mut Frame, area: Rect) {
         }
     }
 
-    render_sidebar_toggle(frame, area, false);
+    render_sidebar_toggle(frame, area, false, p);
 }
 
 /// Render the workspace list in the top section of the sidebar.
@@ -513,7 +522,7 @@ fn render_agent_detail(
     }
 }
 
-fn render_sidebar_toggle(frame: &mut Frame, area: Rect, collapsed: bool) {
+fn render_sidebar_toggle(frame: &mut Frame, area: Rect, collapsed: bool, p: &Palette) {
     // Toggle button not needed when sidebar has content — skip for now
     // to avoid conflicting with the agent detail panel at the bottom.
     if !collapsed {
@@ -528,18 +537,18 @@ fn render_sidebar_toggle(frame: &mut Frame, area: Rect, collapsed: bool) {
     let x = area.x + content_w / 2;
     let toggle_area = Rect::new(x, bottom_y, 1, 1);
     frame.render_widget(
-        Paragraph::new(Span::styled(icon, Style::default().fg(Color::DarkGray))),
+        Paragraph::new(Span::styled(icon, Style::default().fg(p.overlay0))),
         toggle_area,
     );
 }
 
 fn render_panes(app: &AppState, frame: &mut Frame, area: Rect) {
     let Some(ws_idx) = app.active else {
-        render_empty(frame, area, app.accent);
+        render_empty(frame, area, &app.palette);
         return;
     };
     let Some(ws) = app.workspaces.get(ws_idx) else {
-        render_empty(frame, area, app.accent);
+        render_empty(frame, area, &app.palette);
         return;
     };
 
@@ -552,17 +561,17 @@ fn render_panes(app: &AppState, frame: &mut Frame, area: Rect) {
             if multi_pane {
                 let (border_style, border_set) = if info.is_focused && terminal_active {
                     (
-                        Style::default().fg(app.accent),
+                        Style::default().fg(app.palette.accent),
                         ratatui::symbols::border::THICK,
                     )
                 } else if info.is_focused {
                     (
-                        Style::default().fg(app.accent),
+                        Style::default().fg(app.palette.accent),
                         ratatui::symbols::border::PLAIN,
                     )
                 } else {
                     (
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(app.palette.overlay0),
                         ratatui::symbols::border::PLAIN,
                     )
                 };
@@ -597,7 +606,13 @@ fn render_panes(app: &AppState, frame: &mut Frame, area: Rect) {
             }
 
             // Selection highlight
-            render_selection_highlight(&app.selection, frame, info.id, info.inner_rect);
+            render_selection_highlight(
+                &app.selection,
+                frame,
+                info.id,
+                info.inner_rect,
+                &app.palette,
+            );
         }
     }
 }
@@ -632,6 +647,7 @@ fn render_selection_highlight(
     frame: &mut Frame,
     pane_id: crate::layout::PaneId,
     inner: Rect,
+    p: &Palette,
 ) {
     if let Some(sel) = selection {
         if sel.is_visible() && sel.pane_id == pane_id {
@@ -640,13 +656,7 @@ fn render_selection_highlight(
                 for x in 0..inner.width {
                     if sel.contains(y, x) {
                         let cell = &mut buf[(inner.x + x, inner.y + y)];
-                        // Fixed highlight: white text on blue background.
-                        // Consistent regardless of the cell's original colors.
-                        cell.set_style(
-                            Style::default()
-                                .fg(Color::White)
-                                .bg(Color::Rgb(40, 80, 140)),
-                        );
+                        cell.set_style(Style::default().fg(p.panel_bg).bg(p.blue));
                     }
                 }
             }
@@ -654,29 +664,29 @@ fn render_selection_highlight(
     }
 }
 
-fn render_empty(frame: &mut Frame, area: Rect, accent: Color) {
+fn render_empty(frame: &mut Frame, area: Rect, p: &Palette) {
     let lines = vec![
         Line::from(""),
         Line::from(""),
         Line::from(Span::styled(
             "  No active workspace",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(p.overlay0),
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled("  Press ", Style::default().fg(Color::DarkGray)),
+            Span::styled("  Press ", Style::default().fg(p.overlay0)),
             Span::styled(
                 "new",
-                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" to create one", Style::default().fg(Color::DarkGray)),
+            Span::styled(" to create one", Style::default().fg(p.overlay0)),
         ]),
     ];
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(Style::default().fg(p.surface_dim)),
         ),
         area,
     );
@@ -694,12 +704,33 @@ fn dim_background(frame: &mut Frame, area: Rect) {
     }
 }
 
+fn render_panel_shell(
+    frame: &mut Frame,
+    area: Rect,
+    border_color: Color,
+    bg: Color,
+) -> Option<Rect> {
+    if area.width < 2 || area.height < 2 {
+        return None;
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .border_set(ratatui::symbols::border::PLAIN)
+        .style(Style::default().bg(bg));
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    Some(inner)
+}
+
 fn render_modal_shell(
     frame: &mut Frame,
     area: Rect,
     popup_w: u16,
     popup_h: u16,
-    accent: Color,
+    p: &Palette,
 ) -> Option<Rect> {
     let popup_w = popup_w.min(area.width.saturating_sub(4));
     let popup_h = popup_h.min(area.height.saturating_sub(2));
@@ -710,25 +741,14 @@ fn render_modal_shell(
     let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
     let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
     let popup = Rect::new(popup_x, popup_y, popup_w, popup_h);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(accent))
-        .style(Style::default().bg(Color::Black));
-    let inner = block.inner(popup);
-    frame.render_widget(Clear, popup);
-    frame.render_widget(block, popup);
-    Some(inner)
+    render_panel_shell(frame, popup, p.accent, p.panel_bg)
 }
 
-fn render_modal_header(frame: &mut Frame, area: Rect, title: &str, accent: Color) {
+fn render_modal_header(frame: &mut Frame, area: Rect, title: &str, p: &Palette) {
     frame.render_widget(
         Paragraph::new(Span::styled(
             format!(" {title} "),
-            Style::default()
-                .fg(Color::Black)
-                .bg(accent)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD),
         )),
         area,
     );
@@ -744,7 +764,7 @@ fn render_onboarding_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
 }
 
 fn render_onboarding_welcome(app: &AppState, frame: &mut Frame, area: Rect) {
-    let Some(inner) = render_modal_shell(frame, area, 64, 15, app.accent) else {
+    let Some(inner) = render_modal_shell(frame, area, 64, 15, &app.palette) else {
         return;
     };
     if inner.height < 10 {
@@ -769,55 +789,64 @@ fn render_onboarding_welcome(app: &AppState, frame: &mut Frame, area: Rect) {
     frame.render_widget(
         Paragraph::new("  herdr").style(
             Style::default()
-                .fg(Color::White)
+                .fg(app.palette.text)
                 .add_modifier(Modifier::BOLD),
         ),
         rows[1],
     );
     frame.render_widget(
         Paragraph::new("  workspace manager for coding agents")
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(app.palette.overlay0)),
         rows[2],
     );
 
     let line1 = Line::from(vec![
         Span::styled(
             format!("  {}", ONBOARDING_PREFIX_LABEL),
-            Style::default().fg(app.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(app.palette.accent)
+                .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" navigate ", Style::default().fg(Color::Gray)),
-        Span::styled("·", Style::default().fg(Color::DarkGray)),
-        Span::styled(" click sidebar ", Style::default().fg(Color::Gray)),
-        Span::styled("·", Style::default().fg(Color::DarkGray)),
-        Span::styled(" scroll panes", Style::default().fg(Color::Gray)),
+        Span::styled(" navigate ", Style::default().fg(app.palette.overlay1)),
+        Span::styled("·", Style::default().fg(app.palette.overlay0)),
+        Span::styled(" click sidebar ", Style::default().fg(app.palette.overlay1)),
+        Span::styled("·", Style::default().fg(app.palette.overlay0)),
+        Span::styled(" scroll panes", Style::default().fg(app.palette.overlay1)),
     ]);
     frame.render_widget(Paragraph::new(line1), rows[4]);
 
     let line2 = Line::from(vec![
         Span::styled(
             "  ↑↓",
-            Style::default().fg(app.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(app.palette.accent)
+                .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" switch workspace ", Style::default().fg(Color::Gray)),
-        Span::styled("·", Style::default().fg(Color::DarkGray)),
-        Span::styled(" drag borders ", Style::default().fg(Color::Gray)),
-        Span::styled("·", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " switch workspace ",
+            Style::default().fg(app.palette.overlay1),
+        ),
+        Span::styled("·", Style::default().fg(app.palette.overlay0)),
+        Span::styled(" drag borders ", Style::default().fg(app.palette.overlay1)),
+        Span::styled("·", Style::default().fg(app.palette.overlay0)),
         Span::styled(
             " ⇥",
-            Style::default().fg(app.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(app.palette.accent)
+                .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" pane", Style::default().fg(Color::Gray)),
+        Span::styled(" pane", Style::default().fg(app.palette.overlay1)),
     ]);
     frame.render_widget(Paragraph::new(line2), rows[5]);
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("  ● ", Style::default().fg(Color::Red)),
-            Span::styled("needs you    ", Style::default().fg(Color::Gray)),
-            Span::styled("○ ", Style::default().fg(Color::Yellow)),
-            Span::styled("working    ", Style::default().fg(Color::Gray)),
-            Span::styled("◌ ", Style::default().fg(Color::DarkGray)),
-            Span::styled("no agent", Style::default().fg(Color::Gray)),
+            Span::styled("  ● ", Style::default().fg(app.palette.red)),
+            Span::styled("needs you    ", Style::default().fg(app.palette.overlay1)),
+            Span::styled("○ ", Style::default().fg(app.palette.yellow)),
+            Span::styled("working    ", Style::default().fg(app.palette.overlay1)),
+            Span::styled("◌ ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("no agent", Style::default().fg(app.palette.overlay1)),
         ])),
         rows[7],
     );
@@ -826,13 +855,13 @@ fn render_onboarding_welcome(app: &AppState, frame: &mut Frame, area: Rect) {
             Span::styled(
                 "  continue  ",
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(app.accent)
+                    .fg(app.palette.panel_bg)
+                    .bg(app.palette.accent)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "   readme has config and more",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(app.palette.overlay0),
             ),
         ])),
         rows[9],
@@ -840,7 +869,7 @@ fn render_onboarding_welcome(app: &AppState, frame: &mut Frame, area: Rect) {
 }
 
 fn render_onboarding_notifications(app: &AppState, frame: &mut Frame, area: Rect) {
-    let Some(inner) = render_modal_shell(frame, area, 52, 10, app.accent) else {
+    let Some(inner) = render_modal_shell(frame, area, 52, 10, &app.palette) else {
         return;
     };
 
@@ -859,10 +888,10 @@ fn render_onboarding_notifications(app: &AppState, frame: &mut Frame, area: Rect
     ])
     .areas::<7>(inner);
 
-    render_modal_header(frame, rows[0], "choose notification style", app.accent);
+    render_modal_header(frame, rows[0], "choose notification style", &app.palette);
     frame.render_widget(
         Paragraph::new(" herdr can alert you when background work needs attention or finishes.")
-            .style(Style::default().fg(Color::Gray)),
+            .style(Style::default().fg(app.palette.overlay1)),
         rows[1],
     );
 
@@ -877,9 +906,11 @@ fn render_onboarding_notifications(app: &AppState, frame: &mut Frame, area: Rect
         let selected = idx == app.onboarding_selected;
         let prefix = if selected { "›" } else { " " };
         let style = if selected {
-            Style::default().fg(Color::Black).bg(app.accent)
+            Style::default()
+                .fg(app.palette.panel_bg)
+                .bg(app.palette.accent)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(app.palette.text)
         };
         frame.render_widget(
             Paragraph::new(format!(" {prefix} {}. {option}", idx + 1)).style(style),
@@ -889,13 +920,13 @@ fn render_onboarding_notifications(app: &AppState, frame: &mut Frame, area: Rect
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" [ back ] ", Style::default().fg(Color::DarkGray)),
+            Span::styled(" [ back ] ", Style::default().fg(app.palette.overlay0)),
             Span::raw("  "),
             Span::styled(
                 " [ save ] ",
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(app.accent)
+                    .fg(app.palette.panel_bg)
+                    .bg(app.palette.accent)
                     .add_modifier(Modifier::BOLD),
             ),
         ])),
@@ -905,9 +936,11 @@ fn render_onboarding_notifications(app: &AppState, frame: &mut Frame, area: Rect
 
 /// Floating overlay for navigate mode — appears at bottom of terminal area.
 fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
-    let key = Style::default().fg(app.accent).add_modifier(Modifier::BOLD);
-    let dim = Style::default().fg(Color::DarkGray);
-    let label = Style::default().fg(Color::White);
+    let key = Style::default()
+        .fg(app.palette.accent)
+        .add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(app.palette.overlay0);
+    let label = Style::default().fg(app.palette.text);
 
     let kb = &app.keybinds;
     let line1 = Line::from(vec![
@@ -948,8 +981,8 @@ fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
         .unwrap_or_default();
 
     let mode_style = Style::default()
-        .fg(Color::Black)
-        .bg(app.accent)
+        .fg(app.palette.panel_bg)
+        .bg(app.palette.accent)
         .add_modifier(Modifier::BOLD);
 
     let line2 = Line::from(vec![
@@ -968,6 +1001,8 @@ fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
         Span::styled(" resize  ", dim),
         Span::styled(kb.toggle_sidebar_label.as_str(), key),
         Span::styled(" sidebar  ", dim),
+        Span::styled("s", key),
+        Span::styled(" settings  ", dim),
         Span::styled("⏎", key),
         Span::styled(" open  ", dim),
         Span::styled("q", key),
@@ -981,7 +1016,7 @@ fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     // Clear the area behind the overlay
     frame.render_widget(Clear, overlay_area);
 
-    let bg = Style::default().bg(Color::Black);
+    let bg = Style::default().bg(app.palette.panel_bg);
     let buf = frame.buffer_mut();
     for y in overlay_area.y..overlay_area.y + overlay_area.height {
         for x in overlay_area.x..overlay_area.x + overlay_area.width {
@@ -997,12 +1032,14 @@ fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
 
 /// Floating overlay for resize mode.
 fn render_resize_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
-    let key = Style::default().fg(app.accent).add_modifier(Modifier::BOLD);
-    let dim = Style::default().fg(Color::DarkGray);
+    let key = Style::default()
+        .fg(app.palette.accent)
+        .add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(app.palette.overlay0);
 
     let mode_style = Style::default()
-        .fg(Color::Black)
-        .bg(Color::Magenta)
+        .fg(app.palette.panel_bg)
+        .bg(app.palette.mauve)
         .add_modifier(Modifier::BOLD);
 
     let line = Line::from(vec![
@@ -1020,7 +1057,7 @@ fn render_resize_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     let overlay_area = Rect::new(area.x, overlay_y, area.width, 1);
 
     frame.render_widget(Clear, overlay_area);
-    let bg = Style::default().bg(Color::Black);
+    let bg = Style::default().bg(app.palette.panel_bg);
     let buf = frame.buffer_mut();
     for x in overlay_area.x..overlay_area.x + overlay_area.width {
         buf[(x, overlay_y)].set_style(bg);
@@ -1058,14 +1095,18 @@ fn render_confirm_close_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
 
     // Centered popup
     let popup_w = 44u16.min(area.width.saturating_sub(4));
-    let popup_h = 5u16;
+    let popup_h = 6u16;
     let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
     let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
     let popup = Rect::new(popup_x, popup_y, popup_w, popup_h);
 
-    let key = Style::default().fg(app.accent).add_modifier(Modifier::BOLD);
-    let warn = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
-    let dim = Style::default().fg(Color::DarkGray);
+    let key = Style::default()
+        .fg(app.palette.accent)
+        .add_modifier(Modifier::BOLD);
+    let warn = Style::default()
+        .fg(app.palette.red)
+        .add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(app.palette.overlay0);
 
     let title_line = Line::from(vec![Span::styled(" Close workspace?", warn)]);
 
@@ -1073,45 +1114,327 @@ fn render_confirm_close_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
         Span::styled(
             format!(" {ws_name}"),
             Style::default()
-                .fg(Color::White)
+                .fg(app.palette.text)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(format!(" — {pane_text}"), dim),
     ]);
 
-    let action_line = Line::from(vec![
-        Span::raw(" "),
-        Span::styled("y", key),
-        Span::styled("/", dim),
-        Span::styled("enter", key),
-        Span::styled(" confirm    ", dim),
-        Span::styled("any key", key),
-        Span::styled(" cancel", dim),
-    ]);
+    let Some(inner) = render_panel_shell(frame, popup, app.palette.red, app.palette.panel_bg)
+    else {
+        return;
+    };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Red))
-        .style(Style::default().bg(Color::Black));
-
-    let inner = block.inner(popup);
-    frame.render_widget(Clear, popup);
-    frame.render_widget(block, popup);
-
-    if inner.height >= 3 {
+    if inner.height >= 4 {
         let rows = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Length(1),
         ])
-        .areas::<3>(inner);
+        .areas::<4>(inner);
+
         frame.render_widget(Paragraph::new(title_line), rows[0]);
         frame.render_widget(Paragraph::new(detail_line), rows[1]);
-        frame.render_widget(Paragraph::new(action_line), rows[2]);
+
+        let (confirm_rect, cancel_rect) = confirm_close_button_rects(inner);
+        frame.render_widget(
+            Paragraph::new(" confirm ").style(
+                Style::default()
+                    .fg(app.palette.panel_bg)
+                    .bg(app.palette.red)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            confirm_rect,
+        );
+        frame.render_widget(
+            Paragraph::new(" cancel ").style(
+                Style::default()
+                    .fg(app.palette.text)
+                    .bg(app.palette.surface0)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            cancel_rect,
+        );
+
+        let hints = Line::from(vec![
+            Span::styled(" enter/y", key),
+            Span::styled(" confirm  ", dim),
+            Span::styled("esc/click", key),
+            Span::styled(" cancel", dim),
+        ]);
+        frame.render_widget(Paragraph::new(hints), rows[3]);
     }
 }
 
+fn confirm_close_button_rects(inner: Rect) -> (Rect, Rect) {
+    let confirm_w = 9u16;
+    let cancel_w = 8u16;
+    let gap = 2u16;
+    let total_w = confirm_w + gap + cancel_w;
+    let x = inner.x + inner.width.saturating_sub(total_w) / 2;
+    let y = inner.y + 2.min(inner.height.saturating_sub(1));
+    (
+        Rect::new(x, y, confirm_w.min(inner.width), 1),
+        Rect::new(
+            x + confirm_w + gap,
+            y,
+            cancel_w.min(inner.width.saturating_sub(confirm_w + gap)),
+            1,
+        ),
+    )
+}
+
 /// Right-click context menu popup anchored near the click position.
+// ---------------------------------------------------------------------------
+// Settings overlay
+// ---------------------------------------------------------------------------
+
+fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
+    use crate::app::state::SettingsSection;
+
+    let p = &app.palette;
+    let popup_w: u16 = 56;
+    let popup_h: u16 = 20;
+
+    let popup_w = popup_w.min(area.width.saturating_sub(4));
+    let popup_h = popup_h.min(area.height.saturating_sub(2));
+    if popup_w < 20 || popup_h < 10 {
+        return;
+    }
+
+    let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup = Rect::new(popup_x, popup_y, popup_w, popup_h);
+
+    // Dim everything behind the modal
+    dim_background(frame, area);
+
+    let Some(inner) = render_panel_shell(frame, popup, p.accent, p.panel_bg) else {
+        return;
+    };
+    if inner.height < 4 || inner.width < 10 {
+        return;
+    }
+
+    let mut y = inner.y;
+
+    // Title
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            " settings",
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+        )])),
+        Rect::new(inner.x, y, inner.width, 1),
+    );
+    y += 1;
+
+    // Tab bar
+    let tabs: Vec<Span> = SettingsSection::ALL
+        .iter()
+        .map(|s| {
+            let active = *s == app.settings.section;
+            let label = format!(" {} ", s.label());
+            if active {
+                Span::styled(
+                    label,
+                    Style::default()
+                        .fg(p.panel_bg)
+                        .bg(p.accent)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled(label, Style::default().fg(p.overlay1))
+            }
+        })
+        .collect();
+    let mut tab_line: Vec<Span> = Vec::new();
+    tab_line.push(Span::styled(" ", Style::default()));
+    for (i, tab) in tabs.into_iter().enumerate() {
+        if i > 0 {
+            tab_line.push(Span::styled(" ", Style::default()));
+        }
+        tab_line.push(tab);
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(tab_line)),
+        Rect::new(inner.x, y, inner.width, 1),
+    );
+    y += 1;
+
+    // Separator
+    let sep = "─".repeat(inner.width as usize);
+    frame.render_widget(
+        Paragraph::new(Span::styled(&sep, Style::default().fg(p.surface0))),
+        Rect::new(inner.x, y, inner.width, 1),
+    );
+    y += 1;
+
+    // Section content
+    let content_area = Rect::new(inner.x, y, inner.width, inner.y + inner.height - y);
+
+    match app.settings.section {
+        SettingsSection::Theme => {
+            render_settings_theme(app, frame, content_area);
+        }
+        SettingsSection::Sound => {
+            render_settings_toggle(
+                frame,
+                content_area,
+                p,
+                "sound alerts",
+                "play sounds when agents change state in background",
+                app.sound_enabled(),
+                app.settings.selected,
+            );
+        }
+        SettingsSection::Toast => {
+            render_settings_toggle(
+                frame,
+                content_area,
+                p,
+                "visual toasts",
+                "show top-right notifications for background events",
+                app.toast_config.enabled,
+                app.settings.selected,
+            );
+        }
+    }
+
+    // Footer hints
+    let footer_y = inner.y + inner.height - 1;
+    if footer_y > y {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(" ↑↓", Style::default().fg(p.overlay0)),
+                Span::styled(" select  ", Style::default().fg(p.overlay1)),
+                Span::styled("tab", Style::default().fg(p.overlay0)),
+                Span::styled(" section  ", Style::default().fg(p.overlay1)),
+                Span::styled("⏎", Style::default().fg(p.overlay0)),
+                Span::styled(" apply  ", Style::default().fg(p.overlay1)),
+                Span::styled("esc", Style::default().fg(p.overlay0)),
+                Span::styled(" close", Style::default().fg(p.overlay1)),
+            ])),
+            Rect::new(inner.x, footer_y, inner.width, 1),
+        );
+    }
+}
+
+/// Render the theme picker list inside the settings panel.
+fn render_settings_theme(app: &AppState, frame: &mut Frame, area: Rect) {
+    use crate::app::state::THEME_NAMES;
+
+    let p = &app.palette;
+    let max_visible = (area.height as usize).saturating_sub(1);
+    let selected = app.settings.selected;
+
+    // Scroll offset
+    let scroll = if selected >= max_visible {
+        selected - max_visible + 1
+    } else {
+        0
+    };
+
+    for (vi, theme_idx) in (scroll..THEME_NAMES.len()).enumerate() {
+        if vi >= max_visible {
+            break;
+        }
+        let name = THEME_NAMES[theme_idx];
+        let is_selected = theme_idx == selected;
+        let is_current = name.to_lowercase().replace([' ', '_'], "-")
+            == app.theme_name.to_lowercase().replace([' ', '_'], "-");
+
+        let prefix = if is_selected { "▸" } else { " " };
+        let marker = if is_current { " ✓" } else { "" };
+
+        let row_y = area.y + vi as u16;
+
+        // Background for selected
+        if is_selected {
+            let buf = frame.buffer_mut();
+            for x in area.x..area.x + area.width {
+                buf[(x, row_y)].set_style(Style::default().bg(p.surface0));
+            }
+        }
+
+        let name_style = if is_selected {
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.subtext0)
+        };
+
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(format!(" {prefix} "), Style::default().fg(p.overlay0)),
+                Span::styled(name, name_style),
+                Span::styled(marker, Style::default().fg(p.green)),
+            ])),
+            Rect::new(area.x, row_y, area.width, 1),
+        );
+    }
+}
+
+/// Reusable toggle widget for boolean settings (sound, toast).
+fn render_settings_toggle(
+    frame: &mut Frame,
+    area: Rect,
+    p: &crate::app::state::Palette,
+    title: &str,
+    description: &str,
+    current_value: bool,
+    selected_idx: usize,
+) {
+    let mut y = area.y;
+
+    // Description — truncate to fit within area
+    let max_desc_len = (area.width as usize).saturating_sub(2);
+    let desc_text = if description.len() > max_desc_len {
+        format!(" {}…", &description[..max_desc_len.saturating_sub(2)])
+    } else {
+        format!(" {description}")
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(desc_text, Style::default().fg(p.overlay1))),
+        Rect::new(area.x, y, area.width, 1),
+    );
+    y += 2;
+
+    let options = ["on", "off"];
+    for (i, label) in options.iter().enumerate() {
+        if y >= area.y + area.height {
+            break;
+        }
+        let is_selected = i == selected_idx;
+        let is_active = (i == 0) == current_value;
+
+        let prefix = if is_selected { "▸" } else { " " };
+        let marker = if is_active { " ✓" } else { "" };
+
+        if is_selected {
+            let buf = frame.buffer_mut();
+            for x in area.x..area.x + area.width {
+                buf[(x, y)].set_style(Style::default().bg(p.surface0));
+            }
+        }
+
+        let label_style = if is_selected {
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.subtext0)
+        };
+
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(format!(" {prefix} "), Style::default().fg(p.overlay0)),
+                Span::styled(format!("{title}: {label}"), label_style),
+                Span::styled(marker, Style::default().fg(p.green)),
+            ])),
+            Rect::new(area.x, y, area.width, 1),
+        );
+        y += 1;
+    }
+}
+
 fn render_context_menu(app: &AppState, frame: &mut Frame) {
     use crate::app::CONTEXT_MENU_ITEMS;
 
@@ -1119,29 +1442,19 @@ fn render_context_menu(app: &AppState, frame: &mut Frame) {
         return;
     };
 
-    let menu_w = 14u16;
-    let menu_h = CONTEXT_MENU_ITEMS.len() as u16 + 2; // +2 for border
-    let area = frame.area();
-
-    // Position: try to place below-right of click, clamp to screen
-    let x = menu.x.min(area.width.saturating_sub(menu_w));
-    let y = menu.y.min(area.height.saturating_sub(menu_h));
-    let menu_rect = Rect::new(x, y, menu_w, menu_h);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.accent))
-        .style(Style::default().bg(Color::Black));
-    let inner = block.inner(menu_rect);
-
-    frame.render_widget(Clear, menu_rect);
-    frame.render_widget(block, menu_rect);
+    let p = &app.palette;
+    let Some(menu_rect) = app.context_menu_rect() else {
+        return;
+    };
+    let Some(inner) = render_panel_shell(frame, menu_rect, p.accent, p.panel_bg) else {
+        return;
+    };
 
     let highlight = Style::default()
-        .fg(Color::Black)
-        .bg(app.accent)
+        .fg(p.panel_bg)
+        .bg(p.accent)
         .add_modifier(Modifier::BOLD);
-    let normal = Style::default().fg(Color::White);
+    let normal = Style::default().fg(p.text).bg(p.panel_bg);
 
     for (i, item) in CONTEXT_MENU_ITEMS.iter().enumerate() {
         if i as u16 >= inner.height {
@@ -1157,7 +1470,7 @@ fn render_context_menu(app: &AppState, frame: &mut Frame) {
     }
 }
 
-fn render_update_notification(frame: &mut Frame, area: Rect, version: &str, accent: Color) {
+fn render_update_notification(frame: &mut Frame, area: Rect, version: &str, p: &Palette) {
     let text = format!(" ✦ herdr v{version} installed — restart to update ");
     let width = text.len() as u16 + 2;
     let x = area.x + area.width.saturating_sub(width) / 2;
@@ -1169,8 +1482,8 @@ fn render_update_notification(frame: &mut Frame, area: Rect, version: &str, acce
         Paragraph::new(Span::styled(
             text,
             Style::default()
-                .fg(Color::Black)
-                .bg(accent)
+                .fg(p.panel_bg)
+                .bg(p.accent)
                 .add_modifier(Modifier::BOLD),
         )),
         notif_area,
@@ -1182,10 +1495,11 @@ fn render_toast_notification(
     area: Rect,
     toast: &ToastNotification,
     offset_for_warning: bool,
+    p: &Palette,
 ) {
     let dot_color = match toast.kind {
-        ToastKind::NeedsAttention => Color::Red,
-        ToastKind::Finished => Color::Blue,
+        ToastKind::NeedsAttention => p.red,
+        ToastKind::Finished => p.blue,
     };
     let content_width = (toast.title.len().max(toast.context.len()) as u16) + 4;
     let width = content_width.saturating_add(2).min(area.width);
@@ -1197,8 +1511,8 @@ fn render_toast_notification(
     frame.render_widget(Clear, toast_area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .style(Style::default().bg(Color::Black));
+        .border_style(Style::default().fg(p.overlay0))
+        .style(Style::default().bg(p.panel_bg));
     let inner = block.inner(toast_area);
     frame.render_widget(block, toast_area);
 
@@ -1214,14 +1528,12 @@ fn render_toast_notification(
         Span::raw(" "),
         Span::styled(
             &toast.title,
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD),
         ),
     ]);
     let context = Line::from(vec![
-        Span::styled("  ", Style::default().fg(Color::DarkGray)),
-        Span::styled(&toast.context, Style::default().fg(Color::DarkGray)),
+        Span::styled("  ", Style::default().fg(p.overlay0)),
+        Span::styled(&toast.context, Style::default().fg(p.overlay0)),
     ]);
 
     frame.render_widget(Paragraph::new(title), title_row);
@@ -1239,7 +1551,7 @@ fn render_toast_notification(
 ///
 /// Filled dot = needs attention (working, or finished unseen).
 /// Hollow dot = nothing to do here.
-fn render_config_diagnostic(frame: &mut Frame, area: Rect, message: &str) {
+fn render_config_diagnostic(frame: &mut Frame, area: Rect, message: &str, p: &Palette) {
     let text = format!(" config warning: {message} ");
     let width = text.len() as u16 + 2;
     let notif_area = Rect::new(
@@ -1254,8 +1566,8 @@ fn render_config_diagnostic(frame: &mut Frame, area: Rect, message: &str) {
         Paragraph::new(Span::styled(
             text,
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
+                .fg(p.panel_bg)
+                .bg(p.yellow)
                 .add_modifier(Modifier::BOLD),
         )),
         notif_area,

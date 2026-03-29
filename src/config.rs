@@ -46,6 +46,7 @@ pub struct ThemeConfig {
 #[serde(default)]
 pub struct CustomThemeColors {
     pub accent: Option<String>,
+    pub panel_bg: Option<String>,
     pub surface0: Option<String>,
     pub surface1: Option<String>,
     pub surface_dim: Option<String>,
@@ -589,7 +590,16 @@ fn upsert_top_level_bool(content: &str, key: &str, value: bool) -> String {
     }
 }
 
-fn upsert_section_bool(content: &str, section: &str, key: &str, value: bool) -> String {
+/// Write a key = value pair in a TOML section (creates section if missing).
+pub fn upsert_section_value(content: &str, section: &str, key: &str, value: &str) -> String {
+    upsert_section_raw(content, section, key, value)
+}
+
+pub fn upsert_section_bool(content: &str, section: &str, key: &str, value: bool) -> String {
+    upsert_section_raw(content, section, key, &value.to_string())
+}
+
+fn upsert_section_raw(content: &str, section: &str, key: &str, value: &str) -> String {
     let header = format!("[{section}]");
     let assignment = format!("{key} = {value}");
     let lines: Vec<&str> = content.lines().collect();
@@ -998,12 +1008,14 @@ name = "dracula"
 name = "nord"
 
 [theme.custom]
+panel_bg = "#1e1e2e"
 accent = "#ff79c6"
 red = "rgb(255, 85, 85)"
 "##;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.theme.name.as_deref(), Some("nord"));
         let custom = config.theme.custom.as_ref().unwrap();
+        assert_eq!(custom.panel_bg.as_deref(), Some("#1e1e2e"));
         assert_eq!(custom.accent.as_deref(), Some("#ff79c6"));
         assert_eq!(custom.red.as_deref(), Some("rgb(255, 85, 85)"));
         assert!(custom.green.is_none());
