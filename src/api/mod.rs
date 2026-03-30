@@ -9,6 +9,7 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use regex::Regex;
+use tokio::sync::mpsc;
 
 use crate::api::schema::{
     ErrorBody, ErrorResponse, Method, PaneAgentStateChangedEvent, PaneOutputMatchedEvent, Request,
@@ -22,6 +23,8 @@ pub struct ApiRequestMessage {
     pub request: Request,
     pub respond_to: std::sync::mpsc::Sender<String>,
 }
+
+pub type ApiRequestSender = mpsc::UnboundedSender<ApiRequestMessage>;
 
 #[derive(Clone, Default)]
 pub struct EventHub {
@@ -99,7 +102,7 @@ impl Drop for ServerHandle {
 }
 
 pub fn start_server(
-    api_tx: std::sync::mpsc::Sender<ApiRequestMessage>,
+    api_tx: ApiRequestSender,
     event_hub: EventHub,
 ) -> std::io::Result<ServerHandle> {
     let path = socket_path();
@@ -151,7 +154,7 @@ fn prepare_socket_path(path: &Path) -> std::io::Result<()> {
 
 fn handle_connection(
     mut stream: UnixStream,
-    api_tx: &std::sync::mpsc::Sender<ApiRequestMessage>,
+    api_tx: &ApiRequestSender,
     event_hub: &EventHub,
 ) -> std::io::Result<()> {
     let mut line = String::new();
@@ -205,7 +208,7 @@ fn handle_connection(
     }
 }
 
-fn handle_request(request: Request, api_tx: &std::sync::mpsc::Sender<ApiRequestMessage>) -> String {
+fn handle_request(request: Request, api_tx: &ApiRequestSender) -> String {
     let request_id = request.id.clone();
     match request.method {
         Method::Ping(_) => serde_json::to_string(&SuccessResponse {
@@ -226,7 +229,7 @@ fn handle_request(request: Request, api_tx: &std::sync::mpsc::Sender<ApiRequestM
 fn wait_for_output(
     request_id: String,
     params: crate::api::schema::PaneWaitForOutputParams,
-    api_tx: &std::sync::mpsc::Sender<ApiRequestMessage>,
+    api_tx: &ApiRequestSender,
 ) -> String {
     let deadline = params
         .timeout_ms
@@ -316,7 +319,7 @@ fn stream_subscriptions(
     mut stream: UnixStream,
     request_id: String,
     params: crate::api::schema::EventsSubscribeParams,
-    api_tx: &std::sync::mpsc::Sender<ApiRequestMessage>,
+    api_tx: &ApiRequestSender,
     event_hub: &EventHub,
 ) -> std::io::Result<()> {
     let mut subscriptions = Vec::with_capacity(params.subscriptions.len());
@@ -411,7 +414,7 @@ impl ActiveSubscription {
         subscription: Subscription,
         request_id: &str,
         index: usize,
-        api_tx: &std::sync::mpsc::Sender<ApiRequestMessage>,
+        api_tx: &ApiRequestSender,
         _event_hub: &EventHub,
     ) -> Result<Self, ErrorResponse> {
         match subscription {
@@ -514,7 +517,7 @@ impl ActiveSubscription {
 
     fn poll(
         &mut self,
-        api_tx: &std::sync::mpsc::Sender<ApiRequestMessage>,
+        api_tx: &ApiRequestSender,
         event_hub: &EventHub,
     ) -> Option<serde_json::Value> {
         match self {
@@ -542,10 +545,7 @@ impl ActiveEventSubscription {
 }
 
 impl ActiveOutputMatchedSubscription {
-    fn poll(
-        &mut self,
-        api_tx: &std::sync::mpsc::Sender<ApiRequestMessage>,
-    ) -> Option<SubscriptionEventEnvelope> {
+    fn poll(&mut self, api_tx: &ApiRequestSender) -> Option<SubscriptionEventEnvelope> {
         let read = pane_read(
             format!("{}:read", self.request_prefix),
             &self.pane_id,
@@ -581,10 +581,7 @@ impl ActiveOutputMatchedSubscription {
 }
 
 impl ActiveAgentStateChangedSubscription {
-    fn poll(
-        &mut self,
-        api_tx: &std::sync::mpsc::Sender<ApiRequestMessage>,
-    ) -> Option<SubscriptionEventEnvelope> {
+    fn poll(&mut self, api_tx: &ApiRequestSender) -> Option<SubscriptionEventEnvelope> {
         let pane = pane_get(
             format!("{}:pane", self.request_prefix),
             &self.pane_id,
@@ -621,7 +618,7 @@ fn pane_read(
     source: crate::api::schema::ReadSource,
     lines: Option<u32>,
     strip_ansi: bool,
-    api_tx: &std::sync::mpsc::Sender<ApiRequestMessage>,
+    api_tx: &ApiRequestSender,
 ) -> Result<crate::api::schema::PaneReadResult, ErrorResponse> {
     let response = dispatch_to_app(
         Request {
@@ -663,7 +660,7 @@ fn pane_read(
 fn pane_get(
     request_id: String,
     pane_id: &str,
-    api_tx: &std::sync::mpsc::Sender<ApiRequestMessage>,
+    api_tx: &ApiRequestSender,
 ) -> Result<crate::api::schema::PaneInfo, ErrorResponse> {
     let response = dispatch_to_app(
         Request {
@@ -699,10 +696,7 @@ fn pane_get(
     })
 }
 
-fn dispatch_to_app(
-    request: Request,
-    api_tx: &std::sync::mpsc::Sender<ApiRequestMessage>,
-) -> String {
+fn dispatch_to_app(request: Request, api_tx: &ApiRequestSender) -> String {
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     if let Err(err) = api_tx.send(ApiRequestMessage {
         request,
@@ -748,7 +742,7 @@ mod tests {
 
     #[test]
     fn ping_request_returns_pong() {
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = mpsc::unbounded_channel();
         let response = handle_request(
             Request {
                 id: "req_1".into(),
@@ -764,7 +758,7 @@ mod tests {
 
     #[test]
     fn request_dispatches_to_app_channel() {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, mut rx) = mpsc::unbounded_channel();
         let request = Request {
             id: "req_2".into(),
             method: Method::WorkspaceList(crate::api::schema::EmptyParams::default()),
@@ -773,7 +767,7 @@ mod tests {
         let request_for_thread = request.clone();
         let thread = std::thread::spawn(move || handle_request(request_for_thread, &tx));
 
-        let msg = rx.recv().unwrap();
+        let msg = rx.blocking_recv().unwrap();
         assert_eq!(msg.request.id, "req_2");
         msg.respond_to
             .send(

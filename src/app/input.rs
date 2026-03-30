@@ -1418,7 +1418,7 @@ mod tests {
     }
 
     fn app_for_mouse_test() -> App {
-        let (_api_tx, api_rx) = std::sync::mpsc::channel();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &Config::default(),
             true,

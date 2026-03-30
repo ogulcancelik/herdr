@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use ratatui::layout::Direction;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tracing::info;
 
 use crate::detect::{Agent, AgentState};
@@ -29,6 +31,8 @@ pub struct Workspace {
     pub runtimes: HashMap<PaneId, PaneRuntime>,
     pub zoomed: bool,
     pub events: mpsc::Sender<AppEvent>,
+    pub(crate) render_notify: Arc<Notify>,
+    pub(crate) render_dirty: Arc<AtomicBool>,
 }
 
 impl Workspace {
@@ -37,9 +41,19 @@ impl Workspace {
         rows: u16,
         cols: u16,
         events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
     ) -> std::io::Result<Self> {
         let (layout, root_id) = TileLayout::new();
-        let runtime = PaneRuntime::spawn(root_id, rows, cols, initial_cwd, events.clone())?;
+        let runtime = PaneRuntime::spawn(
+            root_id,
+            rows,
+            cols,
+            initial_cwd,
+            events.clone(),
+            render_notify.clone(),
+            render_dirty.clone(),
+        )?;
 
         let mut panes = HashMap::new();
         panes.insert(root_id, PaneState::new());
@@ -60,6 +74,8 @@ impl Workspace {
             runtimes,
             zoomed: false,
             events,
+            render_notify,
+            render_dirty,
         })
     }
 
@@ -74,7 +90,15 @@ impl Workspace {
         let new_id = self.layout.split_focused(direction);
         let actual_cwd =
             cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
-        let runtime = PaneRuntime::spawn(new_id, rows, cols, actual_cwd, self.events.clone())?;
+        let runtime = PaneRuntime::spawn(
+            new_id,
+            rows,
+            cols,
+            actual_cwd,
+            self.events.clone(),
+            self.render_notify.clone(),
+            self.render_dirty.clone(),
+        )?;
         self.panes.insert(new_id, PaneState::new());
         self.public_pane_numbers
             .insert(new_id, self.next_public_pane_number);
@@ -168,6 +192,12 @@ impl Workspace {
             .map(|pane| (pane.state, pane.seen))
             .max_by_key(|(state, seen)| pane_attention_priority(*state, *seen))
             .unwrap_or((AgentState::Unknown, true))
+    }
+
+    pub fn has_working_pane(&self) -> bool {
+        self.panes
+            .values()
+            .any(|pane| pane.state == AgentState::Working)
     }
 
     /// Per-pane (state, seen) in BSP tree order (left-to-right, top-to-bottom).
@@ -346,6 +376,8 @@ impl Workspace {
     pub fn test_new(name: &str) -> Self {
         let (events, _) = mpsc::channel(64);
         let (layout, root_id) = TileLayout::new();
+        let render_notify = Arc::new(Notify::new());
+        let render_dirty = Arc::new(AtomicBool::new(false));
         let mut panes = HashMap::new();
         panes.insert(root_id, PaneState::new());
         let mut public_pane_numbers = HashMap::new();
@@ -361,6 +393,8 @@ impl Workspace {
             runtimes: HashMap::new(),
             zoomed: false,
             events,
+            render_notify,
+            render_dirty,
         }
     }
 

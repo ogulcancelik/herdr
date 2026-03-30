@@ -1,13 +1,13 @@
 use std::cell::Cell;
 use std::io::{BufWriter, Read, Write};
 use std::sync::{
-    atomic::{AtomicU16, AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering},
     Arc, RwLock,
 };
 
 use bytes::Bytes;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info, warn};
 
 use crate::detect::{Agent, AgentState};
@@ -167,6 +167,8 @@ impl PaneRuntime {
         cols: u16,
         cwd: std::path::PathBuf,
         events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
     ) -> std::io::Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -241,6 +243,8 @@ impl PaneRuntime {
             let parser = parser.clone();
             let screen_content = screen_content.clone();
             let response_writer = input_tx.clone();
+            let render_notify = render_notify.clone();
+            let render_dirty = render_dirty.clone();
             tokio::task::spawn_blocking(move || {
                 let mut buf = [0u8; 8192];
                 loop {
@@ -276,6 +280,9 @@ impl PaneRuntime {
                                 if let Err(e) = response_writer.try_send(Bytes::from(resp)) {
                                     warn!(pane = pane_id.raw(), err = %e, "dropped terminal query response");
                                 }
+                            }
+                            if !render_dirty.swap(true, Ordering::AcqRel) {
+                                render_notify.notify_one();
                             }
                         }
                     }

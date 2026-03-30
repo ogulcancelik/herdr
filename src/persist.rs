@@ -4,12 +4,14 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use ratatui::layout::Direction;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 use crate::events::AppEvent;
 use crate::layout::{Node, PaneId, TileLayout};
@@ -132,11 +134,22 @@ pub fn restore(
     rows: u16,
     cols: u16,
     events: mpsc::Sender<AppEvent>,
+    render_notify: Arc<Notify>,
+    render_dirty: Arc<AtomicBool>,
 ) -> Vec<Workspace> {
     snapshot
         .workspaces
         .iter()
-        .filter_map(|ws_snap| restore_workspace(ws_snap, rows, cols, events.clone()))
+        .filter_map(|ws_snap| {
+            restore_workspace(
+                ws_snap,
+                rows,
+                cols,
+                events.clone(),
+                render_notify.clone(),
+                render_dirty.clone(),
+            )
+        })
         .collect()
 }
 
@@ -145,6 +158,8 @@ fn restore_workspace(
     rows: u16,
     cols: u16,
     events: mpsc::Sender<AppEvent>,
+    render_notify: Arc<Notify>,
+    render_dirty: Arc<AtomicBool>,
 ) -> Option<Workspace> {
     let (node, id_map) = restore_node_remapped(&snap.layout);
     let pane_ids = collect_pane_ids(&node);
@@ -169,7 +184,15 @@ fn restore_workspace(
             .map(|p| p.cwd.clone())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
 
-        match PaneRuntime::spawn(*id, rows, cols, cwd, events.clone()) {
+        match PaneRuntime::spawn(
+            *id,
+            rows,
+            cols,
+            cwd,
+            events.clone(),
+            render_notify.clone(),
+            render_dirty.clone(),
+        ) {
             Ok(runtime) => {
                 panes.insert(*id, PaneState::new());
                 runtimes.insert(*id, runtime);
@@ -205,6 +228,8 @@ fn restore_workspace(
         runtimes,
         zoomed: snap.zoomed,
         events,
+        render_notify,
+        render_dirty,
     })
 }
 

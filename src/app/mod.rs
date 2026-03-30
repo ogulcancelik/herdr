@@ -8,17 +8,22 @@ mod actions;
 mod input;
 pub mod state;
 
+use std::future::pending;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const RENDER_INTERVAL: Duration = Duration::from_millis(16);
+const MIN_RENDER_INTERVAL: Duration = Duration::from_millis(16);
+const ANIMATION_INTERVAL: Duration = Duration::from_millis(100);
+const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const GIT_REMOTE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 const SIDEBAR_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
 
 use crossterm::terminal;
 use ratatui::layout::Rect;
 use ratatui::DefaultTerminal;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tracing::{error, info};
 
 use crate::config::Config;
@@ -32,7 +37,7 @@ pub struct App {
     pub state: AppState,
     pub event_tx: mpsc::Sender<AppEvent>,
     event_rx: mpsc::Receiver<AppEvent>,
-    api_rx: std::sync::mpsc::Receiver<crate::api::ApiRequestMessage>,
+    api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
     event_hub: crate::api::EventHub,
     last_focus: Option<(usize, crate::layout::PaneId)>,
     no_session: bool,
@@ -42,14 +47,50 @@ pub struct App {
     toast_deadline: Option<Instant>,
     last_git_remote_status_refresh: Instant,
     last_sidebar_divider_click: Option<Instant>,
+    next_resize_poll: Instant,
+    next_animation_tick: Option<Instant>,
+    last_render_at: Option<Instant>,
+    render_notify: Arc<Notify>,
+    render_dirty: Arc<AtomicBool>,
 }
 
 enum LoopEvent {
-    RenderTick,
+    Timer,
     Internal(AppEvent),
+    Api(crate::api::ApiRequestMessage),
     RawInput(crate::raw_input::RawInputEvent),
     InputClosed,
-    Idle,
+    RenderRequested,
+}
+
+async fn recv_raw_input_or_pending(
+    input_rx: Option<&mut mpsc::Receiver<crate::raw_input::RawInputEvent>>,
+) -> Option<crate::raw_input::RawInputEvent> {
+    match input_rx {
+        Some(rx) => rx.recv().await,
+        None => pending().await,
+    }
+}
+
+async fn sleep_until_or_pending(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await,
+        None => pending().await,
+    }
+}
+
+fn api_request_changes_ui(request: &crate::api::schema::Request) -> bool {
+    use crate::api::schema::Method;
+
+    matches!(
+        &request.method,
+        Method::WorkspaceCreate(_)
+            | Method::WorkspaceFocus(_)
+            | Method::WorkspaceRename(_)
+            | Method::WorkspaceClose(_)
+            | Method::PaneSplit(_)
+            | Method::PaneClose(_)
+    )
 }
 
 /// Resolve the palette from config: base theme + optional custom overrides.
@@ -89,17 +130,26 @@ impl App {
         config: &Config,
         no_session: bool,
         config_diagnostic: Option<String>,
-        api_rx: std::sync::mpsc::Receiver<crate::api::ApiRequestMessage>,
+        api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
         event_hub: crate::api::EventHub,
     ) -> Self {
         let (prefix_code, prefix_mods) = config.prefix_key();
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(64);
+        let render_notify = Arc::new(Notify::new());
+        let render_dirty = Arc::new(AtomicBool::new(false));
 
         // Try to restore previous session
         let (workspaces, active, selected) = if no_session {
             (Vec::new(), None, 0)
         } else if let Some(snap) = crate::persist::load() {
-            let ws = crate::persist::restore(&snap, 24, 80, event_tx.clone());
+            let ws = crate::persist::restore(
+                &snap,
+                24,
+                80,
+                event_tx.clone(),
+                render_notify.clone(),
+                render_dirty.clone(),
+            );
             if ws.is_empty() {
                 info!("session file found but no workspaces restored");
                 (Vec::new(), None, 0)
@@ -199,12 +249,17 @@ impl App {
             event_rx,
             last_git_remote_status_refresh: Instant::now(),
             last_sidebar_divider_click: None,
+            next_resize_poll: Instant::now() + RESIZE_POLL_INTERVAL,
+            next_animation_tick: None,
+            last_render_at: None,
             api_rx,
             event_hub,
             last_focus,
             no_session,
             input_rx: None,
             last_terminal_size: terminal::size().ok(),
+            render_notify,
+            render_dirty,
         }
     }
 
@@ -213,28 +268,25 @@ impl App {
             self.input_rx = Some(crate::raw_input::spawn_input_reader());
         }
 
-        let mut render_tick = tokio::time::interval(RENDER_INTERVAL);
-        render_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut needs_render = true;
 
         while !self.state.should_quit {
-            // Drain internal events first so API reads observe fresh pane state.
-            let had_internal_events = self.drain_internal_events();
-
-            let mut had_api_requests = false;
-            while let Ok(msg) = self.api_rx.try_recv() {
-                had_api_requests = true;
-                let response = self.handle_api_request(msg.request);
-                let _ = msg.respond_to.send(response);
+            if self.render_dirty.load(Ordering::Acquire) {
+                needs_render = true;
             }
 
-            if had_internal_events || had_api_requests {
+            // Drain internal events first so API reads observe fresh pane state.
+            if self.drain_internal_events() {
+                needs_render = true;
+            }
+            if self.drain_api_requests() {
                 needs_render = true;
             }
 
             self.sync_focus_events();
-            self.handle_resize_poll();
-            if self.handle_frame_timers() {
+
+            let now = Instant::now();
+            if self.handle_scheduled_tasks(now) {
                 needs_render = true;
             }
 
@@ -250,52 +302,65 @@ impl App {
                 needs_render = true;
             }
 
-            if needs_render {
+            let now = Instant::now();
+            self.sync_animation_timer(now);
+
+            if needs_render && self.can_render_now(now) {
+                self.render_dirty.swap(false, Ordering::AcqRel);
                 terminal.draw(|frame| {
                     crate::ui::compute_view(&mut self.state, frame.area());
                     crate::ui::render(&self.state, frame);
                 })?;
+                self.last_render_at = Some(now);
                 needs_render = false;
                 continue;
             }
 
+            let next_deadline = self.next_loop_deadline(now, needs_render);
             let event = {
                 let input_rx = self.input_rx.as_mut();
                 tokio::select! {
-                    _ = render_tick.tick() => LoopEvent::RenderTick,
+                    maybe_api = self.api_rx.recv() => match maybe_api {
+                        Some(msg) => LoopEvent::Api(msg),
+                        None => LoopEvent::Timer,
+                    },
                     maybe_ev = self.event_rx.recv() => match maybe_ev {
                         Some(ev) => LoopEvent::Internal(ev),
-                        None => LoopEvent::Idle,
+                        None => LoopEvent::Timer,
                     },
-                    maybe_input = async {
-                        match input_rx {
-                            Some(rx) => rx.recv().await,
-                            None => None,
-                        }
-                    } => match maybe_input {
+                    maybe_input = recv_raw_input_or_pending(input_rx) => match maybe_input {
                         Some(input) => LoopEvent::RawInput(input),
                         None => LoopEvent::InputClosed,
                     },
+                    _ = sleep_until_or_pending(next_deadline) => LoopEvent::Timer,
+                    _ = self.render_notify.notified() => LoopEvent::RenderRequested,
                 }
             };
 
             match event {
-                LoopEvent::RenderTick => {
-                    self.state.spinner_tick = self.state.spinner_tick.wrapping_add(1);
-                    needs_render = true;
-                }
+                LoopEvent::Timer => {}
                 LoopEvent::Internal(ev) => {
                     self.handle_internal_event(ev);
                     needs_render = true;
                 }
+                LoopEvent::Api(msg) => {
+                    if self.handle_api_request_message(msg) {
+                        needs_render = true;
+                    }
+                }
                 LoopEvent::RawInput(input) => {
-                    self.handle_raw_input_event(input).await;
-                    needs_render = true;
+                    if self.handle_raw_input_batch(input).await {
+                        needs_render = true;
+                    }
                 }
                 LoopEvent::InputClosed => {
                     self.input_rx = None;
                 }
-                LoopEvent::Idle => {}
+                LoopEvent::RenderRequested => {
+                    if self.render_dirty.load(Ordering::Acquire) {
+                        needs_render = true;
+                    }
+                }
             }
         }
 
@@ -312,56 +377,168 @@ impl App {
         Ok(())
     }
 
-    async fn handle_raw_input_event(&mut self, event: crate::raw_input::RawInputEvent) {
+    fn drain_api_requests(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(msg) = self.api_rx.try_recv() {
+            changed |= self.handle_api_request_message(msg);
+        }
+        changed
+    }
+
+    fn handle_api_request_message(&mut self, msg: crate::api::ApiRequestMessage) -> bool {
+        let changed = api_request_changes_ui(&msg.request);
+        let response = self.handle_api_request(msg.request);
+        let _ = msg.respond_to.send(response);
+        changed
+    }
+
+    async fn handle_raw_input_batch(&mut self, first: crate::raw_input::RawInputEvent) -> bool {
+        let mut changed = self.handle_raw_input_event(first).await;
+
+        while let Some(rx) = self.input_rx.as_mut() {
+            match rx.try_recv() {
+                Ok(event) => changed |= self.handle_raw_input_event(event).await,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    self.input_rx = None;
+                    break;
+                }
+            }
+        }
+
+        changed
+    }
+
+    async fn handle_raw_input_event(&mut self, event: crate::raw_input::RawInputEvent) -> bool {
         match event {
             crate::raw_input::RawInputEvent::Key(key) => {
                 if key.kind == crossterm::event::KeyEventKind::Press {
                     self.handle_key(key).await;
+                    true
+                } else {
+                    false
                 }
             }
-            crate::raw_input::RawInputEvent::Paste(text) => self.handle_paste(text).await,
-            crate::raw_input::RawInputEvent::Mouse(mouse) => self.handle_mouse(mouse),
-            crate::raw_input::RawInputEvent::Unsupported => {}
+            crate::raw_input::RawInputEvent::Paste(text) => {
+                self.handle_paste(text).await;
+                true
+            }
+            crate::raw_input::RawInputEvent::Mouse(mouse) => {
+                self.handle_mouse(mouse);
+                true
+            }
+            crate::raw_input::RawInputEvent::Unsupported => false,
         }
     }
 
-    fn handle_resize_poll(&mut self) {
-        let Ok(size) = terminal::size() else { return };
+    fn handle_resize_poll(&mut self) -> bool {
+        let Ok(size) = terminal::size() else {
+            return false;
+        };
         if self.last_terminal_size != Some(size) {
             self.last_terminal_size = Some(size);
+            return true;
         }
+        false
     }
 
-    fn handle_frame_timers(&mut self) -> bool {
+    fn handle_scheduled_tasks(&mut self, now: Instant) -> bool {
         let mut changed = false;
+
+        self.sync_animation_timer(now);
+
+        if now >= self.next_resize_poll {
+            changed |= self.handle_resize_poll();
+            self.next_resize_poll = now + RESIZE_POLL_INTERVAL;
+        }
 
         if self
             .config_diagnostic_deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
+            .is_some_and(|deadline| now >= deadline)
         {
             self.config_diagnostic_deadline = None;
             self.state.config_diagnostic = None;
             changed = true;
         }
 
-        if self
-            .toast_deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
+        if self.toast_deadline.is_some_and(|deadline| now >= deadline) {
             self.toast_deadline = None;
             self.state.toast = None;
             changed = true;
         }
 
-        if self.last_git_remote_status_refresh.elapsed() >= GIT_REMOTE_STATUS_REFRESH_INTERVAL {
-            for ws in &mut self.state.workspaces {
-                ws.refresh_git_ahead_behind();
-            }
-            self.last_git_remote_status_refresh = Instant::now();
+        if self
+            .next_animation_tick
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.state.spinner_tick = self.state.spinner_tick.wrapping_add(1);
+            self.next_animation_tick = Some(now + ANIMATION_INTERVAL);
             changed = true;
         }
 
+        if self
+            .git_refresh_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            for ws in &mut self.state.workspaces {
+                ws.refresh_git_ahead_behind();
+            }
+            self.last_git_remote_status_refresh = now;
+            changed = true;
+        }
+
+        self.sync_animation_timer(now);
         changed
+    }
+
+    fn sync_animation_timer(&mut self, now: Instant) {
+        if self.active_workspace_has_animation() {
+            self.next_animation_tick
+                .get_or_insert(now + ANIMATION_INTERVAL);
+        } else {
+            self.next_animation_tick = None;
+        }
+    }
+
+    fn active_workspace_has_animation(&self) -> bool {
+        self.state
+            .active
+            .and_then(|idx| self.state.workspaces.get(idx))
+            .is_some_and(Workspace::has_working_pane)
+    }
+
+    fn can_render_now(&self, now: Instant) -> bool {
+        match self.last_render_at {
+            Some(last_render_at) => now.duration_since(last_render_at) >= MIN_RENDER_INTERVAL,
+            None => true,
+        }
+    }
+
+    fn git_refresh_deadline(&self) -> Option<Instant> {
+        (!self.state.workspaces.is_empty())
+            .then_some(self.last_git_remote_status_refresh + GIT_REMOTE_STATUS_REFRESH_INTERVAL)
+    }
+
+    fn next_loop_deadline(&self, now: Instant, needs_render: bool) -> Option<Instant> {
+        let render_deadline = if needs_render {
+            self.last_render_at
+                .map(|last_render_at| last_render_at + MIN_RENDER_INTERVAL)
+                .filter(|deadline| *deadline > now)
+        } else {
+            None
+        };
+
+        [
+            Some(self.next_resize_poll),
+            self.config_diagnostic_deadline,
+            self.toast_deadline,
+            self.next_animation_tick,
+            self.git_refresh_deadline(),
+            render_deadline,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     fn drain_internal_events(&mut self) -> bool {
@@ -1096,7 +1273,14 @@ impl App {
         focus: bool,
     ) -> std::io::Result<usize> {
         let (rows, cols) = self.state.estimate_pane_size();
-        let mut ws = Workspace::new(initial_cwd, rows, cols, self.event_tx.clone())?;
+        let mut ws = Workspace::new(
+            initial_cwd,
+            rows,
+            cols,
+            self.event_tx.clone(),
+            self.render_notify.clone(),
+            self.render_dirty.clone(),
+        )?;
         ws.refresh_git_ahead_behind();
         self.state.workspaces.push(ws);
         let idx = self.state.workspaces.len() - 1;
@@ -1250,4 +1434,37 @@ fn agent_name(agent: crate::detect::Agent) -> String {
         crate::detect::Agent::Amp => "amp",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn raw_input_waits_when_reader_is_gone() {
+        let result =
+            tokio::time::timeout(Duration::from_millis(20), recv_raw_input_or_pending(None)).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn read_only_api_requests_do_not_force_rerender() {
+        let read_only = crate::api::schema::Request {
+            id: "req_1".into(),
+            method: crate::api::schema::Method::WorkspaceList(
+                crate::api::schema::EmptyParams::default(),
+            ),
+        };
+        let mutating = crate::api::schema::Request {
+            id: "req_2".into(),
+            method: crate::api::schema::Method::WorkspaceFocus(
+                crate::api::schema::WorkspaceTarget {
+                    workspace_id: "w_1".into(),
+                },
+            ),
+        };
+
+        assert!(!api_request_changes_ui(&read_only));
+        assert!(api_request_changes_ui(&mutating));
+    }
 }

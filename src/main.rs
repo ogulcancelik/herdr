@@ -249,7 +249,7 @@ fn main() -> io::Result<()> {
 
     init_logging();
 
-    let (api_tx, api_rx) = std::sync::mpsc::channel();
+    let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_hub = api::EventHub::default();
     let _api_server = api::start_server(api_tx, event_hub.clone())?;
 
