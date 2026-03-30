@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Added
+- Added a local Unix socket API for controlling running herdr sessions, including workspace and pane management, pane reads, text/key input, pane splitting, and output waits.
+- Added event subscriptions over the socket API for workspace and pane lifecycle events, pane output matches, and agent state changes.
+- Added CLI wrappers on top of the socket API with `herdr workspace ...`, `herdr pane ...`, and `herdr wait ...`, using compact public ids like `1` and `1-2` for scripting and agent orchestration.
+- Added a settings popup with mouse support for changing themes, sound alerts, and toast notifications from inside herdr.
+- Added 9 built-in themes: catppuccin, tokyo night, dracula, nord, gruvbox, one dark, solarized, kanagawa, and rosé pine.
+- Added interactive pane scrollbars, manual sidebar resizing, and upstream git ahead/behind indicators in the workspace sidebar.
+
+### Changed
+- Redesigned the sidebar into a two-section layout that separates workspace-level triage from per-agent detail, making it easier to supervise multiple agents in parallel.
+- Agent state names exposed in the UI and integration surfaces now use `working` and `blocked`.
+- Herdr now blocks nested launches by default when started inside a herdr-managed pane; set `advanced.allow_nested = true` to opt back in.
+
+### Fixed
+- Improved terminal keyboard protocol parsing and input forwarding across terminal variants, including better handling for shifted printable keys.
+- Fixed Ghostty on macOS misparsing some arrow-key and modifier/enhanced key sequences.
+- Refined sidebar rollups and pane ordering so workspace status and agent lists stay more stable and predictable.
+
+### Documentation
+- Refreshed the README, socket API reference, and reusable agent skill docs to better explain herdr's agent multiplexer model and integration surface.
+
 ## [0.1.2] - 2026-03-28
 
 ### Added
