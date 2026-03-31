@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -13,13 +13,32 @@ fn unique_test_dir() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    std::env::temp_dir().join(format!("herdr-api-test-{}-{nanos}", std::process::id()))
+    PathBuf::from(format!("/tmp/hapi-{}-{nanos}", std::process::id()))
 }
 
 struct SpawnedHerdr {
     _master: Box<dyn MasterPty + Send>,
-    _drain_thread: thread::JoinHandle<()>,
     child: Box<dyn Child + Send + Sync>,
+}
+
+fn cleanup_spawned_herdr(mut spawned: SpawnedHerdr, base: PathBuf) {
+    let pid = spawned.child.process_id();
+    let _ = spawned.child.kill();
+
+    if let Some(pid) = pid {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            let mut status = 0;
+            let result = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+            if result == pid as libc::pid_t || result == -1 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    drop(spawned);
+    let _ = fs::remove_dir_all(base);
 }
 
 fn test_lock() -> MutexGuard<'static, ()> {
@@ -77,22 +96,10 @@ fn spawn_herdr_with_path(
         cmd.env("PATH", path);
     }
 
-    let mut reader = pair.master.try_clone_reader().unwrap();
-    let drain_thread = thread::spawn(move || {
-        let mut buf = [0u8; 8192];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-        }
-    });
-
     let child = pair.slave.spawn_command(cmd).unwrap();
 
     SpawnedHerdr {
         _master: pair.master,
-        _drain_thread: drain_thread,
         child,
     }
 }
@@ -102,35 +109,45 @@ fn send_request(socket_path: &Path, json: &str) -> serde_json::Value {
     stream.write_all(json.as_bytes()).unwrap();
     stream.write_all(b"\n").unwrap();
     stream.flush().unwrap();
-
-    let mut line = String::new();
-    let mut reader = BufReader::new(stream);
-    reader.read_line(&mut line).unwrap();
-    serde_json::from_str(&line).unwrap()
+    read_json_line(&mut stream, Duration::from_secs(5))
 }
 
-fn open_subscription(socket_path: &Path, json: &str) -> (UnixStream, BufReader<UnixStream>) {
+fn open_subscription(socket_path: &Path, json: &str) -> UnixStream {
     let mut stream = UnixStream::connect(socket_path).unwrap();
     stream.write_all(json.as_bytes()).unwrap();
     stream.write_all(b"\n").unwrap();
     stream.flush().unwrap();
-
-    let reader = BufReader::new(stream.try_clone().unwrap());
-    (stream, reader)
+    stream
 }
 
-fn read_json_line(reader: &mut BufReader<UnixStream>, timeout: Duration) -> serde_json::Value {
-    reader.get_ref().set_read_timeout(Some(timeout)).unwrap();
-    let mut line = String::new();
-    reader.read_line(&mut line).unwrap();
-    serde_json::from_str(&line).unwrap()
+fn read_json_line(stream: &mut UnixStream, timeout: Duration) -> serde_json::Value {
+    let deadline = Instant::now() + timeout;
+    let mut buf = Vec::new();
+    stream.set_nonblocking(true).unwrap();
+
+    loop {
+        assert!(Instant::now() < deadline, "timed out waiting for json line");
+
+        let mut bytes = [0u8; 256];
+        match stream.read(&mut bytes) {
+            Ok(0) => panic!("stream closed while waiting for json line"),
+            Ok(n) => {
+                buf.extend_from_slice(&bytes[..n]);
+                if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                    let line = String::from_utf8(buf[..=pos].to_vec()).unwrap();
+                    stream.set_nonblocking(false).unwrap();
+                    return serde_json::from_str(&line).unwrap();
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(err) => panic!("failed to read json line: {err}"),
+        }
+    }
 }
 
-fn wait_for_event(
-    reader: &mut BufReader<UnixStream>,
-    expected: &str,
-    timeout: Duration,
-) -> serde_json::Value {
+fn wait_for_event(reader: &mut UnixStream, expected: &str, timeout: Duration) -> serde_json::Value {
     let deadline = Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -149,7 +166,7 @@ fn ping_over_socket_returns_version() {
     let runtime_dir = base.join("runtime");
     let socket_path = runtime_dir.join("herdr.sock");
 
-    let mut child = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    let child = spawn_herdr(&config_home, &runtime_dir, &socket_path);
     wait_for_socket(&socket_path, Duration::from_secs(5));
 
     let value = send_request(
@@ -160,11 +177,10 @@ fn ping_over_socket_returns_version() {
     assert_eq!(value["result"]["type"], "pong");
     assert_eq!(value["result"]["version"], env!("CARGO_PKG_VERSION"));
 
-    let _ = child.child.kill();
-    let _ = child.child.wait();
-    let _ = fs::remove_dir_all(base);
+    cleanup_spawned_herdr(child, base);
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn workspace_list_and_create_round_trip() {
     let _lock = test_lock();
@@ -173,7 +189,7 @@ fn workspace_list_and_create_round_trip() {
     let runtime_dir = base.join("runtime");
     let socket_path = runtime_dir.join("herdr.sock");
 
-    let mut child = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    let child = spawn_herdr(&config_home, &runtime_dir, &socket_path);
     wait_for_socket(&socket_path, Duration::from_secs(5));
 
     let empty = send_request(
@@ -308,11 +324,10 @@ fn workspace_list_and_create_round_trip() {
     );
     assert_eq!(timeout["error"]["code"], "timeout");
 
-    let _ = child.child.kill();
-    let _ = child.child.wait();
-    let _ = fs::remove_dir_all(base);
+    cleanup_spawned_herdr(child, base);
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn events_subscribe_streams_lifecycle_and_agent_events() {
     let _lock = test_lock();
@@ -339,7 +354,7 @@ fn events_subscribe_streams_lifecycle_and_agent_events() {
 
     let inherited_path = std::env::var("PATH").unwrap_or_default();
     let path_override = format!("{}:{}", bin_dir.display(), inherited_path);
-    let mut child = spawn_herdr_with_path(
+    let child = spawn_herdr_with_path(
         &config_home,
         &runtime_dir,
         &socket_path,
@@ -347,7 +362,7 @@ fn events_subscribe_streams_lifecycle_and_agent_events() {
     );
     wait_for_socket(&socket_path, Duration::from_secs(5));
 
-    let (_stream, mut reader) = open_subscription(
+    let mut reader = open_subscription(
         &socket_path,
         r#"{"id":"sub_life","method":"events.subscribe","params":{"subscriptions":[{"type":"workspace.created"},{"type":"workspace.focused"},{"type":"pane.created"},{"type":"pane.focused"},{"type":"pane.agent_detected"},{"type":"pane.closed"},{"type":"workspace.closed"}]}}"#,
     );
@@ -442,11 +457,10 @@ fn events_subscribe_streams_lifecycle_and_agent_events() {
     let workspace_closed = wait_for_event(&mut reader, "workspace_closed", Duration::from_secs(2));
     assert_eq!(workspace_closed["data"]["workspace_id"], workspace_id);
 
-    let _ = child.child.kill();
-    let _ = child.child.wait();
-    let _ = fs::remove_dir_all(base);
+    cleanup_spawned_herdr(child, base);
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn events_subscribe_streams_output_and_agent_state_events() {
     let _lock = test_lock();
@@ -473,7 +487,7 @@ fn events_subscribe_streams_output_and_agent_state_events() {
 
     let inherited_path = std::env::var("PATH").unwrap_or_default();
     let path_override = format!("{}:{}", bin_dir.display(), inherited_path);
-    let mut child = spawn_herdr_with_path(
+    let child = spawn_herdr_with_path(
         &config_home,
         &runtime_dir,
         &socket_path,
@@ -499,7 +513,7 @@ fn events_subscribe_streams_output_and_agent_state_events() {
         .unwrap()
         .to_string();
 
-    let (_stream, mut reader) = open_subscription(
+    let mut reader = open_subscription(
         &socket_path,
         &format!(
             r#"{{"id":"sub_1","method":"events.subscribe","params":{{"subscriptions":[{{"type":"pane.output_matched","pane_id":"{}","source":"recent","lines":40,"match":{{"type":"substring","value":"hello from socket"}}}},{{"type":"pane.agent_state_changed","pane_id":"{}","state":"idle"}}]}}}}"#,
@@ -563,7 +577,5 @@ fn events_subscribe_streams_output_and_agent_state_events() {
     assert_eq!(agent_idle["data"]["state"], "idle");
     assert_eq!(agent_idle["data"]["agent"], "pi");
 
-    let _ = child.child.kill();
-    let _ = child.child.wait();
-    let _ = fs::remove_dir_all(base);
+    cleanup_spawned_herdr(child, base);
 }

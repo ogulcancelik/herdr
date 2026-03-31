@@ -215,6 +215,11 @@ fn comm_from_bsdinfo(info: &libc::proc_bsdinfo) -> Option<String> {
 
 fn process_cmdline(pid: u32) -> Option<String> {
     let buf = kern_procargs2(pid)?;
+    let argv = procargs2_argv(&buf)?;
+    Some(argv.join(" "))
+}
+
+fn procargs2_argv(buf: &[u8]) -> Option<Vec<String>> {
     if buf.len() < 4 {
         return None;
     }
@@ -224,24 +229,36 @@ fn process_cmdline(pid: u32) -> Option<String> {
         return None;
     }
 
+    // Layout: [argc: i32] [exec_path\0] [padding\0...] [argv[0]\0] [argv[1]\0] ... [env\0] ...
     let rest = &buf[4..];
-    let mut start = 0usize;
-    while start < rest.len() && rest[start] != 0 {
-        start += 1;
+    let exec_end = rest.iter().position(|&b| b == 0)?;
+    let mut pos = exec_end;
+    while pos < rest.len() && rest[pos] == 0 {
+        pos += 1;
     }
-    while start < rest.len() && rest[start] == 0 {
-        start += 1;
-    }
-    if start >= rest.len() {
+    if pos >= rest.len() {
         return None;
     }
 
-    let parts: Vec<String> = rest[start..]
-        .split(|&b| b == 0)
-        .filter(|part| !part.is_empty())
-        .map(|part| String::from_utf8_lossy(part).into_owned())
-        .collect();
-    (!parts.is_empty()).then(|| parts.join(" "))
+    let mut argv = Vec::with_capacity(argc as usize);
+    let mut current = pos;
+    for _ in 0..argc {
+        if current >= rest.len() {
+            return None;
+        }
+        let end = rest[current..]
+            .iter()
+            .position(|&b| b == 0)
+            .map(|offset| current + offset)
+            .unwrap_or(rest.len());
+        if end == current {
+            return None;
+        }
+        argv.push(String::from_utf8_lossy(&rest[current..end]).into_owned());
+        current = end + 1;
+    }
+
+    Some(argv)
 }
 
 /// Get the current working directory of a process.
@@ -341,5 +358,44 @@ pub fn process_exists(pid: u32) -> bool {
         true
     } else {
         std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_procargs2(exec_path: &str, argv: &[&str], env: &[&str]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(argv.len() as i32).to_ne_bytes());
+        buf.extend_from_slice(exec_path.as_bytes());
+        buf.push(0);
+        buf.push(0);
+        for arg in argv {
+            buf.extend_from_slice(arg.as_bytes());
+            buf.push(0);
+        }
+        for entry in env {
+            buf.extend_from_slice(entry.as_bytes());
+            buf.push(0);
+        }
+        buf
+    }
+
+    #[test]
+    fn procargs2_argv_excludes_environment_entries() {
+        let buf = build_procargs2(
+            "/usr/bin/node",
+            &["node", "/Users/can/.local/bin/pi"],
+            &[
+                "PATH=/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin",
+                "TERM=tmux-256color",
+            ],
+        );
+
+        let argv = procargs2_argv(&buf).expect("expected argv");
+        assert_eq!(argv, vec!["node", "/Users/can/.local/bin/pi"]);
+        assert_eq!(argv.join(" "), "node /Users/can/.local/bin/pi");
+        assert!(!argv.join(" ").contains("codex.system"));
     }
 }
