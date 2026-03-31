@@ -63,6 +63,13 @@ fn flush_incomplete_buffer(buffer: &mut Vec<u8>, tx: &mpsc::Sender<RawInputEvent
         return;
     }
 
+    if buffer.starts_with(BRACKETED_PASTE_START)
+        && find_subsequence(buffer, BRACKETED_PASTE_END).is_none()
+    {
+        tracing::trace!(len = buffer.len(), "waiting for bracketed paste terminator");
+        return;
+    }
+
     if buffer.as_slice() == [ESC] {
         let _ = tx.blocking_send(RawInputEvent::Key(TerminalKey::new(
             crossterm::event::KeyCode::Esc,
@@ -659,6 +666,29 @@ mod tests {
             panic!("expected paste");
         };
         assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn incomplete_bracketed_paste_is_not_flushed_on_timeout() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut buffer = Vec::new();
+
+        drain_chunk(&mut buffer, &tx, b"\x1b[200~hello\nworld");
+        assert_eq!(buffer, b"\x1b[200~hello\nworld");
+        assert!(collect_events(&mut rx).is_empty());
+
+        flush_incomplete_buffer(&mut buffer, &tx);
+        assert_eq!(buffer, b"\x1b[200~hello\nworld");
+        assert!(collect_events(&mut rx).is_empty());
+
+        drain_chunk(&mut buffer, &tx, b"\x1b[201~");
+        assert!(buffer.is_empty());
+        let events = collect_events(&mut rx);
+        assert_eq!(events.len(), 1);
+        let RawInputEvent::Paste(text) = &events[0] else {
+            panic!("expected paste");
+        };
+        assert_eq!(text, "hello\nworld");
     }
 
     #[test]
