@@ -11,11 +11,30 @@ use crate::layout::PaneId;
 pub enum AppEvent {
     /// A pane's child process exited.
     PaneDied { pane_id: PaneId },
-    /// Agent state changed in a pane (detected by the PTY reader).
+    /// Fallback detector state changed in a pane.
     StateChanged {
         pane_id: PaneId,
         agent: Option<Agent>,
         state: AgentState,
+    },
+    /// Hook-authoritative agent state was reported for a pane.
+    HookStateReported {
+        pane_id: PaneId,
+        source: String,
+        agent: Agent,
+        state: AgentState,
+        message: Option<String>,
+    },
+    /// Hook authority was explicitly cleared for a pane.
+    HookAuthorityCleared {
+        pane_id: PaneId,
+        source: Option<String>,
+    },
+    /// The current detected agent gracefully released this pane back to the shell.
+    HookAgentReleased {
+        pane_id: PaneId,
+        source: String,
+        agent: Agent,
     },
     /// A new version was downloaded and installed. Restart to use it.
     UpdateReady { version: String },

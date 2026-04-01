@@ -91,6 +91,9 @@ fn api_request_changes_ui(request: &crate::api::schema::Request) -> bool {
             | Method::WorkspaceRename(_)
             | Method::WorkspaceClose(_)
             | Method::PaneSplit(_)
+            | Method::PaneReportAgent(_)
+            | Method::PaneClearAgentAuthority(_)
+            | Method::PaneReleaseAgent(_)
             | Method::PaneClose(_)
     )
 }
@@ -588,56 +591,76 @@ impl App {
     }
 
     fn handle_internal_event(&mut self, ev: AppEvent) {
-        match &ev {
-            AppEvent::PaneDied { pane_id } => {
-                if let Some((ws_idx, _)) = self.find_pane(*pane_id) {
-                    if let Some(public_pane_id) = self.public_pane_id(ws_idx, *pane_id) {
-                        self.emit_event(crate::api::schema::EventEnvelope {
-                            event: crate::api::schema::EventKind::PaneExited,
-                            data: crate::api::schema::EventData::PaneExited {
-                                pane_id: public_pane_id,
-                                workspace_id: self.public_workspace_id(ws_idx),
-                            },
-                        });
-                    }
+        if let AppEvent::PaneDied { pane_id } = &ev {
+            if let Some((ws_idx, _)) = self.find_pane(*pane_id) {
+                if let Some(public_pane_id) = self.public_pane_id(ws_idx, *pane_id) {
+                    self.emit_event(crate::api::schema::EventEnvelope {
+                        event: crate::api::schema::EventKind::PaneExited,
+                        data: crate::api::schema::EventData::PaneExited {
+                            pane_id: public_pane_id,
+                            workspace_id: self.public_workspace_id(ws_idx),
+                        },
+                    });
                 }
             }
-            AppEvent::StateChanged {
-                pane_id,
-                agent,
-                state,
-            } => {
-                if let Some((ws_idx, pane)) = self.find_pane(*pane_id) {
-                    if let Some(pane_id) = self.public_pane_id(ws_idx, *pane_id) {
-                        let workspace_id = self.public_workspace_id(ws_idx);
-                        if pane.detected_agent != *agent {
-                            self.emit_event(crate::api::schema::EventEnvelope {
-                                event: crate::api::schema::EventKind::PaneAgentDetected,
-                                data: crate::api::schema::EventData::PaneAgentDetected {
-                                    pane_id: pane_id.clone(),
-                                    workspace_id: workspace_id.clone(),
-                                    agent: agent.map(agent_name),
-                                },
-                            });
-                        }
-                        if pane.state != *state {
-                            self.emit_event(crate::api::schema::EventEnvelope {
-                                event: crate::api::schema::EventKind::PaneAgentStateChanged,
-                                data: crate::api::schema::EventData::PaneAgentStateChanged {
-                                    pane_id,
-                                    workspace_id,
-                                    state: pane_agent_state(*state),
-                                },
-                            });
-                        }
-                    }
-                }
-            }
-            AppEvent::UpdateReady { .. } => {}
         }
 
+        let released_agent = if let AppEvent::HookAgentReleased { pane_id, agent, .. } = &ev {
+            Some((*pane_id, *agent))
+        } else {
+            None
+        };
+
         let previous_toast = self.state.toast.clone();
-        self.state.handle_app_event(ev);
+        let pane_updates = self.state.handle_app_event(ev);
+        for update in &pane_updates {
+            self.emit_pane_state_update(update);
+        }
+        if let Some((pane_id, agent)) = released_agent {
+            if pane_updates.iter().any(|update| update.pane_id == pane_id) {
+                if let Some((ws_idx, _)) = self.find_pane(pane_id) {
+                    if let Some(runtime) = self.state.workspaces[ws_idx].runtimes.get(&pane_id) {
+                        runtime.begin_graceful_release(agent);
+                    }
+                }
+            }
+        }
+        self.sync_toast_deadline(previous_toast);
+    }
+
+    fn emit_pane_state_update(&self, update: &crate::app::actions::PaneStateUpdate) {
+        let Some(pane_id) = self.public_pane_id(update.ws_idx, update.pane_id) else {
+            return;
+        };
+        let workspace_id = self.public_workspace_id(update.ws_idx);
+
+        if update.previous_agent != update.agent {
+            self.emit_event(crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::PaneAgentDetected,
+                data: crate::api::schema::EventData::PaneAgentDetected {
+                    pane_id: pane_id.clone(),
+                    workspace_id: workspace_id.clone(),
+                    agent: update.agent.map(agent_name),
+                },
+            });
+        }
+
+        if update.previous_state != update.state {
+            self.emit_event(crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::PaneAgentStateChanged,
+                data: crate::api::schema::EventData::PaneAgentStateChanged {
+                    pane_id,
+                    workspace_id,
+                    state: pane_agent_state(update.state),
+                },
+            });
+        }
+    }
+
+    fn sync_toast_deadline(
+        &mut self,
+        previous_toast: Option<crate::app::state::ToastNotification>,
+    ) {
         if self.state.toast != previous_toast {
             self.toast_deadline = self.state.toast.as_ref().map(|toast| {
                 let duration = match toast.kind {
@@ -716,10 +739,14 @@ impl App {
 
     fn parse_pane_id(&self, id: &str) -> Option<(usize, crate::layout::PaneId)> {
         if let Some(rest) = id.strip_prefix("p_") {
-            let (ws_raw, pane_raw) = rest.split_once('_')?;
-            let ws_idx = ws_raw.parse::<usize>().ok()?.checked_sub(1)?;
-            let pane_id = crate::layout::PaneId::from_raw(pane_raw.parse::<u32>().ok()?);
-            return Some((ws_idx, pane_id));
+            if let Some((ws_raw, pane_raw)) = rest.split_once('_') {
+                let ws_idx = ws_raw.parse::<usize>().ok()?.checked_sub(1)?;
+                let pane_id = crate::layout::PaneId::from_raw(pane_raw.parse::<u32>().ok()?);
+                return Some((ws_idx, pane_id));
+            }
+
+            let pane_id = crate::layout::PaneId::from_raw(rest.parse::<u32>().ok()?);
+            return self.find_pane(pane_id).map(|(ws_idx, _)| (ws_idx, pane_id));
         }
 
         let (ws_raw, pane_number_raw) = id.split_once('-')?;
@@ -1062,6 +1089,90 @@ impl App {
                             truncated: false,
                         },
                     },
+                }
+            }
+            Method::PaneReportAgent(params) => {
+                let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some(agent) = parse_agent_name(&params.agent) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "invalid_agent".into(),
+                            message: format!("unsupported agent {}", params.agent),
+                        },
+                    })
+                    .unwrap();
+                };
+                self.handle_internal_event(crate::events::AppEvent::HookStateReported {
+                    pane_id,
+                    source: params.source,
+                    agent,
+                    state: detect_state_from_api(params.state),
+                    message: params.message,
+                });
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::Ok {},
+                }
+            }
+            Method::PaneClearAgentAuthority(params) => {
+                let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                self.handle_internal_event(crate::events::AppEvent::HookAuthorityCleared {
+                    pane_id,
+                    source: params.source,
+                });
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::Ok {},
+                }
+            }
+            Method::PaneReleaseAgent(params) => {
+                let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some(agent) = parse_agent_name(&params.agent) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "invalid_agent".into(),
+                            message: format!("unsupported agent {}", params.agent),
+                        },
+                    })
+                    .unwrap();
+                };
+                self.handle_internal_event(crate::events::AppEvent::HookAgentReleased {
+                    pane_id,
+                    source: params.source,
+                    agent,
+                });
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::Ok {},
                 }
             }
             Method::PaneSendText(params) => {
@@ -1483,12 +1594,38 @@ fn parse_api_key(key: &str) -> Option<crossterm::event::KeyEvent> {
     }
 }
 
+fn detect_state_from_api(state: crate::api::schema::PaneAgentState) -> crate::detect::AgentState {
+    match state {
+        crate::api::schema::PaneAgentState::Idle => crate::detect::AgentState::Idle,
+        crate::api::schema::PaneAgentState::Working => crate::detect::AgentState::Working,
+        crate::api::schema::PaneAgentState::Blocked => crate::detect::AgentState::Blocked,
+        crate::api::schema::PaneAgentState::Unknown => crate::detect::AgentState::Unknown,
+    }
+}
+
 fn pane_agent_state(state: crate::detect::AgentState) -> crate::api::schema::PaneAgentState {
     match state {
         crate::detect::AgentState::Idle => crate::api::schema::PaneAgentState::Idle,
         crate::detect::AgentState::Working => crate::api::schema::PaneAgentState::Working,
         crate::detect::AgentState::Blocked => crate::api::schema::PaneAgentState::Blocked,
         crate::detect::AgentState::Unknown => crate::api::schema::PaneAgentState::Unknown,
+    }
+}
+
+fn parse_agent_name(agent: &str) -> Option<crate::detect::Agent> {
+    match agent {
+        "pi" => Some(crate::detect::Agent::Pi),
+        "claude" => Some(crate::detect::Agent::Claude),
+        "codex" => Some(crate::detect::Agent::Codex),
+        "gemini" => Some(crate::detect::Agent::Gemini),
+        "cursor" => Some(crate::detect::Agent::Cursor),
+        "cline" => Some(crate::detect::Agent::Cline),
+        "opencode" => Some(crate::detect::Agent::OpenCode),
+        "copilot" => Some(crate::detect::Agent::GithubCopilot),
+        "kimi" => Some(crate::detect::Agent::Kimi),
+        "droid" => Some(crate::detect::Agent::Droid),
+        "amp" => Some(crate::detect::Agent::Amp),
+        _ => None,
     }
 }
 

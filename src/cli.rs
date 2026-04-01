@@ -26,6 +26,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "workspace" => run_workspace_command(&args[2..])?,
         "pane" => run_pane_command(&args[2..])?,
         "wait" => run_wait_command(&args[2..])?,
+        "integration" => run_integration_command(&args[2..])?,
         _ => return Ok(CommandOutcome::NotCli),
     };
 
@@ -85,6 +86,21 @@ fn run_wait_command(args: &[String]) -> std::io::Result<i32> {
         "agent-state" => wait_agent_state(&args[1..]),
         _ => {
             print_wait_help();
+            Ok(2)
+        }
+    }
+}
+
+fn run_integration_command(args: &[String]) -> std::io::Result<i32> {
+    let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
+        print_integration_help();
+        return Ok(2);
+    };
+
+    match subcommand {
+        "install" => integration_install(&args[1..]),
+        _ => {
+            print_integration_help();
             Ok(2)
         }
     }
@@ -432,6 +448,30 @@ fn pane_run(args: &[String]) -> std::io::Result<i32> {
     }))
 }
 
+fn integration_install(args: &[String]) -> std::io::Result<i32> {
+    let Some(target) = args.first().map(|arg| arg.as_str()) else {
+        eprintln!("usage: herdr integration install <pi>");
+        return Ok(2);
+    };
+    if args.len() != 1 {
+        eprintln!("usage: herdr integration install <pi>");
+        return Ok(2);
+    }
+
+    match target {
+        "pi" => {
+            let path = crate::integration::install_pi()?;
+            println!("installed pi integration to {}", path.display());
+            Ok(0)
+        }
+        _ => {
+            eprintln!("unknown integration target: {target}");
+            eprintln!("currently supported: pi");
+            Ok(2)
+        }
+    }
+}
+
 fn wait_output(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_pane_id) = args.first() else {
         eprintln!("usage: herdr wait output <pane_id> --match <text> [--source visible|recent] [--lines N] [--timeout MS] [--regex]");
@@ -741,6 +781,11 @@ fn print_wait_help() {
     eprintln!(
         "  herdr wait agent-state <pane_id> --state <idle|working|blocked|unknown> [--timeout MS]"
     );
+}
+
+fn print_integration_help() {
+    eprintln!("herdr integration commands:");
+    eprintln!("  herdr integration install pi");
 }
 
 fn _print_json<T: Serialize>(value: &T) {

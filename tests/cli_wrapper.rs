@@ -476,6 +476,55 @@ fn ids_are_compact_and_positional() {
 }
 
 #[test]
+fn pane_shell_gets_herdr_socket_and_pane_env() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_env_1","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    assert_eq!(created["result"]["workspace"]["workspace_id"], "1");
+
+    let env_capture = base.join("pane-env.txt");
+    let ran = run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "run",
+            "1-1",
+            &format!(
+                "printf '%s\\n%s\\n' \"$HERDR_SOCKET_PATH\" \"$HERDR_PANE_ID\" > {}",
+                env_capture.display()
+            ),
+        ],
+    );
+    assert!(ran.status.success());
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline && !env_capture.exists() {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(env_capture.exists(), "env capture file was not created");
+    let text = fs::read_to_string(&env_capture).unwrap();
+    assert!(
+        text.contains(&socket_path.display().to_string()),
+        "env file was: {text:?}"
+    );
+    assert!(text.contains("p_"), "env file was: {text:?}");
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
 fn wait_agent_state_exits_when_state_matches() {
     let base = unique_test_dir();
     let config_home = base.join("config");

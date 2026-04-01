@@ -36,6 +36,12 @@ pub enum Method {
     PaneSendKeys(PaneSendKeysParams),
     #[serde(rename = "pane.read")]
     PaneRead(PaneReadParams),
+    #[serde(rename = "pane.report_agent")]
+    PaneReportAgent(PaneReportAgentParams),
+    #[serde(rename = "pane.clear_agent_authority")]
+    PaneClearAgentAuthority(PaneClearAgentAuthorityParams),
+    #[serde(rename = "pane.release_agent")]
+    PaneReleaseAgent(PaneReleaseAgentParams),
     #[serde(rename = "pane.close")]
     PaneClose(PaneTarget),
     #[serde(rename = "events.subscribe")]
@@ -121,6 +127,30 @@ pub struct PaneReadParams {
     pub lines: Option<u32>,
     #[serde(default = "default_true")]
     pub strip_ansi: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneReportAgentParams {
+    pub pane_id: String,
+    pub source: String,
+    pub agent: String,
+    pub state: PaneAgentState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneClearAgentAuthorityParams {
+    pub pane_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneReleaseAgentParams {
+    pub pane_id: String,
+    pub source: String,
+    pub agent: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -467,6 +497,55 @@ mod tests {
                 source: ReadSource::Recent,
                 lines: Some(80),
                 strip_ansi: true,
+            }),
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        let restored: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, request);
+    }
+
+    #[test]
+    fn request_round_trips_for_pane_report_agent() {
+        let request = Request {
+            id: "req_hook".into(),
+            method: Method::PaneReportAgent(PaneReportAgentParams {
+                pane_id: "1-1".into(),
+                source: "herdr:pi".into(),
+                agent: "pi".into(),
+                state: PaneAgentState::Working,
+                message: Some("thinking".into()),
+            }),
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        let restored: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, request);
+    }
+
+    #[test]
+    fn request_round_trips_for_pane_clear_agent_authority() {
+        let request = Request {
+            id: "req_clear".into(),
+            method: Method::PaneClearAgentAuthority(PaneClearAgentAuthorityParams {
+                pane_id: "1-1".into(),
+                source: Some("herdr:pi".into()),
+            }),
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        let restored: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, request);
+    }
+
+    #[test]
+    fn request_round_trips_for_pane_release_agent() {
+        let request = Request {
+            id: "req_release".into(),
+            method: Method::PaneReleaseAgent(PaneReleaseAgentParams {
+                pane_id: "1-1".into(),
+                source: "herdr:pi".into(),
+                agent: "pi".into(),
             }),
         };
 

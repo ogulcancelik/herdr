@@ -25,6 +25,7 @@ mod config;
 mod detect;
 mod events;
 mod input;
+mod integration;
 mod layout;
 mod pane;
 mod persist;
@@ -187,12 +188,14 @@ fn main() -> io::Result<()> {
         println!("       herdr workspace <subcommand> ...");
         println!("       herdr pane <subcommand> ...");
         println!("       herdr wait <subcommand> ...");
+        println!("       herdr integration <subcommand> ...");
         println!();
         println!("Commands:");
         println!("  update              Download and install the latest version");
         println!("  workspace           workspace helpers over the socket api");
         println!("  pane                pane control helpers over the socket api");
         println!("  wait                blocking wait helpers over the socket api");
+        println!("  integration         install built-in agent integrations");
         println!();
         println!("Options:");
         println!("  --no-session        Don't restore or save sessions");
@@ -233,7 +236,8 @@ fn main() -> io::Result<()> {
             eprintln!("run 'herdr --help' for usage");
             std::process::exit(1);
         }
-        if !arg.starts_with('-') && !["update", "workspace", "pane", "wait"].contains(&arg.as_str())
+        if !arg.starts_with('-')
+            && !["update", "workspace", "pane", "wait", "integration"].contains(&arg.as_str())
         {
             eprintln!("unknown command: {arg}");
             eprintln!("run 'herdr --help' for usage");

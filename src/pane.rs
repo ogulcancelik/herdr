@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::io::{BufWriter, Read, Write};
 use std::sync::{
     atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering},
-    Arc, RwLock,
+    Arc, Mutex, RwLock,
 };
 
 use bytes::Bytes;
@@ -16,6 +16,28 @@ use crate::layout::PaneId;
 use crate::pty_callbacks::PtyResponses;
 
 const CLAUDE_WORKING_HOLD: std::time::Duration = std::time::Duration::from_millis(1200);
+const RELEASE_REACQUIRE_SUPPRESSION: std::time::Duration = std::time::Duration::from_secs(1);
+
+#[derive(Debug, Clone, Copy)]
+struct PendingAgentRelease {
+    agent: Agent,
+    until: std::time::Instant,
+}
+
+fn active_pending_release(
+    pending_release: &Mutex<Option<PendingAgentRelease>>,
+    now: std::time::Instant,
+) -> Option<Agent> {
+    let mut pending_release = pending_release.lock().ok()?;
+    match *pending_release {
+        Some(pending) if now < pending.until => Some(pending.agent),
+        Some(_) => {
+            *pending_release = None;
+            None
+        }
+        None => None,
+    }
+}
 
 fn stabilize_agent_state(
     agent: Option<Agent>,
@@ -51,10 +73,28 @@ fn stabilize_agent_state(
 // PaneState — pure data, constructable without PTYs, testable
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookAuthority {
+    pub source: String,
+    pub agent: Agent,
+    pub state: AgentState,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectiveStateChange {
+    pub previous_agent: Option<Agent>,
+    pub previous_state: AgentState,
+    pub agent: Option<Agent>,
+    pub state: AgentState,
+}
+
 /// Observable state for a single pane.
 /// This is the only part of a pane that workspace logic and tests need.
 pub struct PaneState {
     pub detected_agent: Option<Agent>,
+    pub fallback_state: AgentState,
+    pub hook_authority: Option<HookAuthority>,
     pub state: AgentState,
     /// Whether the user has seen this pane since its last state change to Idle.
     /// False = "Done" (agent finished while user was in another workspace).
@@ -65,9 +105,108 @@ impl PaneState {
     pub fn new() -> Self {
         Self {
             detected_agent: None,
+            fallback_state: AgentState::Unknown,
+            hook_authority: None,
             state: AgentState::Unknown,
             seen: true,
         }
+    }
+
+    pub fn set_detected_state(
+        &mut self,
+        agent: Option<Agent>,
+        fallback_state: AgentState,
+    ) -> Option<EffectiveStateChange> {
+        let previous_agent = self.detected_agent;
+        let previous_state = self.state;
+        self.detected_agent = agent;
+        self.fallback_state = fallback_state;
+        if self
+            .hook_authority
+            .as_ref()
+            .is_some_and(|authority| Some(authority.agent) != self.detected_agent)
+        {
+            self.hook_authority = None;
+        }
+        self.recompute_effective_state(previous_agent, previous_state)
+    }
+
+    pub fn set_hook_authority(
+        &mut self,
+        source: String,
+        agent: Agent,
+        state: AgentState,
+        message: Option<String>,
+    ) -> Option<EffectiveStateChange> {
+        let previous_agent = self.detected_agent;
+        let previous_state = self.state;
+        self.hook_authority = Some(HookAuthority {
+            source,
+            agent,
+            state,
+            message,
+        });
+        self.recompute_effective_state(previous_agent, previous_state)
+    }
+
+    pub fn clear_hook_authority(&mut self, source: Option<&str>) -> Option<EffectiveStateChange> {
+        let previous_agent = self.detected_agent;
+        let previous_state = self.state;
+        let should_clear = self
+            .hook_authority
+            .as_ref()
+            .is_some_and(|authority| source.is_none_or(|source| authority.source == source));
+        if !should_clear {
+            return None;
+        }
+        self.hook_authority = None;
+        self.recompute_effective_state(previous_agent, previous_state)
+    }
+
+    pub fn release_agent(&mut self, source: &str, agent: Agent) -> Option<EffectiveStateChange> {
+        if self.detected_agent != Some(agent) {
+            return None;
+        }
+
+        if self
+            .hook_authority
+            .as_ref()
+            .is_some_and(|authority| authority.agent != agent || authority.source != source)
+        {
+            return None;
+        }
+
+        let previous_agent = self.detected_agent;
+        let previous_state = self.state;
+        self.detected_agent = None;
+        self.fallback_state = AgentState::Unknown;
+        self.hook_authority = None;
+        self.recompute_effective_state(previous_agent, previous_state)
+    }
+
+    fn recompute_effective_state(
+        &mut self,
+        previous_agent: Option<Agent>,
+        previous_state: AgentState,
+    ) -> Option<EffectiveStateChange> {
+        let state = self
+            .hook_authority
+            .as_ref()
+            .filter(|authority| Some(authority.agent) == self.detected_agent)
+            .map(|authority| authority.state)
+            .unwrap_or(self.fallback_state);
+
+        if previous_agent == self.detected_agent && previous_state == state {
+            return None;
+        }
+
+        self.state = state;
+        Some(EffectiveStateChange {
+            previous_agent,
+            previous_state,
+            agent: self.detected_agent,
+            state,
+        })
     }
 }
 
@@ -90,6 +229,8 @@ pub struct PaneRuntime {
     /// Kept alive here so the Arc isn't dropped; tasks hold their own clones.
     #[allow(dead_code)]
     screen_content: Arc<RwLock<String>>,
+    detect_reset_notify: Arc<Notify>,
+    pending_release: Arc<Mutex<Option<PendingAgentRelease>>>,
     // Task handles for deterministic shutdown
     detect_handle: tokio::task::AbortHandle,
 }
@@ -279,6 +420,7 @@ impl PaneRuntime {
         let mut cmd = CommandBuilder::new(&shell);
         cmd.cwd(cwd);
         cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
+        crate::integration::apply_pane_env(&mut cmd, pane_id);
 
         let reader = pair
             .master
@@ -379,17 +521,22 @@ impl PaneRuntime {
         }
 
         // --- Detection task ---
-        let detect_handle = {
+        let (detect_handle, detect_reset_notify, pending_release) = {
             use crate::detect;
             use std::time::{Duration, Instant};
 
             const TICK_UNIDENTIFIED: Duration = Duration::from_millis(500);
             const TICK_IDENTIFIED: Duration = Duration::from_millis(300);
+            const TICK_PENDING_RELEASE: Duration = Duration::from_millis(50);
             const PROCESS_RECHECK: Duration = Duration::from_secs(5);
 
             let child_pid = child_pid.clone();
             let screen_content = screen_content.clone();
             let state_events = events.clone();
+            let detect_reset_notify = Arc::new(Notify::new());
+            let detect_reset = detect_reset_notify.clone();
+            let pending_release = Arc::new(Mutex::new(None));
+            let pending_release_for_task = pending_release.clone();
 
             let handle = tokio::spawn(async move {
                 let mut agent: Option<Agent> = None;
@@ -400,15 +547,28 @@ impl PaneRuntime {
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
                 loop {
-                    let tick = if agent.is_none() {
+                    let tick = if active_pending_release(&pending_release_for_task, Instant::now())
+                        .is_some()
+                    {
+                        TICK_PENDING_RELEASE
+                    } else if agent.is_none() {
                         TICK_UNIDENTIFIED
                     } else {
                         TICK_IDENTIFIED
                     };
-                    tokio::time::sleep(tick).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(tick) => {}
+                        _ = detect_reset.notified() => {
+                            agent = None;
+                            state = AgentState::Unknown;
+                            last_claude_working_at = None;
+                        }
+                    }
 
                     let now = Instant::now();
-                    let should_check_process = agent.is_none()
+                    let suppressed_agent = active_pending_release(&pending_release_for_task, now);
+                    let should_check_process = suppressed_agent.is_some()
+                        || agent.is_none()
                         || now.duration_since(last_process_check) >= PROCESS_RECHECK;
 
                     let mut agent_changed = false;
@@ -418,7 +578,18 @@ impl PaneRuntime {
                         if pid > 0 {
                             if let Some(job) = detect::foreground_job(pid) {
                                 let identified = detect::identify_agent_in_job(&job);
-                                let new_agent = identified.as_ref().map(|(agent, _)| *agent);
+                                let mut new_agent = identified.as_ref().map(|(agent, _)| *agent);
+
+                                if let Some(suppressed_agent) = suppressed_agent {
+                                    if new_agent == Some(suppressed_agent) {
+                                        new_agent = None;
+                                    } else if let Ok(mut pending_release) =
+                                        pending_release_for_task.lock()
+                                    {
+                                        *pending_release = None;
+                                    }
+                                }
+
                                 if new_agent != agent {
                                     if let Some((_, process_name)) = identified {
                                         info!(
@@ -480,7 +651,7 @@ impl PaneRuntime {
                     }
                 }
             });
-            handle.abort_handle()
+            (handle.abort_handle(), detect_reset_notify, pending_release)
         };
 
         // --- Writer task: channel → PTY ---
@@ -530,8 +701,20 @@ impl PaneRuntime {
             kitty_keyboard_flags,
             mouse_alternate_scroll,
             screen_content,
+            detect_reset_notify,
+            pending_release,
             detect_handle,
         })
+    }
+
+    pub fn begin_graceful_release(&self, agent: Agent) {
+        if let Ok(mut pending_release) = self.pending_release.lock() {
+            *pending_release = Some(PendingAgentRelease {
+                agent,
+                until: std::time::Instant::now() + RELEASE_REACQUIRE_SUPPRESSION,
+            });
+        }
+        self.detect_reset_notify.notify_one();
     }
 
     /// Resize if the dimensions actually changed.
@@ -765,5 +948,43 @@ mod tests {
             &mut last_working,
         );
         assert_eq!(state, AgentState::Idle);
+    }
+
+    #[test]
+    fn hook_authority_overrides_fallback_for_same_agent() {
+        let mut pane = PaneState::new();
+        pane.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        pane.set_hook_authority("herdr:pi".into(), Agent::Pi, AgentState::Working, None);
+
+        assert_eq!(pane.detected_agent, Some(Agent::Pi));
+        assert_eq!(pane.fallback_state, AgentState::Idle);
+        assert_eq!(pane.state, AgentState::Working);
+    }
+
+    #[test]
+    fn hook_authority_clears_when_detected_agent_changes() {
+        let mut pane = PaneState::new();
+        pane.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        pane.set_hook_authority("herdr:pi".into(), Agent::Pi, AgentState::Working, None);
+
+        pane.set_detected_state(None, AgentState::Unknown);
+
+        assert!(pane.hook_authority.is_none());
+        assert_eq!(pane.detected_agent, None);
+        assert_eq!(pane.state, AgentState::Unknown);
+    }
+
+    #[test]
+    fn release_agent_clears_identity_immediately() {
+        let mut pane = PaneState::new();
+        pane.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        pane.set_hook_authority("herdr:pi".into(), Agent::Pi, AgentState::Working, None);
+
+        pane.release_agent("herdr:pi", Agent::Pi);
+
+        assert!(pane.hook_authority.is_none());
+        assert_eq!(pane.detected_agent, None);
+        assert_eq!(pane.fallback_state, AgentState::Unknown);
+        assert_eq!(pane.state, AgentState::Unknown);
     }
 }

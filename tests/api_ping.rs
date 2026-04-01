@@ -479,6 +479,377 @@ fn events_subscribe_streams_lifecycle_and_agent_events() {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn pane_report_agent_updates_effective_state() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let bin_dir = base.join("bin");
+
+    fs::create_dir_all(&bin_dir).unwrap();
+    let fake_pi = bin_dir.join("pi");
+    fs::write(&fake_pi, "#!/bin/sh\nprintf 'Working...\\n'\nsleep 3\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&fake_pi).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_pi, perms).unwrap();
+    }
+
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    let path_override = format!("{}:{}", bin_dir.display(), inherited_path);
+    let child = spawn_herdr_with_path(
+        &config_home,
+        &runtime_dir,
+        &socket_path,
+        Some(Path::new(&path_override)),
+    );
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_hook_1","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    let pane_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .map(|workspace_id| format!("{}-1", workspace_id))
+        .unwrap();
+
+    let send_pi = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_hook_2","method":"pane.send_text","params":{{"pane_id":"{}","text":"pi"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(send_pi["result"]["type"], "ok");
+    let send_enter = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_hook_3","method":"pane.send_keys","params":{{"pane_id":"{}","keys":["Enter"]}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(send_enter["result"]["type"], "ok");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let pane = send_request(
+            &socket_path,
+            &format!(
+                r#"{{"id":"req_hook_detect","method":"pane.get","params":{{"pane_id":"{}"}}}}"#,
+                pane_id
+            ),
+        );
+        if pane["result"]["pane"]["agent"] == "pi" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "pi agent was never detected: {pane}"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let hook = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_hook_5","method":"pane.report_agent","params":{{"pane_id":"{}","source":"herdr:pi","agent":"pi","state":"working","message":"thinking"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(hook["result"]["type"], "ok");
+
+    let pane = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_hook_6","method":"pane.get","params":{{"pane_id":"{}"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(pane["result"]["pane"]["agent"], "pi");
+    assert_eq!(pane["result"]["pane"]["agent_state"], "working");
+
+    cleanup_spawned_herdr(child, base);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn pane_release_agent_suppresses_reacquire_during_graceful_exit() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let bin_dir = base.join("bin");
+
+    fs::create_dir_all(&bin_dir).unwrap();
+    let fake_pi = bin_dir.join("pi");
+    let stop_file = base.join("pi-stop");
+    fs::write(
+        &fake_pi,
+        format!(
+            "#!/bin/sh\nprintf 'Working...\\n'\nwhile [ ! -f '{}' ]; do sleep 0.05; done\n",
+            stop_file.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&fake_pi).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_pi, perms).unwrap();
+    }
+
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    let path_override = format!("{}:{}", bin_dir.display(), inherited_path);
+    let child = spawn_herdr_with_path(
+        &config_home,
+        &runtime_dir,
+        &socket_path,
+        Some(Path::new(&path_override)),
+    );
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_release_1","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    let pane_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .map(|workspace_id| format!("{}-1", workspace_id))
+        .unwrap();
+
+    let send_pi = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_release_2","method":"pane.send_text","params":{{"pane_id":"{}","text":"pi"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(send_pi["result"]["type"], "ok");
+    let send_enter = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_release_3","method":"pane.send_keys","params":{{"pane_id":"{}","keys":["Enter"]}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(send_enter["result"]["type"], "ok");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let pane = send_request(
+            &socket_path,
+            &format!(
+                r#"{{"id":"req_release_detect","method":"pane.get","params":{{"pane_id":"{}"}}}}"#,
+                pane_id
+            ),
+        );
+        if pane["result"]["pane"]["agent"] == "pi" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "pi agent was never detected: {pane}"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let hook = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_release_4","method":"pane.report_agent","params":{{"pane_id":"{}","source":"herdr:pi","agent":"pi","state":"working"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(hook["result"]["type"], "ok");
+
+    let released = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_release_5","method":"pane.release_agent","params":{{"pane_id":"{}","source":"herdr:pi","agent":"pi"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(released["result"]["type"], "ok");
+
+    let suppression_deadline = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < suppression_deadline {
+        let pane = send_request(
+            &socket_path,
+            &format!(
+                r#"{{"id":"req_release_6","method":"pane.get","params":{{"pane_id":"{}"}}}}"#,
+                pane_id
+            ),
+        );
+        assert!(
+            pane["result"]["pane"]["agent"].is_null(),
+            "pane reacquired pi during graceful release: {pane}"
+        );
+        assert_eq!(pane["result"]["pane"]["agent_state"], "unknown");
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    fs::write(&stop_file, "stop").unwrap();
+
+    let cleared_deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let pane = send_request(
+            &socket_path,
+            &format!(
+                r#"{{"id":"req_release_7","method":"pane.get","params":{{"pane_id":"{}"}}}}"#,
+                pane_id
+            ),
+        );
+        if pane["result"]["pane"]["agent"].is_null()
+            && pane["result"]["pane"]["agent_state"] == "unknown"
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < cleared_deadline,
+            "pi agent was not cleared promptly after release: {pane}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    cleanup_spawned_herdr(child, base);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn pane_clear_agent_authority_restores_fallback_state() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let bin_dir = base.join("bin");
+
+    fs::create_dir_all(&bin_dir).unwrap();
+    let fake_pi = bin_dir.join("pi");
+    fs::write(&fake_pi, "#!/bin/sh\nprintf 'Working...\\n'\nsleep 3\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&fake_pi).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_pi, perms).unwrap();
+    }
+
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    let path_override = format!("{}:{}", bin_dir.display(), inherited_path);
+    let child = spawn_herdr_with_path(
+        &config_home,
+        &runtime_dir,
+        &socket_path,
+        Some(Path::new(&path_override)),
+    );
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_clear_1","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    let pane_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .map(|workspace_id| format!("{}-1", workspace_id))
+        .unwrap();
+
+    let send_pi = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_clear_2","method":"pane.send_text","params":{{"pane_id":"{}","text":"pi"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(send_pi["result"]["type"], "ok");
+    let send_enter = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_clear_3","method":"pane.send_keys","params":{{"pane_id":"{}","keys":["Enter"]}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(send_enter["result"]["type"], "ok");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let pane = send_request(
+            &socket_path,
+            &format!(
+                r#"{{"id":"req_clear_detect","method":"pane.get","params":{{"pane_id":"{}"}}}}"#,
+                pane_id
+            ),
+        );
+        if pane["result"]["pane"]["agent"] == "pi" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "pi agent was never detected: {pane}"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let fallback_before_hook = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_clear_fallback","method":"pane.get","params":{{"pane_id":"{}"}}}}"#,
+            pane_id
+        ),
+    );
+    let fallback_state = fallback_before_hook["result"]["pane"]["agent_state"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let hook = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_clear_4","method":"pane.report_agent","params":{{"pane_id":"{}","source":"herdr:pi","agent":"pi","state":"idle"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(hook["result"]["type"], "ok");
+
+    let cleared = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_clear_5","method":"pane.clear_agent_authority","params":{{"pane_id":"{}","source":"herdr:pi"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(cleared["result"]["type"], "ok");
+
+    let pane = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_clear_6","method":"pane.get","params":{{"pane_id":"{}"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(pane["result"]["pane"]["agent"], "pi");
+    assert_eq!(pane["result"]["pane"]["agent_state"], fallback_state);
+
+    cleanup_spawned_herdr(child, base);
+}
+
 #[test]
 fn events_subscribe_streams_output_and_agent_state_events() {
     let _lock = test_lock();
