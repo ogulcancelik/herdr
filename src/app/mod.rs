@@ -190,7 +190,7 @@ impl App {
             request_complete_onboarding: false,
             name_input: String::new(),
             onboarding_step: 0,
-            onboarding_selected: 1,
+            onboarding_list: state::SelectionListState::new(1),
             release_notes: startup_release_notes.map(|notes| state::ReleaseNotesState {
                 version: notes.version,
                 body: notes.body,
@@ -232,11 +232,11 @@ impl App {
                 .unwrap_or_else(|| "catppuccin".to_string()),
             settings: state::SettingsState {
                 section: state::SettingsSection::Theme,
-                selected: 0,
+                list: state::SelectionListState::new(0),
                 original_palette: None,
                 original_theme: None,
             },
-            global_menu_selected: 0,
+            global_menu: state::MenuListState::new(0),
         };
 
         for ws in &mut state.workspaces {
@@ -1380,7 +1380,7 @@ impl App {
     }
 
     pub(crate) fn complete_onboarding(&mut self) {
-        let (sound_enabled, toast_enabled) = match self.state.onboarding_selected {
+        let (sound_enabled, toast_enabled) = match self.state.onboarding_list.selected {
             0 => (false, false),
             1 => (false, true),
             2 => (true, false),

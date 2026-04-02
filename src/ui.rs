@@ -1434,7 +1434,7 @@ fn render_onboarding_notifications(app: &AppState, frame: &mut Frame, area: Rect
     ];
 
     for (idx, option) in options.iter().enumerate() {
-        let selected = idx == app.onboarding_selected;
+        let selected = idx == app.onboarding_list.selected;
         let prefix = if selected { "›" } else { " " };
         let style = if selected {
             Style::default()
@@ -1537,7 +1537,7 @@ fn render_global_launcher_menu(app: &AppState, frame: &mut Frame) {
         if y >= inner.y + inner.height {
             break;
         }
-        let selected = idx == app.global_menu_selected;
+        let selected = idx == app.global_menu.highlighted;
         let style = if selected {
             Style::default()
                 .fg(app.palette.panel_bg)
@@ -2079,7 +2079,7 @@ fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
                 "sound alerts",
                 "play sounds when agents change state in background",
                 app.sound_enabled(),
-                app.settings.selected,
+                app.settings.list.selected,
             );
         }
         SettingsSection::Toast => {
@@ -2090,7 +2090,7 @@ fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
                 "visual toasts",
                 "show top-right notifications for background events",
                 app.toast_config.enabled,
-                app.settings.selected,
+                app.settings.list.selected,
             );
         }
     }
@@ -2161,7 +2161,7 @@ fn render_settings_theme(app: &AppState, frame: &mut Frame, area: Rect) {
         .highlight_symbol(" ▸ ")
         .style(Style::default().fg(p.subtext0));
 
-    let mut state = ListState::default().with_selected(Some(app.settings.selected));
+    let mut state = ListState::default().with_selected(Some(app.settings.list.selected));
     frame.render_stateful_widget(list, area, &mut state);
 }
 
@@ -2244,7 +2244,7 @@ fn render_context_menu(app: &AppState, frame: &mut Frame) {
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol(" ");
-    let mut state = ListState::default().with_selected(Some(menu.selected));
+    let mut state = ListState::default().with_selected(Some(menu.list.highlighted));
     frame.render_stateful_widget(list, inner, &mut state);
 }
 

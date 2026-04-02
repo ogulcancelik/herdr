@@ -385,11 +385,63 @@ pub const THEME_NAMES: &[&str] = &[
     "rose-pine",
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MenuListState {
+    pub highlighted: usize,
+}
+
+impl MenuListState {
+    pub fn new(highlighted: usize) -> Self {
+        Self { highlighted }
+    }
+
+    pub fn move_prev(&mut self) {
+        self.highlighted = self.highlighted.saturating_sub(1);
+    }
+
+    pub fn move_next(&mut self, item_count: usize) {
+        if item_count > 0 {
+            self.highlighted = (self.highlighted + 1).min(item_count - 1);
+        }
+    }
+
+    pub fn hover(&mut self, idx: Option<usize>) {
+        if let Some(idx) = idx {
+            self.highlighted = idx;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionListState {
+    pub selected: usize,
+}
+
+impl SelectionListState {
+    pub fn new(selected: usize) -> Self {
+        Self { selected }
+    }
+
+    pub fn move_prev(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    pub fn move_next(&mut self, item_count: usize) {
+        if item_count > 0 {
+            self.selected = (self.selected + 1).min(item_count - 1);
+        }
+    }
+
+    pub fn select(&mut self, idx: usize) {
+        self.selected = idx;
+    }
+}
+
 pub struct SettingsState {
     /// Which section tab is active.
     pub section: SettingsSection,
     /// Selected item index within the current section.
-    pub selected: usize,
+    pub list: SelectionListState,
     /// The palette before opening settings (for cancel/restore).
     pub original_palette: Option<Palette>,
     /// The theme name before opening settings.
@@ -429,7 +481,7 @@ pub struct ContextMenuState {
     pub kind: ContextMenuKind,
     pub x: u16,
     pub y: u16,
-    pub selected: usize,
+    pub list: MenuListState,
 }
 
 impl ContextMenuState {
@@ -481,7 +533,7 @@ pub struct AppState {
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub onboarding_step: usize,
-    pub onboarding_selected: usize,
+    pub onboarding_list: SelectionListState,
     pub release_notes: Option<ReleaseNotesState>,
     // View geometry (computed before render, consumed by render + mouse)
     pub view: ViewState,
@@ -513,8 +565,8 @@ pub struct AppState {
     pub theme_name: String,
     /// Settings panel state.
     pub settings: SettingsState,
-    /// Currently selected item in the bottom-right global launcher menu.
-    pub global_menu_selected: usize,
+    /// Highlight state for the bottom-right global launcher menu.
+    pub global_menu: MenuListState,
 }
 
 impl AppState {
@@ -573,7 +625,7 @@ impl AppState {
             request_complete_onboarding: false,
             name_input: String::new(),
             onboarding_step: 0,
-            onboarding_selected: 1,
+            onboarding_list: SelectionListState::new(1),
             release_notes: None,
             view: ViewState {
                 sidebar_rect: Rect::default(),
@@ -642,11 +694,11 @@ impl AppState {
             theme_name: "catppuccin".to_string(),
             settings: SettingsState {
                 section: SettingsSection::Theme,
-                selected: 0,
+                list: SelectionListState::new(0),
                 original_palette: None,
                 original_theme: None,
             },
-            global_menu_selected: 0,
+            global_menu: MenuListState::new(0),
         }
     }
 }

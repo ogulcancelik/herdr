@@ -24,7 +24,8 @@ enum WheelRouting {
 }
 
 use super::state::{
-    key_matches, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget, Mode,
+    key_matches, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget, MenuListState,
+    Mode,
 };
 use super::App;
 
@@ -121,21 +122,15 @@ impl App {
                 },
             },
             _ => match key.code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    if self.state.onboarding_selected > 0 {
-                        self.state.onboarding_selected -= 1;
-                    }
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if self.state.onboarding_selected < 3 {
-                        self.state.onboarding_selected += 1;
-                    }
-                }
+                KeyCode::Up | KeyCode::Char('k') => self.state.onboarding_list.move_prev(),
+                KeyCode::Down | KeyCode::Char('j') => self.state.onboarding_list.move_next(4),
                 KeyCode::Left | KeyCode::Char('h') => {
                     self.state.onboarding_step = 0;
                 }
                 KeyCode::Char(c) if ('1'..='4').contains(&c) => {
-                    self.state.onboarding_selected = (c as usize) - ('1' as usize);
+                    self.state
+                        .onboarding_list
+                        .select((c as usize) - ('1' as usize));
                 }
                 KeyCode::Char('q') => self.state.should_quit = true,
                 _ => match modal_action_from_key(&key, ONBOARDING_NOTIFICATION_ACTIONS) {
@@ -397,7 +392,7 @@ fn current_theme_index(theme_name: &str) -> usize {
 fn preview_selected_theme(state: &mut AppState) {
     use crate::app::state::{Palette, THEME_NAMES};
 
-    let name = THEME_NAMES[state.settings.selected];
+    let name = THEME_NAMES[state.settings.list.selected];
     if let Some(palette) = Palette::from_name(name) {
         state.palette = palette;
         state.theme_name = name.to_string();
@@ -436,20 +431,25 @@ fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Option<Settings
     match state.settings.section {
         SettingsSection::Theme => match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
-                if state.settings.selected > 0 {
-                    state.settings.selected -= 1;
+                let previous = state.settings.list.selected;
+                state.settings.list.move_prev();
+                if state.settings.list.selected != previous {
                     preview_selected_theme(state);
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if state.settings.selected + 1 < crate::app::state::THEME_NAMES.len() {
-                    state.settings.selected += 1;
+                let previous = state.settings.list.selected;
+                state
+                    .settings
+                    .list
+                    .move_next(crate::app::state::THEME_NAMES.len());
+                if state.settings.list.selected != previous {
                     preview_selected_theme(state);
                 }
             }
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
                 state.settings.section = SettingsSection::Sound;
-                state.settings.selected = usize::from(!state.sound_enabled());
+                state.settings.list.selected = usize::from(!state.sound_enabled());
             }
             _ => match modal_action_from_key(&key, SETTINGS_ACTIONS) {
                 Some(ModalAction::Apply) => return apply_settings(state),
@@ -459,20 +459,20 @@ fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Option<Settings
         },
         SettingsSection::Sound => match key.code {
             KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
-                state.settings.selected = 1 - state.settings.selected.min(1);
+                state.settings.list.selected = 1 - state.settings.list.selected.min(1);
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
-                let enabled = state.settings.selected == 0;
+                let enabled = state.settings.list.selected == 0;
                 state.sound.enabled = enabled;
                 return Some(SettingsAction::SaveSound(enabled));
             }
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
                 state.settings.section = SettingsSection::Toast;
-                state.settings.selected = usize::from(!state.toast_config.enabled);
+                state.settings.list.selected = usize::from(!state.toast_config.enabled);
             }
             KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
                 state.settings.section = SettingsSection::Theme;
-                state.settings.selected = current_theme_index(&state.theme_name);
+                state.settings.list.selected = current_theme_index(&state.theme_name);
             }
             _ => match modal_action_from_key(&key, SETTINGS_ACTIONS) {
                 Some(ModalAction::Close) => cancel_settings(state),
@@ -481,20 +481,20 @@ fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Option<Settings
         },
         SettingsSection::Toast => match key.code {
             KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
-                state.settings.selected = 1 - state.settings.selected.min(1);
+                state.settings.list.selected = 1 - state.settings.list.selected.min(1);
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
-                let enabled = state.settings.selected == 0;
+                let enabled = state.settings.list.selected == 0;
                 state.toast_config.enabled = enabled;
                 return Some(SettingsAction::SaveToast(enabled));
             }
             KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
                 state.settings.section = SettingsSection::Sound;
-                state.settings.selected = usize::from(!state.sound_enabled());
+                state.settings.list.selected = usize::from(!state.sound_enabled());
             }
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
                 state.settings.section = SettingsSection::Theme;
-                state.settings.selected = current_theme_index(&state.theme_name);
+                state.settings.list.selected = current_theme_index(&state.theme_name);
             }
             _ => match modal_action_from_key(&key, SETTINGS_ACTIONS) {
                 Some(ModalAction::Close) => cancel_settings(state),
@@ -507,7 +507,7 @@ fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Option<Settings
 }
 
 fn open_global_menu(state: &mut AppState) {
-    state.global_menu_selected = 0;
+    state.global_menu = MenuListState::new(0);
     state.mode = Mode::GlobalMenu;
 }
 
@@ -525,15 +525,12 @@ fn apply_global_menu_action(state: &mut AppState, action: GlobalMenuAction) {
 fn handle_global_menu_key(state: &mut AppState, key: KeyEvent) {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => leave_modal(state),
-        KeyCode::Up | KeyCode::Char('k') => {
-            state.global_menu_selected = state.global_menu_selected.saturating_sub(1);
-        }
+        KeyCode::Up | KeyCode::Char('k') => state.global_menu.move_prev(),
         KeyCode::Down | KeyCode::Char('j') => {
-            state.global_menu_selected =
-                (state.global_menu_selected + 1).min(GlobalMenuAction::ALL.len() - 1);
+            state.global_menu.move_next(GlobalMenuAction::ALL.len())
         }
         KeyCode::Enter => {
-            let action = GlobalMenuAction::ALL[state.global_menu_selected];
+            let action = GlobalMenuAction::ALL[state.global_menu.highlighted];
             apply_global_menu_action(state, action);
         }
         _ => {}
@@ -851,7 +848,7 @@ fn open_settings(state: &mut AppState) {
     state.settings.original_palette = Some(state.palette.clone());
     state.settings.original_theme = Some(state.theme_name.clone());
     state.settings.section = SettingsSection::Theme;
-    state.settings.selected = current_theme_index(&state.theme_name);
+    state.settings.list.selected = current_theme_index(&state.theme_name);
     state.mode = Mode::Settings;
 }
 
@@ -1036,21 +1033,17 @@ fn handle_context_menu_key(state: &mut AppState, key: KeyEvent) {
         }
         KeyCode::Up => {
             if let Some(menu) = &mut state.context_menu {
-                if menu.selected > 0 {
-                    menu.selected -= 1;
-                }
+                menu.list.move_prev();
             }
         }
         KeyCode::Down => {
             if let Some(menu) = &mut state.context_menu {
-                if menu.selected + 1 < menu.items().len() {
-                    menu.selected += 1;
-                }
+                menu.list.move_next(menu.items().len());
             }
         }
         KeyCode::Enter => {
             if let Some(menu) = state.context_menu.take() {
-                let idx = menu.selected;
+                let idx = menu.list.highlighted;
                 apply_context_menu_action(state, menu, idx);
             }
         }
@@ -1188,10 +1181,7 @@ impl AppState {
     }
 
     fn handle_onboarding_mouse(&mut self, mouse: MouseEvent) {
-        if !matches!(
-            mouse.kind,
-            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Moved
-        ) {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             return;
         }
 
@@ -1222,7 +1212,8 @@ impl AppState {
                 };
                 let options_start_y = inner.y + 2;
                 if mouse.row >= options_start_y && mouse.row < options_start_y + 4 {
-                    self.onboarding_selected = (mouse.row - options_start_y) as usize;
+                    self.onboarding_list
+                        .select((mouse.row - options_start_y) as usize);
                     return;
                 }
 
@@ -1362,8 +1353,8 @@ impl AppState {
         match self.settings.section {
             crate::app::state::SettingsSection::Theme => {
                 let max_visible = area.height as usize;
-                let scroll = if self.settings.selected >= max_visible {
-                    self.settings.selected - max_visible + 1
+                let scroll = if self.settings.list.selected >= max_visible {
+                    self.settings.list.selected - max_visible + 1
                 } else {
                     0
                 };
@@ -1389,15 +1380,15 @@ impl AppState {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(section) = self.settings_tab_at(mouse.column, mouse.row) {
                     self.settings.section = section;
-                    self.settings.selected = match section {
+                    self.settings.list.select(match section {
                         SettingsSection::Theme => current_theme_index(&self.theme_name),
                         SettingsSection::Sound => usize::from(!self.sound_enabled()),
                         SettingsSection::Toast => usize::from(!self.toast_config.enabled),
-                    };
+                    });
                     return None;
                 }
                 if let Some(idx) = self.settings_list_index_at(mouse.column, mouse.row) {
-                    self.settings.selected = idx;
+                    self.settings.list.select(idx);
                     return match self.settings.section {
                         SettingsSection::Theme => {
                             preview_selected_theme(self);
@@ -1465,12 +1456,14 @@ impl AppState {
             && mouse.row < launcher.y + launcher.height;
 
         if matches!(mouse.kind, MouseEventKind::Moved) && self.mode == Mode::GlobalMenu {
-            if let Some(action) = self.global_menu_item_at(mouse.column, mouse.row) {
-                self.global_menu_selected = GlobalMenuAction::ALL
-                    .iter()
-                    .position(|item| *item == action)
-                    .unwrap_or(0);
-            }
+            let hovered = self
+                .global_menu_item_at(mouse.column, mouse.row)
+                .and_then(|action| {
+                    GlobalMenuAction::ALL
+                        .iter()
+                        .position(|item| *item == action)
+                });
+            self.global_menu.hover(hovered);
             return None;
         }
 
@@ -1764,10 +1757,9 @@ impl AppState {
             }
 
             MouseEventKind::Moved if self.mode == Mode::ContextMenu => {
-                if let Some(idx) = self.context_menu_item_at(mouse.column, mouse.row) {
-                    if let Some(menu) = &mut self.context_menu {
-                        menu.selected = idx;
-                    }
+                let hovered = self.context_menu_item_at(mouse.column, mouse.row);
+                if let Some(menu) = &mut self.context_menu {
+                    menu.list.hover(hovered);
                 }
             }
 
@@ -1778,7 +1770,7 @@ impl AppState {
                         kind: ContextMenuKind::Workspace { ws_idx: idx },
                         x: mouse.column,
                         y: mouse.row,
-                        selected: 0,
+                        list: MenuListState::new(0),
                     });
                     self.mode = Mode::ContextMenu;
                 }
@@ -1795,7 +1787,7 @@ impl AppState {
                         kind: ContextMenuKind::Tab { ws_idx, tab_idx },
                         x: mouse.column,
                         y: mouse.row,
-                        selected: 0,
+                        list: MenuListState::new(0),
                     });
                     self.mode = Mode::ContextMenu;
                 }
@@ -1807,7 +1799,7 @@ impl AppState {
                         kind: ContextMenuKind::Pane,
                         x: mouse.column,
                         y: mouse.row,
-                        selected: 0,
+                        list: MenuListState::new(0),
                     });
                     self.mode = Mode::ContextMenu;
                 }
@@ -2368,7 +2360,7 @@ mod tests {
         let mut state = state_with_workspaces(&["test"]);
         open_settings(&mut state);
         state.settings.section = crate::app::state::SettingsSection::Sound;
-        state.settings.selected = 0;
+        state.settings.list.selected = 0;
 
         let action = update_settings_state(
             &mut state,
@@ -2458,6 +2450,22 @@ mod tests {
     }
 
     #[test]
+    fn hovering_global_menu_updates_highlight() {
+        let mut app = app_for_mouse_test();
+        let launcher = app.state.global_launcher_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            launcher.x,
+            launcher.y,
+        ));
+
+        let menu = app.state.global_menu_rect();
+        app.handle_mouse(mouse(MouseEventKind::Moved, menu.x + 2, menu.y + 2));
+
+        assert_eq!(app.state.global_menu.highlighted, 1);
+    }
+
+    #[test]
     fn clicking_keybinds_menu_item_opens_help() {
         let mut app = app_for_mouse_test();
         let launcher = app.state.global_launcher_rect();
@@ -2495,6 +2503,65 @@ mod tests {
         ));
 
         assert_eq!(app.state.mode, Mode::Settings);
+    }
+
+    #[test]
+    fn hovering_context_menu_updates_highlight() {
+        let mut app = app_for_mouse_test();
+        app.state.context_menu = Some(ContextMenuState {
+            kind: ContextMenuKind::Workspace { ws_idx: 0 },
+            x: 2,
+            y: 2,
+            list: MenuListState::new(0),
+        });
+        app.state.mode = Mode::ContextMenu;
+
+        let menu = app.state.context_menu_rect().unwrap();
+        app.handle_mouse(mouse(MouseEventKind::Moved, menu.x + 2, menu.y + 2));
+
+        assert_eq!(app.state.context_menu.unwrap().list.highlighted, 1);
+    }
+
+    #[test]
+    fn onboarding_hover_does_not_change_selection() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::Onboarding;
+        app.state.onboarding_step = 1;
+        app.state.onboarding_list.select(1);
+
+        let inner = app.state.onboarding_modal_inner(52, 10).unwrap();
+        app.handle_mouse(mouse(MouseEventKind::Moved, inner.x + 2, inner.y + 4));
+
+        assert_eq!(app.state.onboarding_list.selected, 1);
+    }
+
+    #[test]
+    fn onboarding_click_selects_notification_option() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::Onboarding;
+        app.state.onboarding_step = 1;
+        app.state.onboarding_list.select(0);
+
+        let inner = app.state.onboarding_modal_inner(52, 10).unwrap();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            inner.x + 2,
+            inner.y + 4,
+        ));
+
+        assert_eq!(app.state.onboarding_list.selected, 2);
+    }
+
+    #[test]
+    fn settings_hover_does_not_change_selection() {
+        let mut app = app_for_mouse_test();
+        open_settings(&mut app.state);
+        app.state.settings.list.select(0);
+
+        let area = app.state.settings_content_rect();
+        app.handle_mouse(mouse(MouseEventKind::Moved, area.x + 2, area.y + 2));
+
+        assert_eq!(app.state.settings.list.selected, 0);
     }
 
     #[test]
@@ -2536,7 +2603,7 @@ mod tests {
             kind: ContextMenuKind::Workspace { ws_idx: 1 },
             x: 2,
             y: 2,
-            selected: 1,
+            list: MenuListState::new(1),
         });
         app.state.mode = Mode::ContextMenu;
         handle_context_menu_key(
