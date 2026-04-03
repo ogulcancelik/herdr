@@ -445,7 +445,7 @@ impl App {
     async fn handle_raw_input_event(&mut self, event: crate::raw_input::RawInputEvent) -> bool {
         match event {
             crate::raw_input::RawInputEvent::Key(key) => {
-                if key.kind == crossterm::event::KeyEventKind::Press {
+                if matches!(key.kind, crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat) {
                     self.handle_key(key).await;
                     true
                 } else {
