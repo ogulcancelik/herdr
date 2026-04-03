@@ -1234,15 +1234,7 @@ impl AppState {
         if inner.height < 8 || inner.width < 4 {
             return None;
         }
-        let rows = ratatui::layout::Layout::vertical([
-            ratatui::layout::Constraint::Length(1),
-            ratatui::layout::Constraint::Length(1),
-            ratatui::layout::Constraint::Length(1),
-            ratatui::layout::Constraint::Min(1),
-            ratatui::layout::Constraint::Length(1),
-        ])
-        .areas::<5>(inner);
-        Some(rows[3])
+        Some(crate::ui::modal_stack_areas(inner, 2, 1, 0, 1).content)
     }
 
     fn release_notes_scroll_metrics(&self) -> Option<crate::pane::ScrollMetrics> {
@@ -1334,12 +1326,10 @@ impl AppState {
                 let Some(inner) = self.onboarding_modal_inner(64, 16) else {
                     return;
                 };
-                let button = crate::ui::onboarding_welcome_continue_rect(Rect::new(
-                    inner.x,
-                    inner.y + 10,
-                    inner.width,
-                    1,
-                ));
+                let actions = crate::ui::modal_stack_areas(inner, 2, 0, 1, 1)
+                    .actions
+                    .unwrap_or_default();
+                let button = crate::ui::onboarding_welcome_continue_rect(actions);
                 if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
                     && modal_action_from_buttons(
                         mouse.column,
@@ -1354,19 +1344,16 @@ impl AppState {
                 let Some(inner) = self.onboarding_modal_inner(56, 14) else {
                     return;
                 };
-                let options_start_y = inner.y + 5;
-                if mouse.row >= options_start_y && mouse.row < options_start_y + 4 {
+                let stack = crate::ui::modal_stack_areas(inner, 3, 0, 1, 1);
+                if mouse.row >= stack.content.y && mouse.row < stack.content.y + 4 {
                     self.onboarding_list
-                        .select((mouse.row - options_start_y) as usize);
+                        .select((mouse.row - stack.content.y) as usize);
                     return;
                 }
 
-                let (back, save) = crate::ui::onboarding_notification_button_rects(Rect::new(
-                    inner.x,
-                    inner.y + 10,
-                    inner.width,
-                    1,
-                ));
+                let (back, save) = crate::ui::onboarding_notification_button_rects(
+                    stack.actions.unwrap_or_default(),
+                );
                 if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                     match modal_action_from_buttons(
                         mouse.column,
@@ -1466,14 +1453,7 @@ impl AppState {
         if inner.height < 6 || inner.width < 4 {
             return None;
         }
-        let rows = ratatui::layout::Layout::vertical([
-            ratatui::layout::Constraint::Length(1),
-            ratatui::layout::Constraint::Length(1),
-            ratatui::layout::Constraint::Min(1),
-            ratatui::layout::Constraint::Length(1),
-        ])
-        .areas::<4>(inner);
-        Some(rows[2])
+        Some(crate::ui::modal_stack_areas(inner, 2, 1, 0, 1).content)
     }
 
     fn keybind_help_scroll_metrics(&self) -> Option<crate::pane::ScrollMetrics> {
@@ -1577,8 +1557,7 @@ impl AppState {
 
     fn settings_content_rect(&self) -> Rect {
         let inner = self.settings_inner_rect();
-        let y = inner.y + 3;
-        Rect::new(inner.x, y, inner.width, inner.y + inner.height - y)
+        crate::ui::modal_stack_areas(inner, 3, 2, 0, 1).content
     }
 
     fn settings_list_index_at(&self, col: u16, row: u16) -> Option<usize> {
@@ -2897,7 +2876,8 @@ mod tests {
         app.state.onboarding_list.select(1);
 
         let inner = app.state.onboarding_modal_inner(56, 14).unwrap();
-        app.handle_mouse(mouse(MouseEventKind::Moved, inner.x + 2, inner.y + 7));
+        let content = crate::ui::modal_stack_areas(inner, 3, 0, 1, 1).content;
+        app.handle_mouse(mouse(MouseEventKind::Moved, content.x + 2, content.y));
 
         assert_eq!(app.state.onboarding_list.selected, 1);
     }
@@ -2910,10 +2890,11 @@ mod tests {
         app.state.onboarding_list.select(0);
 
         let inner = app.state.onboarding_modal_inner(56, 14).unwrap();
+        let content = crate::ui::modal_stack_areas(inner, 3, 0, 1, 1).content;
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            inner.x + 2,
-            inner.y + 7,
+            content.x + 2,
+            content.y + 2,
         ));
 
         assert_eq!(app.state.onboarding_list.selected, 2);

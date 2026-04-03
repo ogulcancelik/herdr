@@ -1121,6 +1121,71 @@ fn render_modal_header(frame: &mut Frame, area: Rect, title: &str, p: &Palette) 
     );
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ModalStackAreas {
+    pub header: Rect,
+    pub content: Rect,
+    pub footer: Option<Rect>,
+    pub actions: Option<Rect>,
+}
+
+pub(crate) fn modal_stack_areas(
+    inner: Rect,
+    header_height: u16,
+    footer_height: u16,
+    actions_height: u16,
+    gap: u16,
+) -> ModalStackAreas {
+    #[derive(Clone, Copy)]
+    enum Slot {
+        Header,
+        Content,
+        Footer,
+        Actions,
+    }
+
+    let mut constraints = Vec::new();
+    let mut slots = Vec::new();
+    let mut push = |slot: Slot, constraint: Constraint| {
+        if !slots.is_empty() {
+            constraints.push(Constraint::Length(gap));
+        }
+        constraints.push(constraint);
+        slots.push(slot);
+    };
+
+    push(Slot::Header, Constraint::Length(header_height));
+    push(Slot::Content, Constraint::Min(0));
+    if footer_height > 0 {
+        push(Slot::Footer, Constraint::Length(footer_height));
+    }
+    if actions_height > 0 {
+        push(Slot::Actions, Constraint::Length(actions_height));
+    }
+
+    let areas = Layout::vertical(constraints).split(inner);
+    let mut header = Rect::default();
+    let mut content = Rect::default();
+    let mut footer = None;
+    let mut actions = None;
+
+    for (slot, area) in slots.into_iter().zip(areas.iter().step_by(2).copied()) {
+        match slot {
+            Slot::Header => header = area,
+            Slot::Content => content = area,
+            Slot::Footer => footer = Some(area),
+            Slot::Actions => actions = Some(area),
+        }
+    }
+
+    ModalStackAreas {
+        header,
+        content,
+        footer,
+        actions,
+    }
+}
+
 fn render_onboarding_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     dim_background(frame, area);
 
@@ -1144,24 +1209,24 @@ fn render_release_notes_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let rows = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ])
-    .areas::<5>(inner);
+    let stack = modal_stack_areas(inner, 2, 1, 0, 1);
+    let header_rows =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas::<2>(stack.header);
 
-    render_modal_header(frame, rows[0], &format!("v{}", notes.version), &app.palette);
+    render_modal_header(
+        frame,
+        header_rows[0],
+        &format!("v{}", notes.version),
+        &app.palette,
+    );
     frame.render_widget(
         Paragraph::new(" what's new in this release")
             .style(Style::default().fg(app.palette.overlay1)),
-        rows[1],
+        header_rows[1],
     );
     render_action_button(
         frame,
-        release_notes_close_button_rect(rows[0]),
+        release_notes_close_button_rect(header_rows[0]),
         Some("esc"),
         "close",
         Style::default()
@@ -1170,7 +1235,7 @@ fn render_release_notes_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
             .add_modifier(Modifier::BOLD),
     );
 
-    let body_area = rows[3];
+    let body_area = stack.content;
     let metrics = crate::pane::ScrollMetrics {
         offset_from_bottom: app.release_notes_max_scroll().saturating_sub(notes.scroll) as usize,
         max_offset_from_bottom: app.release_notes_max_scroll() as usize,
@@ -1216,7 +1281,7 @@ fn render_release_notes_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
             Span::styled("close", Style::default().fg(app.palette.overlay0)),
             Span::styled(" q / esc / enter ", Style::default().fg(app.palette.text)),
         ])),
-        rows[4],
+        stack.footer.unwrap_or_default(),
     );
 }
 
@@ -1330,21 +1395,16 @@ fn render_onboarding_welcome(app: &AppState, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let rows = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
+    let stack = modal_stack_areas(inner, 2, 0, 1, 1);
+    let header_rows =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas::<2>(stack.header);
+    let content_rows = Layout::vertical([
+        Constraint::Length(3),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(0),
     ])
-    .areas::<12>(inner);
+    .areas::<4>(stack.content);
 
     frame.render_widget(
         Paragraph::new("  herdr").style(
@@ -1352,28 +1412,20 @@ fn render_onboarding_welcome(app: &AppState, frame: &mut Frame, area: Rect) {
                 .fg(app.palette.text)
                 .add_modifier(Modifier::BOLD),
         ),
-        rows[1],
+        header_rows[0],
     );
     frame.render_widget(
         Paragraph::new("  terminal workspace manager for coding agents")
             .style(Style::default().fg(app.palette.overlay0)),
-        rows[2],
+        header_rows[1],
     );
 
     frame.render_widget(
-        Paragraph::new("  this is a mouse-first terminal.")
-            .style(Style::default().fg(app.palette.overlay1)),
-        rows[4],
-    );
-    frame.render_widget(
-        Paragraph::new("  click the sidebar to switch workspaces, drag pane")
-            .style(Style::default().fg(app.palette.overlay1)),
-        rows[5],
-    );
-    frame.render_widget(
-        Paragraph::new("  borders to resize, right-click for context menus.")
-            .style(Style::default().fg(app.palette.overlay1)),
-        rows[6],
+        Paragraph::new(
+            "  this is a mouse-first terminal.\n  click the sidebar to switch workspaces, drag pane\n  borders to resize, right-click for context menus.",
+        )
+        .style(Style::default().fg(app.palette.overlay1)),
+        content_rows[0],
     );
 
     let key_line = Line::from(vec![
@@ -1399,9 +1451,9 @@ fn render_onboarding_welcome(app: &AppState, frame: &mut Frame, area: Rect) {
             Style::default().fg(app.palette.overlay1),
         ),
     ]);
-    frame.render_widget(Paragraph::new(key_line), rows[8]);
+    frame.render_widget(Paragraph::new(key_line), content_rows[2]);
 
-    let continue_rect = onboarding_welcome_continue_rect(rows[10]);
+    let continue_rect = onboarding_welcome_continue_rect(stack.actions.unwrap_or_default());
     render_action_button(
         frame,
         continue_rect,
@@ -1423,32 +1475,32 @@ fn render_onboarding_notifications(app: &AppState, frame: &mut Frame, area: Rect
         return;
     }
 
-    let rows = Layout::vertical([
+    let stack = modal_stack_areas(inner, 3, 0, 1, 1);
+    let header_rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
+    ])
+    .areas::<3>(stack.header);
+    let option_rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(0),
     ])
-    .areas::<12>(inner);
+    .areas::<5>(stack.content);
 
-    render_modal_header(frame, rows[0], "notification style", &app.palette);
+    render_modal_header(frame, header_rows[0], "notification style", &app.palette);
     frame.render_widget(
         Paragraph::new(" herdr watches background panes and can alert you")
             .style(Style::default().fg(app.palette.overlay1)),
-        rows[2],
+        header_rows[1],
     );
     frame.render_widget(
         Paragraph::new(" when agents finish or need attention.")
             .style(Style::default().fg(app.palette.overlay1)),
-        rows[3],
+        header_rows[2],
     );
 
     let options = [
@@ -1470,11 +1522,12 @@ fn render_onboarding_notifications(app: &AppState, frame: &mut Frame, area: Rect
         };
         frame.render_widget(
             Paragraph::new(format!(" {prefix} {}. {option}", idx + 1)).style(style),
-            rows[idx + 5],
+            option_rows[idx],
         );
     }
 
-    let (back_rect, save_rect) = onboarding_notification_button_rects(rows[10]);
+    let (back_rect, save_rect) =
+        onboarding_notification_button_rects(stack.actions.unwrap_or_default());
     render_action_button(
         frame,
         back_rect,
@@ -1714,18 +1767,14 @@ fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
         return;
     }
 
-    let rows = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ])
-    .areas::<4>(inner);
+    let stack = modal_stack_areas(inner, 2, 1, 0, 1);
+    let header_rows =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas::<2>(stack.header);
 
-    render_modal_header(frame, rows[0], "keybinds", &app.palette);
+    render_modal_header(frame, header_rows[0], "keybinds", &app.palette);
     render_action_button(
         frame,
-        release_notes_close_button_rect(rows[0]),
+        release_notes_close_button_rect(header_rows[0]),
         Some("esc"),
         "close",
         Style::default()
@@ -1736,10 +1785,10 @@ fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
     frame.render_widget(
         Paragraph::new(" available commands and configured shortcuts")
             .style(Style::default().fg(app.palette.overlay1)),
-        rows[1],
+        header_rows[1],
     );
 
-    let body_area = rows[2];
+    let body_area = stack.content;
     let metrics = crate::pane::ScrollMetrics {
         offset_from_bottom: app
             .keybind_help_max_scroll()
@@ -1790,7 +1839,7 @@ fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
             Span::styled("close", Style::default().fg(app.palette.overlay0)),
             Span::styled(" q / esc / enter ", Style::default().fg(app.palette.text)),
         ])),
-        rows[3],
+        stack.footer.unwrap_or_default(),
     );
 }
 
@@ -2128,7 +2177,13 @@ fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let mut y = inner.y;
+    let stack = modal_stack_areas(inner, 3, 2, 0, 1);
+    let header_rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas::<3>(stack.header);
 
     // Title
     frame.render_widget(
@@ -2136,9 +2191,8 @@ fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
             " settings",
             Style::default().fg(p.text).add_modifier(Modifier::BOLD),
         )])),
-        Rect::new(inner.x, y, inner.width, 1),
+        header_rows[0],
     );
-    y += 1;
 
     // Tab bar
     let tabs = Tabs::new(SettingsSection::ALL.iter().map(|s| s.label()))
@@ -2157,19 +2211,17 @@ fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
         )
         .divider(" ")
         .padding(" ", " ");
-    frame.render_widget(tabs, Rect::new(inner.x, y, inner.width, 1));
-    y += 1;
+    frame.render_widget(tabs, header_rows[1]);
 
     // Separator
     let sep = "─".repeat(inner.width as usize);
     frame.render_widget(
         Paragraph::new(Span::styled(&sep, Style::default().fg(p.surface0))),
-        Rect::new(inner.x, y, inner.width, 1),
+        header_rows[2],
     );
-    y += 1;
 
     // Section content
-    let content_area = Rect::new(inner.x, y, inner.width, inner.y + inner.height - y);
+    let content_area = stack.content;
 
     match app.settings.section {
         SettingsSection::Theme => {
@@ -2200,8 +2252,9 @@ fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     }
 
     // Footer buttons + hints
-    let footer_y = inner.y + inner.height - 1;
-    if footer_y > y {
+    if let Some(footer_area) = stack.footer {
+        let footer_rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)])
+            .areas::<2>(footer_area);
         let (apply_rect, close_rect) = settings_button_rects(inner);
         render_action_button(
             frame,
@@ -2224,7 +2277,6 @@ fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         );
 
-        let hint_area = Rect::new(inner.x, footer_y.saturating_sub(1), inner.width, 1);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(" ↑↓", Style::default().fg(p.overlay0)),
@@ -2232,7 +2284,7 @@ fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
                 Span::styled("tab", Style::default().fg(p.overlay0)),
                 Span::styled(" section", Style::default().fg(p.overlay1)),
             ])),
-            hint_area,
+            footer_rows[0],
         );
     }
 }
