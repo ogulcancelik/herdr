@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 
-use super::{KeyboardProtocol, TerminalKey};
+use super::{KeyboardProtocol, MouseProtocolEncoding, TerminalKey};
 
 const KITTY_FLAG_REPORT_EVENT_TYPES: u16 = 0b0000_0010;
 const KITTY_FLAG_REPORT_ALTERNATE_KEYS: u16 = 0b0000_0100;
@@ -44,7 +44,7 @@ pub fn encode_mouse_scroll(
     column: u16,
     row: u16,
     modifiers: KeyModifiers,
-    encoding: vt100::MouseProtocolEncoding,
+    encoding: MouseProtocolEncoding,
 ) -> Option<Vec<u8>> {
     let button = match kind {
         MouseEventKind::ScrollUp => 64u16,
@@ -61,7 +61,7 @@ pub fn encode_mouse_button(
     column: u16,
     row: u16,
     modifiers: KeyModifiers,
-    encoding: vt100::MouseProtocolEncoding,
+    encoding: MouseProtocolEncoding,
 ) -> Option<Vec<u8>> {
     let (button, release) = match kind {
         MouseEventKind::Down(MouseButton::Left) => (0u16, false),
@@ -84,10 +84,10 @@ fn encode_mouse_cb(
     column: u16,
     row: u16,
     modifiers: KeyModifiers,
-    encoding: vt100::MouseProtocolEncoding,
+    encoding: MouseProtocolEncoding,
 ) -> Option<Vec<u8>> {
     let mut cb = match (encoding, release) {
-        (vt100::MouseProtocolEncoding::Sgr, true) => base_button,
+        (MouseProtocolEncoding::Sgr, true) => base_button,
         (_, true) => 3,
         (_, false) => base_button,
     };
@@ -105,20 +105,20 @@ fn encode_mouse_cb(
     let row = row as u32 + 1;
 
     match encoding {
-        vt100::MouseProtocolEncoding::Sgr => Some(
+        MouseProtocolEncoding::Sgr => Some(
             format!(
                 "\x1b[<{cb};{column};{row}{}",
                 if release { 'm' } else { 'M' }
             )
             .into_bytes(),
         ),
-        vt100::MouseProtocolEncoding::Default => {
+        MouseProtocolEncoding::Default => {
             let cb = u8::try_from(cb + 32).ok()?;
             let column = u8::try_from(column + 32).ok()?;
             let row = u8::try_from(row + 32).ok()?;
             Some(vec![0x1b, b'[', b'M', cb, column, row])
         }
-        vt100::MouseProtocolEncoding::Utf8 => {
+        MouseProtocolEncoding::Utf8 => {
             let mut bytes = Vec::with_capacity(16);
             bytes.extend_from_slice(b"\x1b[M");
             push_mouse_codepoint(&mut bytes, cb as u32 + 32)?;

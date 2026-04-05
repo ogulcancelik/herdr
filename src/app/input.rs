@@ -2591,7 +2591,7 @@ impl AppState {
 
 #[cfg(test)]
 fn wheel_routing(input_state: crate::pane::InputState) -> WheelRouting {
-    if input_state.mouse_protocol_mode != vt100::MouseProtocolMode::None {
+    if input_state.mouse_protocol_mode.reporting_enabled() {
         WheelRouting::MouseReport
     } else if input_state.alternate_screen && input_state.mouse_alternate_scroll {
         WheelRouting::AlternateScroll
@@ -3373,8 +3373,8 @@ mod tests {
             application_cursor: false,
             bracketed_paste: false,
             focus_reporting: false,
-            mouse_protocol_mode: vt100::MouseProtocolMode::ButtonMotion,
-            mouse_protocol_encoding: vt100::MouseProtocolEncoding::Sgr,
+            mouse_protocol_mode: crate::input::MouseProtocolMode::ButtonMotion,
+            mouse_protocol_encoding: crate::input::MouseProtocolEncoding::Sgr,
             mouse_alternate_scroll: true,
         };
 
@@ -3388,8 +3388,8 @@ mod tests {
             application_cursor: false,
             bracketed_paste: false,
             focus_reporting: false,
-            mouse_protocol_mode: vt100::MouseProtocolMode::None,
-            mouse_protocol_encoding: vt100::MouseProtocolEncoding::Default,
+            mouse_protocol_mode: crate::input::MouseProtocolMode::None,
+            mouse_protocol_encoding: crate::input::MouseProtocolEncoding::Default,
             mouse_alternate_scroll: true,
         };
 
@@ -3403,8 +3403,8 @@ mod tests {
             application_cursor: false,
             bracketed_paste: false,
             focus_reporting: false,
-            mouse_protocol_mode: vt100::MouseProtocolMode::None,
-            mouse_protocol_encoding: vt100::MouseProtocolEncoding::Default,
+            mouse_protocol_mode: crate::input::MouseProtocolMode::None,
+            mouse_protocol_encoding: crate::input::MouseProtocolEncoding::Default,
             mouse_alternate_scroll: true,
         };
 

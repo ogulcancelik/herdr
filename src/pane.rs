@@ -273,14 +273,14 @@ pub struct InputState {
     pub application_cursor: bool,
     pub bracketed_paste: bool,
     pub focus_reporting: bool,
-    pub mouse_protocol_mode: vt100::MouseProtocolMode,
-    pub mouse_protocol_encoding: vt100::MouseProtocolEncoding,
+    pub mouse_protocol_mode: crate::input::MouseProtocolMode,
+    pub mouse_protocol_encoding: crate::input::MouseProtocolEncoding,
     pub mouse_alternate_scroll: bool,
 }
 
 impl InputState {
     pub fn mouse_reporting_enabled(self) -> bool {
-        self.mouse_protocol_mode != vt100::MouseProtocolMode::None
+        self.mouse_protocol_mode.reporting_enabled()
     }
 }
 
@@ -604,8 +604,24 @@ impl VtPaneTerminal {
             application_cursor: screen.application_cursor(),
             bracketed_paste: screen.bracketed_paste(),
             focus_reporting: false,
-            mouse_protocol_mode: screen.mouse_protocol_mode(),
-            mouse_protocol_encoding: screen.mouse_protocol_encoding(),
+            mouse_protocol_mode: match screen.mouse_protocol_mode() {
+                vt100::MouseProtocolMode::None => crate::input::MouseProtocolMode::None,
+                vt100::MouseProtocolMode::Press => crate::input::MouseProtocolMode::Press,
+                vt100::MouseProtocolMode::PressRelease => {
+                    crate::input::MouseProtocolMode::PressRelease
+                }
+                vt100::MouseProtocolMode::ButtonMotion => {
+                    crate::input::MouseProtocolMode::ButtonMotion
+                }
+                vt100::MouseProtocolMode::AnyMotion => crate::input::MouseProtocolMode::AnyMotion,
+            },
+            mouse_protocol_encoding: match screen.mouse_protocol_encoding() {
+                vt100::MouseProtocolEncoding::Default => {
+                    crate::input::MouseProtocolEncoding::Default
+                }
+                vt100::MouseProtocolEncoding::Utf8 => crate::input::MouseProtocolEncoding::Utf8,
+                vt100::MouseProtocolEncoding::Sgr => crate::input::MouseProtocolEncoding::Sgr,
+            },
             mouse_alternate_scroll: self.mouse_alternate_scroll.load(Ordering::Relaxed),
         })
     }
@@ -821,22 +837,22 @@ impl GhosttyPaneTerminal {
             .mode_get(crate::ghostty::MODE_MOUSE_ALTERNATE_SCROLL)
             .ok()?;
         let mouse_protocol_mode = if core.terminal.mode_get(1003).ok()? {
-            vt100::MouseProtocolMode::AnyMotion
+            crate::input::MouseProtocolMode::AnyMotion
         } else if core.terminal.mode_get(1002).ok()? {
-            vt100::MouseProtocolMode::ButtonMotion
+            crate::input::MouseProtocolMode::ButtonMotion
         } else if core.terminal.mode_get(1000).ok()? {
-            vt100::MouseProtocolMode::PressRelease
+            crate::input::MouseProtocolMode::PressRelease
         } else if core.terminal.mode_get(9).ok()? {
-            vt100::MouseProtocolMode::Press
+            crate::input::MouseProtocolMode::Press
         } else {
-            vt100::MouseProtocolMode::None
+            crate::input::MouseProtocolMode::None
         };
         let mouse_protocol_encoding = if mouse_sgr {
-            vt100::MouseProtocolEncoding::Sgr
+            crate::input::MouseProtocolEncoding::Sgr
         } else if mouse_utf8 {
-            vt100::MouseProtocolEncoding::Utf8
+            crate::input::MouseProtocolEncoding::Utf8
         } else {
-            vt100::MouseProtocolEncoding::Default
+            crate::input::MouseProtocolEncoding::Default
         };
         Some(InputState {
             alternate_screen,
@@ -2162,7 +2178,7 @@ impl PaneRuntime {
         row: u16,
         modifiers: crossterm::event::KeyModifiers,
     ) -> Option<Vec<u8>> {
-        if self.input_state()?.mouse_protocol_mode == vt100::MouseProtocolMode::None {
+        if !self.input_state()?.mouse_protocol_mode.reporting_enabled() {
             return None;
         }
         self.terminal

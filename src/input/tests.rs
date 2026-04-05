@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, ModifierKeyCode};
 
 use super::{
     encode_cursor_key, encode_key, encode_mouse_button, encode_mouse_scroll, encode_terminal_key,
-    parse_terminal_key_sequence, KeyboardProtocol, TerminalKey,
+    parse_terminal_key_sequence, KeyboardProtocol, MouseProtocolEncoding, TerminalKey,
 };
 
 fn assert_terminal_key_eq(
@@ -198,7 +198,7 @@ fn sgr_mouse_scroll_encodes_wheel_button_and_coordinates() {
         4,
         6,
         KeyModifiers::SHIFT,
-        vt100::MouseProtocolEncoding::Sgr,
+        MouseProtocolEncoding::Sgr,
     )
     .expect("mouse scroll should encode");
 
@@ -212,7 +212,7 @@ fn sgr_mouse_release_keeps_button_code() {
         11,
         9,
         KeyModifiers::empty(),
-        vt100::MouseProtocolEncoding::Sgr,
+        MouseProtocolEncoding::Sgr,
     )
     .expect("mouse release should encode");
 

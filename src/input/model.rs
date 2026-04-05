@@ -55,3 +55,25 @@ impl KeyboardProtocol {
         }
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseProtocolMode {
+    None,
+    Press,
+    PressRelease,
+    ButtonMotion,
+    AnyMotion,
+}
+
+impl MouseProtocolMode {
+    pub fn reporting_enabled(self) -> bool {
+        self != Self::None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseProtocolEncoding {
+    Default,
+    Utf8,
+    Sgr,
+}
