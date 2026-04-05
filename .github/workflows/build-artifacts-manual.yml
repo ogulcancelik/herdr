@@ -22,6 +22,14 @@ on:
           - ReleaseFast
           - ReleaseSmall
           - Debug
+      libghostty_simd:
+        description: build libghostty-vt with SIMD-accelerated code paths
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 permissions:
   contents: read
@@ -45,6 +53,7 @@ jobs:
             name: herdr-linux-aarch64
     env:
       LIBGHOSTTY_VT_OPTIMIZE: ${{ inputs.libghostty_optimize }}
+      LIBGHOSTTY_VT_SIMD: ${{ inputs.libghostty_simd }}
 
     steps:
       - uses: actions/checkout@v4
@@ -81,13 +90,14 @@ jobs:
             echo "commit=$GITHUB_SHA"
             echo "target=${{ matrix.target }}"
             echo "libghostty_vt_optimize=$LIBGHOSTTY_VT_OPTIMIZE"
+            echo "libghostty_vt_simd=$LIBGHOSTTY_VT_SIMD"
           } >> BUILD_INFO.txt
           python3 -c "import hashlib, pathlib; artifact = pathlib.Path('${{ matrix.name }}'); print(f'sha256={hashlib.sha256(artifact.read_bytes()).hexdigest()}  {artifact.name}')" >> BUILD_INFO.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name }}-${{ inputs.libghostty_optimize }}
+          name: ${{ matrix.name }}-${{ inputs.libghostty_optimize }}-simd-${{ inputs.libghostty_simd }}
           path: |
             ${{ matrix.name }}
             BUILD_INFO.txt
@@ -108,6 +118,7 @@ jobs:
             name: herdr-macos-aarch64
     env:
       LIBGHOSTTY_VT_OPTIMIZE: ${{ inputs.libghostty_optimize }}
+      LIBGHOSTTY_VT_SIMD: ${{ inputs.libghostty_simd }}
 
     steps:
       - uses: actions/checkout@v4
@@ -140,13 +151,14 @@ jobs:
             echo "commit=$GITHUB_SHA"
             echo "target=${{ matrix.target }}"
             echo "libghostty_vt_optimize=$LIBGHOSTTY_VT_OPTIMIZE"
+            echo "libghostty_vt_simd=$LIBGHOSTTY_VT_SIMD"
           } >> BUILD_INFO.txt
           python3 -c "import hashlib, pathlib; artifact = pathlib.Path('${{ matrix.name }}'); print(f'sha256={hashlib.sha256(artifact.read_bytes()).hexdigest()}  {artifact.name}')" >> BUILD_INFO.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name }}-${{ inputs.libghostty_optimize }}
+          name: ${{ matrix.name }}-${{ inputs.libghostty_optimize }}-simd-${{ inputs.libghostty_simd }}
           path: |
             ${{ matrix.name }}
             BUILD_INFO.txt
