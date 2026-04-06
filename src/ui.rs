@@ -514,7 +514,7 @@ fn render_workspace_list(app: &AppState, frame: &mut Frame, area: Rect, is_navig
 
     // Reserve last row for "new" button
     let list_bottom = area.y + area.height.saturating_sub(1);
-    let mut row_y = area.y;
+    let mut row_y = area.y + 1;
 
     for (i, ws) in app.workspaces.iter().enumerate() {
         if row_y + 1 >= list_bottom {
