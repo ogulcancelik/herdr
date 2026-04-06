@@ -2804,9 +2804,14 @@ impl AppState {
             .and_then(|rt| rt.cwd());
 
         if let Some(ws) = self.active.and_then(|i| self.workspaces.get_mut(i)) {
-            if let Ok(new_id) =
-                ws.split_focused(direction, new_rows, new_cols, cwd, self.host_terminal_theme)
-            {
+            if let Ok(new_id) = ws.split_focused(
+                direction,
+                new_rows,
+                new_cols,
+                cwd,
+                self.pane_scrollback_limit_bytes,
+                self.host_terminal_theme,
+            ) {
                 ws.layout.focus_pane(new_id);
                 self.mode = Mode::Terminal;
             }

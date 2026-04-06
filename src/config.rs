@@ -4,6 +4,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use serde::Deserialize;
 
 pub const CONFIG_PATH_ENV_VAR: &str = "HERDR_CONFIG_PATH";
+pub const DEFAULT_SCROLLBACK_LIMIT_BYTES: usize = 10_000_000;
 use tracing::warn;
 
 pub fn app_dir_name() -> &'static str {
@@ -151,11 +152,14 @@ pub struct UiConfig {
     pub sound: SoundConfig,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct AdvancedConfig {
     /// Allow launching herdr inside an existing herdr pane. Default: false.
     pub allow_nested: bool,
+    /// Maximum scrollback buffer size in bytes retained per pane terminal. Default: 10000000.
+    #[serde(alias = "scrollback_lines")]
+    pub scrollback_limit_bytes: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -333,6 +337,15 @@ impl Default for SoundConfig {
             done_path: None,
             request_path: None,
             agents: AgentSoundOverrides::default(),
+        }
+    }
+}
+
+impl Default for AdvancedConfig {
+    fn default() -> Self {
+        Self {
+            allow_nested: false,
+            scrollback_limit_bytes: DEFAULT_SCROLLBACK_LIMIT_BYTES,
         }
     }
 }
@@ -1356,13 +1369,34 @@ path = "sounds/notification.wav"
     }
 
     #[test]
-    fn advanced_allow_nested_parses() {
+    fn advanced_defaults_include_scrollback_limit_bytes() {
+        let config = Config::default();
+        assert_eq!(
+            config.advanced.scrollback_limit_bytes,
+            DEFAULT_SCROLLBACK_LIMIT_BYTES
+        );
+    }
+
+    #[test]
+    fn advanced_config_parses() {
         let toml = r#"
 [advanced]
 allow_nested = true
+scrollback_limit_bytes = 12345
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.advanced.allow_nested);
+        assert_eq!(config.advanced.scrollback_limit_bytes, 12345);
+    }
+
+    #[test]
+    fn advanced_legacy_scrollback_lines_alias_parses() {
+        let toml = r#"
+[advanced]
+scrollback_lines = 12345
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.advanced.scrollback_limit_bytes, 12345);
     }
 
     #[test]

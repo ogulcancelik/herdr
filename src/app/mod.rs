@@ -170,6 +170,7 @@ impl App {
                 &snap,
                 24,
                 80,
+                config.advanced.scrollback_limit_bytes,
                 event_tx.clone(),
                 render_notify.clone(),
                 render_dirty.clone(),
@@ -204,6 +205,11 @@ impl App {
                 config.ui.sidebar_width,
             )
         };
+
+        info!(
+            pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes,
+            "using pane scrollback configuration"
+        );
 
         let latest_release_notes_available = crate::release_notes::load_latest().is_some();
 
@@ -267,6 +273,7 @@ impl App {
             sidebar_collapsed: false,
             agent_panel_scope,
             confirm_close: config.ui.confirm_close,
+            pane_scrollback_limit_bytes: config.advanced.scrollback_limit_bytes,
             accent: crate::config::parse_color(&config.ui.accent),
             sound: config.ui.sound.clone(),
             toast_config: config.ui.toast.clone(),
@@ -1243,7 +1250,15 @@ impl App {
                     .workspaces
                     .get_mut(ws_idx)
                     .ok_or_else(|| std::io::Error::other("workspace disappeared"))
-                    .and_then(|ws| ws.create_tab(rows, cols, cwd, self.state.host_terminal_theme));
+                    .and_then(|ws| {
+                        ws.create_tab(
+                            rows,
+                            cols,
+                            cwd,
+                            self.state.pane_scrollback_limit_bytes,
+                            self.state.host_terminal_theme,
+                        )
+                    });
                 match result {
                     Ok(tab_idx) => {
                         if params.focus {
@@ -1442,6 +1457,7 @@ impl App {
                     rows,
                     cols,
                     params.cwd.map(std::path::PathBuf::from),
+                    self.state.pane_scrollback_limit_bytes,
                     self.state.host_terminal_theme,
                 ) {
                     Ok(new_pane_id) => new_pane_id,
@@ -1973,7 +1989,13 @@ impl App {
         };
         let (rows, cols) = self.state.estimate_pane_size();
         let ws = &mut self.state.workspaces[ws_idx];
-        let idx = ws.create_tab(rows, cols, initial_cwd, self.state.host_terminal_theme)?;
+        let idx = ws.create_tab(
+            rows,
+            cols,
+            initial_cwd,
+            self.state.pane_scrollback_limit_bytes,
+            self.state.host_terminal_theme,
+        )?;
         if focus {
             ws.switch_tab(idx);
             self.state.mode = Mode::Terminal;
@@ -1991,6 +2013,7 @@ impl App {
             initial_cwd,
             rows,
             cols,
+            self.state.pane_scrollback_limit_bytes,
             self.state.host_terminal_theme,
             self.event_tx.clone(),
             self.render_notify.clone(),

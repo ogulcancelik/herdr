@@ -243,6 +243,7 @@ available agent keys:
 ```toml
 [advanced]
 allow_nested = false
+scrollback_limit_bytes = 10000000
 ```
 
 ### options
@@ -250,10 +251,14 @@ allow_nested = false
 | option | default | description |
 |--------|---------|-------------|
 | `advanced.allow_nested` | `false` | allow launching herdr from inside a herdr-managed pane |
+| `advanced.scrollback_limit_bytes` | `10000000` | maximum scrollback buffer size in bytes retained per pane terminal |
 
 notes:
 - by default, herdr blocks nested launches when `HERDR_ENV=1` is already present
 - this is mainly an escape hatch for debugging or intentionally weird setups
+- this matches Ghostty's default `scrollback-limit` value
+- set `scrollback_limit_bytes = 0` to disable pane scrollback entirely
+- the old `advanced.scrollback_lines` key is still accepted as a compatibility alias, but it uses the same byte-based value
 
 ## environment variables
 

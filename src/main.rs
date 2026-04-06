@@ -151,6 +151,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 [advanced]
 # Allow launching herdr from inside a herdr-managed pane.
 # allow_nested = false
+# Maximum scrollback buffer size in bytes retained per pane terminal.
+# Matches Ghostty's default scrollback-limit behavior.
+# scrollback_limit_bytes = 10000000
 "##;
 
 fn should_block_nested(config: &config::Config) -> bool {

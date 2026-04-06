@@ -58,6 +58,7 @@ impl Tab {
         initial_cwd: PathBuf,
         rows: u16,
         cols: u16,
+        scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
@@ -69,6 +70,7 @@ impl Tab {
             rows,
             cols,
             initial_cwd.clone(),
+            scrollback_limit_bytes,
             host_terminal_theme,
             events.clone(),
             render_notify.clone(),
@@ -113,6 +115,7 @@ impl Tab {
         rows: u16,
         cols: u16,
         cwd: Option<PathBuf>,
+        scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
     ) -> std::io::Result<PaneId> {
         let new_id = self.layout.split_focused(direction);
@@ -123,6 +126,7 @@ impl Tab {
             rows,
             cols,
             actual_cwd.clone(),
+            scrollback_limit_bytes,
             host_terminal_theme,
             self.events.clone(),
             self.render_notify.clone(),
@@ -281,6 +285,7 @@ impl Workspace {
         initial_cwd: PathBuf,
         rows: u16,
         cols: u16,
+        scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
@@ -291,6 +296,7 @@ impl Workspace {
             initial_cwd.clone(),
             rows,
             cols,
+            scrollback_limit_bytes,
             host_terminal_theme,
             events,
             render_notify,
@@ -339,6 +345,7 @@ impl Workspace {
         rows: u16,
         cols: u16,
         cwd: PathBuf,
+        scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
     ) -> std::io::Result<usize> {
         let number = self.tabs.len() + 1;
@@ -360,6 +367,7 @@ impl Workspace {
             cwd,
             rows,
             cols,
+            scrollback_limit_bytes,
             host_terminal_theme,
             events,
             render_notify,
@@ -398,12 +406,20 @@ impl Workspace {
         rows: u16,
         cols: u16,
         cwd: Option<PathBuf>,
+        scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
     ) -> std::io::Result<PaneId> {
         let new_id = self
             .active_tab_mut()
             .expect("workspace must always have at least one tab")
-            .split_focused(direction, rows, cols, cwd, host_terminal_theme)?;
+            .split_focused(
+                direction,
+                rows,
+                cols,
+                cwd,
+                scrollback_limit_bytes,
+                host_terminal_theme,
+            )?;
         self.register_new_pane(new_id);
         Ok(new_id)
     }

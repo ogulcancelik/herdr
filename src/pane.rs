@@ -1344,6 +1344,7 @@ impl PaneRuntime {
         rows: u16,
         cols: u16,
         cwd: std::path::PathBuf,
+        scrollback_limit_bytes: usize,
         _host_terminal_theme: crate::terminal_theme::TerminalTheme,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
@@ -1362,7 +1363,12 @@ impl PaneRuntime {
         // --- Writer channel ---
         let (input_tx, mut input_rx) = mpsc::channel::<Bytes>(32);
 
-        let terminal = crate::ghostty::Terminal::new(cols, rows, 10000)
+        info!(
+            pane = pane_id.raw(),
+            rows, cols, scrollback_limit_bytes, "spawning pane terminal"
+        );
+
+        let terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         let pane_terminal = GhosttyPaneTerminal::new(terminal, input_tx.clone())?;
         pane_terminal.apply_host_terminal_theme(_host_terminal_theme);
@@ -1807,6 +1813,12 @@ impl PaneRuntime {
 mod tests {
     use super::*;
 
+    fn write_numbered_lines(terminal: &mut crate::ghostty::Terminal, count: usize) {
+        for i in 0..count {
+            terminal.write(format!("{i:06}\r\n").as_bytes());
+        }
+    }
+
     #[test]
     fn ghostty_keyboard_protocol_tracks_live_terminal_flags() {
         let (tx, _rx) = mpsc::channel(4);
@@ -1931,6 +1943,24 @@ mod tests {
             ghostty_normalize_buffer_symbol("xx", crate::ghostty::CellWide::SpacerHead),
             " "
         );
+    }
+
+    #[test]
+    fn pane_scrollback_controls_reach_top_without_ui_interference() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(80, 3, 100).unwrap();
+        write_numbered_lines(&mut terminal, 1000);
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let before = pane.scroll_metrics().expect("scroll metrics before scroll");
+        assert!(before.max_offset_from_bottom > 0);
+        assert_eq!(before.offset_from_bottom, 0);
+
+        pane.set_scroll_offset_from_bottom(before.max_offset_from_bottom);
+
+        let after = pane.scroll_metrics().expect("scroll metrics after scroll");
+        assert_eq!(after.offset_from_bottom, after.max_offset_from_bottom);
+        assert!(pane.visible_text().contains("000000"));
     }
 
     #[test]

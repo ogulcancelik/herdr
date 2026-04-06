@@ -1115,6 +1115,19 @@ impl<'a> RowCellIter<'a> {
 mod tests {
     use super::*;
 
+    fn write_numbered_lines(terminal: &mut Terminal, count: usize) {
+        for i in 0..count {
+            terminal.write(format!("{i:06}\r\n").as_bytes());
+        }
+    }
+
+    fn write_padded_lines(terminal: &mut Terminal, count: usize, width: usize) {
+        let line = format!("{}\r\n", "x".repeat(width));
+        for _ in 0..count {
+            terminal.write(line.as_bytes());
+        }
+    }
+
     #[test]
     fn focus_encoding_matches_expected_sequences() {
         assert_eq!(encode_focus(FocusEvent::Gained).unwrap(), b"\x1b[I");
@@ -1191,6 +1204,46 @@ mod tests {
 
         let wide_only = terminal.read_text_viewport((3, 0), (3, 0), false).unwrap();
         assert_eq!(wide_only, "⚡");
+    }
+
+    #[test]
+    fn zero_max_scrollback_disables_history() {
+        let mut terminal = Terminal::new(80, 3, 0).unwrap();
+        write_numbered_lines(&mut terminal, 3000);
+        assert_eq!(terminal.scrollback_rows().unwrap(), 0);
+    }
+
+    #[test]
+    fn max_scrollback_limit_bytes_retains_more_history_for_larger_limits() {
+        let mut small = Terminal::new(80, 3, 1_000_000).unwrap();
+        let mut large = Terminal::new(80, 3, 10_000_000).unwrap();
+
+        write_padded_lines(&mut small, 20_000, 70);
+        write_padded_lines(&mut large, 20_000, 70);
+
+        let small_scrollback = small.scrollback_rows().unwrap();
+        let large_scrollback = large.scrollback_rows().unwrap();
+
+        assert!(
+            large_scrollback > small_scrollback,
+            "expected larger byte limit to retain more history, got small={small_scrollback}, large={large_scrollback}"
+        );
+    }
+
+    #[test]
+    fn large_negative_scroll_delta_reaches_top_of_scrollback() {
+        let mut terminal = Terminal::new(80, 3, 1_000_000).unwrap();
+        write_numbered_lines(&mut terminal, 1000);
+
+        let before = terminal.scrollbar().unwrap();
+        assert!(before.total > before.len);
+
+        terminal.scroll_viewport_bottom();
+        terminal.scroll_viewport_delta(-10_000);
+
+        let after = terminal.scrollbar().unwrap();
+        assert_eq!(after.offset, 0);
+        assert_eq!(after.len, before.len);
     }
 
     #[test]
