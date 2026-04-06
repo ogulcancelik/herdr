@@ -3361,7 +3361,32 @@ mod tests {
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
 
         assert_eq!(app.state.workspace_drop_index_at_row(0), Some(0));
-        assert_eq!(app.state.workspace_drop_index_at_row(1), Some(1));
+        assert_eq!(app.state.workspace_drop_index_at_row(1), Some(0));
+        assert_eq!(app.state.workspace_drop_index_at_row(2), Some(0));
+        assert_eq!(app.state.workspace_drop_index_at_row(3), Some(1));
+    }
+
+    #[test]
+    fn bottom_drop_slot_stays_below_last_workspace_not_footer() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![
+            Workspace::test_new("a"),
+            Workspace::test_new("b"),
+            Workspace::test_new("c"),
+        ];
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+
+        let cards = &app.state.view.workspace_card_areas;
+        let bottom_slot = crate::ui::workspace_drop_indicator_row(
+            cards,
+            app.state.workspace_list_rect(),
+            cards.len(),
+        )
+        .unwrap();
+
+        let last = cards.last().unwrap().rect;
+        assert_eq!(bottom_slot, last.y + last.height);
+        assert!(bottom_slot < app.state.sidebar_footer_rect().y.saturating_sub(1));
     }
 
     #[test]

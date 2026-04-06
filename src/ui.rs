@@ -145,7 +145,7 @@ pub(crate) fn compute_workspace_card_areas(
     let ws_h = (total_h + 1) / 2;
     let ws_area = Rect::new(content.x, content.y, content.width, ws_h as u16);
     let list_bottom = ws_area.y + ws_area.height.saturating_sub(1);
-    let mut row_y = ws_area.y;
+    let mut row_y = ws_area.y.saturating_add(2);
     let mut cards = Vec::new();
 
     for (ws_idx, ws) in app.workspaces.iter().enumerate() {
@@ -431,7 +431,7 @@ pub(crate) fn workspace_drop_indicator_row(
     if insert_idx == 0 {
         return cards
             .first()
-            .map(|card| card.rect.y)
+            .and_then(|card| card.rect.y.checked_sub(1))
             .filter(|y| *y < list_bottom);
     }
     if let Some(card) = cards.get(insert_idx) {
@@ -439,7 +439,7 @@ pub(crate) fn workspace_drop_indicator_row(
     }
     cards
         .last()
-        .map(|_| list_bottom.saturating_sub(1))
+        .map(|card| card.rect.y.saturating_add(card.rect.height))
         .filter(|y| *y < list_bottom)
 }
 
@@ -512,9 +512,21 @@ fn render_workspace_list(app: &AppState, frame: &mut Frame, area: Rect, is_navig
         _ => None,
     };
 
-    // Reserve last row for "new" button
+    // Section header + reserve last row for "new" button
     let list_bottom = area.y + area.height.saturating_sub(1);
-    let mut row_y = area.y;
+    if area.height > 0 {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                " spaces",
+                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+            )])),
+            Rect::new(area.x, area.y, area.width, 1),
+        );
+    }
+    let mut row_y = area.y.saturating_add(1);
+
+    // Blank line for breathing room
+    row_y = row_y.saturating_add(1);
 
     for (i, ws) in app.workspaces.iter().enumerate() {
         if row_y + 1 >= list_bottom {
