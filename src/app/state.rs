@@ -492,6 +492,7 @@ pub(crate) enum DragTarget {
         grab_row_offset: u16,
     },
     SidebarDivider,
+    SidebarSectionDivider,
 }
 
 /// Active mouse drag on a split border or sidebar divider.
@@ -599,6 +600,8 @@ pub struct AppState {
     pub sidebar_width: u16,
     pub sidebar_width_auto: bool,
     pub sidebar_collapsed: bool,
+    /// Ratio of sidebar height for workspaces section (0.0-1.0). Default 0.5.
+    pub sidebar_section_split: f32,
     pub agent_panel_scope: AgentPanelScope,
     pub confirm_close: bool,
     pub pane_scrollback_limit_bytes: usize,
@@ -709,6 +712,7 @@ impl AppState {
             sidebar_width: 26,
             sidebar_width_auto: false,
             sidebar_collapsed: false,
+            sidebar_section_split: 0.5,
             agent_panel_scope: AgentPanelScope::CurrentWorkspace,
             confirm_close: true,
             pane_scrollback_limit_bytes: crate::config::DEFAULT_SCROLLBACK_LIMIT_BYTES,

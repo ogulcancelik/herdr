@@ -37,24 +37,39 @@ pub(crate) struct AgentPanelEntry {
     pub seen: bool,
 }
 
-pub(crate) fn expanded_sidebar_sections(area: Rect) -> (Rect, Rect) {
+pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, Rect) {
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
     if content.width == 0 || content.height == 0 {
         return (Rect::default(), Rect::default());
     }
 
-    let total_h = content.height as usize;
-    let ws_h = (total_h + 1) / 2;
+    let total_h = content.height;
+    let ratio = split_ratio.clamp(0.1, 0.9);
+    let ws_h = ((total_h as f32) * ratio).round() as u16;
+    let ws_h = ws_h.clamp(3, total_h.saturating_sub(3));
     let detail_h = total_h.saturating_sub(ws_h);
 
-    let ws_area = Rect::new(content.x, content.y, content.width, ws_h as u16);
+    let ws_area = Rect::new(content.x, content.y, content.width, ws_h);
     let detail_area = Rect::new(
         content.x,
-        content.y + ws_h as u16,
+        content.y + ws_h,
         content.width,
-        detail_h as u16,
+        detail_h,
     );
     (ws_area, detail_area)
+}
+
+/// Compute the rect for the draggable divider between sidebar sections.
+pub(crate) fn sidebar_section_divider_rect(area: Rect, split_ratio: f32) -> Rect {
+    let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
+    if content.width == 0 || content.height < 6 {
+        return Rect::default();
+    }
+    let total_h = content.height;
+    let ratio = split_ratio.clamp(0.1, 0.9);
+    let ws_h = ((total_h as f32) * ratio).round() as u16;
+    let ws_h = ws_h.clamp(3, total_h.saturating_sub(3));
+    Rect::new(content.x, content.y + ws_h, content.width, 1)
 }
 
 fn agent_panel_current_workspace_idx(app: &AppState) -> Option<usize> {
@@ -320,15 +335,9 @@ fn workspace_row_height(ws: &crate::workspace::Workspace) -> u16 {
     }
 }
 
-pub(crate) fn workspace_list_rect(area: Rect) -> Rect {
-    let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
-    if content.width == 0 || content.height == 0 {
-        return Rect::default();
-    }
-
-    let total_h = content.height as usize;
-    let ws_h = (total_h + 1) / 2;
-    Rect::new(content.x, content.y, content.width, ws_h as u16)
+pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32) -> Rect {
+    let (ws_area, _) = expanded_sidebar_sections(area, split_ratio);
+    ws_area
 }
 
 pub(crate) fn workspace_list_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
@@ -395,7 +404,7 @@ pub(crate) fn compute_workspace_card_areas(
     app: &AppState,
     area: Rect,
 ) -> Vec<crate::app::state::WorkspaceCardArea> {
-    let ws_area = workspace_list_rect(area);
+    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
     if ws_area == Rect::default() {
         return Vec::new();
     }
@@ -760,10 +769,24 @@ fn render_sidebar(app: &AppState, frame: &mut Frame, area: Rect) {
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-    let (ws_area, detail_area) = expanded_sidebar_sections(area);
+    let (ws_area, detail_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
 
     // --- Top section: Workspaces ---
     render_workspace_list(app, frame, ws_area, is_navigating);
+
+    // --- Section divider (draggable) ---
+    let divider_rect = sidebar_section_divider_rect(area, app.sidebar_section_split);
+    if divider_rect.width > 0 {
+        let divider_style = if app.drag.as_ref().is_some_and(|d| matches!(d.target, crate::app::state::DragTarget::SidebarSectionDivider)) {
+            Style::default().fg(p.accent).bg(p.surface0)
+        } else {
+            Style::default().fg(p.overlay0).bg(p.surface0)
+        };
+        frame.render_widget(
+            Paragraph::new("─".repeat(divider_rect.width as usize)).style(divider_style),
+            divider_rect,
+        );
+    }
 
     // --- Bottom section: Agent detail ---
     render_agent_detail(app, frame, detail_area);

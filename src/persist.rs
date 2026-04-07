@@ -34,6 +34,8 @@ pub struct SessionSnapshot {
     pub agent_panel_scope: crate::app::state::AgentPanelScope,
     #[serde(default)]
     pub sidebar_width: Option<u16>,
+    #[serde(default)]
+    pub sidebar_section_split: Option<f32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -133,6 +135,8 @@ struct RawSessionSnapshot {
     agent_panel_scope: crate::app::state::AgentPanelScope,
     #[serde(default)]
     sidebar_width: Option<u16>,
+    #[serde(default)]
+    sidebar_section_split: Option<f32>,
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
@@ -147,6 +151,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         selected: raw.selected,
         agent_panel_scope: raw.agent_panel_scope,
         sidebar_width: raw.sidebar_width,
+        sidebar_section_split: raw.sidebar_section_split,
     })
 }
 
@@ -205,6 +210,7 @@ pub fn capture(
     selected: usize,
     agent_panel_scope: crate::app::state::AgentPanelScope,
     sidebar_width: u16,
+    sidebar_section_split: f32,
 ) -> SessionSnapshot {
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
@@ -213,6 +219,7 @@ pub fn capture(
         selected,
         agent_panel_scope,
         sidebar_width: Some(sidebar_width),
+        sidebar_section_split: Some(sidebar_section_split),
     }
 }
 
@@ -580,12 +587,14 @@ mod tests {
             selected: 0,
             agent_panel_scope: crate::app::state::AgentPanelScope::CurrentWorkspace,
             sidebar_width: Some(26),
+            sidebar_section_split: Some(0.5),
         };
         let json = serde_json::to_string(&snap).unwrap();
         let restored = parse_snapshot(&json).unwrap();
         assert!(restored.workspaces.is_empty());
         assert_eq!(restored.active, None);
         assert_eq!(restored.sidebar_width, Some(26));
+        assert_eq!(restored.sidebar_section_split, Some(0.5));
     }
 
     #[test]
@@ -651,6 +660,7 @@ mod tests {
             selected: 0,
             agent_panel_scope: crate::app::state::AgentPanelScope::CurrentWorkspace,
             sidebar_width: Some(26),
+            sidebar_section_split: Some(0.5),
             version: SNAPSHOT_VERSION,
         };
 

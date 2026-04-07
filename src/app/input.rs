@@ -1431,7 +1431,7 @@ impl AppState {
         if self.sidebar_collapsed || sidebar.width <= 1 || sidebar.height == 0 {
             return Rect::default();
         }
-        crate::ui::workspace_list_rect(sidebar)
+        crate::ui::workspace_list_rect(sidebar, self.sidebar_section_split)
     }
 
     fn workspace_list_scrollbar_target_at(
@@ -1923,6 +1923,14 @@ impl AppState {
                     return None;
                 }
 
+                if self.on_sidebar_section_divider(mouse.column, mouse.row) {
+                    self.drag = Some(DragState {
+                        target: DragTarget::SidebarSectionDivider,
+                    });
+                    self.set_sidebar_section_split(mouse.row);
+                    return None;
+                }
+
                 if !in_sidebar {
                     if let Some(border) = self.find_border_at(mouse.column, mouse.row) {
                         self.drag = Some(DragState {
@@ -2161,6 +2169,9 @@ impl AppState {
                         DragTarget::SidebarDivider => {
                             self.set_manual_sidebar_width(mouse.column);
                         }
+                        DragTarget::SidebarSectionDivider => {
+                            self.set_sidebar_section_split(mouse.row);
+                        }
                         DragTarget::ReleaseNotesScrollbar { .. }
                         | DragTarget::KeybindHelpScrollbar { .. } => {}
                     }
@@ -2340,6 +2351,29 @@ impl AppState {
             width.clamp(crate::ui::MIN_SIDEBAR_WIDTH, crate::ui::MAX_SIDEBAR_WIDTH);
     }
 
+    fn on_sidebar_section_divider(&self, col: u16, row: u16) -> bool {
+        if self.sidebar_collapsed {
+            return false;
+        }
+        let rect = crate::ui::sidebar_section_divider_rect(self.view.sidebar_rect, self.sidebar_section_split);
+        rect.width > 0
+            && col >= rect.x
+            && col < rect.x + rect.width
+            && row >= rect.y
+            && row < rect.y + rect.height
+    }
+
+    fn set_sidebar_section_split(&mut self, row: u16) {
+        let sidebar = self.view.sidebar_rect;
+        let content_height = sidebar.height;
+        if content_height < 6 {
+            return;
+        }
+        let relative_y = row.saturating_sub(sidebar.y);
+        let ratio = (relative_y as f32) / (content_height as f32);
+        self.sidebar_section_split = ratio.clamp(0.1, 0.9);
+    }
+
     /// Find which workspace index a sidebar row belongs to (two-section layout).
     fn tab_at(&self, col: u16, row: u16) -> Option<usize> {
         self.view
@@ -2487,7 +2521,7 @@ impl AppState {
             return false;
         }
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(self.view.sidebar_rect);
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(self.view.sidebar_rect, self.sidebar_section_split);
         let rect = crate::ui::agent_panel_toggle_rect(detail_area, self.agent_panel_scope);
         rect.width > 0
             && col >= rect.x
@@ -2501,7 +2535,7 @@ impl AppState {
             return None;
         }
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(self.view.sidebar_rect);
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(self.view.sidebar_rect, self.sidebar_section_split);
         if detail_area.height < 4
             || row < detail_area.y + 3
             || row >= detail_area.y + detail_area.height
@@ -3544,7 +3578,7 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(app.state.view.sidebar_rect);
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(app.state.view.sidebar_rect, app.state.sidebar_section_split);
         let toggle = crate::ui::agent_panel_toggle_rect(detail_area, app.state.agent_panel_scope);
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -3580,7 +3614,7 @@ mod tests {
         app.state.mode = Mode::Terminal;
         app.state.agent_panel_scope = AgentPanelScope::AllWorkspaces;
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(app.state.view.sidebar_rect);
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(app.state.view.sidebar_rect, app.state.sidebar_section_split);
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             detail_area.x + 2,
