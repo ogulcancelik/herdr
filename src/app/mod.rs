@@ -77,6 +77,8 @@ enum RestoreOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionStructureFingerprint {
     workspaces: Vec<WorkspaceStructureFingerprint>,
+    agent_panel_scope: state::AgentPanelScope,
+    sidebar_width: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,7 +176,11 @@ fn layout_structure_fingerprint(node: &crate::layout::Node) -> LayoutStructureFi
     }
 }
 
-fn session_structure_fingerprint(workspaces: &[Workspace]) -> SessionStructureFingerprint {
+fn session_structure_fingerprint(
+    workspaces: &[Workspace],
+    agent_panel_scope: state::AgentPanelScope,
+    sidebar_width: u16,
+) -> SessionStructureFingerprint {
     SessionStructureFingerprint {
         workspaces: workspaces
             .iter()
@@ -192,6 +198,8 @@ fn session_structure_fingerprint(workspaces: &[Workspace]) -> SessionStructureFi
                     .collect(),
             })
             .collect(),
+        agent_panel_scope,
+        sidebar_width,
     }
 }
 
@@ -465,7 +473,11 @@ impl App {
                 .get(idx)
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
-        let startup_session_structure = session_structure_fingerprint(&state.workspaces);
+        let startup_session_structure = session_structure_fingerprint(
+            &state.workspaces,
+            state.agent_panel_scope,
+            state.sidebar_width,
+        );
         let persistence_armed = !no_session
             && matches!(
                 restore_outcome,
@@ -754,7 +766,12 @@ impl App {
             return;
         }
 
-        if session_structure_fingerprint(&self.state.workspaces) != self.startup_session_structure {
+        if session_structure_fingerprint(
+            &self.state.workspaces,
+            self.state.agent_panel_scope,
+            self.state.sidebar_width,
+        ) != self.startup_session_structure
+        {
             info!(restore_outcome = ?self.restore_outcome, "session persistence armed after structural change");
             self.persistence_armed = true;
             if self.next_session_save.is_none() {
@@ -2765,7 +2782,11 @@ mod tests {
         app.persistence_armed = false;
         app.session_autosave_interval = Some(Duration::from_secs(10));
         app.state.workspaces = vec![Workspace::test_new("test")];
-        app.startup_session_structure = session_structure_fingerprint(&app.state.workspaces);
+        app.startup_session_structure = session_structure_fingerprint(
+            &app.state.workspaces,
+            app.state.agent_panel_scope,
+            app.state.sidebar_width,
+        );
 
         app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
         app.refresh_persistence_gate(Instant::now());
@@ -2783,7 +2804,11 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("test")];
         let second_pane =
             app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
-        app.startup_session_structure = session_structure_fingerprint(&app.state.workspaces);
+        app.startup_session_structure = session_structure_fingerprint(
+            &app.state.workspaces,
+            app.state.agent_panel_scope,
+            app.state.sidebar_width,
+        );
 
         let tab = &mut app.state.workspaces[0].tabs[0];
         tab.layout.focus_pane(second_pane);
@@ -2801,11 +2826,57 @@ mod tests {
         app.session_autosave_interval = Some(Duration::from_secs(60));
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
-        app.startup_session_structure = session_structure_fingerprint(&app.state.workspaces);
+        app.startup_session_structure = session_structure_fingerprint(
+            &app.state.workspaces,
+            app.state.agent_panel_scope,
+            app.state.sidebar_width,
+        );
 
         app.state.workspaces[0].tabs[0]
             .layout
             .set_ratio_at(&[], 0.7);
+        app.refresh_persistence_gate(Instant::now());
+
+        assert!(app.persistence_armed);
+        assert!(app.next_session_save.is_some());
+    }
+
+    #[test]
+    fn changing_agent_panel_scope_arms_persistence_after_partial_restore() {
+        let mut app = test_app();
+        app.no_session = false;
+        app.restore_outcome = RestoreOutcome::PartialRestore;
+        app.persistence_armed = false;
+        app.session_autosave_interval = Some(Duration::from_secs(60));
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.startup_session_structure = session_structure_fingerprint(
+            &app.state.workspaces,
+            app.state.agent_panel_scope,
+            app.state.sidebar_width,
+        );
+
+        app.state.agent_panel_scope = crate::app::state::AgentPanelScope::AllWorkspaces;
+        app.refresh_persistence_gate(Instant::now());
+
+        assert!(app.persistence_armed);
+        assert!(app.next_session_save.is_some());
+    }
+
+    #[test]
+    fn changing_sidebar_width_arms_persistence_after_partial_restore() {
+        let mut app = test_app();
+        app.no_session = false;
+        app.restore_outcome = RestoreOutcome::PartialRestore;
+        app.persistence_armed = false;
+        app.session_autosave_interval = Some(Duration::from_secs(60));
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.startup_session_structure = session_structure_fingerprint(
+            &app.state.workspaces,
+            app.state.agent_panel_scope,
+            app.state.sidebar_width,
+        );
+
+        app.state.sidebar_width += 1;
         app.refresh_persistence_gate(Instant::now());
 
         assert!(app.persistence_armed);
