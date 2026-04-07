@@ -101,6 +101,14 @@ fn flush_incomplete_buffer(buffer: &mut Vec<u8>, tx: &mpsc::Sender<RawInputEvent
         }
     }
 
+    if buffer.starts_with(&[ESC]) {
+        tracing::trace!(
+            bytes = ?buffer,
+            "keeping incomplete escape sequence buffered after input timeout"
+        );
+        return;
+    }
+
     tracing::debug!(bytes = ?buffer, "dropping incomplete raw input buffer after timeout");
     buffer.clear();
 }
@@ -716,6 +724,78 @@ mod tests {
             events.into_iter().next().unwrap(),
             KeyCode::Char('1'),
             KeyModifiers::SHIFT,
+        );
+    }
+
+    #[test]
+    fn timed_out_modify_other_keys_shift_enter_waits_for_completion() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut buffer = Vec::new();
+
+        drain_chunk(&mut buffer, &tx, b"\x1b[27");
+        assert_eq!(buffer, b"\x1b[27");
+        assert!(collect_events(&mut rx).is_empty());
+
+        flush_incomplete_buffer(&mut buffer, &tx);
+        assert_eq!(buffer, b"\x1b[27");
+        assert!(collect_events(&mut rx).is_empty());
+
+        drain_chunk(&mut buffer, &tx, b";2;13~");
+        assert!(buffer.is_empty());
+        let events = collect_events(&mut rx);
+        assert_eq!(events.len(), 1);
+        assert_raw_key(
+            events.into_iter().next().unwrap(),
+            KeyCode::Enter,
+            KeyModifiers::SHIFT,
+        );
+    }
+
+    #[test]
+    fn timed_out_kitty_shift_enter_waits_for_completion() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut buffer = Vec::new();
+
+        drain_chunk(&mut buffer, &tx, b"\x1b[13;2");
+        assert_eq!(buffer, b"\x1b[13;2");
+        assert!(collect_events(&mut rx).is_empty());
+
+        flush_incomplete_buffer(&mut buffer, &tx);
+        assert_eq!(buffer, b"\x1b[13;2");
+        assert!(collect_events(&mut rx).is_empty());
+
+        drain_chunk(&mut buffer, &tx, b"u");
+        assert!(buffer.is_empty());
+        let events = collect_events(&mut rx);
+        assert_eq!(events.len(), 1);
+        assert_raw_key(
+            events.into_iter().next().unwrap(),
+            KeyCode::Enter,
+            KeyModifiers::SHIFT,
+        );
+    }
+
+    #[test]
+    fn timed_out_kitty_ctrl_j_waits_for_completion() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut buffer = Vec::new();
+
+        drain_chunk(&mut buffer, &tx, b"\x1b[106;5");
+        assert_eq!(buffer, b"\x1b[106;5");
+        assert!(collect_events(&mut rx).is_empty());
+
+        flush_incomplete_buffer(&mut buffer, &tx);
+        assert_eq!(buffer, b"\x1b[106;5");
+        assert!(collect_events(&mut rx).is_empty());
+
+        drain_chunk(&mut buffer, &tx, b"u");
+        assert!(buffer.is_empty());
+        let events = collect_events(&mut rx);
+        assert_eq!(events.len(), 1);
+        assert_raw_key(
+            events.into_iter().next().unwrap(),
+            KeyCode::Char('j'),
+            KeyModifiers::CONTROL,
         );
     }
 
