@@ -48,10 +48,10 @@ If you plan to implement the change yourself, say that directly in the issue and
 
 ## Before submitting a PR
 
-Run the project checks and make sure they pass.
+Run the PR checks and make sure they pass.
 
 ```bash
-just check
+just ci
 ```
 
 Do not open a PR that bypasses failing tests, formatting, or build errors.

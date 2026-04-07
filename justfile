@@ -5,10 +5,13 @@ test:
     cargo test
     python3 -m unittest scripts.test_changelog scripts.test_vendor_libghostty_vt
 
-# Check formatting + run unit tests
-check:
+# Run PR CI checks
+ci:
     cargo fmt --check
     cargo test
+
+# Check formatting + run unit tests + maintenance script tests
+check: ci
     python3 -m unittest scripts.test_changelog scripts.test_vendor_libghostty_vt
 
 # Run the full local test suite
