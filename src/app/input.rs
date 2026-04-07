@@ -404,7 +404,16 @@ impl App {
                         warn!(code = ?key_event.code, mods = ?key_event.modifiers, state = ?key_event.state, "key produced empty encoding");
                     }
                 } else {
-                    let _ = rt.send_bytes(Bytes::from(bytes)).await;
+                    let bytes = Bytes::from(bytes);
+                    match rt.try_send_bytes(bytes.clone()) {
+                        Ok(()) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            let _ = rt.send_bytes(bytes).await;
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            warn!("pane input channel closed while forwarding key");
+                        }
+                    }
                 }
             }
         }
