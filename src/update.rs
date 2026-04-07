@@ -65,10 +65,7 @@ impl std::fmt::Display for Version {
 #[derive(Deserialize)]
 struct UpdateManifest {
     version: String,
-    #[serde(default)]
     notes: String,
-    #[serde(default)]
-    notes_url: String,
     assets: BTreeMap<String, String>,
 }
 
@@ -78,17 +75,7 @@ impl UpdateManifest {
     }
 
     fn notes_body(&self) -> String {
-        let notes = self.notes.trim();
-        if !notes.is_empty() {
-            return notes.to_string();
-        }
-
-        let notes_url = self.notes_url.trim();
-        if notes_url.is_empty() {
-            return String::new();
-        }
-
-        format!("### Release notes\n- {notes_url}")
+        self.notes.trim().to_string()
     }
 }
 
@@ -135,6 +122,11 @@ fn check_latest() -> Result<Option<ReleaseInfo>, String> {
         return Ok(None); // up to date
     }
 
+    let notes_body = manifest.notes_body();
+    if notes_body.is_empty() {
+        return Err("update manifest notes are empty".into());
+    }
+
     let (os, arch) = platform_target();
     let download_url = manifest
         .download_url_for(os, arch)
@@ -143,7 +135,7 @@ fn check_latest() -> Result<Option<ReleaseInfo>, String> {
     Ok(Some(ReleaseInfo {
         version: latest,
         download_url,
-        notes_body: manifest.notes_body(),
+        notes_body,
     }))
 }
 
@@ -401,17 +393,18 @@ mod tests {
 
     #[test]
     fn update_manifest_deserializes() {
-        let json = r#"{
-            "version": "0.2.0",
-            "notes_url": "https://example.com/releases/v0.2.0",
-            "assets": {
-                "linux-x86_64": "https://example.com/herdr-linux-x86_64",
-                "macos-aarch64": "https://example.com/herdr-macos-aarch64"
-            }
-        }"#;
+        let json = "{\n\
+            \"version\": \"0.2.0\",\n\
+            \"notes\": \"### Changed\\n- One\",\n\
+            \"assets\": {\n\
+                \"linux-x86_64\": \"https://example.com/herdr-linux-x86_64\",\n\
+                \"macos-aarch64\": \"https://example.com/herdr-macos-aarch64\"\n\
+            }\n\
+        }";
         let manifest: UpdateManifest = serde_json::from_str(json).unwrap();
         assert_eq!(manifest.version, "0.2.0");
         assert_eq!(manifest.assets.len(), 2);
+        assert_eq!(manifest.notes_body(), "### Changed\n- One");
         assert_eq!(
             manifest.download_url_for("linux", "x86_64").as_deref(),
             Some("https://example.com/herdr-linux-x86_64")
@@ -419,29 +412,43 @@ mod tests {
     }
 
     #[test]
-    fn update_manifest_prefers_embedded_notes() {
-        let manifest = UpdateManifest {
-            version: "0.2.0".into(),
-            notes: "### Changed\n- One".into(),
-            notes_url: "https://example.com/releases/v0.2.0".into(),
-            assets: BTreeMap::new(),
-        };
+    fn update_manifest_requires_notes_field() {
+        let json = r#"{
+            "version": "0.2.0",
+            "assets": {
+                "linux-x86_64": "https://example.com/herdr-linux-x86_64"
+            }
+        }"#;
 
-        assert_eq!(manifest.notes_body(), "### Changed\n- One");
+        assert!(serde_json::from_str::<UpdateManifest>(json).is_err());
     }
 
     #[test]
-    fn update_manifest_falls_back_to_notes_url() {
-        let manifest = UpdateManifest {
-            version: "0.2.0".into(),
-            notes: String::new(),
-            notes_url: "https://example.com/releases/v0.2.0".into(),
-            assets: BTreeMap::new(),
-        };
+    fn checked_in_website_manifest_matches_update_schema() {
+        let manifest: UpdateManifest = serde_json::from_str(include_str!("../website/latest.json"))
+            .expect("website/latest.json should match updater schema");
 
-        assert_eq!(
-            manifest.notes_body(),
-            "### Release notes\n- https://example.com/releases/v0.2.0"
-        );
+        assert!(!manifest.notes_body().is_empty());
+        assert_eq!(manifest.assets.len(), 4);
+
+        for target in [
+            "linux-x86_64",
+            "linux-aarch64",
+            "macos-x86_64",
+            "macos-aarch64",
+        ] {
+            let url = manifest
+                .assets
+                .get(target)
+                .unwrap_or_else(|| panic!("missing asset URL for {target}"));
+            assert!(
+                url.contains(&format!("/releases/download/v{}/", manifest.version)),
+                "unexpected release URL for {target}: {url}"
+            );
+            assert!(
+                url.ends_with(&format!("herdr-{target}")),
+                "unexpected asset name for {target}: {url}"
+            );
+        }
     }
 }

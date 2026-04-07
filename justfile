@@ -42,6 +42,10 @@ release version:
     git push --follow-tags
     @echo "v{{version}} released — GitHub Actions building binaries"
 
+# Update website/latest.json from a published GitHub release (usage: just update-latest-json 0.1.1)
+update-latest-json version:
+    python3 scripts/changelog.py sync-latest-json --version {{version}} --output website/latest.json
+
 # Print default config
 default-config:
     cargo run --release -- --default-config
