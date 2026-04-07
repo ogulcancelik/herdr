@@ -292,6 +292,7 @@ pub fn restore(
 ) -> RestoreReport {
     let mut workspaces = Vec::new();
     let mut failed = false;
+    let mut repaired = false;
 
     for ws_snap in &snapshot.workspaces {
         match restore_workspace(
@@ -303,20 +304,15 @@ pub fn restore(
             render_notify.clone(),
             render_dirty.clone(),
         ) {
-            Some(workspace) => workspaces.push(workspace),
+            Some((workspace, workspace_repaired)) => {
+                repaired |= workspace_repaired;
+                workspaces.push(workspace);
+            }
             None => failed = true,
         }
     }
 
-    let status = if failed {
-        if workspaces.is_empty() {
-            RestoreStatus::Failed
-        } else {
-            RestoreStatus::Partial
-        }
-    } else {
-        RestoreStatus::Clean
-    };
+    let status = summarize_restore_status(failed, repaired, workspaces.len());
 
     RestoreReport { workspaces, status }
 }
@@ -329,13 +325,14 @@ fn restore_workspace(
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<AtomicBool>,
-) -> Option<Workspace> {
+) -> Option<(Workspace, bool)> {
     let mut tabs = Vec::new();
     let mut public_pane_numbers = HashMap::new();
     let mut next_public_pane_number = 1;
+    let mut repaired = false;
 
     for (idx, tab_snap) in snap.tabs.iter().enumerate() {
-        let tab = restore_tab(
+        let (tab, tab_repaired) = restore_tab(
             tab_snap,
             idx + 1,
             rows,
@@ -345,6 +342,7 @@ fn restore_workspace(
             render_notify.clone(),
             render_dirty.clone(),
         )?;
+        repaired |= tab_repaired;
         for pane_id in tab.layout.pane_ids() {
             public_pane_numbers.insert(pane_id, next_public_pane_number);
             next_public_pane_number += 1;
@@ -356,19 +354,25 @@ fn restore_workspace(
         return None;
     }
 
-    Some(Workspace {
-        id: snap
-            .id
-            .clone()
-            .unwrap_or_else(crate::workspace::generate_workspace_id),
-        custom_name: snap.custom_name.clone(),
-        identity_cwd: snap.identity_cwd.clone(),
-        cached_git_ahead_behind: None,
-        public_pane_numbers,
-        next_public_pane_number,
-        active_tab: snap.active_tab.min(tabs.len().saturating_sub(1)),
-        tabs,
-    })
+    let active_tab = snap.active_tab.min(tabs.len().saturating_sub(1));
+    repaired |= active_tab != snap.active_tab;
+
+    Some((
+        Workspace {
+            id: snap
+                .id
+                .clone()
+                .unwrap_or_else(crate::workspace::generate_workspace_id),
+            custom_name: snap.custom_name.clone(),
+            identity_cwd: snap.identity_cwd.clone(),
+            cached_git_ahead_behind: None,
+            public_pane_numbers,
+            next_public_pane_number,
+            active_tab,
+            tabs,
+        },
+        repaired,
+    ))
 }
 
 fn restore_tab(
@@ -380,28 +384,21 @@ fn restore_tab(
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<AtomicBool>,
-) -> Option<crate::workspace::Tab> {
+) -> Option<(crate::workspace::Tab, bool)> {
     let (node, id_map) = restore_node_remapped(&snap.layout);
     let pane_ids = collect_pane_ids(&node);
-    let focus = snap
-        .focused
-        .and_then(|old_raw| id_map.get(&old_raw).copied())
-        .or_else(|| pane_ids.first().copied())
-        .unwrap_or(PaneId::from_raw(0));
-    let layout = TileLayout::from_saved(node, focus);
+    let metadata = resolve_tab_restore_metadata(snap, &id_map, &pane_ids);
+    let layout = TileLayout::from_saved(node, metadata.focus);
 
     let mut panes = HashMap::new();
     let mut pane_cwds = HashMap::new();
     let mut runtimes = HashMap::new();
     for id in &pane_ids {
-        let old_id = id_map
-            .iter()
-            .find(|(_, new)| **new == *id)
-            .map(|(old, _)| old);
-        let cwd = old_id
-            .and_then(|old| snap.panes.get(old))
-            .map(|p| p.cwd.clone())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
+        let cwd = metadata
+            .pane_cwds
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| current_dir_fallback());
 
         match PaneRuntime::spawn(
             *id,
@@ -426,25 +423,108 @@ fn restore_tab(
         }
     }
 
-    let root_pane = snap
+    Some((
+        crate::workspace::Tab {
+            custom_name: snap.custom_name.clone(),
+            number,
+            root_pane: metadata.root_pane,
+            layout,
+            panes,
+            pane_cwds,
+            runtimes,
+            zoomed: snap.zoomed,
+            events,
+            render_notify,
+            render_dirty,
+        },
+        metadata.repaired,
+    ))
+}
+
+#[derive(Debug)]
+struct TabRestoreMetadata {
+    focus: PaneId,
+    root_pane: PaneId,
+    pane_cwds: HashMap<PaneId, PathBuf>,
+    repaired: bool,
+}
+
+fn summarize_restore_status(
+    failed: bool,
+    repaired: bool,
+    restored_workspaces: usize,
+) -> RestoreStatus {
+    if failed {
+        if restored_workspaces == 0 {
+            RestoreStatus::Failed
+        } else {
+            RestoreStatus::Partial
+        }
+    } else if repaired {
+        RestoreStatus::Partial
+    } else {
+        RestoreStatus::Clean
+    }
+}
+
+fn current_dir_fallback() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| "/".into())
+}
+
+fn resolve_tab_restore_metadata(
+    snap: &TabSnapshot,
+    id_map: &HashMap<u32, PaneId>,
+    pane_ids: &[PaneId],
+) -> TabRestoreMetadata {
+    let mut repaired = false;
+
+    let focus = match snap
+        .focused
+        .and_then(|old_raw| id_map.get(&old_raw).copied())
+    {
+        Some(focus) => focus,
+        None => {
+            repaired = true;
+            pane_ids.first().copied().unwrap_or(PaneId::from_raw(0))
+        }
+    };
+
+    let mut pane_cwds = HashMap::new();
+    for id in pane_ids {
+        let old_id = id_map
+            .iter()
+            .find(|(_, new)| **new == *id)
+            .map(|(old, _)| *old);
+        let cwd = match old_id
+            .and_then(|old| snap.panes.get(&old))
+            .map(|pane| pane.cwd.clone())
+        {
+            Some(cwd) => cwd,
+            None => {
+                repaired = true;
+                current_dir_fallback()
+            }
+        };
+        pane_cwds.insert(*id, cwd);
+    }
+
+    let root_pane = match snap
         .root_pane
         .and_then(|old_raw| id_map.get(&old_raw).copied())
-        .or_else(|| pane_ids.first().copied())
-        .unwrap_or(PaneId::from_raw(0));
+    {
+        Some(root_pane) => root_pane,
+        None => {
+            repaired = true;
+            pane_ids.first().copied().unwrap_or(PaneId::from_raw(0))
+        }
+    };
 
-    Some(crate::workspace::Tab {
-        custom_name: snap.custom_name.clone(),
-        number,
+    TabRestoreMetadata {
+        focus,
         root_pane,
-        layout,
-        panes,
         pane_cwds,
-        runtimes,
-        zoomed: snap.zoomed,
-        events,
-        render_notify,
-        render_dirty,
-    })
+        repaired,
+    }
 }
 
 /// Restore a layout tree, remapping every pane ID to a fresh globally unique one.
@@ -1088,6 +1168,48 @@ mod tests {
             agent_panel_scope: crate::app::state::AgentPanelScope::CurrentWorkspace,
             sidebar_width: Some(26),
         }
+    }
+
+    #[test]
+    fn restore_status_is_partial_when_any_workspace_is_repaired() {
+        assert_eq!(
+            summarize_restore_status(false, true, 1),
+            RestoreStatus::Partial
+        );
+        assert_eq!(
+            summarize_restore_status(false, false, 1),
+            RestoreStatus::Clean
+        );
+        assert_eq!(
+            summarize_restore_status(true, false, 1),
+            RestoreStatus::Partial
+        );
+        assert_eq!(
+            summarize_restore_status(true, false, 0),
+            RestoreStatus::Failed
+        );
+    }
+
+    #[test]
+    fn resolve_tab_restore_metadata_marks_missing_focus_root_and_cwd_as_repaired() {
+        let pane_id = PaneId::from_raw(42);
+        let id_map = HashMap::from([(7, pane_id)]);
+        let pane_ids = vec![pane_id];
+        let snap = TabSnapshot {
+            custom_name: Some("broken".to_string()),
+            layout: LayoutSnapshot::Pane(7),
+            panes: HashMap::new(),
+            zoomed: false,
+            focused: Some(999),
+            root_pane: Some(998),
+        };
+
+        let metadata = resolve_tab_restore_metadata(&snap, &id_map, &pane_ids);
+
+        assert!(metadata.repaired);
+        assert_eq!(metadata.focus, pane_id);
+        assert_eq!(metadata.root_pane, pane_id);
+        assert!(metadata.pane_cwds.contains_key(&pane_id));
     }
 
     #[test]

@@ -49,7 +49,7 @@ pub struct App {
     next_session_save: Option<Instant>,
     persistence_armed: bool,
     restore_outcome: RestoreOutcome,
-    startup_session_structure: SessionStructureFingerprint,
+    shutdown_listener_diagnostic: Option<String>,
     input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
     last_terminal_size: Option<(u16, u16)>,
     config_diagnostic_deadline: Option<Instant>,
@@ -72,36 +72,6 @@ enum RestoreOutcome {
     PartialRestore,
     RestoreFailed,
     NewerSnapshotIgnored,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SessionStructureFingerprint {
-    workspaces: Vec<WorkspaceStructureFingerprint>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct WorkspaceStructureFingerprint {
-    id: String,
-    custom_name: Option<String>,
-    tabs: Vec<TabStructureFingerprint>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TabStructureFingerprint {
-    custom_name: Option<String>,
-    zoomed: bool,
-    layout: LayoutStructureFingerprint,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum LayoutStructureFingerprint {
-    Pane,
-    Split {
-        direction: ratatui::layout::Direction,
-        ratio_bits: u32,
-        first: Box<LayoutStructureFingerprint>,
-        second: Box<LayoutStructureFingerprint>,
-    },
 }
 
 enum LoopEvent {
@@ -167,44 +137,6 @@ fn api_request_changes_ui(request: &crate::api::schema::Request) -> bool {
 }
 
 /// Resolve the palette from config: base theme + optional custom overrides.
-fn layout_structure_fingerprint(node: &crate::layout::Node) -> LayoutStructureFingerprint {
-    match node {
-        crate::layout::Node::Pane(_) => LayoutStructureFingerprint::Pane,
-        crate::layout::Node::Split {
-            direction,
-            ratio,
-            first,
-            second,
-        } => LayoutStructureFingerprint::Split {
-            direction: *direction,
-            ratio_bits: ratio.to_bits(),
-            first: Box::new(layout_structure_fingerprint(first)),
-            second: Box::new(layout_structure_fingerprint(second)),
-        },
-    }
-}
-
-fn session_structure_fingerprint(workspaces: &[Workspace]) -> SessionStructureFingerprint {
-    SessionStructureFingerprint {
-        workspaces: workspaces
-            .iter()
-            .map(|workspace| WorkspaceStructureFingerprint {
-                id: workspace.id.clone(),
-                custom_name: workspace.custom_name.clone(),
-                tabs: workspace
-                    .tabs
-                    .iter()
-                    .map(|tab| TabStructureFingerprint {
-                        custom_name: tab.custom_name.clone(),
-                        zoomed: tab.zoomed,
-                        layout: layout_structure_fingerprint(tab.layout.root()),
-                    })
-                    .collect(),
-            })
-            .collect(),
-    }
-}
-
 fn resolve_palette(config: &crate::config::Config) -> state::Palette {
     // Start with the named theme (default: catppuccin)
     let base_name = config.theme.name.as_deref().unwrap_or("catppuccin");
@@ -429,6 +361,7 @@ impl App {
             config_diagnostic,
             session_diagnostic,
             toast: None,
+            persistence_relevant_mutation: false,
             prefix_code,
             prefix_mods,
             default_sidebar_width: config.ui.sidebar_width,
@@ -476,7 +409,6 @@ impl App {
                 .get(idx)
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
-        let startup_session_structure = session_structure_fingerprint(&state.workspaces);
         let persistence_armed = !no_session
             && matches!(
                 restore_outcome,
@@ -530,7 +462,7 @@ impl App {
             next_session_save,
             persistence_armed,
             restore_outcome,
-            startup_session_structure,
+            shutdown_listener_diagnostic: None,
             input_rx: None,
             last_terminal_size: terminal::size().ok(),
             render_notify,
@@ -545,8 +477,10 @@ impl App {
         self.query_host_terminal_theme();
 
         let mut needs_render = true;
-
-        while !self.state.should_quit {
+        let run_result = loop {
+            if self.state.should_quit {
+                break Ok(());
+            }
             if self.render_dirty.load(Ordering::Acquire) {
                 needs_render = true;
             }
@@ -594,10 +528,12 @@ impl App {
 
             if needs_render && self.can_render_now(now) {
                 self.render_dirty.swap(false, Ordering::AcqRel);
-                terminal.draw(|frame| {
+                if let Err(err) = terminal.draw(|frame| {
                     crate::ui::compute_view(&mut self.state, frame.area());
                     crate::ui::render(&self.state, frame);
-                })?;
+                }) {
+                    break Err(err);
+                }
                 self.last_render_at = Some(now);
                 needs_render = false;
                 continue;
@@ -656,12 +592,10 @@ impl App {
                     }
                 }
             }
-        }
+        };
 
         self.refresh_persistence_gate(Instant::now());
-        self.finalize_persistence()?;
-
-        Ok(())
+        self.finish_run(run_result)
     }
 
     fn drain_persistence_events(&mut self) -> bool {
@@ -788,7 +722,7 @@ impl App {
             return;
         }
 
-        if session_structure_fingerprint(&self.state.workspaces) != self.startup_session_structure {
+        if self.state.persistence_relevant_mutation {
             info!(restore_outcome = ?self.restore_outcome, "session persistence armed after structural change");
             self.persistence_armed = true;
             if self.next_session_save.is_none() {
@@ -822,6 +756,19 @@ impl App {
         };
 
         worker.shutdown().map_err(io::Error::other)
+    }
+
+    fn finish_run(&mut self, run_result: io::Result<()>) -> io::Result<()> {
+        let finalize_result = self.finalize_persistence();
+
+        match (run_result, finalize_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(run_err), Ok(())) => Err(run_err),
+            (Ok(()), Err(finalize_err)) => Err(finalize_err),
+            (Err(run_err), Err(finalize_err)) => Err(io::Error::other(format!(
+                "run failed: {run_err}; persistence finalization failed: {finalize_err}"
+            ))),
+        }
     }
 
     fn apply_host_terminal_theme_to_panes(&self) {
@@ -1011,14 +958,15 @@ impl App {
             }
             AppEvent::ShutdownListenerFailed { error } => {
                 tracing::error!(error = %error, "shutdown listener failed");
-                self.state.session_diagnostic = Some(format!(
+                self.shutdown_listener_diagnostic = Some(format!(
                     "graceful shutdown persistence unavailable: {error}"
                 ));
+                self.state.session_diagnostic = self.shutdown_listener_diagnostic.clone();
                 return;
             }
             AppEvent::SessionPersistenceSucceeded { generation } => {
                 tracing::debug!(generation = *generation, "session persistence succeeded");
-                self.state.session_diagnostic = None;
+                self.state.session_diagnostic = self.shutdown_listener_diagnostic.clone();
                 return;
             }
             AppEvent::SessionPersistenceFailed {
@@ -1398,7 +1346,7 @@ impl App {
                     })
                     .unwrap();
                 };
-                let Some(ws) = self.state.workspaces.get_mut(index) else {
+                if self.state.workspaces.get(index).is_none() {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
                         error: ErrorBody {
@@ -1407,8 +1355,11 @@ impl App {
                         },
                     })
                     .unwrap();
-                };
-                ws.set_custom_name(params.label.clone());
+                }
+                self.state.mark_persistence_relevant_mutation();
+                if let Some(ws) = self.state.workspaces.get_mut(index) {
+                    ws.set_custom_name(params.label.clone());
+                }
                 self.emit_event(crate::api::schema::EventEnvelope {
                     event: crate::api::schema::EventKind::WorkspaceRenamed,
                     data: crate::api::schema::EventData::WorkspaceRenamed {
@@ -1578,6 +1529,7 @@ impl App {
                     });
                 match result {
                     Ok(tab_idx) => {
+                        self.state.mark_persistence_relevant_mutation();
                         if params.focus {
                             self.state.switch_workspace(ws_idx);
                             if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
@@ -1654,12 +1606,13 @@ impl App {
                     })
                     .unwrap();
                 };
-                let Some(tab) = self
+                if self
                     .state
                     .workspaces
-                    .get_mut(ws_idx)
-                    .and_then(|ws| ws.tabs.get_mut(tab_idx))
-                else {
+                    .get(ws_idx)
+                    .and_then(|ws| ws.tabs.get(tab_idx))
+                    .is_none()
+                {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
                         error: ErrorBody {
@@ -1668,8 +1621,16 @@ impl App {
                         },
                     })
                     .unwrap();
-                };
-                tab.set_custom_name(params.label.clone());
+                }
+                self.state.mark_persistence_relevant_mutation();
+                if let Some(tab) = self
+                    .state
+                    .workspaces
+                    .get_mut(ws_idx)
+                    .and_then(|ws| ws.tabs.get_mut(tab_idx))
+                {
+                    tab.set_custom_name(params.label.clone());
+                }
                 self.emit_event(crate::api::schema::EventEnvelope {
                     event: crate::api::schema::EventKind::TabRenamed,
                     data: crate::api::schema::EventData::TabRenamed {
@@ -1725,6 +1686,7 @@ impl App {
                     })
                     .unwrap();
                 }
+                self.state.mark_persistence_relevant_mutation();
                 self.emit_event(crate::api::schema::EventEnvelope {
                     event: crate::api::schema::EventKind::TabClosed,
                     data: crate::api::schema::EventData::TabClosed {
@@ -1792,6 +1754,7 @@ impl App {
                 if !params.focus {
                     ws.layout.focus_pane(target_pane_id);
                 }
+                self.state.mark_persistence_relevant_mutation();
                 let pane = self.pane_info(ws_idx, new_pane_id).unwrap();
                 self.emit_event(crate::api::schema::EventEnvelope {
                     event: crate::api::schema::EventKind::PaneCreated,
@@ -2066,6 +2029,7 @@ impl App {
                             workspace_id,
                         },
                     });
+                    self.state.mark_persistence_relevant_mutation();
                 }
                 SuccessResponse {
                     id: request.id,
@@ -2280,10 +2244,10 @@ impl App {
         match self.create_tab_with_options(initial_cwd, true) {
             Ok(tab_idx) => {
                 if let Some(name) = custom_name {
-                    if let Some(ws) = self
-                        .state
-                        .active
-                        .and_then(|ws_idx| self.state.workspaces.get_mut(ws_idx))
+                    let active_ws_idx = self.state.active;
+                    self.state.mark_persistence_relevant_mutation();
+                    if let Some(ws) =
+                        active_ws_idx.and_then(|ws_idx| self.state.workspaces.get_mut(ws_idx))
                     {
                         if let Some(tab) = ws.tabs.get_mut(tab_idx) {
                             tab.set_custom_name(name);
@@ -2306,16 +2270,21 @@ impl App {
             return self.create_workspace_with_options(initial_cwd, focus);
         };
         let (rows, cols) = self.state.estimate_pane_size();
-        let ws = &mut self.state.workspaces[ws_idx];
-        let idx = ws.create_tab(
-            rows,
-            cols,
-            initial_cwd,
-            self.state.pane_scrollback_limit_bytes,
-            self.state.host_terminal_theme,
-        )?;
+        let idx = {
+            let ws = &mut self.state.workspaces[ws_idx];
+            ws.create_tab(
+                rows,
+                cols,
+                initial_cwd,
+                self.state.pane_scrollback_limit_bytes,
+                self.state.host_terminal_theme,
+            )?
+        };
+        self.state.mark_persistence_relevant_mutation();
         if focus {
-            ws.switch_tab(idx);
+            if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
+                ws.switch_tab(idx);
+            }
             self.state.mode = Mode::Terminal;
         }
         Ok(idx)
@@ -2339,6 +2308,7 @@ impl App {
         )?;
         ws.refresh_git_ahead_behind();
         self.state.workspaces.push(ws);
+        self.state.mark_persistence_relevant_mutation();
         let idx = self.state.workspaces.len() - 1;
         if focus || self.state.active.is_none() {
             self.state.switch_workspace(idx);
@@ -2805,10 +2775,9 @@ mod tests {
         app.restore_outcome = RestoreOutcome::PartialRestore;
         app.persistence_armed = false;
         app.session_autosave_interval = Some(Duration::from_secs(10));
-        app.state.workspaces = vec![Workspace::test_new("test")];
-        app.startup_session_structure = session_structure_fingerprint(&app.state.workspaces);
+        app.state.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
 
-        app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.move_workspace(0, app.state.workspaces.len());
         app.refresh_persistence_gate(Instant::now());
 
         assert!(app.persistence_armed);
@@ -2824,7 +2793,6 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("test")];
         let second_pane =
             app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
-        app.startup_session_structure = session_structure_fingerprint(&app.state.workspaces);
 
         let tab = &mut app.state.workspaces[0].tabs[0];
         tab.layout.focus_pane(second_pane);
@@ -2841,12 +2809,11 @@ mod tests {
         app.persistence_armed = false;
         app.session_autosave_interval = Some(Duration::from_secs(60));
         app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
         app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
-        app.startup_session_structure = session_structure_fingerprint(&app.state.workspaces);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
 
-        app.state.workspaces[0].tabs[0]
-            .layout
-            .set_ratio_at(&[], 0.7);
+        app.state.resize_pane(crate::layout::NavDirection::Right);
         app.refresh_persistence_gate(Instant::now());
 
         assert!(app.persistence_armed);
@@ -2861,7 +2828,6 @@ mod tests {
         app.persistence_armed = false;
         app.session_autosave_interval = Some(Duration::from_secs(60));
         app.state.workspaces = vec![Workspace::test_new("test")];
-        app.startup_session_structure = session_structure_fingerprint(&app.state.workspaces);
 
         app.state.agent_panel_scope = crate::app::state::AgentPanelScope::AllWorkspaces;
         app.refresh_persistence_gate(Instant::now());
@@ -2878,13 +2844,44 @@ mod tests {
         app.persistence_armed = false;
         app.session_autosave_interval = Some(Duration::from_secs(60));
         app.state.workspaces = vec![Workspace::test_new("test")];
-        app.startup_session_structure = session_structure_fingerprint(&app.state.workspaces);
 
         app.state.sidebar_width += 1;
         app.refresh_persistence_gate(Instant::now());
 
         assert!(!app.persistence_armed);
         assert!(app.next_session_save.is_none());
+    }
+
+    #[test]
+    fn reverted_structural_edit_still_arms_persistence_after_partial_restore() {
+        let mut app = test_app();
+        app.no_session = false;
+        app.restore_outcome = RestoreOutcome::PartialRestore;
+        app.persistence_armed = false;
+        app.session_autosave_interval = Some(Duration::from_secs(60));
+        app.state.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
+        let original_ids: Vec<_> = app
+            .state
+            .workspaces
+            .iter()
+            .map(|ws| ws.id.clone())
+            .collect();
+
+        app.state.move_workspace(0, app.state.workspaces.len());
+        app.state.move_workspace(1, 0);
+        assert_eq!(
+            app.state
+                .workspaces
+                .iter()
+                .map(|ws| ws.id.clone())
+                .collect::<Vec<_>>(),
+            original_ids
+        );
+
+        app.refresh_persistence_gate(Instant::now());
+
+        assert!(app.persistence_armed);
+        assert!(app.next_session_save.is_some());
     }
 
     #[tokio::test]
@@ -2895,6 +2892,26 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn background_pane_exit_does_not_arm_persistence_after_partial_restore() {
+        let mut app = test_app();
+        app.no_session = false;
+        app.restore_outcome = RestoreOutcome::PartialRestore;
+        app.persistence_armed = false;
+        app.session_autosave_interval = Some(Duration::from_secs(60));
+        let ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        app.handle_internal_event(AppEvent::PaneDied { pane_id });
+        app.refresh_persistence_gate(Instant::now());
+
+        assert!(!app.persistence_armed);
+        assert!(app.next_session_save.is_none());
     }
 
     #[test]
@@ -2912,7 +2929,31 @@ mod tests {
     }
 
     #[test]
-    fn persistence_events_update_session_diagnostic() {
+    fn persistence_success_preserves_shutdown_listener_diagnostic() {
+        let mut app = test_app();
+
+        app.handle_internal_event(AppEvent::ShutdownListenerFailed {
+            error: "registration failed".to_string(),
+        });
+        app.handle_internal_event(AppEvent::SessionPersistenceFailed {
+            generation: 1,
+            action: "save session",
+            error: "disk full".to_string(),
+        });
+        assert_eq!(
+            app.state.session_diagnostic.as_deref(),
+            Some("save session failed: disk full")
+        );
+
+        app.handle_internal_event(AppEvent::SessionPersistenceSucceeded { generation: 2 });
+        assert_eq!(
+            app.state.session_diagnostic.as_deref(),
+            Some("graceful shutdown persistence unavailable: registration failed")
+        );
+    }
+
+    #[test]
+    fn persistence_success_clears_persistence_diagnostic_when_no_shutdown_warning_remains() {
         let mut app = test_app();
 
         app.handle_internal_event(AppEvent::SessionPersistenceFailed {

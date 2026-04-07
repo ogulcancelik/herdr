@@ -1033,6 +1033,7 @@ fn apply_rename_action(state: &mut AppState, action: ModalAction) {
             match state.mode {
                 Mode::RenameWorkspace if !state.workspaces.is_empty() => {
                     if !new_name.is_empty() {
+                        state.mark_persistence_relevant_mutation();
                         state.workspaces[state.selected].set_custom_name(new_name);
                     }
                 }
@@ -1046,6 +1047,7 @@ fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                 }
                 Mode::RenameTab => {
                     if !new_name.is_empty() {
+                        state.mark_persistence_relevant_mutation();
                         if let Some(ws) = state.active.and_then(|i| state.workspaces.get_mut(i)) {
                             if let Some(tab) = ws.active_tab_mut() {
                                 tab.set_custom_name(new_name);
@@ -2142,8 +2144,11 @@ impl AppState {
                             };
                             let ratio = ratio.clamp(0.1, 0.9);
                             let path = path.clone();
-                            if let Some(ws) = self.active.and_then(|i| self.workspaces.get_mut(i)) {
-                                ws.layout.set_ratio_at(&path, ratio);
+                            if let Some(active) = self.active {
+                                self.mark_persistence_relevant_mutation();
+                                if let Some(ws) = self.workspaces.get_mut(active) {
+                                    ws.layout.set_ratio_at(&path, ratio);
+                                }
                             }
                         }
                         DragTarget::PaneScrollbar {
@@ -2820,18 +2825,25 @@ impl AppState {
             .and_then(|ws| ws.focused_runtime())
             .and_then(|rt| rt.cwd());
 
-        if let Some(ws) = self.active.and_then(|i| self.workspaces.get_mut(i)) {
-            if let Ok(new_id) = ws.split_focused(
-                direction,
-                new_rows,
-                new_cols,
-                cwd,
-                self.pane_scrollback_limit_bytes,
-                self.host_terminal_theme,
-            ) {
-                ws.layout.focus_pane(new_id);
-                self.mode = Mode::Terminal;
+        let mut did_split = false;
+        if let Some(active) = self.active {
+            if let Some(ws) = self.workspaces.get_mut(active) {
+                if let Ok(new_id) = ws.split_focused(
+                    direction,
+                    new_rows,
+                    new_cols,
+                    cwd,
+                    self.pane_scrollback_limit_bytes,
+                    self.host_terminal_theme,
+                ) {
+                    ws.layout.focus_pane(new_id);
+                    did_split = true;
+                }
             }
+        }
+        if did_split {
+            self.mark_persistence_relevant_mutation();
+            self.mode = Mode::Terminal;
         }
     }
 }

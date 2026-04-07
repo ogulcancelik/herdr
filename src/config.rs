@@ -970,6 +970,31 @@ fn parse_key_combo(s: &str) -> Option<(KeyCode, KeyModifiers)> {
             if ch.is_ascii_uppercase() {
                 modifiers |= KeyModifiers::SHIFT;
                 KeyCode::Char(ch.to_ascii_lowercase())
+            } else if matches!(
+                ch,
+                '!' | '@'
+                    | '#'
+                    | '$'
+                    | '%'
+                    | '^'
+                    | '&'
+                    | '*'
+                    | '('
+                    | ')'
+                    | '_'
+                    | '+'
+                    | '{'
+                    | '}'
+                    | '|'
+                    | ':'
+                    | '"'
+                    | '<'
+                    | '>'
+                    | '?'
+                    | '~'
+            ) {
+                modifiers |= KeyModifiers::SHIFT;
+                KeyCode::Char(ch)
             } else {
                 KeyCode::Char(ch)
             }
@@ -1106,6 +1131,14 @@ mod tests {
         assert_eq!(
             parse_key_combo("ctrl+`"),
             Some((KeyCode::Char('`'), KeyModifiers::CONTROL))
+        );
+        assert_eq!(
+            parse_key_combo("{"),
+            Some((KeyCode::Char('{'), KeyModifiers::SHIFT))
+        );
+        assert_eq!(
+            parse_key_combo("?"),
+            Some((KeyCode::Char('?'), KeyModifiers::SHIFT))
         );
     }
 

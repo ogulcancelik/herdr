@@ -174,6 +174,8 @@ impl AppState {
             return;
         }
 
+        self.mark_persistence_relevant_mutation();
+
         let active_id = self.active.map(|idx| self.workspaces[idx].id.clone());
         let selected_id = self
             .workspaces
@@ -222,6 +224,7 @@ impl AppState {
         if self.workspaces.is_empty() {
             return;
         }
+        self.mark_persistence_relevant_mutation();
         let name = self.workspaces[self.selected].display_name();
         info!(workspace = %name, "workspace closed");
         self.workspaces.remove(self.selected);
@@ -269,6 +272,9 @@ impl AppState {
                 .pane_infos
                 .iter()
                 .fold(first.rect, |acc, p| acc.union(p.rect));
+            if self.active.is_some() {
+                self.mark_persistence_relevant_mutation();
+            }
             if let Some(tab) = self
                 .active
                 .and_then(|i| self.workspaces.get_mut(i))
@@ -294,6 +300,14 @@ impl AppState {
     }
 
     pub fn toggle_fullscreen(&mut self) {
+        let can_toggle = self
+            .active
+            .and_then(|i| self.workspaces.get(i))
+            .and_then(|ws| ws.active_tab())
+            .is_some_and(|tab| tab.layout.pane_count() > 1);
+        if can_toggle {
+            self.mark_persistence_relevant_mutation();
+        }
         if let Some(tab) = self
             .active
             .and_then(|i| self.workspaces.get_mut(i))
@@ -312,6 +326,8 @@ impl AppState {
             .is_some_and(|ws| ws.close_focused());
         if should_close_workspace {
             self.close_selected_workspace();
+        } else if self.active.is_some() {
+            self.mark_persistence_relevant_mutation();
         }
     }
 
@@ -324,8 +340,11 @@ impl AppState {
             self.close_selected_workspace();
             return;
         }
-        if let Some(ws) = self.active.and_then(|i| self.workspaces.get_mut(i)) {
-            ws.close_active_tab();
+        if let Some(active) = self.active {
+            self.mark_persistence_relevant_mutation();
+            if let Some(ws) = self.workspaces.get_mut(active) {
+                ws.close_active_tab();
+            }
         }
     }
 }

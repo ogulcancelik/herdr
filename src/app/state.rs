@@ -593,6 +593,7 @@ pub struct AppState {
     pub config_diagnostic: Option<String>,
     pub session_diagnostic: Option<String>,
     pub toast: Option<ToastNotification>,
+    pub(crate) persistence_relevant_mutation: bool,
     // Config
     pub prefix_code: KeyCode,
     pub prefix_mods: KeyModifiers,
@@ -623,6 +624,10 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub(crate) fn mark_persistence_relevant_mutation(&mut self) {
+        self.persistence_relevant_mutation = true;
+    }
+
     pub fn sound_enabled(&self) -> bool {
         self.sound.enabled
     }
@@ -640,6 +645,46 @@ impl AppState {
     }
 }
 
+fn shifted_symbol_base(ch: char) -> Option<char> {
+    Some(match ch {
+        '!' => '1',
+        '@' => '2',
+        '#' => '3',
+        '$' => '4',
+        '%' => '5',
+        '^' => '6',
+        '&' => '7',
+        '*' => '8',
+        '(' => '9',
+        ')' => '0',
+        '_' => '-',
+        '+' => '=',
+        '{' => '[',
+        '}' => ']',
+        '|' => '\\',
+        ':' => ';',
+        '"' => '\'',
+        '<' => ',',
+        '>' => '.',
+        '?' => '/',
+        '~' => '`',
+        _ => return None,
+    })
+}
+
+fn canonical_key_char(ch: char, modifiers: KeyModifiers) -> char {
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        if ch.is_ascii_alphabetic() {
+            return ch.to_ascii_lowercase();
+        }
+        if let Some(base) = shifted_symbol_base(ch) {
+            return base;
+        }
+    }
+
+    ch
+}
+
 pub fn key_matches(
     key: &crossterm::event::KeyEvent,
     expected_code: KeyCode,
@@ -650,10 +695,8 @@ pub fn key_matches(
     }
 
     match (key.code, expected_code) {
-        (KeyCode::Char(actual), KeyCode::Char(expected))
-            if actual.is_ascii_alphabetic() && expected.is_ascii_alphabetic() =>
-        {
-            actual.eq_ignore_ascii_case(&expected)
+        (KeyCode::Char(actual), KeyCode::Char(expected)) => {
+            canonical_key_char(actual, key.modifiers) == canonical_key_char(expected, expected_mods)
         }
         (actual, expected) => actual == expected,
     }
@@ -705,6 +748,7 @@ impl AppState {
             config_diagnostic: None,
             session_diagnostic: None,
             toast: None,
+            persistence_relevant_mutation: false,
             prefix_code: KeyCode::Char('b'),
             prefix_mods: KeyModifiers::CONTROL,
             default_sidebar_width: 26,
@@ -805,6 +849,25 @@ mod tests {
         assert!(key_matches(
             &KeyEvent::new(KeyCode::Char('B'), KeyModifiers::SHIFT),
             KeyCode::Char('b'),
+            KeyModifiers::SHIFT,
+        ));
+    }
+
+    #[test]
+    fn key_matches_shifted_symbol_with_base_binding() {
+        assert!(key_matches(
+            &KeyEvent::new(KeyCode::Char('!'), KeyModifiers::SHIFT),
+            KeyCode::Char('1'),
+            KeyModifiers::SHIFT,
+        ));
+        assert!(key_matches(
+            &KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT),
+            KeyCode::Char('/'),
+            KeyModifiers::SHIFT,
+        ));
+        assert!(key_matches(
+            &KeyEvent::new(KeyCode::Char('{'), KeyModifiers::SHIFT),
+            KeyCode::Char('['),
             KeyModifiers::SHIFT,
         ));
     }
