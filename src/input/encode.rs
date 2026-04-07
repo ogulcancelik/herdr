@@ -309,19 +309,31 @@ fn kitty_modifier(mods: KeyModifiers) -> u32 {
 }
 
 fn encode_text_input(key: &TerminalKey) -> Option<Vec<u8>> {
+    let ch = match key.code {
+        KeyCode::Char(ch) => ch,
+        _ => return None,
+    };
+
+    if key.modifiers.is_empty() {
+        match key.kind {
+            crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat => {
+                let mut buf = [0u8; 4];
+                return Some(ch.encode_utf8(&mut buf).as_bytes().to_vec());
+            }
+            crossterm::event::KeyEventKind::Release => return Some(Vec::new()),
+        }
+    }
+
     if key.modifiers != KeyModifiers::SHIFT {
         return None;
     }
 
-    let ch = match key.code {
-        KeyCode::Char(ch) => shifted_text_char(key, ch)?,
-        _ => return None,
-    };
+    let shifted_ch = shifted_text_char(key, ch)?;
 
     match key.kind {
         crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat => {
             let mut buf = [0u8; 4];
-            Some(ch.encode_utf8(&mut buf).as_bytes().to_vec())
+            Some(shifted_ch.encode_utf8(&mut buf).as_bytes().to_vec())
         }
         crossterm::event::KeyEventKind::Release => Some(Vec::new()),
     }
