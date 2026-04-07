@@ -596,19 +596,8 @@ fn pane_run(args: &[String]) -> std::io::Result<i32> {
     }
 
     let pane_id = normalize_pane_id(&args[0]);
-    let text = args[1..].join(" ");
-    let send_text_status = send_ok_request(Method::PaneSendText(PaneSendTextParams {
-        pane_id: pane_id.clone(),
-        text,
-    }))?;
-    if send_text_status != 0 {
-        return Ok(send_text_status);
-    }
-
-    send_ok_request(Method::PaneSendKeys(PaneSendKeysParams {
-        pane_id,
-        keys: vec!["Enter".into()],
-    }))
+    let text = format!("{}\r", args[1..].join(" "));
+    send_ok_request(Method::PaneSendText(PaneSendTextParams { pane_id, text }))
 }
 
 fn integration_install(args: &[String]) -> std::io::Result<i32> {

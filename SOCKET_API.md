@@ -830,7 +830,7 @@ herdr wait agent-state <pane_id> --state <idle|working|blocked|unknown> [--timeo
 - `pane read --source recent-unwrapped` returns recent terminal text with soft wraps joined back together
 - `pane send-text`, `pane send-keys`, and `pane run` print nothing on success
 - list/get/create/split/wait commands print json on success
-- `pane run` is a convenience wrapper for `pane send-text` + `pane send-keys Enter`
+- `pane run` is a convenience wrapper for `pane send-text` with a trailing carriage return (`\r`)
 - `wait agent-state` is a cli convenience built on top of event subscriptions
 - `--raw` disables ansi stripping for `pane read` and `wait output`
 - `wait output --source recent` matches against unwrapped recent terminal text by default, so pane width and soft wrapping do not break matches
@@ -860,7 +860,7 @@ herdr pane read 1-1 --source recent --lines 80
 
 ## behavior notes and gotchas
 
-- `pane.send_text` sends literal text only. if you want to execute a command, follow it with `pane.send_keys` and `Enter`, or use cli `pane run`.
+- `pane.send_text` sends literal text only. if you want to execute a command, follow it with `pane.send_keys` and `Enter`, or use cli `pane run`, which appends a trailing carriage return (`\r`).
 - `pane.read` and `pane.wait_for_output` strip ansi by default.
 - `pane.output_matched` subscriptions fire on transitions into a matching state; they do not repeatedly spam the same still-visible match on every poll.
 - closing the socket connection ends the subscription.
