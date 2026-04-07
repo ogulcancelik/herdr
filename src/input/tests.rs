@@ -720,3 +720,25 @@ fn protocol_from_nonzero_flags_is_kitty() {
         KeyboardProtocol::Kitty { flags: 7 }
     );
 }
+
+#[test]
+fn chinese_char_encodes_as_utf8() {
+    let key = TerminalKey::new(KeyCode::Char('中'), KeyModifiers::empty());
+    let encoded = encode_terminal_key(key, KeyboardProtocol::Legacy);
+    assert_eq!(encoded, "中".as_bytes());
+}
+
+#[test]
+fn chinese_char_with_kitty_protocol_encodes_as_utf8() {
+    let key = TerminalKey::new(KeyCode::Char('文'), KeyModifiers::empty());
+    let encoded = encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 7 });
+    assert_eq!(encoded, "文".as_bytes());
+}
+
+#[test]
+fn chinese_char_with_modifiers_falls_back_to_kitty_encoding() {
+    let key = TerminalKey::new(KeyCode::Char('测'), KeyModifiers::ALT);
+    let encoded = encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 7 });
+    assert!(!encoded.is_empty());
+    assert_ne!(encoded, "测".as_bytes());
+}
