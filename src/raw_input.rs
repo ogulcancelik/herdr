@@ -407,6 +407,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_kitty_shift_enter() {
+        let (RawInputEvent::Key(key), consumed) = extract_one_event(b"\x1b[13;2u").unwrap()
+        else {
+            panic!("expected key");
+        };
+        assert_eq!(consumed, 7);
+        assert_eq!(key.code, KeyCode::Enter);
+        assert_eq!(key.modifiers, KeyModifiers::SHIFT);
+    }
+
+    #[test]
     fn parses_bracketed_paste() {
         let (RawInputEvent::Paste(text), consumed) =
             extract_one_event(b"\x1b[200~hello\x1b[201~rest").unwrap()

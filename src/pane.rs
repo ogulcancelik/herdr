@@ -411,6 +411,11 @@ impl GhosttyPaneTerminal {
             })
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
+        // Enable kitty keyboard protocol so modified keys (Shift+Enter, etc.)
+        // are properly encoded when forwarded to child processes.
+        // This matches what the host terminal (e.g. Ghostty) already has enabled.
+        terminal.write(b"\x1b[>1u");
+
         let render_state =
             crate::ghostty::RenderState::new().map_err(|e| std::io::Error::other(e.to_string()))?;
         let mut key_encoder =
@@ -1855,9 +1860,18 @@ mod tests {
     #[test]
     fn ghostty_keyboard_protocol_tracks_live_terminal_flags() {
         let (tx, _rx) = mpsc::channel(4);
-        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
-        terminal.write(b"\x1b[>3u");
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        // After construction, kitty protocol is enabled (flags=1)
+        assert_eq!(
+            pane.keyboard_protocol(),
+            Some(crate::input::KeyboardProtocol::Kitty { flags: 1 })
+        );
+
+        // Child can change flags
+        pane.core.lock().unwrap().terminal.write(b"\x1b[>3u");
+        pane.key_encoder.lock().unwrap().set_from_terminal(&pane.core.lock().unwrap().terminal);
 
         assert_eq!(
             pane.keyboard_protocol(),
@@ -1909,6 +1923,7 @@ mod tests {
             .unwrap();
         let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
 
+        // With kitty protocol active (default), arrows use CSI format regardless of cursor mode
         let encoded = pane.encode_terminal_key(
             crate::input::TerminalKey::new(
                 crossterm::event::KeyCode::Up,
@@ -1917,7 +1932,7 @@ mod tests {
             crate::input::KeyboardProtocol::Legacy,
         );
 
-        assert_eq!(encoded, b"\x1bOA");
+        assert_eq!(encoded, b"\x1b[A");
     }
 
     #[test]
@@ -1927,6 +1942,7 @@ mod tests {
         let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
         let pane_id = PaneId::from_raw(1);
 
+        // With kitty protocol active, arrows use CSI format
         let before = pane.encode_terminal_key(
             crate::input::TerminalKey::new(
                 crossterm::event::KeyCode::Up,
@@ -1936,6 +1952,7 @@ mod tests {
         );
         assert_eq!(before, b"\x1b[A");
 
+        // Even with application cursor mode, kitty protocol uses CSI format
         pane.process_pty_bytes(pane_id, b"\x1b[?1h", &tx);
 
         let after = pane.encode_terminal_key(
@@ -1945,7 +1962,7 @@ mod tests {
             ),
             crate::input::KeyboardProtocol::Legacy,
         );
-        assert_eq!(after, b"\x1bOA");
+        assert_eq!(after, b"\x1b[A");
     }
 
     #[test]
@@ -1959,11 +1976,15 @@ mod tests {
             crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::SHIFT,
         );
 
+        // Kitty protocol is already active (flags=1) after construction
         let before = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
-        pane.process_pty_bytes(pane_id, b"\x1b[>1u", &tx);
+        assert_eq!(before, b"\x1b[13;6u");
+
+        // Child can change flags to 3 (adds REPORT_ALTERNATE_KEYS)
+        pane.process_pty_bytes(pane_id, b"\x1b[>3u", &tx);
         let after = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
 
-        assert_ne!(before, after);
+        // Still works with different flags
         assert_eq!(after, b"\x1b[13;6u");
     }
 
@@ -1981,25 +2002,16 @@ mod tests {
         )
         .unwrap();
 
-        first.process_pty_bytes(PaneId::from_raw(1), b"\x1b[?1h", &tx);
+        // Both start with kitty protocol (flags=1)
+        assert_eq!(first.keyboard_protocol(), second.keyboard_protocol());
 
-        let first_encoded = first.encode_terminal_key(
-            crate::input::TerminalKey::new(
-                crossterm::event::KeyCode::Up,
-                crossterm::event::KeyModifiers::empty(),
-            ),
-            crate::input::KeyboardProtocol::Legacy,
-        );
-        let second_encoded = second.encode_terminal_key(
-            crate::input::TerminalKey::new(
-                crossterm::event::KeyCode::Up,
-                crossterm::event::KeyModifiers::empty(),
-            ),
-            crate::input::KeyboardProtocol::Legacy,
-        );
+        // First pane disables kitty protocol
+        first.process_pty_bytes(PaneId::from_raw(1), b"\x1b[>0u", &tx);
 
-        assert_eq!(first_encoded, b"\x1bOA");
-        assert_eq!(second_encoded, b"\x1b[A");
+        // Now they should have different protocols
+        assert_ne!(first.keyboard_protocol(), second.keyboard_protocol());
+        assert_eq!(first.keyboard_protocol(), Some(crate::input::KeyboardProtocol::Legacy));
+        assert_eq!(second.keyboard_protocol(), Some(crate::input::KeyboardProtocol::Kitty { flags: 1 }));
     }
 
     #[test]

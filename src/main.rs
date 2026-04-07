@@ -337,12 +337,12 @@ fn main() -> io::Result<()> {
             io::stdout(),
             EnableMouseCapture,
             EnableBracketedPaste,
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-            )
+            // Keep host-side keyboard enhancement minimal: we need modified
+            // special keys like Shift+Enter to disambiguate, but asking for all
+            // keys as escape codes interferes with macOS text composition/dead
+            // keys (accent input). Child PTYs negotiate richer keyboard modes
+            // separately when they need them.
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         )?;
 
         // tmux doesn't understand kitty keyboard protocol push (\e[>1u).
