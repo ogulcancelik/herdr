@@ -354,8 +354,8 @@ impl PaneTerminal {
         self.ghostty.extract_selection(selection)
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
-        self.ghostty.render(frame, area);
+    fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {
+        self.ghostty.render(frame, area, show_cursor);
     }
 
     fn apply_host_terminal_theme(&self, theme: crate::terminal_theme::TerminalTheme) {
@@ -669,7 +669,7 @@ impl GhosttyPaneTerminal {
             .and_then(|mut core| ghostty_extract_selection(&mut core, selection).ok())
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {
         let Ok(mut core) = self.core.lock() else {
             return;
         };
@@ -732,7 +732,7 @@ impl GhosttyPaneTerminal {
             }
         }
 
-        if render_state.cursor_visible().ok() == Some(true) {
+        if show_cursor && render_state.cursor_visible().ok() == Some(true) {
             if let Ok(Some(cursor)) = render_state.cursor_viewport() {
                 if cursor.x < area.width && cursor.y < area.height {
                     frame.set_cursor_position((area.x + cursor.x, area.y + cursor.y));
@@ -1722,8 +1722,8 @@ impl PaneRuntime {
         self.terminal.extract_selection(selection)
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect) {
-        self.terminal.render(frame, area);
+    pub fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {
+        self.terminal.render(frame, area, show_cursor);
     }
 
     pub fn keyboard_protocol(&self) -> crate::input::KeyboardProtocol {

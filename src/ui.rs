@@ -1207,8 +1207,8 @@ fn render_panes(app: &AppState, frame: &mut Frame, area: Rect) {
                 frame.render_widget(block, info.rect);
             }
 
-            // Draw terminal content
-            rt.render(frame, info.inner_rect);
+            // Draw terminal content; only show cursor in the focused pane
+            rt.render(frame, info.inner_rect, info.is_focused && terminal_active);
             render_pane_scrollbar(app, frame, info, rt);
 
             // Dim unfocused panes only in navigate mode
