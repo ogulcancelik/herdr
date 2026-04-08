@@ -56,6 +56,7 @@ Process:
    - Keep bullets concrete and outcome-focused.
    - Prefer one bullet per meaningful shipped change.
    - If there are both PRs and direct commits, include both, but exclude direct commits already covered by PRs.
+   - For merged PR items, append the PR reference and contributor thanks inline when appropriate, in the form `(#123, thanks @author)`. Do this for merged PRs, not for direct commits.
 
 7. Respect repo reality.
    - If `CHANGELOG.md` exists, read it before proposing edits and follow its existing style.
