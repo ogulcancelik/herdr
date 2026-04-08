@@ -626,6 +626,9 @@ pub struct AppState {
     pub global_menu: MenuListState,
     /// Resolved host terminal default colors for theming embedded panes.
     pub host_terminal_theme: TerminalTheme,
+    /// Set by structural mutations; the main loop checks and resets this to
+    /// schedule a debounced session save.
+    pub session_dirty: bool,
 }
 
 impl AppState {
@@ -780,6 +783,7 @@ impl AppState {
             },
             global_menu: MenuListState::new(0),
             host_terminal_theme: TerminalTheme::default(),
+            session_dirty: false,
         }
     }
 }

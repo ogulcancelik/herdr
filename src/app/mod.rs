@@ -20,6 +20,7 @@ const ANIMATION_INTERVAL: Duration = Duration::from_millis(16);
 const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const GIT_REMOTE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
+const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_secs(5);
 const SIDEBAR_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
 
 use crossterm::terminal;
@@ -56,6 +57,9 @@ pub struct App {
     suppressed_repeat_keys: HashSet<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<AtomicBool>,
+    /// Debounced session save: set to `Some(deadline)` when session-relevant
+    /// state changes, cleared after the save fires.
+    session_save_deadline: Option<Instant>,
 }
 
 enum LoopEvent {
@@ -300,6 +304,7 @@ impl App {
             },
             global_menu: state::MenuListState::new(0),
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
+            session_dirty: false,
         };
 
         for ws in &mut state.workspaces {
@@ -345,7 +350,32 @@ impl App {
             last_terminal_size: terminal::size().ok(),
             render_notify,
             render_dirty,
+            session_save_deadline: None,
         }
+    }
+
+    /// Schedule a debounced session save. Multiple calls within the debounce
+    /// window collapse into a single write.
+    fn mark_session_dirty(&mut self) {
+        if !self.no_session {
+            self.session_save_deadline = Some(Instant::now() + SESSION_SAVE_DEBOUNCE);
+        }
+    }
+
+    fn save_session_now(&mut self) {
+        if self.state.workspaces.is_empty() {
+            return;
+        }
+        let snap = crate::persist::capture(
+            &self.state.workspaces,
+            self.state.active,
+            self.state.selected,
+            self.state.agent_panel_scope,
+            self.state.sidebar_width,
+            self.state.sidebar_section_split,
+        );
+        crate::persist::save(&snap);
+        self.session_save_deadline = None;
     }
 
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
@@ -370,6 +400,12 @@ impl App {
             }
 
             self.sync_focus_events();
+
+            // Pick up session-dirty flag set by state mutations.
+            if self.state.session_dirty {
+                self.state.session_dirty = false;
+                self.mark_session_dirty();
+            }
 
             let now = Instant::now();
             if self.handle_scheduled_tasks(now) {
@@ -457,16 +493,8 @@ impl App {
         }
 
         // Save session on exit (skip in --no-session mode)
-        if !self.no_session && !self.state.workspaces.is_empty() {
-            let snap = crate::persist::capture(
-                &self.state.workspaces,
-                self.state.active,
-                self.state.selected,
-                self.state.agent_panel_scope,
-                self.state.sidebar_width,
-                self.state.sidebar_section_split,
-            );
-            crate::persist::save(&snap);
+        if !self.no_session {
+            self.save_session_now();
         }
 
         Ok(())
@@ -643,6 +671,13 @@ impl App {
             self.run_auto_update_check();
         }
 
+        if self
+            .session_save_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.save_session_now();
+        }
+
         self.sync_animation_timer(now);
         changed
     }
@@ -714,6 +749,7 @@ impl App {
             self.next_animation_tick,
             self.git_refresh_deadline(),
             self.next_auto_update_check,
+            self.session_save_deadline,
             render_deadline,
         ]
         .into_iter()
@@ -1108,6 +1144,7 @@ impl App {
                     .unwrap();
                 };
                 ws.set_custom_name(params.label.clone());
+                self.mark_session_dirty();
                 self.emit_event(crate::api::schema::EventEnvelope {
                     event: crate::api::schema::EventKind::WorkspaceRenamed,
                     data: crate::api::schema::EventData::WorkspaceRenamed {
@@ -1369,6 +1406,7 @@ impl App {
                     .unwrap();
                 };
                 tab.set_custom_name(params.label.clone());
+                self.mark_session_dirty();
                 self.emit_event(crate::api::schema::EventEnvelope {
                     event: crate::api::schema::EventKind::TabRenamed,
                     data: crate::api::schema::EventData::TabRenamed {
@@ -2083,6 +2121,7 @@ impl App {
             ws.switch_tab(idx);
             self.state.mode = Mode::Terminal;
         }
+        self.mark_session_dirty();
         Ok(idx)
     }
 
@@ -2109,6 +2148,7 @@ impl App {
             self.state.switch_workspace(idx);
             self.state.mode = Mode::Terminal;
         }
+        self.mark_session_dirty();
         Ok(idx)
     }
 

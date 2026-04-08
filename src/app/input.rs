@@ -320,6 +320,7 @@ impl App {
             if is_double_click {
                 self.state.sidebar_width = self.state.default_sidebar_width;
                 self.state.sidebar_width_auto = false;
+                self.state.session_dirty = true;
                 self.state.drag = None;
                 return;
             }
@@ -1034,6 +1035,7 @@ fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                 Mode::RenameWorkspace if !state.workspaces.is_empty() => {
                     if !new_name.is_empty() {
                         state.workspaces[state.selected].set_custom_name(new_name);
+                        state.session_dirty = true;
                     }
                 }
                 Mode::RenameTab if state.creating_new_tab => {
@@ -1049,6 +1051,7 @@ fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                         if let Some(ws) = state.active.and_then(|i| state.workspaces.get_mut(i)) {
                             if let Some(tab) = ws.active_tab_mut() {
                                 tab.set_custom_name(new_name);
+                                state.session_dirty = true;
                             }
                         }
                     }
@@ -2456,6 +2459,7 @@ impl AppState {
         let width = divider_col.saturating_sub(sidebar.x).saturating_add(1);
         self.sidebar_width =
             width.clamp(crate::ui::MIN_SIDEBAR_WIDTH, crate::ui::MAX_SIDEBAR_WIDTH);
+        self.session_dirty = true;
     }
 
     fn on_sidebar_section_divider(&self, col: u16, row: u16) -> bool {
@@ -2482,6 +2486,7 @@ impl AppState {
         let relative_y = row.saturating_sub(sidebar.y);
         let ratio = (relative_y as f32) / (content_height as f32);
         self.sidebar_section_split = ratio.clamp(0.1, 0.9);
+        self.session_dirty = true;
     }
 
     /// Find which workspace index a sidebar row belongs to (two-section layout).
@@ -2988,6 +2993,7 @@ impl AppState {
             ) {
                 ws.layout.focus_pane(new_id);
                 self.mode = Mode::Terminal;
+                self.session_dirty = true;
             }
         }
     }

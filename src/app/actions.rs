@@ -106,6 +106,7 @@ impl AppState {
         if idx < self.workspaces.len() {
             self.active = Some(idx);
             self.selected = idx;
+            self.session_dirty = true;
             if matches!(
                 self.agent_panel_scope,
                 crate::app::state::AgentPanelScope::CurrentWorkspace
@@ -152,6 +153,7 @@ impl AppState {
     pub fn switch_tab(&mut self, idx: usize) {
         if let Some(ws) = self.active.and_then(|i| self.workspaces.get_mut(i)) {
             ws.switch_tab(idx);
+            self.session_dirty = true;
         }
     }
 
@@ -179,6 +181,7 @@ impl AppState {
         if source_idx >= self.workspaces.len() || insert_idx > self.workspaces.len() {
             return;
         }
+        self.session_dirty = true;
 
         let active_id = self.active.map(|idx| self.workspaces[idx].id.clone());
         let selected_id = self
@@ -228,6 +231,7 @@ impl AppState {
         if self.workspaces.is_empty() {
             return;
         }
+        self.session_dirty = true;
         let name = self.workspaces[self.selected].display_name();
         info!(workspace = %name, "workspace closed");
         self.workspaces.remove(self.selected);
@@ -281,6 +285,7 @@ impl AppState {
                 .and_then(|ws| ws.active_tab_mut())
             {
                 tab.layout.resize_focused(direction, 0.05, area);
+                self.session_dirty = true;
             }
         }
     }
@@ -312,6 +317,7 @@ impl AppState {
     }
 
     pub fn close_pane(&mut self) {
+        self.session_dirty = true;
         let should_close_workspace = self
             .active
             .and_then(|i| self.workspaces.get_mut(i))
@@ -322,6 +328,7 @@ impl AppState {
     }
 
     pub fn close_tab(&mut self) {
+        self.session_dirty = true;
         let should_close_workspace = self
             .active
             .and_then(|i| self.workspaces.get(i))
