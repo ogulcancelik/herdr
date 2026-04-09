@@ -102,24 +102,13 @@ impl Selection {
         matches!(self.phase, Phase::Anchored | Phase::Dragging)
     }
 
-    /// Extend the selection by `rows` in the direction of a scroll.
-    ///
-    /// `scroll_up == true` moves the top endpoint (smaller absolute row)
-    /// upward; `scroll_up == false` moves the bottom endpoint (larger
-    /// absolute row) downward. Top and bottom are chosen dynamically from
-    /// `anchor` vs `cursor` by absolute row — this means the stored
-    /// `anchor` can be mutated when it is the endpoint on the scrolled side,
-    /// which matches the UX the user expects (selection grows toward the
-    /// newly revealed content).
-    ///
-    /// Preserves the `Anchored → Dragging` transition that the existing
-    /// wheel handler relies on: a click without drag followed by a wheel
-    /// scroll must become a visible selection.
+    /// Extend the selection by `rows` rows toward the scroll direction.
+    /// Either endpoint may be mutated, depending on which side is currently
+    /// the top.
     pub(crate) fn extend_in_scroll_direction(&mut self, scroll_up: bool, rows: u32) {
-        // Choose the logically earlier endpoint with the same ordering rule
-        // as `ordered()`: row first, column as tie-breaker. This matters
-        // for single-row selections dragged right-to-left, where the
-        // leftmost endpoint is the cursor, not the anchor.
+        // Endpoint pick must match `ordered()` exactly, including the column
+        // tie-breaker — otherwise a single-row right-to-left drag moves the
+        // wrong side.
         let anchor_precedes_cursor = self.anchor.0 < self.cursor.0
             || (self.anchor.0 == self.cursor.0 && self.anchor.1 <= self.cursor.1);
         let (top, bottom) = if anchor_precedes_cursor {
@@ -341,7 +330,6 @@ mod tests {
 
     #[test]
     fn extend_scroll_up_moves_top_endpoint() {
-        // anchor is top, cursor is bottom
         let mut sel = make_sel(10, 2, 20, 5);
         sel.extend_in_scroll_direction(true, 3);
         assert_eq!(sel.ordered_cells(), ((7, 2), (20, 5)));
@@ -349,7 +337,6 @@ mod tests {
 
     #[test]
     fn extend_scroll_down_moves_bottom_endpoint() {
-        // anchor is top, cursor is bottom
         let mut sel = make_sel(10, 2, 20, 5);
         sel.extend_in_scroll_direction(false, 3);
         assert_eq!(sel.ordered_cells(), ((10, 2), (23, 5)));
@@ -357,32 +344,26 @@ mod tests {
 
     #[test]
     fn extend_scroll_up_when_cursor_is_top() {
-        // cursor is top, anchor is bottom (reverse drag)
         let mut sel = make_sel(20, 5, 10, 2);
         sel.extend_in_scroll_direction(true, 4);
-        // cursor moves up from (10,2) to (6,2), anchor stays (20,5)
         assert_eq!(sel.ordered_cells(), ((6, 2), (20, 5)));
     }
 
     #[test]
     fn extend_scroll_down_when_anchor_is_bottom() {
-        // cursor is top, anchor is bottom
         let mut sel = make_sel(20, 5, 10, 2);
         sel.extend_in_scroll_direction(false, 4);
-        // anchor moves down from (20,5) to (24,5), cursor stays (10,2)
         assert_eq!(sel.ordered_cells(), ((10, 2), (24, 5)));
     }
 
     #[test]
     fn extend_from_anchored_transitions_to_dragging() {
-        // click without drag — phase Anchored, anchor == cursor
         let mut sel = Selection::anchor(PaneId::from_raw(0), 5, 10, None);
         assert!(sel.was_just_click());
         assert!(!sel.is_visible());
 
         sel.extend_in_scroll_direction(true, 3);
 
-        // Transitioned to Dragging, selection is now visible
         assert!(!sel.was_just_click());
         assert!(sel.is_visible());
         assert_eq!(sel.ordered_cells(), ((2, 10), (5, 10)));
@@ -397,17 +378,11 @@ mod tests {
 
     #[test]
     fn extend_single_row_right_to_left_drag_uses_col_tiebreak() {
-        // Single-row selection dragged right-to-left: anchor=(5,20),
-        // cursor=(5,5). Logical top is cursor (leftmost column), not anchor.
-        // The helper must pick the same endpoint as `ordered()` or the wrong
-        // side of the selection gets extended.
         let mut sel = make_sel(5, 20, 5, 5);
         assert_eq!(sel.ordered_cells(), ((5, 5), (5, 20)));
 
         sel.extend_in_scroll_direction(true, 3);
 
-        // Top endpoint (the one at col 5) should have moved up to row 2.
-        // The other endpoint (col 20 on row 5) should stay put.
         assert_eq!(sel.ordered_cells(), ((2, 5), (5, 20)));
     }
 
