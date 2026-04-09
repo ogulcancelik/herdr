@@ -25,20 +25,23 @@ Use this layout:
 
 Do all code edits, tests, and validation inside the task worktree.
 
+Commit on the task branch in that worktree.
+
+When the change is ready, fast-forward the shared checkout at `../herdr` to the task branch commit, then push `origin/master` from `../herdr`. Do not treat the task branch as the final landing branch.
+
 You may skip a worktree only for a clearly solo, trivial change when no other agent is expected to modify the repository at the same time.
 
 If the current session is already inside an isolated task worktree, keep using it. Do not create nested worktrees.
 
 Before committing, propose the commit message and get alignment.
 
-After the change is accepted and integrated back into the main checkout at `../herdr`, remove the task worktree and delete its branch.
+After the change is integrated, remove the task worktree and delete the task branch locally and remotely.
 
 ## Testing
 
 ```bash
-just check              # formatting + unit tests
-just test               # unit tests
-just test-all           # full local test suite
+just test               # cargo tests + maintenance script tests
+just check              # formatting check + cargo tests + maintenance script tests
 ```
 
 Default flow: run `just check` before committing.

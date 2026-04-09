@@ -14,9 +14,6 @@ ci:
 check: ci
     python3 -m unittest scripts.test_changelog scripts.test_vendor_libghostty_vt
 
-# Run the full local test suite
-test-all: check
-
 # Build release binary
 build:
     cargo build --release
