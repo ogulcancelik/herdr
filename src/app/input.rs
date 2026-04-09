@@ -2887,13 +2887,43 @@ impl AppState {
             return false;
         }
         let pane_id = selection.pane_id;
-        self.focus_pane(pane_id);
-        match mouse.kind {
-            MouseEventKind::ScrollUp => self.scroll_pane_up(pane_id, LINES_PER_NOTCH),
-            MouseEventKind::ScrollDown => self.scroll_pane_down(pane_id, LINES_PER_NOTCH),
+
+        let scroll_up = match mouse.kind {
+            MouseEventKind::ScrollUp => true,
+            MouseEventKind::ScrollDown => false,
             _ => return false,
+        };
+
+        self.focus_pane(pane_id);
+
+        // Measure the actual scroll delta: wheel requests LINES_PER_NOTCH,
+        // but the pane clamps at top/bottom of scrollback. Passing the
+        // requested notch straight into the selection math would over-extend
+        // the selection at those boundaries.
+        let before_offset = self
+            .pane_scroll_metrics(pane_id)
+            .map(|m| m.offset_from_bottom);
+        if scroll_up {
+            self.scroll_pane_up(pane_id, LINES_PER_NOTCH);
+        } else {
+            self.scroll_pane_down(pane_id, LINES_PER_NOTCH);
         }
-        self.update_selection_cursor(pane_id, mouse.column, mouse.row);
+        let after_offset = self
+            .pane_scroll_metrics(pane_id)
+            .map(|m| m.offset_from_bottom);
+
+        let effective_delta = match (before_offset, after_offset) {
+            (Some(before), Some(after)) if scroll_up => after.saturating_sub(before) as u32,
+            (Some(before), Some(after)) => before.saturating_sub(after) as u32,
+            _ => 0,
+        };
+
+        if effective_delta > 0 {
+            if let Some(selection) = self.selection.as_mut() {
+                selection.extend_in_scroll_direction(scroll_up, effective_delta);
+            }
+        }
+
         true
     }
 
@@ -4319,6 +4349,200 @@ mod tests {
                 (start_metrics.max_offset_from_bottom as u32, 2),
             )
         );
+    }
+
+    #[tokio::test]
+    async fn wheel_scroll_during_drag_extends_selection_beyond_viewport() {
+        // Regression: dragging a selection to the bottom of the viewport and
+        // then scrolling the wheel upward used to shrink the selection because
+        // the wheel handler recalculated the cursor from the stuck mouse
+        // position combined with the new scroll metrics. The fix extends the
+        // selection by the effective scroll delta instead.
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = pane_infos[0].clone();
+        ws.tabs[0].runtimes.insert(
+            pane_id,
+            crate::pane::PaneRuntime::test_with_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                16 * 1024,
+                &numbered_lines_bytes(64),
+            ),
+        );
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+
+        let start_metrics = app.state.workspaces[0]
+            .runtime(pane_id)
+            .and_then(crate::pane::PaneRuntime::scroll_metrics)
+            .expect("initial scroll metrics");
+        let top_row = info.inner_rect.y;
+        let bottom_row = info.inner_rect.y + info.inner_rect.height - 1;
+        let col = info.inner_rect.x + 2;
+
+        // Click at the top of the viewport and drag to the bottom. This
+        // selects the full viewport height.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, top_row));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            col,
+            bottom_row,
+        ));
+
+        let selection_before = app.state.selection.as_ref().expect("selection after drag");
+        assert!(selection_before.is_visible());
+        let (before_top, before_bottom) = selection_before.ordered_cells();
+        let before_rows = before_bottom.0 - before_top.0 + 1;
+        assert!(
+            before_rows >= 10,
+            "sanity: drag should select multiple rows (got {before_rows})"
+        );
+
+        // Scroll wheel up while still holding — should extend the selection
+        // upward into the scrollback, not shrink it.
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp, col, bottom_row));
+
+        let selection_after = app.state.selection.as_ref().expect("selection after wheel");
+        assert!(
+            selection_after.is_visible(),
+            "selection stays visible after wheel"
+        );
+
+        let (after_top, after_bottom) = selection_after.ordered_cells();
+        let after_rows = after_bottom.0 - after_top.0 + 1;
+
+        assert!(
+            after_top.0 < before_top.0,
+            "top row should move upward after scroll up: before={} after={}",
+            before_top.0,
+            after_top.0
+        );
+        assert_eq!(
+            after_bottom.0, before_bottom.0,
+            "bottom row should stay anchored: before={} after={}",
+            before_bottom.0, after_bottom.0
+        );
+        assert!(
+            after_rows > before_rows,
+            "selection should grow, not shrink: before_rows={before_rows} after_rows={after_rows}"
+        );
+
+        let end_metrics = app.state.workspaces[0]
+            .runtime(pane_id)
+            .and_then(crate::pane::PaneRuntime::scroll_metrics)
+            .expect("metrics after wheel");
+        assert!(end_metrics.offset_from_bottom > start_metrics.offset_from_bottom);
+    }
+
+    #[tokio::test]
+    async fn wheel_scroll_down_during_reverse_drag_extends_selection() {
+        // Symmetric to the scroll-up case. The original bug is asymmetric:
+        // it appears when the mouse sits on the side opposite to the scroll
+        // direction. For ScrollDown that case is a reverse drag (bottom →
+        // top), leaving the mouse at the top of the viewport while new rows
+        // enter from the bottom. The fix must extend the bottom endpoint
+        // past the original viewport bottom.
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = pane_infos[0].clone();
+        ws.tabs[0].runtimes.insert(
+            pane_id,
+            crate::pane::PaneRuntime::test_with_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                16 * 1024,
+                &numbered_lines_bytes(64),
+            ),
+        );
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+
+        // Scroll up into the scrollback first so ScrollDown has room to
+        // advance.
+        if let Some(rt) = app.state.workspaces[0]
+            .tabs
+            .first()
+            .and_then(|tab| tab.runtimes.get(&pane_id))
+        {
+            rt.scroll_up(10);
+        }
+
+        let start_metrics = app.state.workspaces[0]
+            .runtime(pane_id)
+            .and_then(crate::pane::PaneRuntime::scroll_metrics)
+            .expect("initial scroll metrics");
+        assert!(
+            start_metrics.offset_from_bottom > 0,
+            "pane should start scrolled into scrollback"
+        );
+
+        let top_row = info.inner_rect.y;
+        let bottom_row = info.inner_rect.y + info.inner_rect.height - 1;
+        let col = info.inner_rect.x + 2;
+
+        // Reverse drag: click at bottom, drag up to top. The mouse now sits
+        // at the top row of the viewport.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            col,
+            bottom_row,
+        ));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), col, top_row));
+
+        let (before_top, before_bottom) = app
+            .state
+            .selection
+            .as_ref()
+            .expect("selection after drag")
+            .ordered_cells();
+        let before_rows = before_bottom.0 - before_top.0 + 1;
+        assert!(before_rows >= 10, "sanity: reverse drag should select rows");
+
+        // Scroll wheel down while still holding. With the buggy code the
+        // new top = new_viewport_top + 0 advances with the scroll, shrinking
+        // the selection from the top. The fix must extend the bottom
+        // endpoint instead and keep the top anchored.
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, col, top_row));
+
+        let selection_after = app.state.selection.as_ref().expect("selection after wheel");
+        assert!(selection_after.is_visible());
+        let (after_top, after_bottom) = selection_after.ordered_cells();
+        let after_rows = after_bottom.0 - after_top.0 + 1;
+
+        assert_eq!(
+            after_top.0, before_top.0,
+            "top row should stay anchored: before={} after={}",
+            before_top.0, after_top.0
+        );
+        assert!(
+            after_bottom.0 > before_bottom.0,
+            "bottom row should move downward after scroll down: before={} after={}",
+            before_bottom.0,
+            after_bottom.0
+        );
+        assert!(
+            after_rows > before_rows,
+            "selection should grow, not shrink: before_rows={before_rows} after_rows={after_rows}"
+        );
+
+        let end_metrics = app.state.workspaces[0]
+            .runtime(pane_id)
+            .and_then(crate::pane::PaneRuntime::scroll_metrics)
+            .expect("metrics after wheel");
+        assert!(end_metrics.offset_from_bottom < start_metrics.offset_from_bottom);
     }
 
     #[test]
