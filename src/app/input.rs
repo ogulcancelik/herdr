@@ -3051,8 +3051,8 @@ impl AppState {
 
         self.focus_pane(pane_id);
 
-        // Use the actual scroll delta — the pane clamps at the scrollback
-        // edges, so the notch we requested may not match what scrolled.
+        // Use the actual scroll delta, since the pane clamps at the scrollback
+        // edges and the notch we requested may not match what scrolled.
         let before_offset = self
             .pane_scroll_metrics(pane_id)
             .map(|m| m.offset_from_bottom);
@@ -3333,6 +3333,35 @@ mod tests {
             .map(|i| format!("{i:06}\r\n"))
             .collect::<String>()
             .into_bytes()
+    }
+
+    /// Build an `App` with a single workspace that contains one pane backed by
+    /// a runtime with 64 lines of scrollback. Returns the app, the pane id, and
+    /// a clone of the pane info so tests can read `inner_rect` without touching
+    /// `app.state.view.pane_infos` again.
+    fn app_with_scrollback_pane() -> (App, crate::layout::PaneId, PaneInfo) {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = pane_infos[0].clone();
+        ws.tabs[0].runtimes.insert(
+            pane_id,
+            crate::pane::PaneRuntime::test_with_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                16 * 1024,
+                &numbered_lines_bytes(64),
+            ),
+        );
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+
+        (app, pane_id, info)
     }
 
     fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
@@ -4450,26 +4479,7 @@ mod tests {
 
     #[tokio::test]
     async fn wheel_scroll_keeps_in_progress_selection_and_extends_it() {
-        let mut app = app_for_mouse_test();
-        let mut ws = Workspace::test_new("test");
-        let pane_id = ws.tabs[0].root_pane;
-        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
-        let info = pane_infos[0].clone();
-        ws.tabs[0].runtimes.insert(
-            pane_id,
-            crate::pane::PaneRuntime::test_with_scrollback_bytes(
-                info.inner_rect.width,
-                info.inner_rect.height,
-                16 * 1024,
-                &numbered_lines_bytes(64),
-            ),
-        );
-
-        app.state.workspaces = vec![ws];
-        app.state.active = Some(0);
-        app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
-        app.state.view.pane_infos = pane_infos;
+        let (mut app, pane_id, info) = app_with_scrollback_pane();
 
         let start_metrics = app.state.workspaces[0]
             .runtime(pane_id)
@@ -4506,26 +4516,7 @@ mod tests {
 
     #[tokio::test]
     async fn wheel_scroll_during_drag_extends_selection_beyond_viewport() {
-        let mut app = app_for_mouse_test();
-        let mut ws = Workspace::test_new("test");
-        let pane_id = ws.tabs[0].root_pane;
-        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
-        let info = pane_infos[0].clone();
-        ws.tabs[0].runtimes.insert(
-            pane_id,
-            crate::pane::PaneRuntime::test_with_scrollback_bytes(
-                info.inner_rect.width,
-                info.inner_rect.height,
-                16 * 1024,
-                &numbered_lines_bytes(64),
-            ),
-        );
-
-        app.state.workspaces = vec![ws];
-        app.state.active = Some(0);
-        app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
-        app.state.view.pane_infos = pane_infos;
+        let (mut app, pane_id, info) = app_with_scrollback_pane();
 
         let start_metrics = app.state.workspaces[0]
             .runtime(pane_id)
@@ -4587,26 +4578,7 @@ mod tests {
 
     #[tokio::test]
     async fn wheel_scroll_down_during_reverse_drag_extends_selection() {
-        let mut app = app_for_mouse_test();
-        let mut ws = Workspace::test_new("test");
-        let pane_id = ws.tabs[0].root_pane;
-        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
-        let info = pane_infos[0].clone();
-        ws.tabs[0].runtimes.insert(
-            pane_id,
-            crate::pane::PaneRuntime::test_with_scrollback_bytes(
-                info.inner_rect.width,
-                info.inner_rect.height,
-                16 * 1024,
-                &numbered_lines_bytes(64),
-            ),
-        );
-
-        app.state.workspaces = vec![ws];
-        app.state.active = Some(0);
-        app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
-        app.state.view.pane_infos = pane_infos;
+        let (mut app, pane_id, info) = app_with_scrollback_pane();
 
         if let Some(rt) = app.state.workspaces[0]
             .tabs

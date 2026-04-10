@@ -107,7 +107,7 @@ impl Selection {
     /// the top.
     pub(crate) fn extend_in_scroll_direction(&mut self, scroll_up: bool, rows: u32) {
         // Endpoint pick must match `ordered()` exactly, including the column
-        // tie-breaker — otherwise a single-row right-to-left drag moves the
+        // tie-breaker; otherwise a single-row right-to-left drag moves the
         // wrong side.
         let anchor_precedes_cursor = self.anchor.0 < self.cursor.0
             || (self.anchor.0 == self.cursor.0 && self.anchor.1 <= self.cursor.1);
