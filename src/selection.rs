@@ -102,6 +102,32 @@ impl Selection {
         matches!(self.phase, Phase::Anchored | Phase::Dragging)
     }
 
+    /// Extend the selection by `rows` rows toward the scroll direction.
+    /// Either endpoint may be mutated, depending on which side is currently
+    /// the top.
+    pub(crate) fn extend_in_scroll_direction(&mut self, scroll_up: bool, rows: u32) {
+        // Endpoint pick must match `ordered()` exactly, including the column
+        // tie-breaker; otherwise a single-row right-to-left drag moves the
+        // wrong side.
+        let anchor_precedes_cursor = self.anchor.0 < self.cursor.0
+            || (self.anchor.0 == self.cursor.0 && self.anchor.1 <= self.cursor.1);
+        let (top, bottom) = if anchor_precedes_cursor {
+            (&mut self.anchor, &mut self.cursor)
+        } else {
+            (&mut self.cursor, &mut self.anchor)
+        };
+
+        if scroll_up {
+            top.0 = top.0.saturating_sub(rows);
+        } else {
+            bottom.0 = bottom.0.saturating_add(rows);
+        }
+
+        if self.cursor != self.anchor {
+            self.phase = Phase::Dragging;
+        }
+    }
+
     /// Returns (start, end) in reading order (top-left to bottom-right).
     fn ordered(&self) -> ((u32, u16), (u32, u16)) {
         let (ar, ac) = self.anchor;
@@ -311,6 +337,64 @@ mod tests {
         assert!(sel.contains(1, 40, metrics));
         assert!(sel.contains(2, 4, metrics));
         assert!(!sel.contains(3, 4, metrics));
+    }
+
+    #[test]
+    fn extend_scroll_up_moves_top_endpoint() {
+        let mut sel = make_sel(10, 2, 20, 5);
+        sel.extend_in_scroll_direction(true, 3);
+        assert_eq!(sel.ordered_cells(), ((7, 2), (20, 5)));
+    }
+
+    #[test]
+    fn extend_scroll_down_moves_bottom_endpoint() {
+        let mut sel = make_sel(10, 2, 20, 5);
+        sel.extend_in_scroll_direction(false, 3);
+        assert_eq!(sel.ordered_cells(), ((10, 2), (23, 5)));
+    }
+
+    #[test]
+    fn extend_scroll_up_when_cursor_is_top() {
+        let mut sel = make_sel(20, 5, 10, 2);
+        sel.extend_in_scroll_direction(true, 4);
+        assert_eq!(sel.ordered_cells(), ((6, 2), (20, 5)));
+    }
+
+    #[test]
+    fn extend_scroll_down_when_anchor_is_bottom() {
+        let mut sel = make_sel(20, 5, 10, 2);
+        sel.extend_in_scroll_direction(false, 4);
+        assert_eq!(sel.ordered_cells(), ((10, 2), (24, 5)));
+    }
+
+    #[test]
+    fn extend_from_anchored_transitions_to_dragging() {
+        let mut sel = Selection::anchor(PaneId::from_raw(0), 5, 10, None);
+        assert!(sel.was_just_click());
+        assert!(!sel.is_visible());
+
+        sel.extend_in_scroll_direction(true, 3);
+
+        assert!(!sel.was_just_click());
+        assert!(sel.is_visible());
+        assert_eq!(sel.ordered_cells(), ((2, 10), (5, 10)));
+    }
+
+    #[test]
+    fn extend_scroll_up_saturates_at_zero() {
+        let mut sel = make_sel(2, 0, 4, 0);
+        sel.extend_in_scroll_direction(true, 10);
+        assert_eq!(sel.ordered_cells(), ((0, 0), (4, 0)));
+    }
+
+    #[test]
+    fn extend_single_row_right_to_left_drag_uses_col_tiebreak() {
+        let mut sel = make_sel(5, 20, 5, 5);
+        assert_eq!(sel.ordered_cells(), ((5, 5), (5, 20)));
+
+        sel.extend_in_scroll_direction(true, 3);
+
+        assert_eq!(sel.ordered_cells(), ((2, 5), (5, 20)));
     }
 
     #[test]
