@@ -2387,31 +2387,51 @@ impl PaneRuntime {
         Self::test_with_scrollback_bytes(cols, rows, 0, bytes)
     }
 
+    pub(crate) fn test_with_screen_bytes_and_receiver(
+        cols: u16,
+        rows: u16,
+        bytes: &[u8],
+    ) -> (Self, mpsc::Receiver<Bytes>) {
+        Self::test_with_scrollback_bytes_and_receiver(cols, rows, 0, bytes)
+    }
+
     pub(crate) fn test_with_scrollback_bytes(
         cols: u16,
         rows: u16,
         scrollback_limit_bytes: usize,
         bytes: &[u8],
     ) -> Self {
-        let (tx, _rx) = mpsc::channel(4);
+        Self::test_with_scrollback_bytes_and_receiver(cols, rows, scrollback_limit_bytes, bytes).0
+    }
+
+    fn test_with_scrollback_bytes_and_receiver(
+        cols: u16,
+        rows: u16,
+        scrollback_limit_bytes: usize,
+        bytes: &[u8],
+    ) -> (Self, mpsc::Receiver<Bytes>) {
+        let (tx, rx) = mpsc::channel(4);
         let (resize_tx, _resize_rx) = mpsc::channel(1);
         let mut terminal =
             crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes).unwrap();
         terminal.write(bytes);
 
-        Self {
-            terminal: Arc::new(PaneTerminal {
-                ghostty: GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap(),
-            }),
-            sender: tx,
-            resize_tx,
-            current_size: Cell::new((rows, cols)),
-            child_pid: Arc::new(AtomicU32::new(0)),
-            kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
-            detect_reset_notify: Arc::new(Notify::new()),
-            pending_release: Arc::new(Mutex::new(None)),
-            detect_handle: tokio::spawn(async {}).abort_handle(),
-        }
+        (
+            Self {
+                terminal: Arc::new(PaneTerminal {
+                    ghostty: GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap(),
+                }),
+                sender: tx,
+                resize_tx,
+                current_size: Cell::new((rows, cols)),
+                child_pid: Arc::new(AtomicU32::new(0)),
+                kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
+                detect_reset_notify: Arc::new(Notify::new()),
+                pending_release: Arc::new(Mutex::new(None)),
+                detect_handle: tokio::spawn(async {}).abort_handle(),
+            },
+            rx,
+        )
     }
 }
 

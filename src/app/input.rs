@@ -164,12 +164,12 @@ impl App {
     pub(super) async fn handle_key(&mut self, key: TerminalKey) {
         match self.state.mode {
             Mode::Terminal => self.handle_terminal_key(key).await,
+            Mode::Navigate => self.handle_navigate_key(key),
             _ => {
                 let key = AppKey::from(key);
                 match self.state.mode {
                     Mode::Onboarding => self.handle_onboarding_key(key),
                     Mode::ReleaseNotes => self.handle_release_notes_key(key),
-                    Mode::Navigate => self.handle_navigate_key(key),
                     Mode::RenameWorkspace | Mode::RenameTab => {
                         handle_rename_key(&mut self.state, key)
                     }
@@ -179,7 +179,7 @@ impl App {
                     Mode::Settings => self.handle_settings_key(key),
                     Mode::GlobalMenu => handle_global_menu_key(&mut self.state, key),
                     Mode::KeybindHelp => handle_keybind_help_key(&mut self.state, key),
-                    Mode::Terminal => unreachable!(),
+                    Mode::Terminal | Mode::Navigate => unreachable!(),
                 }
             }
         }
@@ -261,12 +261,18 @@ impl App {
         }
     }
 
-    fn handle_navigate_key(&mut self, key: AppKey) {
+    fn handle_navigate_key(&mut self, raw_key: TerminalKey) {
+        let key = AppKey::from(raw_key);
         self.state.update_dismissed = true;
 
-        if key.matches_binding(self.state.prefix_code, self.state.prefix_mods)
-            || key.code() == KeyCode::Esc
-        {
+        if key.matches_binding(self.state.prefix_code, self.state.prefix_mods) {
+            if !self.pass_through_key_to_focused_pane(raw_key) {
+                leave_navigate_mode(&mut self.state);
+            }
+            return;
+        }
+
+        if key.code() == KeyCode::Esc {
             leave_navigate_mode(&mut self.state);
             return;
         }
@@ -422,6 +428,26 @@ impl App {
                 SettingsAction::SaveToast(enabled) => self.save_toast(enabled),
             }
         }
+    }
+
+    fn pass_through_key_to_focused_pane(&mut self, key: TerminalKey) -> bool {
+        let Some(ws) = self.state.active.and_then(|i| self.state.workspaces.get(i)) else {
+            return false;
+        };
+        let Some(rt) = ws.focused_runtime() else {
+            return false;
+        };
+
+        let bytes = rt.encode_terminal_key(key);
+        if bytes.is_empty() {
+            return false;
+        }
+        if rt.try_send_bytes(Bytes::from(bytes)).is_err() {
+            return false;
+        }
+
+        self.state.mode = Mode::Terminal;
+        true
     }
 
     async fn handle_terminal_key(&mut self, key: TerminalKey) {
@@ -3606,6 +3632,83 @@ mod tests {
 
         assert_ne!(app.state.workspaces[0].layout.focused(), focused_before);
         assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn double_prefix_passes_prefix_through_to_focused_pane() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = Workspace::test_new("test");
+        let pane_id = workspace.tabs[0].root_pane;
+        let (runtime, mut rx) =
+            crate::pane::PaneRuntime::test_with_screen_bytes_and_receiver(20, 5, b"");
+        let expected = runtime
+            .encode_terminal_key(TerminalKey::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        workspace.tabs[0].runtimes.insert(pane_id, runtime);
+
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.prefix_code = KeyCode::Char('a');
+        app.state.prefix_mods = KeyModifiers::CONTROL;
+
+        app.handle_key(TerminalKey::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(app.state.mode, Mode::Navigate);
+
+        app.handle_key(TerminalKey::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(app.state.mode, Mode::Terminal);
+
+        let forwarded = rx.try_recv().expect("prefix bytes should be forwarded");
+        assert_eq!(forwarded.as_ref(), expected.as_slice());
+    }
+
+    #[tokio::test]
+    async fn double_shifted_prefix_preserves_shifted_codepoint_when_forwarded() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = Workspace::test_new("test");
+        let pane_id = workspace.tabs[0].root_pane;
+        let (runtime, mut rx) =
+            crate::pane::PaneRuntime::test_with_screen_bytes_and_receiver(20, 5, b"");
+        let prefix = TerminalKey::new(KeyCode::Char('/'), KeyModifiers::SHIFT)
+            .with_shifted_codepoint('?' as u32);
+        let expected = runtime.encode_terminal_key(prefix);
+        workspace.tabs[0].runtimes.insert(pane_id, runtime);
+
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.prefix_code = KeyCode::Char('?');
+        app.state.prefix_mods = KeyModifiers::empty();
+
+        app.handle_key(prefix).await;
+        assert_eq!(app.state.mode, Mode::Navigate);
+
+        app.handle_key(prefix).await;
+        assert_eq!(app.state.mode, Mode::Terminal);
+
+        let forwarded = rx
+            .try_recv()
+            .expect("shifted prefix bytes should be forwarded");
+        assert_eq!(forwarded.as_ref(), expected.as_slice());
     }
 
     #[tokio::test]
