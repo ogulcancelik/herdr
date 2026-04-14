@@ -881,14 +881,13 @@ fn compute_pane_infos(app: &AppState, area: Rect, resize_panes: bool) -> Vec<Pan
 
     if ws.zoomed {
         let focused_id = ws.layout.focused();
-        let mut inner_rect = area;
+        let inner_rect = area;
         let mut scrollbar_rect = None;
         if let Some(rt) = ws.runtimes.get(&focused_id) {
             if rt
                 .scroll_metrics()
-                .is_some_and(|metrics| should_show_scrollbar(metrics) && area.width > 1)
+                .is_some_and(|metrics| should_show_scrollbar(metrics) && area.width > 0)
             {
-                inner_rect.width = inner_rect.width.saturating_sub(1);
                 scrollbar_rect = Some(Rect::new(
                     area.x + area.width.saturating_sub(1),
                     area.y,
@@ -926,14 +925,13 @@ fn compute_pane_infos(app: &AppState, area: Rect, resize_panes: bool) -> Vec<Pan
             area
         };
 
-        let mut inner_rect = pane_inner;
+        let inner_rect = pane_inner;
         let mut scrollbar_rect = None;
         if let Some(rt) = ws.runtimes.get(&info.id) {
             if rt
                 .scroll_metrics()
-                .is_some_and(|metrics| should_show_scrollbar(metrics) && pane_inner.width > 1)
+                .is_some_and(|metrics| should_show_scrollbar(metrics) && pane_inner.width > 0)
             {
-                inner_rect.width = inner_rect.width.saturating_sub(1);
                 scrollbar_rect = Some(Rect::new(
                     pane_inner.x + pane_inner.width.saturating_sub(1),
                     pane_inner.y,
@@ -3872,16 +3870,50 @@ mod tests {
     }
 
     #[test]
-    fn pane_scrollbar_rect_uses_rightmost_inner_column() {
+    fn pane_scrollbar_rect_overlays_rightmost_inner_column() {
         let info = PaneInfo {
             id: crate::layout::PaneId::from_raw(1),
             rect: Rect::new(0, 0, 12, 8),
-            inner_rect: Rect::new(1, 1, 9, 6),
+            inner_rect: Rect::new(1, 1, 10, 6),
             scrollbar_rect: Some(Rect::new(10, 1, 1, 6)),
             is_focused: true,
         };
 
         assert_eq!(pane_scrollbar_rect(&info), Some(Rect::new(10, 1, 1, 6)));
+    }
+
+    #[tokio::test]
+    async fn compute_view_keeps_terminal_width_when_pane_scrollbar_is_visible() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        ws.tabs[0].runtimes.insert(
+            pane_id,
+            crate::pane::PaneRuntime::test_with_scrollback_bytes(
+                12,
+                4,
+                4096,
+                b"000000000000\r\n111111111111\r\n222222222222\r\n333333333333\r\n444444444444\r\n",
+            ),
+        );
+
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.selected = 0;
+
+        compute_view(&mut app, Rect::new(0, 0, 40, 12));
+
+        let info = app.view.pane_infos.first().expect("pane info");
+        assert_eq!(info.inner_rect.width, app.view.terminal_area.width);
+        assert_eq!(
+            info.scrollbar_rect,
+            Some(Rect::new(
+                info.inner_rect.x + info.inner_rect.width.saturating_sub(1),
+                info.inner_rect.y,
+                1,
+                info.inner_rect.height,
+            ))
+        );
     }
 
     #[test]

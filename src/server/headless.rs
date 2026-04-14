@@ -57,10 +57,17 @@ enum LoopEvent {
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Minimum effective terminal size (columns, rows).
-/// Client-reported sizes below this are clamped up.
+/// Default shared runtime size (columns, rows) when no clients are attached.
 const MIN_COLS: u16 = 80;
 const MIN_ROWS: u16 = 24;
+
+/// Minimum accepted attached client size.
+///
+/// Narrow observers must be allowed to drive narrow renders, otherwise the
+/// server wraps pane content against a wider width and the client sees the
+/// right edge clipped.
+const MIN_CLIENT_COLS: u16 = 1;
+const MIN_CLIENT_ROWS: u16 = 1;
 
 /// Legacy environment variable for overriding the client socket path.
 ///
@@ -139,8 +146,8 @@ fn derive_client_socket_from_api_socket(api_socket_path: &Path) -> PathBuf {
 
 /// Clamp client-reported terminal dimensions to a minimum viable size.
 pub fn clamp_terminal_size(cols: u16, rows: u16) -> (u16, u16) {
-    let clamped_cols = cols.max(MIN_COLS);
-    let clamped_rows = rows.max(MIN_ROWS);
+    let clamped_cols = cols.max(MIN_CLIENT_COLS);
+    let clamped_rows = rows.max(MIN_CLIENT_ROWS);
     (clamped_cols, clamped_rows)
 }
 
@@ -1951,17 +1958,20 @@ mod tests {
 
     #[test]
     fn clamp_terminal_size_zero_zero() {
-        assert_eq!(clamp_terminal_size(0, 0), (MIN_COLS, MIN_ROWS));
+        assert_eq!(
+            clamp_terminal_size(0, 0),
+            (MIN_CLIENT_COLS, MIN_CLIENT_ROWS)
+        );
     }
 
     #[test]
     fn clamp_terminal_size_one_one() {
-        assert_eq!(clamp_terminal_size(1, 1), (MIN_COLS, MIN_ROWS));
+        assert_eq!(clamp_terminal_size(1, 1), (1, 1));
     }
 
     #[test]
-    fn clamp_terminal_size_small() {
-        assert_eq!(clamp_terminal_size(40, 12), (80, 24));
+    fn clamp_terminal_size_preserves_narrow_client_size() {
+        assert_eq!(clamp_terminal_size(40, 12), (40, 12));
     }
 
     #[test]
@@ -1972,8 +1982,8 @@ mod tests {
     #[test]
     fn clamp_terminal_size_exact_minimum() {
         assert_eq!(
-            clamp_terminal_size(MIN_COLS, MIN_ROWS),
-            (MIN_COLS, MIN_ROWS)
+            clamp_terminal_size(MIN_CLIENT_COLS, MIN_CLIENT_ROWS),
+            (MIN_CLIENT_COLS, MIN_CLIENT_ROWS)
         );
     }
 
