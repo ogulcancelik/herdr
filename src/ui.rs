@@ -991,23 +991,18 @@ fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: Rect) {
         let (agg_state, agg_seen) = ws.aggregate_state();
         let (icon, icon_style) = state_dot(agg_state, agg_seen, p);
         let is_selected = visible_idx == app.selected && is_navigating;
-        let is_active = Some(visible_idx) == app.active;
         let row_style = if is_selected {
             Style::default().bg(p.surface0)
-        } else if is_active {
-            Style::default().bg(p.surface_dim)
         } else {
             Style::default()
         };
         let num_style = if is_selected {
             Style::default().fg(p.overlay1).bg(p.surface0)
-        } else if is_active {
-            Style::default().fg(p.text).bg(p.surface_dim)
         } else {
             Style::default().fg(p.overlay0)
         };
 
-        if is_selected || is_active {
+        if is_selected {
             let buf = frame.buffer_mut();
             for x in ws_area.x..ws_area.x + ws_area.width {
                 buf[(x, y)].set_style(row_style);
@@ -2635,7 +2630,7 @@ fn keybind_help_groups(app: &AppState) -> Vec<(&'static str, Vec<(String, &'stat
         ],
     ));
 
-    let workspace_tab = vec![
+    let mut workspace_tab = vec![
         (kb.new_workspace_label.clone(), "new workspace"),
         (kb.rename_workspace_label.clone(), "rename workspace"),
         (kb.close_workspace_label.clone(), "close workspace"),
@@ -2656,6 +2651,9 @@ fn keybind_help_groups(app: &AppState) -> Vec<(&'static str, Vec<(String, &'stat
         (optional_keybind_label(&kb.next_tab_label), "next tab"),
         (optional_keybind_label(&kb.close_tab_label), "close tab"),
     ];
+    if let Some(label) = &kb.detach_label {
+        workspace_tab.insert(3, (label.clone(), "detach from server"));
+    }
     groups.push(("workspaces / tabs", workspace_tab));
 
     let panes = vec![

@@ -15,7 +15,7 @@ fn is_background_completion_transition(prev_state: AgentState, new_state: AgentS
         && matches!(prev_state, AgentState::Working | AgentState::Blocked)
 }
 
-fn notification_sound_for_state_change(
+pub fn notification_sound_for_state_change(
     is_active_tab: bool,
     prev_state: AgentState,
     new_state: AgentState,
@@ -89,7 +89,7 @@ pub struct PaneStateUpdate {
 // ---------------------------------------------------------------------------
 
 impl AppState {
-    fn pane_is_in_active_tab(&self, ws_idx: usize, pane_id: PaneId) -> bool {
+    pub(crate) fn pane_is_in_active_tab(&self, ws_idx: usize, pane_id: PaneId) -> bool {
         let Some(active_ws_idx) = self.active else {
             return false;
         };

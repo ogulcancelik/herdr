@@ -64,6 +64,8 @@ launch herdr:
 herdr
 ```
 
+by default, herdr now launches or attaches to a background session server. closing a client detaches from that shared session. use `herdr server stop` when you want to stop the server itself. use `herdr --no-session` for the old single-process mode.
+
 then do this:
 
 1. press `n` to create a workspace
@@ -201,7 +203,7 @@ common defaults:
 
 - `n` new workspace
 - `shift+n` rename workspace
-- `d` close workspace
+- `shift+d` close workspace
 - `c` new tab
 - `v` / `-` split pane
 - `x` close pane
@@ -210,8 +212,6 @@ common defaults:
 - `b` toggle sidebar
 
 optional direct bindings are available but **unset by default**. you can bind workspace, tab, and pane switching directly in terminal mode without going through the prefix first.
-
-prefix mode also supports custom commands with `[[keys.command]]`. that lets you launch detached shell helpers or temporary overlay panes. two common examples are opening `lazygit` in a pane and running your own script with the active herdr ids and cwd.
 
 example:
 
@@ -225,15 +225,6 @@ focus_pane_left = "alt+h"
 focus_pane_down = "alt+j"
 focus_pane_up = "alt+k"
 focus_pane_right = "alt+l"
-
-[[keys.command]]
-key = "g"
-type = "pane"
-command = "lazygit"
-
-[[keys.command]]
-key = "o"
-command = "~/bin/herdr-open-current \"$HERDR_ACTIVE_WORKSPACE_ID\" \"$HERDR_ACTIVE_TAB_ID\" \"$HERDR_ACTIVE_PANE_ID\" \"$HERDR_ACTIVE_PANE_CWD\""
 ```
 
 full keybinding and config reference: [`CONFIGURATION.md`](./CONFIGURATION.md)
@@ -301,11 +292,22 @@ for day-to-day changes, you do not have to edit the config by hand. herdr also h
 
 ## session persistence
 
-herdr saves your workspaces, tabs, pane layouts, pane working directories, and focused tab or pane automatically as you work, then restores them on restart. sessions are stored at `~/.config/herdr/session.json`.
+herdr now runs in server/client mode by default. the first `herdr` launch starts a background server, restores your last session, and attaches a thin client to it. later `herdr` launches attach to that same running session.
+
+that means:
+
+- pane processes survive when you detach a client
+- `herdr` from another terminal reattaches to the same session
+- in-app quit actions like navigate-mode `q` detach the current client by default
+- `herdr server stop` shuts down the background server explicitly
+
+session state is still saved at `~/.config/herdr/session.json`. that snapshot stores workspaces, tabs, pane layouts, pane working directories, and focused tab or pane so the server can restore them after a full restart.
+
+current model: attached clients share one session view. this is a shared persistent session, not fully independent tmux-style per-client navigation yet.
 
 through the socket api, tabs are first-class too. raw integrations and cli wrappers can list, create, focus, rename, and close tabs directly while pane ids stay workspace-scoped.
 
-use `--no-session` to start fresh.
+use `--no-session` to start fresh in the old monolithic mode.
 
 ## how agent detection works
 
@@ -327,11 +329,7 @@ herdr's workspace, tab, pane, and wait commands are documented in [`SOCKET_API.m
 
 both `workspace create` and `tab create` support optional `--label` flags, so scripts and agents can name contexts immediately instead of renaming them after creation. both create commands also return the created root pane in their json response, so clients can act on the new pane without an extra lookup.
 
-workspace ids are compact public ids like `1`, `2`, `3`.
-tab ids are compact public ids like `1:1`, `1:2`, `2:1`.
-pane ids are compact public ids like `1-1`, `1-2`, `2-1`.
-
-even with tabs enabled, pane ids remain workspace-scoped public ids rather than `workspace-tab-pane` triples. both tab ids and pane ids are positional within the current live session, so numbering compacts when tabs, workspaces, or panes are closed.
+raw api responses use stable ids for workspaces, tabs, and panes. cli wrappers and raw requests still accept positional shorthand like `1`, `1:2`, and `1-2` for convenience in the current live session.
 
 ## built with agents
 

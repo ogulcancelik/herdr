@@ -53,7 +53,7 @@ example:
 prefix = "ctrl+b"
 new_workspace = "n"
 rename_workspace = "shift+n"
-close_workspace = "d"
+close_workspace = "shift+d"
 new_tab = "c"
 split_vertical = "v"
 split_horizontal = "-"
@@ -71,35 +71,6 @@ focus_pane_up = "alt+k"
 focus_pane_right = "alt+l"
 ```
 
-### custom command bindings
-
-custom commands also live under `[keys]`, but use repeated `[[keys.command]]` tables.
-
-each binding runs after pressing the prefix key and then the configured command key.
-
-actions:
-- `type = "shell"` launches a detached `/bin/sh -lc ...` command in the background
-- `type = "pane"` opens a temporary overlay pane, runs the command there, then restores the previous pane focus when it exits
-
-example:
-
-```toml
-[[keys.command]]
-key = "g"
-type = "pane"
-command = "lazygit"
-
-[[keys.command]]
-key = "o"
-command = "~/bin/herdr-open-current \"$HERDR_ACTIVE_WORKSPACE_ID\" \"$HERDR_ACTIVE_TAB_ID\" \"$HERDR_ACTIVE_PANE_ID\" \"$HERDR_ACTIVE_PANE_CWD\""
-```
-
-notes:
-- `type` defaults to `"shell"`
-- custom command keys share the same navigate-mode key namespace as built-in actions, so conflicts are rejected as config errors
-- `pane` commands require an active workspace and focused pane
-- shell commands inherit useful context through environment variables listed below
-
 ### key reference
 
 | key | default | action |
@@ -107,7 +78,8 @@ notes:
 | `prefix` | `ctrl+b` | enter or leave navigate mode |
 | `new_workspace` | `n` | create a new workspace |
 | `rename_workspace` | `shift+n` | rename selected workspace |
-| `close_workspace` | `d` | close selected workspace |
+| `close_workspace` | `shift+d` | close selected workspace |
+| `detach` | unset | optional explicit detach shortcut in the persistent session |
 | `previous_workspace` | unset | switch to the previous workspace directly from terminal mode |
 | `next_workspace` | unset | switch to the next workspace directly from terminal mode |
 | `new_tab` | `c` | create a new tab |
@@ -292,18 +264,13 @@ notes:
 - this matches Ghostty's default `scrollback-limit` value
 - set `scrollback_limit_bytes = 0` to disable pane scrollback entirely
 - the old `advanced.scrollback_lines` key is still accepted as a compatibility alias, but it uses the same byte-based value
+- in default persistence mode, quitting the ui detaches the current client; use `herdr server stop` to stop the shared background server
 
 ## environment variables
 
 | variable | description |
 |----------|-------------|
 | `HERDR_LOG` | log level filter (default: `herdr=info`) |
-| `HERDR_SOCKET_PATH` | socket path for `herdr` cli subcommands and scripts started from inside herdr |
-| `HERDR_BIN_PATH` | absolute path to the running herdr binary |
-| `HERDR_ACTIVE_WORKSPACE_ID` | active workspace id when a custom command is launched |
-| `HERDR_ACTIVE_TAB_ID` | active tab id when a custom command is launched |
-| `HERDR_ACTIVE_PANE_ID` | focused pane id when a custom command is launched |
-| `HERDR_ACTIVE_PANE_CWD` | focused pane cwd when available; shell commands also use it as their working directory |
 
 logs are written to:
 

@@ -135,8 +135,10 @@ pub struct KeysConfig {
     pub new_workspace: String,
     /// Rename the selected workspace. Default: "shift+n"
     pub rename_workspace: String,
-    /// Close the selected workspace. Default: "d"
+    /// Close the selected workspace. Default: "shift+d"
     pub close_workspace: String,
+    /// Optional explicit detach shortcut in server/client mode. Unset by default.
+    pub detach: String,
     /// Select the previous workspace. Unset by default.
     pub previous_workspace: String,
     /// Select the next workspace. Unset by default.
@@ -327,7 +329,8 @@ impl Default for KeysConfig {
             prefix: "ctrl+b".into(),
             new_workspace: "n".into(),
             rename_workspace: "shift+n".into(),
-            close_workspace: "d".into(),
+            close_workspace: "shift+d".into(),
+            detach: "".into(),
             previous_workspace: "".into(),
             next_workspace: "".into(),
             new_tab: "c".into(),
@@ -531,7 +534,6 @@ impl Config {
                 binding: (KeyCode, KeyModifiers),
                 field: &str,
             ) -> Option<String> {
-                let binding = crate::input::normalize_app_key_binding(binding.0, binding.1, None);
                 self.seen
                     .insert((scope, binding.0, binding.1), field.to_string())
             }
@@ -541,7 +543,6 @@ impl Config {
                 scope: BindingScope,
                 binding: (KeyCode, KeyModifiers),
             ) -> Option<&str> {
-                let binding = crate::input::normalize_app_key_binding(binding.0, binding.1, None);
                 self.seen
                     .get(&(scope, binding.0, binding.1))
                     .map(String::as_str)
@@ -553,7 +554,6 @@ impl Config {
                 binding: (KeyCode, KeyModifiers),
                 field: &str,
             ) {
-                let binding = crate::input::normalize_app_key_binding(binding.0, binding.1, None);
                 self.seen
                     .entry((scope, binding.0, binding.1))
                     .or_insert_with(|| field.to_string());
@@ -654,8 +654,8 @@ impl Config {
                 BindingScope::Navigate,
                 "keys.close_workspace",
                 &self.keys.close_workspace,
-                "d",
-                (KeyCode::Char('d'), KeyModifiers::empty()),
+                "shift+d",
+                (KeyCode::Char('d'), KeyModifiers::SHIFT),
                 &mut diagnostics,
             ),
             required_binding(
@@ -717,6 +717,12 @@ impl Config {
         ];
 
         let mut optional_bindings = vec![
+            optional_binding(
+                BindingScope::Navigate,
+                "keys.detach",
+                &self.keys.detach,
+                &mut diagnostics,
+            ),
             optional_binding(
                 BindingScope::Navigate,
                 "keys.previous_workspace",
@@ -958,28 +964,30 @@ impl Config {
             rename_workspace_label: bindings[1].label.clone(),
             close_workspace: bindings[2].value,
             close_workspace_label: bindings[2].label.clone(),
-            previous_workspace: optional_bindings[0].value,
-            previous_workspace_label: optional_bindings[0].label.clone(),
-            next_workspace: optional_bindings[1].value,
-            next_workspace_label: optional_bindings[1].label.clone(),
+            detach: optional_bindings[0].value,
+            detach_label: optional_bindings[0].label.clone(),
+            previous_workspace: optional_bindings[1].value,
+            previous_workspace_label: optional_bindings[1].label.clone(),
+            next_workspace: optional_bindings[2].value,
+            next_workspace_label: optional_bindings[2].label.clone(),
             new_tab: bindings[3].value,
             new_tab_label: bindings[3].label.clone(),
-            rename_tab: optional_bindings[2].value,
-            rename_tab_label: optional_bindings[2].label.clone(),
-            previous_tab: optional_bindings[3].value,
-            previous_tab_label: optional_bindings[3].label.clone(),
-            next_tab: optional_bindings[4].value,
-            next_tab_label: optional_bindings[4].label.clone(),
-            close_tab: optional_bindings[5].value,
-            close_tab_label: optional_bindings[5].label.clone(),
-            focus_pane_left: optional_bindings[6].value,
-            focus_pane_left_label: optional_bindings[6].label.clone(),
-            focus_pane_down: optional_bindings[7].value,
-            focus_pane_down_label: optional_bindings[7].label.clone(),
-            focus_pane_up: optional_bindings[8].value,
-            focus_pane_up_label: optional_bindings[8].label.clone(),
-            focus_pane_right: optional_bindings[9].value,
-            focus_pane_right_label: optional_bindings[9].label.clone(),
+            rename_tab: optional_bindings[3].value,
+            rename_tab_label: optional_bindings[3].label.clone(),
+            previous_tab: optional_bindings[4].value,
+            previous_tab_label: optional_bindings[4].label.clone(),
+            next_tab: optional_bindings[5].value,
+            next_tab_label: optional_bindings[5].label.clone(),
+            close_tab: optional_bindings[6].value,
+            close_tab_label: optional_bindings[6].label.clone(),
+            focus_pane_left: optional_bindings[7].value,
+            focus_pane_left_label: optional_bindings[7].label.clone(),
+            focus_pane_down: optional_bindings[8].value,
+            focus_pane_down_label: optional_bindings[8].label.clone(),
+            focus_pane_up: optional_bindings[9].value,
+            focus_pane_up_label: optional_bindings[9].label.clone(),
+            focus_pane_right: optional_bindings[10].value,
+            focus_pane_right_label: optional_bindings[10].label.clone(),
             split_vertical: bindings[4].value,
             split_vertical_label: bindings[4].label.clone(),
             split_horizontal: bindings[5].value,
@@ -1022,6 +1030,8 @@ pub struct Keybinds {
     pub rename_workspace_label: String,
     pub close_workspace: (KeyCode, KeyModifiers),
     pub close_workspace_label: String,
+    pub detach: Option<(KeyCode, KeyModifiers)>,
+    pub detach_label: Option<String>,
     pub previous_workspace: Option<(KeyCode, KeyModifiers)>,
     pub previous_workspace_label: Option<String>,
     pub next_workspace: Option<(KeyCode, KeyModifiers)>,
@@ -1474,7 +1484,11 @@ mod tests {
             kb.rename_workspace,
             (KeyCode::Char('n'), KeyModifiers::SHIFT)
         );
-        assert_eq!(kb.close_workspace.0, KeyCode::Char('d'));
+        assert_eq!(
+            kb.close_workspace,
+            (KeyCode::Char('d'), KeyModifiers::SHIFT)
+        );
+        assert_eq!(kb.detach, None);
         assert_eq!(kb.split_vertical.0, KeyCode::Char('v'));
         assert_eq!(kb.split_horizontal.0, KeyCode::Char('-'));
         assert_eq!(kb.close_pane.0, KeyCode::Char('x'));
@@ -1544,14 +1558,11 @@ focus_pane_right = "alt+right"
     fn uppercase_keybind_from_toml_flows_into_shift_combo() {
         let toml = r#"
 [keys]
-split_horizontal = "D"
+close_pane = "X"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         let kb = config.keybinds();
-        assert_eq!(
-            kb.split_horizontal,
-            (KeyCode::Char('d'), KeyModifiers::SHIFT)
-        );
+        assert_eq!(kb.close_pane, (KeyCode::Char('x'), KeyModifiers::SHIFT));
     }
 
     #[test]
@@ -1655,52 +1666,6 @@ rename_tab = "g"
             (KeyCode::Char('g'), KeyModifiers::empty())
         );
         assert_eq!(kb.rename_tab, None);
-    }
-
-    #[test]
-    fn duplicate_shifted_symbol_binding_is_rejected_after_normalization() {
-        let toml = r#"
-[keys]
-new_workspace = "?"
-rename_workspace = "shift+/"
-"#;
-        let config: Config = toml::from_str(toml).unwrap();
-        let diagnostics = config.collect_diagnostics();
-        let kb = config.keybinds();
-
-        assert!(diagnostics.iter().any(|d| {
-            d.contains("duplicate keybinding")
-                && d.contains("keys.rename_workspace")
-                && d.contains("keys.new_workspace")
-        }));
-        assert_eq!(
-            kb.new_workspace,
-            (KeyCode::Char('?'), KeyModifiers::empty())
-        );
-        assert_eq!(
-            kb.rename_workspace,
-            (KeyCode::Char('n'), KeyModifiers::SHIFT)
-        );
-        assert_eq!(kb.rename_workspace_label, "shift+n");
-    }
-
-    #[test]
-    fn custom_command_conflicting_with_shifted_symbol_reserved_key_is_disabled() {
-        let toml = r#"
-[[keys.command]]
-key = "shift+/"
-command = "echo hi"
-"#;
-        let config: Config = toml::from_str(toml).unwrap();
-        let diagnostics = config.collect_diagnostics();
-        let kb = config.keybinds();
-
-        assert!(diagnostics.iter().any(|d| {
-            d.contains("duplicate custom keybinding")
-                && d.contains("keys.command[0].key")
-                && d.contains("navigate.keybind_help")
-        }));
-        assert!(kb.custom_commands.is_empty());
     }
 
     #[test]

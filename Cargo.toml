@@ -13,8 +13,10 @@ include = ["src/**/*", "assets/sounds/*", "README.md", "LICENSE", "Cargo.toml"]
 
 [dependencies]
 base64 = "0.22.1"
+bincode = { version = "2", features = ["serde"] }
 bytes = "1"
 crossterm = "0.29"
+ctrlc = "3"
 libc = "0.2"
 portable-pty = "0.9"
 ratatui = "0.30"

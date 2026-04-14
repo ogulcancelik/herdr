@@ -6,7 +6,8 @@ use serde::Serialize;
 
 use crate::api;
 use crate::api::schema::{
-    AgentStatus, EmptyParams, Method, OutputMatch, PaneListParams, PaneReadParams,
+    AgentStatus, EmptyParams, IntegrationInstallParams, IntegrationTarget,
+    IntegrationUninstallParams, Method, OutputMatch, PaneListParams, PaneReadParams,
     PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneTarget,
     PaneWaitForOutputParams, ReadSource, Request, SplitDirection, Subscription, TabCreateParams,
     TabListParams, TabRenameParams, TabTarget, WorkspaceCreateParams, WorkspaceRenameParams,
@@ -24,6 +25,12 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
     };
 
     let exit_code = match command {
+        "server" => {
+            let Some(exit_code) = run_server_command(&args[2..])? else {
+                return Ok(CommandOutcome::NotCli);
+            };
+            exit_code
+        }
         "workspace" => run_workspace_command(&args[2..])?,
         "tab" => run_tab_command(&args[2..])?,
         "pane" => run_pane_command(&args[2..])?,
@@ -33,6 +40,24 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
     };
 
     Ok(CommandOutcome::Handled(exit_code))
+}
+
+fn run_server_command(args: &[String]) -> std::io::Result<Option<i32>> {
+    let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
+        return Ok(None);
+    };
+
+    match subcommand {
+        "stop" => server_stop(&args[1..]).map(Some),
+        "help" | "--help" | "-h" => {
+            print_server_help();
+            Ok(Some(0))
+        }
+        _ => {
+            print_server_help();
+            Ok(Some(2))
+        }
+    }
 }
 
 fn run_workspace_command(args: &[String]) -> std::io::Result<i32> {
@@ -127,6 +152,15 @@ fn run_integration_command(args: &[String]) -> std::io::Result<i32> {
             Ok(2)
         }
     }
+}
+
+fn server_stop(args: &[String]) -> std::io::Result<i32> {
+    if !args.is_empty() {
+        eprintln!("usage: herdr server stop");
+        return Ok(2);
+    }
+
+    send_ok_request(Method::ServerStop(EmptyParams::default()))
 }
 
 fn workspace_list(args: &[String]) -> std::io::Result<i32> {
@@ -625,153 +659,85 @@ fn pane_run(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn integration_install(args: &[String]) -> std::io::Result<i32> {
-    let Some(target) = args.first().map(|arg| arg.as_str()) else {
-        eprintln!("usage: herdr integration install <pi|claude|codex|opencode>");
+    let Some(target) = parse_integration_target(args, "install")? else {
         return Ok(2);
     };
-    if args.len() != 1 {
-        eprintln!("usage: herdr integration install <pi|claude|codex|opencode>");
-        return Ok(2);
+
+    let response = send_request(&Request {
+        id: "cli:integration:install".into(),
+        method: Method::IntegrationInstall(IntegrationInstallParams { target }),
+    })?;
+
+    if let Some(error) = response.get("error") {
+        eprintln!("{}", serde_json::to_string(error).unwrap());
+        return Ok(1);
     }
 
-    match target {
-        "pi" => {
-            let path = crate::integration::install_pi()?;
-            println!("installed pi integration to {}", path.display());
-            Ok(0)
-        }
-        "claude" => {
-            let installed = crate::integration::install_claude()?;
-            println!(
-                "installed claude integration hook to {}",
-                installed.hook_path.display()
-            );
-            println!(
-                "ensured claude settings at {}",
-                installed.settings_path.display()
-            );
-            Ok(0)
-        }
-        "codex" => {
-            let installed = crate::integration::install_codex()?;
-            println!(
-                "installed codex integration hook to {}",
-                installed.hook_path.display()
-            );
-            println!("ensured codex hooks at {}", installed.hooks_path.display());
-            println!(
-                "ensured codex config at {}",
-                installed.config_path.display()
-            );
-            Ok(0)
-        }
-        "opencode" => {
-            let installed = crate::integration::install_opencode()?;
-            println!(
-                "installed opencode integration plugin to {}",
-                installed.plugin_path.display()
-            );
-            Ok(0)
-        }
-        _ => {
-            eprintln!("unknown integration target: {target}");
-            eprintln!("currently supported: pi, claude, codex, opencode");
-            Ok(2)
-        }
+    let Some(messages) = response["result"]["details"]["messages"].as_array() else {
+        eprintln!("invalid integration install response");
+        return Ok(1);
+    };
+
+    for message in messages.iter().filter_map(|entry| entry.as_str()) {
+        println!("{message}");
     }
+
+    Ok(0)
 }
 
 fn integration_uninstall(args: &[String]) -> std::io::Result<i32> {
-    let Some(target) = args.first().map(|arg| arg.as_str()) else {
-        eprintln!("usage: herdr integration uninstall <pi|claude|codex|opencode>");
+    let Some(target) = parse_integration_target(args, "uninstall")? else {
         return Ok(2);
     };
-    if args.len() != 1 {
-        eprintln!("usage: herdr integration uninstall <pi|claude|codex|opencode>");
-        return Ok(2);
+
+    let response = send_request(&Request {
+        id: "cli:integration:uninstall".into(),
+        method: Method::IntegrationUninstall(IntegrationUninstallParams { target }),
+    })?;
+
+    if let Some(error) = response.get("error") {
+        eprintln!("{}", serde_json::to_string(error).unwrap());
+        return Ok(1);
     }
 
-    match target {
-        "pi" => {
-            let result = crate::integration::uninstall_pi()?;
-            if result.removed_extension {
-                println!(
-                    "removed pi integration extension at {}",
-                    result.extension_path.display()
-                );
-            } else {
-                println!(
-                    "no pi integration extension found at {}",
-                    result.extension_path.display()
-                );
-            }
-            Ok(0)
-        }
-        "claude" => {
-            let result = crate::integration::uninstall_claude()?;
-            if result.removed_hook_file {
-                println!("removed claude hook at {}", result.hook_path.display());
-            } else {
-                println!("no claude hook found at {}", result.hook_path.display());
-            }
-            if result.updated_settings {
-                println!(
-                    "removed herdr claude hook entries from {}",
-                    result.settings_path.display()
-                );
-            } else {
-                println!(
-                    "no herdr claude hook entries found in {}",
-                    result.settings_path.display()
-                );
-            }
-            Ok(0)
-        }
-        "codex" => {
-            let result = crate::integration::uninstall_codex()?;
-            if result.removed_hook_file {
-                println!("removed codex hook at {}", result.hook_path.display());
-            } else {
-                println!("no codex hook found at {}", result.hook_path.display());
-            }
-            if result.updated_hooks {
-                println!(
-                    "removed herdr codex hook entries from {}",
-                    result.hooks_path.display()
-                );
-            } else {
-                println!(
-                    "no herdr codex hook entries found in {}",
-                    result.hooks_path.display()
-                );
-            }
-            println!(
-                "left codex config unchanged at {}",
-                result.config_path.display()
-            );
-            Ok(0)
-        }
-        "opencode" => {
-            let result = crate::integration::uninstall_opencode()?;
-            if result.removed_plugin {
-                println!(
-                    "removed opencode integration plugin at {}",
-                    result.plugin_path.display()
-                );
-            } else {
-                println!(
-                    "no opencode integration plugin found at {}",
-                    result.plugin_path.display()
-                );
-            }
-            Ok(0)
-        }
+    let Some(messages) = response["result"]["details"]["messages"].as_array() else {
+        eprintln!("invalid integration uninstall response");
+        return Ok(1);
+    };
+
+    for message in messages.iter().filter_map(|entry| entry.as_str()) {
+        println!("{message}");
+    }
+
+    Ok(0)
+}
+
+fn parse_integration_target(
+    args: &[String],
+    action: &str,
+) -> std::io::Result<Option<IntegrationTarget>> {
+    let Some(target) = args.first().map(|arg| arg.as_str()) else {
+        eprintln!("usage: herdr integration {action} <pi|claude|codex|opencode>");
+        return Ok(None);
+    };
+    if args.len() != 1 {
+        eprintln!("usage: herdr integration {action} <pi|claude|codex|opencode>");
+        return Ok(None);
+    }
+
+    let parsed = match target {
+        "pi" => IntegrationTarget::Pi,
+        "claude" => IntegrationTarget::Claude,
+        "codex" => IntegrationTarget::Codex,
+        "opencode" => IntegrationTarget::Opencode,
         _ => {
             eprintln!("unknown integration target: {target}");
             eprintln!("currently supported: pi, claude, codex, opencode");
-            Ok(2)
+            return Ok(None);
         }
-    }
+    };
+
+    Ok(Some(parsed))
 }
 
 fn wait_output(args: &[String]) -> std::io::Result<i32> {
@@ -1069,6 +1035,12 @@ fn parse_u64_flag(flag: &str, value: &str) -> std::io::Result<u64> {
     value
         .parse::<u64>()
         .map_err(|_| std::io::Error::other(format!("invalid value for {flag}: {value}")))
+}
+
+fn print_server_help() {
+    eprintln!("herdr server commands:");
+    eprintln!("  herdr server                run as headless server");
+    eprintln!("  herdr server stop           stop the running server via the api socket");
 }
 
 fn print_workspace_help() {

@@ -379,10 +379,29 @@ fn restore_tab(
             .iter()
             .find(|(_, new)| **new == *id)
             .map(|(old, _)| old);
-        let cwd = old_id
+        let saved_cwd = old_id
             .and_then(|old| snap.panes.get(old))
             .map(|p| p.cwd.clone())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
+
+        // If the saved cwd doesn't exist, fall back to HOME, then "/".
+        // Never drop the entire tab/workspace because of a single bad cwd.
+        let cwd = if saved_cwd.exists() {
+            saved_cwd
+        } else {
+            warn!(
+                cwd = %saved_cwd.display(),
+                "saved pane cwd does not exist, falling back to HOME"
+            );
+            let home = std::env::var("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("/"));
+            if home.exists() {
+                home
+            } else {
+                PathBuf::from("/")
+            }
+        };
 
         match PaneRuntime::spawn(
             *id,
@@ -401,10 +420,26 @@ fn restore_tab(
                 runtimes.insert(*id, runtime);
             }
             Err(e) => {
-                error!(tab = ?snap.custom_name, err = %e, "failed to restore pane");
-                return None;
+                error!(
+                    tab = ?snap.custom_name,
+                    pane_id = id.raw(),
+                    err = %e,
+                    "failed to restore pane, skipping"
+                );
+                // Skip this pane but continue restoring others.
+                // A tab with fewer panes is better than dropping the entire
+                // workspace because one pane's spawn failed.
             }
         }
+    }
+
+    // If no panes could be restored, the tab is empty — return None.
+    if panes.is_empty() {
+        warn!(
+            tab = ?snap.custom_name,
+            "no panes could be restored for tab, dropping it"
+        );
+        return None;
     }
 
     let root_pane = snap
@@ -1051,5 +1086,67 @@ mod tests {
         let json = r#"{"custom_name":"test","identity_cwd":"/tmp","tabs":[]}"#;
         let ws: WorkspaceSnapshot = serde_json::from_str(json).unwrap();
         assert_eq!(ws.active_tab, 0);
+    }
+
+    #[test]
+    fn restore_falls_back_to_home_when_cwd_missing() {
+        // Pane spawn failure during session restore falls back
+        // to HOME instead of dropping the entire workspace/tab.
+        // Create a snapshot with a pane pointing to a non-existent directory.
+        let mut panes = HashMap::new();
+        panes.insert(
+            0,
+            PaneSnapshot {
+                cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test"),
+            },
+        );
+        panes.insert(
+            1,
+            PaneSnapshot {
+                cwd: std::env::var("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| PathBuf::from("/tmp")),
+            },
+        );
+
+        let snap = SessionSnapshot {
+            version: SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("test-ws".to_string()),
+                custom_name: Some("fallback test".to_string()),
+                identity_cwd: PathBuf::from("/tmp"),
+                tabs: vec![TabSnapshot {
+                    custom_name: None,
+                    layout: LayoutSnapshot::Split {
+                        direction: DirectionSnapshot::Horizontal,
+                        ratio: 0.5,
+                        first: Box::new(LayoutSnapshot::Pane(0)),
+                        second: Box::new(LayoutSnapshot::Pane(1)),
+                    },
+                    panes,
+                    zoomed: false,
+                    focused: Some(0),
+                    root_pane: Some(0),
+                }],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            agent_panel_scope: crate::app::state::AgentPanelScope::CurrentWorkspace,
+            sidebar_width: Some(26),
+            sidebar_section_split: Some(0.5),
+        };
+
+        // The snapshot should parse correctly.
+        let json = serde_json::to_string(&snap).unwrap();
+        let restored = parse_snapshot(&json).unwrap();
+        assert_eq!(restored.workspaces.len(), 1);
+
+        // The pane with the missing cwd should still have its saved cwd
+        // in the snapshot (the fallback happens during restore, not parse).
+        assert_eq!(
+            restored.workspaces[0].tabs[0].panes[&0].cwd,
+            PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test")
+        );
     }
 }

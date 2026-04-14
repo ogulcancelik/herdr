@@ -80,16 +80,6 @@ pub fn socket_path() -> PathBuf {
         return PathBuf::from(path);
     }
 
-    let socket_name = if crate::config::app_dir_name() == "herdr" {
-        "herdr.sock"
-    } else {
-        "herdr-dev.sock"
-    };
-
-    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-        return PathBuf::from(dir).join(socket_name);
-    }
-
     crate::config::config_dir().join("herdr.sock")
 }
 
@@ -969,6 +959,23 @@ mod tests {
         std::env::set_var(SOCKET_PATH_ENV_VAR, &unique);
         assert_eq!(socket_path(), PathBuf::from(&unique));
         std::env::remove_var(SOCKET_PATH_ENV_VAR);
+    }
+
+    #[test]
+    fn socket_path_defaults_to_config_dir_even_when_xdg_runtime_dir_is_set() {
+        let config_home = unique_test_path("socket-default-config-home");
+        let runtime_dir = unique_test_path("socket-default-runtime");
+        std::env::remove_var(SOCKET_PATH_ENV_VAR);
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
+
+        let expected = config_home
+            .join(crate::config::app_dir_name())
+            .join("herdr.sock");
+        assert_eq!(socket_path(), expected);
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_RUNTIME_DIR");
     }
 
     #[test]

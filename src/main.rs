@@ -21,6 +21,7 @@ const NESTED_HERDR_MESSAGES: [&str; 6] = [
 mod api;
 mod app;
 mod cli;
+mod client;
 mod config;
 mod detect;
 mod events;
@@ -34,6 +35,7 @@ mod platform;
 mod raw_input;
 mod release_notes;
 mod selection;
+mod server;
 mod sound;
 mod terminal_theme;
 mod ui;
@@ -63,12 +65,12 @@ fn init_logging() {
     let filter =
         EnvFilter::try_from_env("HERDR_LOG").unwrap_or_else(|_| EnvFilter::new("herdr=info"));
 
-    tracing_subscriber::fmt()
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(file)
         .with_ansi(false)
         .with_target(false)
-        .init();
+        .try_init();
 }
 
 const DEFAULT_CONFIG: &str = r##"# herdr configuration
@@ -102,9 +104,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Navigate-mode actions
 # new_workspace = "n"
 # rename_workspace = "shift+n"
-# close_workspace = "d"
+# close_workspace = "shift+d"
 # previous_workspace = "" # optional, unset by default
 # next_workspace = ""     # optional, unset by default
+# detach = ""             # optional explicit detach shortcut in server/client mode
 # new_tab = "c"
 # rename_tab = ""         # optional, unset by default
 # previous_tab = ""       # optional, unset by default
@@ -184,6 +187,15 @@ fn main() -> io::Result<()> {
     }
 
     // Subcommands and flags (no TUI, no logging needed)
+    if args.get(1).map(|s| s.as_str()) == Some("server") {
+        return server::headless::run_server();
+    }
+
+    // Client mode: connect to an existing server's client socket.
+    if args.get(1).map(|s| s.as_str()) == Some("client") {
+        return client::run_client();
+    }
+
     if args.get(1).map(|s| s.as_str()) == Some("update") {
         match update::self_update() {
             Ok(_) => return Ok(()),
@@ -199,6 +211,7 @@ fn main() -> io::Result<()> {
         println!();
         println!("Usage: herdr [options]");
         println!("       herdr update");
+        println!("       herdr server stop");
         println!("       herdr workspace <subcommand> ...");
         println!("       herdr tab <subcommand> ...");
         println!("       herdr pane <subcommand> ...");
@@ -206,6 +219,9 @@ fn main() -> io::Result<()> {
         println!("       herdr integration <subcommand> ...");
         println!();
         println!("Commands:");
+        println!("  server              Run as headless server (no terminal, persists after client disconnect)");
+        println!("  server stop         Stop the running server via the API socket");
+        println!("  client             Connect to a running server as a thin client");
         println!("  update              Download and install the latest version");
         println!("  workspace           workspace helpers over the socket api");
         println!("  tab                 tab helpers over the socket api");
@@ -214,7 +230,7 @@ fn main() -> io::Result<()> {
         println!("  integration         manage built-in agent integrations");
         println!();
         println!("Options:");
-        println!("  --no-session        Don't restore or save sessions");
+        println!("  --no-session        Run monolithically (no server/client, escape hatch)");
         println!("  --default-config    Print default configuration and exit");
         println!("  --version, -V       Print version and exit");
         println!("  --show-changelog    Preview the current version's release notes");
@@ -257,7 +273,16 @@ fn main() -> io::Result<()> {
             std::process::exit(1);
         }
         if !arg.starts_with('-')
-            && !["update", "workspace", "pane", "wait", "integration"].contains(&arg.as_str())
+            && ![
+                "server",
+                "client",
+                "update",
+                "workspace",
+                "pane",
+                "wait",
+                "integration",
+            ]
+            .contains(&arg.as_str())
         {
             eprintln!("unknown command: {arg}");
             eprintln!("run 'herdr --help' for usage");
@@ -274,6 +299,18 @@ fn main() -> io::Result<()> {
         std::process::exit(1);
     }
 
+    let no_session = args.iter().any(|a| a == "--no-session");
+
+    // Auto-detect launch: when --no-session is NOT set, use server/client mode.
+    // Check if a server is running, spawn one if needed, then attach as client.
+    if !no_session {
+        init_logging();
+        return server::autodetect::auto_detect_launch();
+    }
+
+    // --- Monolithic mode (--no-session escape hatch) ---
+    // This is the pre-mission single-process behavior.
+
     init_logging();
 
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -288,8 +325,7 @@ fn main() -> io::Result<()> {
         Err(err) => return Err(err),
     };
 
-    let no_session = std::env::args().any(|a| a == "--no-session");
-    let show_changelog = std::env::args().any(|a| a == "--show-changelog");
+    let show_changelog = args.iter().any(|a| a == "--show-changelog");
     let in_tmux = std::env::var("TMUX").is_ok();
 
     let original_hook = std::panic::take_hook();
@@ -321,7 +357,7 @@ fn main() -> io::Result<()> {
             loaded_config.diagnostics.len() - 1
         ))
     };
-    info!("herdr starting, pid={}", std::process::id());
+    info!("herdr starting (monolithic), pid={}", std::process::id());
 
     // Background update check (non-blocking, best-effort)
     // Only checks for newer versions and notifies the TUI.
@@ -362,7 +398,7 @@ fn main() -> io::Result<()> {
 
         let mut app = app::App::new(
             config,
-            no_session,
+            true, // no_session — monolithic mode never saves/restores sessions
             config_diagnostic,
             startup_release_notes,
             api_rx,

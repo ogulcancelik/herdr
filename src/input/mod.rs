@@ -8,10 +8,7 @@ pub use encode::encode_key;
 pub use encode::{
     encode_cursor_key, encode_mouse_button, encode_mouse_scroll, encode_terminal_key,
 };
-pub use model::{
-    normalize_app_key_binding, KeyboardProtocol, MouseProtocolEncoding, MouseProtocolMode,
-    TerminalKey,
-};
+pub use model::{KeyboardProtocol, MouseProtocolEncoding, MouseProtocolMode, TerminalKey};
 pub use parse::parse_terminal_key_sequence;
 
 #[cfg(test)]

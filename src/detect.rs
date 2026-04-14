@@ -352,10 +352,6 @@ fn detect_kimi(content: &str) -> AgentState {
 fn detect_droid(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
-    if is_droid_mission_control(content, &lower) {
-        return AgentState::Idle;
-    }
-
     // Blocked: EXECUTE approval prompt with selection UI chrome
     // Primary (AND): structural keyword + chrome text = certain
     let has_execute = content.contains("EXECUTE");
@@ -383,20 +379,6 @@ fn detect_droid(content: &str) -> AgentState {
     }
 
     AgentState::Idle
-}
-
-fn is_droid_mission_control(content: &str, lower_content: &str) -> bool {
-    let has_header = lower_content.contains("mission control");
-    let has_active_feature = lower_content.contains("active feature");
-    let has_feature_summary = lower_content.contains("features ");
-    let has_mission_metrics = lower_content.contains("time ")
-        && lower_content.contains("input ")
-        && lower_content.contains("output ");
-
-    content.contains("⛬")
-        && has_header
-        && has_active_feature
-        && (has_feature_summary || has_mission_metrics)
 }
 
 /// Amp (Sourcegraph) detection.
@@ -1130,24 +1112,6 @@ mod tests {
         let screen =
             "⛬  Doing well, thanks!\n\nAuto (Off)\n╭──────────╮\n│ >        │\n╰──────────╯";
         assert_eq!(detect_droid(screen), AgentState::Idle);
-    }
-
-    #[test]
-    fn droid_mission_control_is_idle_even_with_stop_chrome() {
-        let screen = concat!(
-            "⛬ Mission Control  ~/Projects/herdr-worktrees/persistence  TIME 22h 40m · Input 12.6M · Cached 129.7M · Output 471.5K\n",
-            "●  RUNNING\n",
-            "Active Feature  fix-scrutiny-misc-followups\n",
-            "Features  25/28\n",
-            "(Press ESC to stop)\n",
-        );
-        assert_eq!(detect_droid(screen), AgentState::Idle);
-    }
-
-    #[test]
-    fn droid_leaves_mission_control_and_returns_to_working() {
-        let screen = ">  how u doin\n\n⠴ Thinking...  (Press ESC to stop)\n\nAuto (Off)";
-        assert_eq!(detect_droid(screen), AgentState::Working);
     }
 
     #[test]

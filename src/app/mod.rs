@@ -2,14 +2,10 @@
 //!
 //! - `state.rs` — AppState, Mode, and pure data structs
 //! - `actions.rs` — state mutations (testable without PTYs/async)
-//! - `api.rs` — API request handling and response building
 //! - `input.rs` — key/mouse → action translation
-//! - `runtime_commands.rs` — custom command launching and overlay restoration
 
-mod actions;
-mod api;
+pub(crate) mod actions;
 mod input;
-mod runtime_commands;
 pub mod state;
 
 use std::collections::{HashMap, HashSet};
@@ -20,7 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const MIN_RENDER_INTERVAL: Duration = Duration::from_millis(16);
-const ANIMATION_INTERVAL: Duration = Duration::from_millis(16);
+pub(crate) const ANIMATION_INTERVAL: Duration = Duration::from_millis(16);
 const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const GIT_REMOTE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
@@ -37,38 +33,44 @@ use crate::config::Config;
 use crate::events::AppEvent;
 use crate::workspace::Workspace;
 
-#[cfg(test)]
-use self::api::api_request_changes_ui;
-
 pub use state::{AppState, Mode, ToastKind, ViewState};
 
 /// Full application: AppState + runtime concerns (event channels, async I/O).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct OverlayPaneState {
+    ws_idx: usize,
+    tab_idx: usize,
+    previous_focus: crate::layout::PaneId,
+    previous_zoomed: bool,
+}
+
 pub struct App {
     pub state: AppState,
     pub event_tx: mpsc::Sender<AppEvent>,
-    event_rx: mpsc::Receiver<AppEvent>,
-    api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
-    event_hub: crate::api::EventHub,
-    last_focus: Option<(usize, crate::layout::PaneId)>,
-    no_session: bool,
-    input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
-    last_terminal_size: Option<(u16, u16)>,
-    config_diagnostic_deadline: Option<Instant>,
-    toast_deadline: Option<Instant>,
-    last_git_remote_status_refresh: Instant,
-    last_sidebar_divider_click: Option<Instant>,
-    next_resize_poll: Instant,
-    next_animation_tick: Option<Instant>,
-    next_auto_update_check: Option<Instant>,
-    session_save_deadline: Option<Instant>,
-    last_render_at: Option<Instant>,
-    suppressed_repeat_keys: HashSet<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
-    render_notify: Arc<Notify>,
-    render_dirty: Arc<AtomicBool>,
-    overlay_panes: HashMap<crate::layout::PaneId, runtime_commands::OverlayPaneState>,
+    pub(crate) event_rx: mpsc::Receiver<AppEvent>,
+    pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
+    pub(crate) event_hub: crate::api::EventHub,
+    pub(crate) last_focus: Option<(usize, crate::layout::PaneId)>,
+    pub(crate) no_session: bool,
+    pub(crate) input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
+    pub(crate) last_terminal_size: Option<(u16, u16)>,
+    pub(crate) config_diagnostic_deadline: Option<Instant>,
+    pub(crate) toast_deadline: Option<Instant>,
+    pub(crate) last_git_remote_status_refresh: Instant,
+    pub(crate) last_sidebar_divider_click: Option<Instant>,
+    pub(crate) next_resize_poll: Instant,
+    pub(crate) next_animation_tick: Option<Instant>,
+    pub(crate) next_auto_update_check: Option<Instant>,
+    pub(crate) session_save_deadline: Option<Instant>,
+    pub(crate) last_render_at: Option<Instant>,
+    pub(crate) suppressed_repeat_keys:
+        HashSet<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
+    pub render_notify: Arc<Notify>,
+    pub render_dirty: Arc<AtomicBool>,
+    pub(crate) overlay_panes: HashMap<crate::layout::PaneId, OverlayPaneState>,
 }
 
-enum LoopEvent {
+pub(crate) enum LoopEvent {
     Timer,
     Internal(AppEvent),
     Api(crate::api::ApiRequestMessage),
@@ -97,6 +99,31 @@ fn repeat_key_identity(
     key: &crate::input::TerminalKey,
 ) -> (crossterm::event::KeyCode, crossterm::event::KeyModifiers) {
     (key.code, key.modifiers)
+}
+
+fn auto_updates_enabled(no_session: bool) -> bool {
+    !no_session && !cfg!(debug_assertions)
+}
+
+fn api_request_changes_ui(request: &crate::api::schema::Request) -> bool {
+    use crate::api::schema::Method;
+
+    matches!(
+        &request.method,
+        Method::WorkspaceCreate(_)
+            | Method::WorkspaceFocus(_)
+            | Method::WorkspaceRename(_)
+            | Method::WorkspaceClose(_)
+            | Method::TabCreate(_)
+            | Method::TabFocus(_)
+            | Method::TabRename(_)
+            | Method::TabClose(_)
+            | Method::PaneSplit(_)
+            | Method::PaneReportAgent(_)
+            | Method::PaneClearAgentAuthority(_)
+            | Method::PaneReleaseAgent(_)
+            | Method::PaneClose(_)
+    )
 }
 
 /// Resolve the palette from config: base theme + optional custom overrides.
@@ -228,6 +255,8 @@ impl App {
             selected,
             mode,
             should_quit: false,
+            quit_detaches: !no_session,
+            detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,
             request_reload_keybinds: false,
@@ -307,9 +336,10 @@ impl App {
             ws.refresh_git_ahead_behind();
         }
 
-        // Background auto-update (skipped in --no-session / test mode)
-        // Check once at startup, then periodically from the main loop.
-        if !no_session {
+        // Background auto-update is disabled in monolithic no-session mode
+        // and in debug/test builds so local development never mutates the
+        // running binary out from under spawned test processes.
+        if auto_updates_enabled(no_session) {
             let update_tx = event_tx.clone();
             std::thread::spawn(move || crate::update::auto_update(update_tx));
         }
@@ -334,7 +364,7 @@ impl App {
             last_sidebar_divider_click: None,
             next_resize_poll: Instant::now() + RESIZE_POLL_INTERVAL,
             next_animation_tick: None,
-            next_auto_update_check: (!no_session)
+            next_auto_update_check: auto_updates_enabled(no_session)
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
             session_save_deadline: None,
             last_render_at: None,
@@ -357,14 +387,14 @@ impl App {
         }
     }
 
-    fn sync_session_save_schedule(&mut self) {
+    pub(crate) fn sync_session_save_schedule(&mut self) {
         if self.state.session_dirty {
             self.state.session_dirty = false;
             self.schedule_session_save();
         }
     }
 
-    fn save_session_now(&mut self) {
+    pub(crate) fn save_session_now(&mut self) {
         if self.no_session {
             self.session_save_deadline = None;
             return;
@@ -510,11 +540,18 @@ impl App {
         Ok(())
     }
 
-    fn drain_api_requests(&mut self) -> bool {
+    pub(crate) fn drain_api_requests(&mut self) -> bool {
         let mut changed = false;
         while let Ok(msg) = self.api_rx.try_recv() {
             changed |= self.handle_api_request_message(msg);
         }
+        changed
+    }
+
+    fn handle_api_request_message(&mut self, msg: crate::api::ApiRequestMessage) -> bool {
+        let changed = api_request_changes_ui(&msg.request);
+        let response = self.handle_api_request(msg.request);
+        let _ = msg.respond_to.send(response);
         changed
     }
 
@@ -574,13 +611,7 @@ impl App {
                 true
             }
             crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
-                let next_theme = self.state.host_terminal_theme.with_color(kind, color);
-                if next_theme == self.state.host_terminal_theme {
-                    return false;
-                }
-                self.state.host_terminal_theme = next_theme;
-                self.apply_host_terminal_theme_to_panes();
-                true
+                self.update_host_terminal_theme(kind, color)
             }
             crate::raw_input::RawInputEvent::Unsupported => false,
         }
@@ -592,6 +623,20 @@ impl App {
         let _ = std::io::stdout()
             .write_all(crate::terminal_theme::HOST_COLOR_QUERY_SEQUENCE.as_bytes());
         let _ = std::io::stdout().flush();
+    }
+
+    fn update_host_terminal_theme(
+        &mut self,
+        kind: crate::terminal_theme::DefaultColorKind,
+        color: crate::terminal_theme::RgbColor,
+    ) -> bool {
+        let next_theme = self.state.host_terminal_theme.with_color(kind, color);
+        if next_theme == self.state.host_terminal_theme {
+            return false;
+        }
+        self.state.host_terminal_theme = next_theme;
+        self.apply_host_terminal_theme_to_panes();
+        true
     }
 
     fn apply_host_terminal_theme_to_panes(&self) {
@@ -622,7 +667,7 @@ impl App {
         false
     }
 
-    fn handle_scheduled_tasks(&mut self, now: Instant) -> bool {
+    pub(crate) fn handle_scheduled_tasks(&mut self, now: Instant) -> bool {
         let mut changed = false;
 
         self.sync_animation_timer(now);
@@ -685,7 +730,7 @@ impl App {
         changed
     }
 
-    fn sync_animation_timer(&mut self, now: Instant) {
+    pub(crate) fn sync_animation_timer(&mut self, now: Instant) {
         if self.agent_panel_has_animation() {
             self.next_animation_tick
                 .get_or_insert(now + ANIMATION_INTERVAL);
@@ -709,14 +754,19 @@ impl App {
         }
     }
 
-    fn can_render_now(&self, now: Instant) -> bool {
+    pub(crate) fn can_render_now(&self, now: Instant) -> bool {
         match self.last_render_at {
             Some(last_render_at) => now.duration_since(last_render_at) >= MIN_RENDER_INTERVAL,
             None => true,
         }
     }
 
-    fn run_auto_update_check(&mut self) {
+    pub(crate) fn run_auto_update_check(&mut self) {
+        if !auto_updates_enabled(self.no_session) {
+            self.next_auto_update_check = None;
+            return;
+        }
+
         self.next_auto_update_check = self
             .state
             .update_available
@@ -731,12 +781,12 @@ impl App {
         std::thread::spawn(move || crate::update::auto_update(update_tx));
     }
 
-    fn git_refresh_deadline(&self) -> Option<Instant> {
+    pub(crate) fn git_refresh_deadline(&self) -> Option<Instant> {
         (!self.state.workspaces.is_empty())
             .then_some(self.last_git_remote_status_refresh + GIT_REMOTE_STATUS_REFRESH_INTERVAL)
     }
 
-    fn next_loop_deadline(&self, now: Instant, needs_render: bool) -> Option<Instant> {
+    pub(crate) fn next_loop_deadline(&self, now: Instant, needs_render: bool) -> Option<Instant> {
         let render_deadline = if needs_render {
             self.last_render_at
                 .map(|last_render_at| last_render_at + MIN_RENDER_INTERVAL)
@@ -760,7 +810,7 @@ impl App {
         .min()
     }
 
-    fn drain_internal_events(&mut self) -> bool {
+    pub(crate) fn drain_internal_events(&mut self) -> bool {
         let mut had_event = false;
         while let Ok(ev) = self.event_rx.try_recv() {
             had_event = true;
@@ -769,7 +819,7 @@ impl App {
         had_event
     }
 
-    fn handle_internal_event(&mut self, ev: AppEvent) {
+    pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
         if let AppEvent::ClipboardWrite { content } = ev {
             crate::selection::write_osc52_bytes(&content);
             return;
@@ -824,6 +874,26 @@ impl App {
             self.restore_overlay_after_exit(overlay);
         }
         self.sync_toast_deadline(previous_toast);
+    }
+
+    fn restore_overlay_after_exit(&mut self, overlay: OverlayPaneState) {
+        let Some(ws) = self.state.workspaces.get_mut(overlay.ws_idx) else {
+            return;
+        };
+        if overlay.tab_idx >= ws.tabs.len() {
+            return;
+        }
+
+        ws.active_tab = overlay.tab_idx;
+        let tab = &mut ws.tabs[overlay.tab_idx];
+        if tab.panes.contains_key(&overlay.previous_focus) {
+            tab.layout.focus_pane(overlay.previous_focus);
+        }
+        tab.zoomed = overlay.previous_zoomed;
+
+        if self.state.active == Some(overlay.ws_idx) {
+            self.state.mode = Mode::Terminal;
+        }
     }
 
     fn emit_pane_state_update(&self, update: &crate::app::actions::PaneStateUpdate) {
@@ -882,7 +952,7 @@ impl App {
         self.event_hub.push(event);
     }
 
-    fn sync_focus_events(&mut self) {
+    pub(crate) fn sync_focus_events(&mut self) {
         let current_focus = self.state.active.and_then(|idx| {
             self.state
                 .workspaces
@@ -955,6 +1025,1300 @@ impl App {
             .iter()
             .enumerate()
             .find_map(|(ws_idx, ws)| ws.pane_state(pane_id).map(|pane| (ws_idx, pane)))
+    }
+
+    fn public_workspace_id(&self, ws_idx: usize) -> String {
+        self.state.workspaces[ws_idx].id.clone()
+    }
+
+    fn public_tab_id(&self, ws_idx: usize, tab_idx: usize) -> Option<String> {
+        let ws = self.state.workspaces.get(ws_idx)?;
+        ws.tabs.get(tab_idx)?;
+        Some(format!("{}:{}", ws.id, tab_idx + 1))
+    }
+
+    fn public_pane_id(&self, ws_idx: usize, pane_id: crate::layout::PaneId) -> Option<String> {
+        let ws = self.state.workspaces.get(ws_idx)?;
+        let pane_number = ws.public_pane_number(pane_id)?;
+        Some(format!("{}-{pane_number}", ws.id))
+    }
+
+    fn parse_workspace_id(&self, id: &str) -> Option<usize> {
+        self.state
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == id)
+            .or_else(|| id.strip_prefix("w_")?.parse::<usize>().ok()?.checked_sub(1))
+            .or_else(|| id.parse::<usize>().ok()?.checked_sub(1))
+    }
+
+    fn parse_tab_id(&self, id: &str) -> Option<(usize, usize)> {
+        if let Some(rest) = id.strip_prefix("t_") {
+            let (ws_raw, tab_raw) = rest.rsplit_once('_')?;
+            let ws_idx = self.parse_workspace_id(ws_raw)?;
+            let tab_idx = tab_raw.parse::<usize>().ok()?.checked_sub(1)?;
+            self.state.workspaces.get(ws_idx)?.tabs.get(tab_idx)?;
+            return Some((ws_idx, tab_idx));
+        }
+
+        let (ws_raw, tab_raw) = id.rsplit_once(':')?;
+        let ws_idx = self.parse_workspace_id(ws_raw)?;
+        let tab_idx = tab_raw.parse::<usize>().ok()?.checked_sub(1)?;
+        self.state.workspaces.get(ws_idx)?.tabs.get(tab_idx)?;
+        Some((ws_idx, tab_idx))
+    }
+
+    fn parse_pane_id(&self, id: &str) -> Option<(usize, crate::layout::PaneId)> {
+        if let Some(rest) = id.strip_prefix("p_") {
+            if let Some((ws_raw, pane_raw)) = rest.rsplit_once('_') {
+                let ws_idx = self.parse_workspace_id(ws_raw)?;
+                let pane_id = crate::layout::PaneId::from_raw(pane_raw.parse::<u32>().ok()?);
+                return Some((ws_idx, pane_id));
+            }
+
+            let pane_id = crate::layout::PaneId::from_raw(rest.parse::<u32>().ok()?);
+            return self.find_pane(pane_id).map(|(ws_idx, _)| (ws_idx, pane_id));
+        }
+
+        let (ws_raw, pane_number_raw) = id.rsplit_once('-')?;
+        let ws_idx = self.parse_workspace_id(ws_raw)?;
+        let pane_number = pane_number_raw.parse::<usize>().ok()?;
+        let ws = self.state.workspaces.get(ws_idx)?;
+        let pane_id = ws
+            .public_pane_numbers
+            .iter()
+            .find_map(|(pane_id, number)| (*number == pane_number).then_some(*pane_id))?;
+        Some((ws_idx, pane_id))
+    }
+
+    pub(crate) fn handle_api_request(&mut self, request: crate::api::schema::Request) -> String {
+        self.drain_internal_events();
+        use bytes::Bytes;
+
+        use crate::api::schema::{
+            ErrorBody, ErrorResponse, IntegrationInstallResult, IntegrationTarget,
+            IntegrationUninstallResult, Method, PaneListParams, PaneReadResult, ReadSource,
+            ResponseResult, SuccessResponse, TabListParams,
+        };
+
+        let response = match request.method {
+            Method::ServerStop(_) => {
+                self.state.should_quit = true;
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::Ok {},
+                }
+            }
+            Method::WorkspaceList(_) => SuccessResponse {
+                id: request.id,
+                result: ResponseResult::WorkspaceList {
+                    workspaces: self
+                        .state
+                        .workspaces
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, _)| self.workspace_info(idx))
+                        .collect(),
+                },
+            },
+            Method::WorkspaceGet(target) => {
+                let Some(index) = self.parse_workspace_id(&target.workspace_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "workspace_not_found".into(),
+                            message: format!("workspace {} not found", target.workspace_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some(_) = self.state.workspaces.get(index) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "workspace_not_found".into(),
+                            message: format!("workspace {} not found", target.workspace_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::WorkspaceInfo {
+                        workspace: self.workspace_info(index),
+                    },
+                }
+            }
+            Method::WorkspaceCreate(params) => {
+                let cwd = params
+                    .cwd
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_else(|| std::path::PathBuf::from("/"));
+                match self.create_workspace_with_options(cwd, params.focus) {
+                    Ok(index) => {
+                        if let Some(label) = params.label {
+                            if let Some(workspace) = self.state.workspaces.get_mut(index) {
+                                workspace.set_custom_name(label);
+                            }
+                        }
+                        let workspace = self.workspace_info(index);
+                        let tab = self
+                            .tab_info(index, 0)
+                            .expect("new workspace should have an initial tab");
+                        let root_pane = self
+                            .root_pane_info(index, 0)
+                            .expect("new workspace should have an initial root pane");
+                        self.emit_event(crate::api::schema::EventEnvelope {
+                            event: crate::api::schema::EventKind::WorkspaceCreated,
+                            data: crate::api::schema::EventData::WorkspaceCreated {
+                                workspace: workspace.clone(),
+                            },
+                        });
+                        self.emit_event(crate::api::schema::EventEnvelope {
+                            event: crate::api::schema::EventKind::TabCreated,
+                            data: crate::api::schema::EventData::TabCreated { tab: tab.clone() },
+                        });
+                        self.emit_event(crate::api::schema::EventEnvelope {
+                            event: crate::api::schema::EventKind::PaneCreated,
+                            data: crate::api::schema::EventData::PaneCreated {
+                                pane: root_pane.clone(),
+                            },
+                        });
+                        SuccessResponse {
+                            id: request.id,
+                            result: self
+                                .workspace_created_result(index)
+                                .expect("new workspace should produce a complete create response"),
+                        }
+                    }
+                    Err(err) => {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "workspace_create_failed".into(),
+                                message: err.to_string(),
+                            },
+                        })
+                        .unwrap();
+                    }
+                }
+            }
+            Method::WorkspaceFocus(target) => {
+                let Some(index) = self.parse_workspace_id(&target.workspace_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "workspace_not_found".into(),
+                            message: format!("workspace {} not found", target.workspace_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                if self.state.workspaces.get(index).is_none() {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "workspace_not_found".into(),
+                            message: format!("workspace {} not found", target.workspace_id),
+                        },
+                    })
+                    .unwrap();
+                }
+                self.state.switch_workspace(index);
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::WorkspaceInfo {
+                        workspace: self.workspace_info(index),
+                    },
+                }
+            }
+            Method::WorkspaceRename(params) => {
+                let Some(index) = self.parse_workspace_id(&params.workspace_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "workspace_not_found".into(),
+                            message: format!("workspace {} not found", params.workspace_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some(ws) = self.state.workspaces.get_mut(index) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "workspace_not_found".into(),
+                            message: format!("workspace {} not found", params.workspace_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                ws.set_custom_name(params.label.clone());
+                self.schedule_session_save();
+                self.emit_event(crate::api::schema::EventEnvelope {
+                    event: crate::api::schema::EventKind::WorkspaceRenamed,
+                    data: crate::api::schema::EventData::WorkspaceRenamed {
+                        workspace_id: self.public_workspace_id(index),
+                        label: params.label,
+                    },
+                });
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::WorkspaceInfo {
+                        workspace: self.workspace_info(index),
+                    },
+                }
+            }
+            Method::WorkspaceClose(target) => {
+                let Some(index) = self.parse_workspace_id(&target.workspace_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "workspace_not_found".into(),
+                            message: format!("workspace {} not found", target.workspace_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                if self.state.workspaces.get(index).is_none() {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "workspace_not_found".into(),
+                            message: format!("workspace {} not found", target.workspace_id),
+                        },
+                    })
+                    .unwrap();
+                }
+                self.state.selected = index;
+                self.state.close_selected_workspace();
+                self.emit_event(crate::api::schema::EventEnvelope {
+                    event: crate::api::schema::EventKind::WorkspaceClosed,
+                    data: crate::api::schema::EventData::WorkspaceClosed {
+                        workspace_id: target.workspace_id,
+                    },
+                });
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::Ok {},
+                }
+            }
+            Method::TabList(TabListParams { workspace_id }) => {
+                let tabs = if let Some(workspace_id) = workspace_id {
+                    let Some(ws_idx) = self.parse_workspace_id(&workspace_id) else {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "workspace_not_found".into(),
+                                message: format!("workspace {} not found", workspace_id),
+                            },
+                        })
+                        .unwrap();
+                    };
+                    let Some(ws) = self.state.workspaces.get(ws_idx) else {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "workspace_not_found".into(),
+                                message: format!("workspace {} not found", workspace_id),
+                            },
+                        })
+                        .unwrap();
+                    };
+                    (0..ws.tabs.len())
+                        .filter_map(|tab_idx| self.tab_info(ws_idx, tab_idx))
+                        .collect()
+                } else {
+                    let mut tabs = Vec::new();
+                    for (ws_idx, ws) in self.state.workspaces.iter().enumerate() {
+                        for tab_idx in 0..ws.tabs.len() {
+                            if let Some(tab) = self.tab_info(ws_idx, tab_idx) {
+                                tabs.push(tab);
+                            }
+                        }
+                    }
+                    tabs
+                };
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::TabList { tabs },
+                }
+            }
+            Method::TabGet(target) => {
+                let Some((ws_idx, tab_idx)) = self.parse_tab_id(&target.tab_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "tab_not_found".into(),
+                            message: format!("tab {} not found", target.tab_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some(tab) = self.tab_info(ws_idx, tab_idx) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "tab_not_found".into(),
+                            message: format!("tab {} not found", target.tab_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::TabInfo { tab },
+                }
+            }
+            Method::TabCreate(params) => {
+                let crate::api::schema::TabCreateParams {
+                    workspace_id,
+                    cwd,
+                    focus,
+                    label,
+                } = params;
+                let ws_idx = if let Some(workspace_id) = workspace_id {
+                    let Some(ws_idx) = self.parse_workspace_id(&workspace_id) else {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "workspace_not_found".into(),
+                                message: format!("workspace {} not found", workspace_id),
+                            },
+                        })
+                        .unwrap();
+                    };
+                    ws_idx
+                } else if let Some(active) = self.state.active {
+                    active
+                } else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "workspace_not_found".into(),
+                            message: "no active workspace".into(),
+                        },
+                    })
+                    .unwrap();
+                };
+                let cwd = cwd
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| {
+                        self.state.workspaces.get(ws_idx).and_then(|ws| {
+                            ws.active_tab()
+                                .and_then(|tab| tab.focused_runtime())
+                                .and_then(|rt| rt.cwd())
+                        })
+                    })
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_else(|| std::path::PathBuf::from("/"));
+                let (rows, cols) = self.state.estimate_pane_size();
+                let result = self
+                    .state
+                    .workspaces
+                    .get_mut(ws_idx)
+                    .ok_or_else(|| std::io::Error::other("workspace disappeared"))
+                    .and_then(|ws| {
+                        ws.create_tab(
+                            rows,
+                            cols,
+                            cwd,
+                            self.state.pane_scrollback_limit_bytes,
+                            self.state.host_terminal_theme,
+                        )
+                    });
+                match result {
+                    Ok(tab_idx) => {
+                        if let Some(label) = label {
+                            if let Some(tab) = self
+                                .state
+                                .workspaces
+                                .get_mut(ws_idx)
+                                .and_then(|ws| ws.tabs.get_mut(tab_idx))
+                            {
+                                tab.set_custom_name(label);
+                            }
+                        }
+                        if focus {
+                            self.state.switch_workspace(ws_idx);
+                            self.state.switch_tab(tab_idx);
+                            self.state.mode = Mode::Terminal;
+                        }
+                        self.schedule_session_save();
+                        let tab = self.tab_info(ws_idx, tab_idx).unwrap();
+                        let root_pane = self
+                            .root_pane_info(ws_idx, tab_idx)
+                            .expect("new tab should have a root pane");
+                        self.emit_event(crate::api::schema::EventEnvelope {
+                            event: crate::api::schema::EventKind::TabCreated,
+                            data: crate::api::schema::EventData::TabCreated { tab: tab.clone() },
+                        });
+                        self.emit_event(crate::api::schema::EventEnvelope {
+                            event: crate::api::schema::EventKind::PaneCreated,
+                            data: crate::api::schema::EventData::PaneCreated {
+                                pane: root_pane.clone(),
+                            },
+                        });
+                        SuccessResponse {
+                            id: request.id,
+                            result: self
+                                .tab_created_result(ws_idx, tab_idx)
+                                .expect("new tab should produce a complete create response"),
+                        }
+                    }
+                    Err(err) => {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "tab_create_failed".into(),
+                                message: err.to_string(),
+                            },
+                        })
+                        .unwrap();
+                    }
+                }
+            }
+            Method::TabFocus(target) => {
+                let Some((ws_idx, tab_idx)) = self.parse_tab_id(&target.tab_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "tab_not_found".into(),
+                            message: format!("tab {} not found", target.tab_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                self.state.switch_workspace(ws_idx);
+                self.state.switch_tab(tab_idx);
+                let tab = self.tab_info(ws_idx, tab_idx).unwrap();
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::TabInfo { tab },
+                }
+            }
+            Method::TabRename(params) => {
+                let Some((ws_idx, tab_idx)) = self.parse_tab_id(&params.tab_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "tab_not_found".into(),
+                            message: format!("tab {} not found", params.tab_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some(tab) = self
+                    .state
+                    .workspaces
+                    .get_mut(ws_idx)
+                    .and_then(|ws| ws.tabs.get_mut(tab_idx))
+                else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "tab_not_found".into(),
+                            message: format!("tab {} not found", params.tab_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                tab.set_custom_name(params.label.clone());
+                self.schedule_session_save();
+                self.emit_event(crate::api::schema::EventEnvelope {
+                    event: crate::api::schema::EventKind::TabRenamed,
+                    data: crate::api::schema::EventData::TabRenamed {
+                        tab_id: self.public_tab_id(ws_idx, tab_idx).unwrap(),
+                        workspace_id: self.public_workspace_id(ws_idx),
+                        label: params.label,
+                    },
+                });
+                let tab = self.tab_info(ws_idx, tab_idx).unwrap();
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::TabInfo { tab },
+                }
+            }
+            Method::TabClose(target) => {
+                let Some((ws_idx, tab_idx)) = self.parse_tab_id(&target.tab_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "tab_not_found".into(),
+                            message: format!("tab {} not found", target.tab_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "tab_not_found".into(),
+                            message: format!("tab {} not found", target.tab_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                if ws.tabs.len() <= 1 {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "tab_close_failed".into(),
+                            message: "cannot close the last tab in a workspace".into(),
+                        },
+                    })
+                    .unwrap();
+                }
+                if !ws.close_tab(tab_idx) {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "tab_close_failed".into(),
+                            message: format!("tab {} could not be closed", target.tab_id),
+                        },
+                    })
+                    .unwrap();
+                }
+                self.schedule_session_save();
+                self.emit_event(crate::api::schema::EventEnvelope {
+                    event: crate::api::schema::EventKind::TabClosed,
+                    data: crate::api::schema::EventData::TabClosed {
+                        tab_id: target.tab_id,
+                        workspace_id: self.public_workspace_id(ws_idx),
+                    },
+                });
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::Ok {},
+                }
+            }
+            Method::PaneSplit(params) => {
+                let Some((ws_idx, target_pane_id)) = self.parse_pane_id(&params.target_pane_id)
+                else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.target_pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let (rows, cols) = self.state.estimate_pane_size();
+                let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.target_pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                ws.layout.focus_pane(target_pane_id);
+                let direction = match params.direction {
+                    crate::api::schema::SplitDirection::Right => {
+                        ratatui::layout::Direction::Horizontal
+                    }
+                    crate::api::schema::SplitDirection::Down => {
+                        ratatui::layout::Direction::Vertical
+                    }
+                };
+                let new_pane_id = match ws.split_focused(
+                    direction,
+                    rows,
+                    cols,
+                    params.cwd.map(std::path::PathBuf::from),
+                    self.state.pane_scrollback_limit_bytes,
+                    self.state.host_terminal_theme,
+                ) {
+                    Ok(new_pane_id) => new_pane_id,
+                    Err(err) => {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "pane_split_failed".into(),
+                                message: err.to_string(),
+                            },
+                        })
+                        .unwrap();
+                    }
+                };
+                if !params.focus {
+                    ws.layout.focus_pane(target_pane_id);
+                }
+                self.schedule_session_save();
+                let pane = self.pane_info(ws_idx, new_pane_id).unwrap();
+                self.emit_event(crate::api::schema::EventEnvelope {
+                    event: crate::api::schema::EventKind::PaneCreated,
+                    data: crate::api::schema::EventData::PaneCreated { pane: pane.clone() },
+                });
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::PaneInfo { pane },
+                }
+            }
+            Method::PaneList(PaneListParams { workspace_id }) => {
+                match self.collect_panes_for_workspace(workspace_id.as_deref()) {
+                    Ok(panes) => SuccessResponse {
+                        id: request.id,
+                        result: ResponseResult::PaneList { panes },
+                    },
+                    Err((code, message)) => {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody { code, message },
+                        })
+                        .unwrap();
+                    }
+                }
+            }
+            Method::PaneGet(target) => {
+                let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", target.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some(pane) = self.pane_info(ws_idx, pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", target.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::PaneInfo { pane },
+                }
+            }
+            Method::PaneRead(params) => {
+                let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some((pane, workspace_id)) = self.lookup_runtime(ws_idx, pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some(tab_idx) = self
+                    .state
+                    .workspaces
+                    .get(ws_idx)
+                    .and_then(|ws| ws.find_tab_index_for_pane(pane_id))
+                else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let requested_lines = params.lines.unwrap_or(80).min(1000) as usize;
+                let text = match params.source {
+                    ReadSource::Visible => pane.visible_text(),
+                    ReadSource::Recent => pane.recent_text(requested_lines),
+                    ReadSource::RecentUnwrapped => pane.recent_unwrapped_text(requested_lines),
+                };
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::PaneRead {
+                        read: PaneReadResult {
+                            pane_id: params.pane_id,
+                            workspace_id,
+                            tab_id: self.public_tab_id(ws_idx, tab_idx).unwrap(),
+                            source: params.source,
+                            text,
+                            revision: 0,
+                            truncated: false,
+                        },
+                    },
+                }
+            }
+            Method::PaneReportAgent(params) => {
+                let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some(agent) = parse_agent_name(&params.agent) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "invalid_agent".into(),
+                            message: format!("unsupported agent {}", params.agent),
+                        },
+                    })
+                    .unwrap();
+                };
+                self.handle_internal_event(crate::events::AppEvent::HookStateReported {
+                    pane_id,
+                    source: params.source,
+                    agent,
+                    state: detect_state_from_api(params.state),
+                    message: params.message,
+                });
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::Ok {},
+                }
+            }
+            Method::PaneClearAgentAuthority(params) => {
+                let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                self.handle_internal_event(crate::events::AppEvent::HookAuthorityCleared {
+                    pane_id,
+                    source: params.source,
+                });
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::Ok {},
+                }
+            }
+            Method::PaneReleaseAgent(params) => {
+                let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some(agent) = parse_agent_name(&params.agent) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "invalid_agent".into(),
+                            message: format!("unsupported agent {}", params.agent),
+                        },
+                    })
+                    .unwrap();
+                };
+                self.handle_internal_event(crate::events::AppEvent::HookAgentReleased {
+                    pane_id,
+                    source: params.source,
+                    agent,
+                });
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::Ok {},
+                }
+            }
+            Method::PaneSendText(params) => {
+                let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                if let Err(err) = runtime.try_send_bytes(Bytes::from(params.text)) {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_send_failed".into(),
+                            message: err.to_string(),
+                        },
+                    })
+                    .unwrap();
+                }
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::Ok {},
+                }
+            }
+            Method::PaneSendInput(params) => {
+                let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let encoded_keys = match encode_api_keys(runtime, &params.keys) {
+                    Ok(encoded_keys) => encoded_keys,
+                    Err(key) => {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "invalid_key".into(),
+                                message: format!("unsupported key {key}"),
+                            },
+                        })
+                        .unwrap();
+                    }
+                };
+                if !params.text.is_empty() {
+                    let text_bytes = encode_api_text(runtime, &params.text);
+                    if let Err(err) = runtime.try_send_bytes(Bytes::from(text_bytes)) {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "pane_send_failed".into(),
+                                message: err.to_string(),
+                            },
+                        })
+                        .unwrap();
+                    }
+                }
+                for bytes in encoded_keys {
+                    if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "pane_send_failed".into(),
+                                message: err.to_string(),
+                            },
+                        })
+                        .unwrap();
+                    }
+                }
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::Ok {},
+                }
+            }
+            Method::PaneClose(target) => {
+                let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", target.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let workspace_id = self.state.workspaces[ws_idx].id.clone();
+                let should_close_workspace = {
+                    let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "pane_not_found".into(),
+                                message: format!("pane {} not found", target.pane_id),
+                            },
+                        })
+                        .unwrap();
+                    };
+                    ws.close_pane(pane_id)
+                };
+                if should_close_workspace {
+                    self.state.selected = ws_idx;
+                    self.state.close_selected_workspace();
+                    self.emit_event(crate::api::schema::EventEnvelope {
+                        event: crate::api::schema::EventKind::PaneClosed,
+                        data: crate::api::schema::EventData::PaneClosed {
+                            pane_id: target.pane_id.clone(),
+                            workspace_id: workspace_id.clone(),
+                        },
+                    });
+                    self.emit_event(crate::api::schema::EventEnvelope {
+                        event: crate::api::schema::EventKind::WorkspaceClosed,
+                        data: crate::api::schema::EventData::WorkspaceClosed { workspace_id },
+                    });
+                } else {
+                    self.schedule_session_save();
+                    self.emit_event(crate::api::schema::EventEnvelope {
+                        event: crate::api::schema::EventKind::PaneClosed,
+                        data: crate::api::schema::EventData::PaneClosed {
+                            pane_id: target.pane_id,
+                            workspace_id,
+                        },
+                    });
+                }
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::Ok {},
+                }
+            }
+            Method::PaneSendKeys(params) => {
+                let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let encoded_keys = match encode_api_keys(runtime, &params.keys) {
+                    Ok(encoded_keys) => encoded_keys,
+                    Err(key) => {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "invalid_key".into(),
+                                message: format!("unsupported key {key}"),
+                            },
+                        })
+                        .unwrap();
+                    }
+                };
+                for bytes in encoded_keys {
+                    if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "pane_send_failed".into(),
+                                message: err.to_string(),
+                            },
+                        })
+                        .unwrap();
+                    }
+                }
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::Ok {},
+                }
+            }
+            Method::IntegrationInstall(params) => {
+                let target = params.target;
+                let messages = match target {
+                    IntegrationTarget::Pi => {
+                        let path = crate::integration::install_pi().map_err(|err| {
+                            serde_json::to_string(&ErrorResponse {
+                                id: request.id.clone(),
+                                error: ErrorBody {
+                                    code: "integration_install_failed".into(),
+                                    message: err.to_string(),
+                                },
+                            })
+                            .unwrap()
+                        });
+                        match path {
+                            Ok(path) => {
+                                vec![format!("installed pi integration to {}", path.display())]
+                            }
+                            Err(response) => return response,
+                        }
+                    }
+                    IntegrationTarget::Claude => {
+                        let installed = crate::integration::install_claude().map_err(|err| {
+                            serde_json::to_string(&ErrorResponse {
+                                id: request.id.clone(),
+                                error: ErrorBody {
+                                    code: "integration_install_failed".into(),
+                                    message: err.to_string(),
+                                },
+                            })
+                            .unwrap()
+                        });
+                        match installed {
+                            Ok(installed) => vec![
+                                format!(
+                                    "installed claude integration hook to {}",
+                                    installed.hook_path.display()
+                                ),
+                                format!(
+                                    "ensured claude settings at {}",
+                                    installed.settings_path.display()
+                                ),
+                            ],
+                            Err(response) => return response,
+                        }
+                    }
+                    IntegrationTarget::Codex => {
+                        let installed = crate::integration::install_codex().map_err(|err| {
+                            serde_json::to_string(&ErrorResponse {
+                                id: request.id.clone(),
+                                error: ErrorBody {
+                                    code: "integration_install_failed".into(),
+                                    message: err.to_string(),
+                                },
+                            })
+                            .unwrap()
+                        });
+                        match installed {
+                            Ok(installed) => vec![
+                                format!(
+                                    "installed codex integration hook to {}",
+                                    installed.hook_path.display()
+                                ),
+                                format!(
+                                    "ensured codex hooks at {}",
+                                    installed.hooks_path.display()
+                                ),
+                                format!(
+                                    "ensured codex config at {}",
+                                    installed.config_path.display()
+                                ),
+                            ],
+                            Err(response) => return response,
+                        }
+                    }
+                    IntegrationTarget::Opencode => {
+                        let installed = crate::integration::install_opencode().map_err(|err| {
+                            serde_json::to_string(&ErrorResponse {
+                                id: request.id.clone(),
+                                error: ErrorBody {
+                                    code: "integration_install_failed".into(),
+                                    message: err.to_string(),
+                                },
+                            })
+                            .unwrap()
+                        });
+                        match installed {
+                            Ok(installed) => vec![format!(
+                                "installed opencode integration plugin to {}",
+                                installed.plugin_path.display()
+                            )],
+                            Err(response) => return response,
+                        }
+                    }
+                };
+
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::IntegrationInstall {
+                        target,
+                        details: IntegrationInstallResult { messages },
+                    },
+                }
+            }
+            Method::IntegrationUninstall(params) => {
+                let target = params.target;
+                let messages = match target {
+                    IntegrationTarget::Pi => {
+                        let result = crate::integration::uninstall_pi().map_err(|err| {
+                            serde_json::to_string(&ErrorResponse {
+                                id: request.id.clone(),
+                                error: ErrorBody {
+                                    code: "integration_uninstall_failed".into(),
+                                    message: err.to_string(),
+                                },
+                            })
+                            .unwrap()
+                        });
+                        match result {
+                            Ok(result) => {
+                                if result.removed_extension {
+                                    vec![format!(
+                                        "removed pi integration extension at {}",
+                                        result.extension_path.display()
+                                    )]
+                                } else {
+                                    vec![format!(
+                                        "no pi integration extension found at {}",
+                                        result.extension_path.display()
+                                    )]
+                                }
+                            }
+                            Err(response) => return response,
+                        }
+                    }
+                    IntegrationTarget::Claude => {
+                        let result = crate::integration::uninstall_claude().map_err(|err| {
+                            serde_json::to_string(&ErrorResponse {
+                                id: request.id.clone(),
+                                error: ErrorBody {
+                                    code: "integration_uninstall_failed".into(),
+                                    message: err.to_string(),
+                                },
+                            })
+                            .unwrap()
+                        });
+                        match result {
+                            Ok(result) => {
+                                let mut messages = Vec::new();
+                                if result.removed_hook_file {
+                                    messages.push(format!(
+                                        "removed claude hook at {}",
+                                        result.hook_path.display()
+                                    ));
+                                } else {
+                                    messages.push(format!(
+                                        "no claude hook found at {}",
+                                        result.hook_path.display()
+                                    ));
+                                }
+                                if result.updated_settings {
+                                    messages.push(format!(
+                                        "removed herdr claude hook entries from {}",
+                                        result.settings_path.display()
+                                    ));
+                                } else {
+                                    messages.push(format!(
+                                        "no herdr claude hook entries found in {}",
+                                        result.settings_path.display()
+                                    ));
+                                }
+                                messages
+                            }
+                            Err(response) => return response,
+                        }
+                    }
+                    IntegrationTarget::Codex => {
+                        let result = crate::integration::uninstall_codex().map_err(|err| {
+                            serde_json::to_string(&ErrorResponse {
+                                id: request.id.clone(),
+                                error: ErrorBody {
+                                    code: "integration_uninstall_failed".into(),
+                                    message: err.to_string(),
+                                },
+                            })
+                            .unwrap()
+                        });
+                        match result {
+                            Ok(result) => {
+                                let mut messages = Vec::new();
+                                if result.removed_hook_file {
+                                    messages.push(format!(
+                                        "removed codex hook at {}",
+                                        result.hook_path.display()
+                                    ));
+                                } else {
+                                    messages.push(format!(
+                                        "no codex hook found at {}",
+                                        result.hook_path.display()
+                                    ));
+                                }
+                                if result.updated_hooks {
+                                    messages.push(format!(
+                                        "removed herdr codex hook entries from {}",
+                                        result.hooks_path.display()
+                                    ));
+                                } else {
+                                    messages.push(format!(
+                                        "no herdr codex hook entries found in {}",
+                                        result.hooks_path.display()
+                                    ));
+                                }
+                                messages.push(format!(
+                                    "left codex config unchanged at {}",
+                                    result.config_path.display()
+                                ));
+                                messages
+                            }
+                            Err(response) => return response,
+                        }
+                    }
+                    IntegrationTarget::Opencode => {
+                        let result = crate::integration::uninstall_opencode().map_err(|err| {
+                            serde_json::to_string(&ErrorResponse {
+                                id: request.id.clone(),
+                                error: ErrorBody {
+                                    code: "integration_uninstall_failed".into(),
+                                    message: err.to_string(),
+                                },
+                            })
+                            .unwrap()
+                        });
+                        match result {
+                            Ok(result) => {
+                                if result.removed_plugin {
+                                    vec![format!(
+                                        "removed opencode integration plugin at {}",
+                                        result.plugin_path.display()
+                                    )]
+                                } else {
+                                    vec![format!(
+                                        "no opencode integration plugin found at {}",
+                                        result.plugin_path.display()
+                                    )]
+                                }
+                            }
+                            Err(response) => return response,
+                        }
+                    }
+                };
+
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::IntegrationUninstall {
+                        target,
+                        details: IntegrationUninstallResult { messages },
+                    },
+                }
+            }
+            _ => {
+                return serde_json::to_string(&ErrorResponse {
+                    id: request.id,
+                    error: ErrorBody {
+                        code: "not_implemented".into(),
+                        message: "method not implemented yet".into(),
+                    },
+                })
+                .unwrap();
+            }
+        };
+
+        serde_json::to_string(&response).unwrap()
     }
 
     pub(crate) fn dismiss_release_notes(&mut self) {
@@ -1040,7 +2404,7 @@ impl App {
         }
     }
 
-    fn reload_keybinds(&mut self) {
+    pub(crate) fn reload_keybinds(&mut self) {
         let previous_toast = self.state.toast.clone();
         match crate::config::load_live_keybinds() {
             Ok(live) => {
@@ -1106,7 +2470,7 @@ impl App {
     }
 
     /// Create a workspace with a real PTY (needs event_tx).
-    fn create_workspace(&mut self) {
+    pub(crate) fn create_workspace(&mut self) {
         let initial_cwd = self
             .workspace_creation_source()
             .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx))
@@ -1118,7 +2482,7 @@ impl App {
         }
     }
 
-    fn create_tab(&mut self) {
+    pub(crate) fn create_tab(&mut self) {
         let custom_name = self.state.requested_new_tab_name.take();
         let initial_cwd = self
             .state
@@ -1197,6 +2561,161 @@ impl App {
         }
         self.schedule_session_save();
         Ok(idx)
+    }
+
+    fn collect_panes_for_workspace(
+        &self,
+        workspace_id: Option<&str>,
+    ) -> Result<Vec<crate::api::schema::PaneInfo>, (String, String)> {
+        if let Some(workspace_id) = workspace_id {
+            let Some(ws_idx) = self.parse_workspace_id(workspace_id) else {
+                return Err((
+                    "workspace_not_found".into(),
+                    format!("workspace {workspace_id} not found"),
+                ));
+            };
+            let Some(ws) = self.state.workspaces.get(ws_idx) else {
+                return Err((
+                    "workspace_not_found".into(),
+                    format!("workspace {workspace_id} not found"),
+                ));
+            };
+            Ok(ws
+                .tabs
+                .iter()
+                .flat_map(|tab| tab.layout.pane_ids().into_iter())
+                .filter_map(|pane_id| self.pane_info(ws_idx, pane_id))
+                .collect())
+        } else {
+            Ok(self
+                .state
+                .workspaces
+                .iter()
+                .enumerate()
+                .flat_map(|(ws_idx, ws)| {
+                    ws.tabs
+                        .iter()
+                        .flat_map(|tab| tab.layout.pane_ids().into_iter())
+                        .filter_map(move |pane_id| self.pane_info(ws_idx, pane_id))
+                })
+                .collect())
+        }
+    }
+
+    fn tab_info(&self, ws_idx: usize, tab_idx: usize) -> Option<crate::api::schema::TabInfo> {
+        let ws = self.state.workspaces.get(ws_idx)?;
+        let tab = ws.tabs.get(tab_idx)?;
+        let (agg_state, seen) = tab
+            .panes
+            .values()
+            .map(|pane| (pane.state, pane.seen))
+            .max_by_key(|(state, seen)| tab_attention_priority(*state, *seen))
+            .unwrap_or((crate::detect::AgentState::Unknown, true));
+        Some(crate::api::schema::TabInfo {
+            tab_id: self.public_tab_id(ws_idx, tab_idx)?,
+            workspace_id: self.public_workspace_id(ws_idx),
+            number: tab_idx + 1,
+            label: tab.display_name(),
+            focused: self.state.active == Some(ws_idx) && ws.active_tab == tab_idx,
+            pane_count: tab.panes.len(),
+            agent_status: pane_agent_status(agg_state, seen),
+        })
+    }
+
+    fn workspace_created_result(
+        &self,
+        ws_idx: usize,
+    ) -> Option<crate::api::schema::ResponseResult> {
+        Some(crate::api::schema::ResponseResult::WorkspaceCreated {
+            workspace: self.workspace_info(ws_idx),
+            tab: self.tab_info(ws_idx, 0)?,
+            root_pane: self.root_pane_info(ws_idx, 0)?,
+        })
+    }
+
+    fn tab_created_result(
+        &self,
+        ws_idx: usize,
+        tab_idx: usize,
+    ) -> Option<crate::api::schema::ResponseResult> {
+        Some(crate::api::schema::ResponseResult::TabCreated {
+            tab: self.tab_info(ws_idx, tab_idx)?,
+            root_pane: self.root_pane_info(ws_idx, tab_idx)?,
+        })
+    }
+
+    fn root_pane_info(
+        &self,
+        ws_idx: usize,
+        tab_idx: usize,
+    ) -> Option<crate::api::schema::PaneInfo> {
+        let ws = self.state.workspaces.get(ws_idx)?;
+        let tab = ws.tabs.get(tab_idx)?;
+        self.pane_info(ws_idx, tab.root_pane)
+    }
+
+    fn pane_info(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<crate::api::schema::PaneInfo> {
+        let ws = self.state.workspaces.get(ws_idx)?;
+        let pane = ws.pane_state(pane_id)?;
+        let runtime = ws.runtime(pane_id);
+        let tab_idx = ws.find_tab_index_for_pane(pane_id)?;
+        let focused = self.state.active == Some(ws_idx)
+            && ws.active_tab == tab_idx
+            && ws
+                .focused_pane_id()
+                .is_some_and(|focused| focused == pane_id);
+        Some(crate::api::schema::PaneInfo {
+            pane_id: self.public_pane_id(ws_idx, pane_id)?,
+            workspace_id: self.public_workspace_id(ws_idx),
+            tab_id: self.public_tab_id(ws_idx, tab_idx)?,
+            focused,
+            cwd: runtime
+                .and_then(|rt| rt.cwd())
+                .map(|cwd| cwd.display().to_string()),
+            agent: pane.detected_agent.map(agent_name),
+            agent_status: pane_agent_status(pane.state, pane.seen),
+            revision: 0,
+        })
+    }
+
+    fn lookup_runtime(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<(&crate::pane::PaneRuntime, String)> {
+        let ws = self.state.workspaces.get(ws_idx)?;
+        let runtime = ws.runtime(pane_id)?;
+        Some((runtime, self.public_workspace_id(ws_idx)))
+    }
+
+    fn lookup_runtime_sender(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<&crate::pane::PaneRuntime> {
+        let ws = self.state.workspaces.get(ws_idx)?;
+        ws.runtime(pane_id)
+    }
+
+    fn workspace_info(&self, index: usize) -> crate::api::schema::WorkspaceInfo {
+        let ws = &self.state.workspaces[index];
+        let (agg_state, seen) = ws.aggregate_state();
+        crate::api::schema::WorkspaceInfo {
+            workspace_id: self.public_workspace_id(index),
+            number: index + 1,
+            label: ws.display_name(),
+            focused: self.state.active == Some(index),
+            pane_count: ws.public_pane_numbers.len(),
+            tab_count: ws.tabs.len(),
+            active_tab_id: self
+                .public_tab_id(index, ws.active_tab)
+                .unwrap_or_else(|| format!("{}:{}", ws.id, ws.active_tab + 1)),
+            agent_status: pane_agent_status(agg_state, seen),
+        }
     }
 }
 
@@ -1280,11 +2799,178 @@ fn pane_agent_status(
     }
 }
 
+fn parse_agent_name(agent: &str) -> Option<crate::detect::Agent> {
+    match agent {
+        "pi" => Some(crate::detect::Agent::Pi),
+        "claude" => Some(crate::detect::Agent::Claude),
+        "codex" => Some(crate::detect::Agent::Codex),
+        "gemini" => Some(crate::detect::Agent::Gemini),
+        "cursor" => Some(crate::detect::Agent::Cursor),
+        "cline" => Some(crate::detect::Agent::Cline),
+        "opencode" => Some(crate::detect::Agent::OpenCode),
+        "copilot" => Some(crate::detect::Agent::GithubCopilot),
+        "kimi" => Some(crate::detect::Agent::Kimi),
+        "droid" => Some(crate::detect::Agent::Droid),
+        "amp" => Some(crate::detect::Agent::Amp),
+        _ => None,
+    }
+}
+
+fn agent_name(agent: crate::detect::Agent) -> String {
+    match agent {
+        crate::detect::Agent::Pi => "pi",
+        crate::detect::Agent::Claude => "claude",
+        crate::detect::Agent::Codex => "codex",
+        crate::detect::Agent::Gemini => "gemini",
+        crate::detect::Agent::Cursor => "cursor",
+        crate::detect::Agent::Cline => "cline",
+        crate::detect::Agent::OpenCode => "opencode",
+        crate::detect::Agent::GithubCopilot => "copilot",
+        crate::detect::Agent::Kimi => "kimi",
+        crate::detect::Agent::Droid => "droid",
+        crate::detect::Agent::Amp => "amp",
+    }
+    .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Input routing for headless server mode
+// ---------------------------------------------------------------------------
+
+impl App {
+    /// Routes raw input bytes from a client through the existing input pipeline.
+    ///
+    /// The input bytes are parsed into `RawInputEvent`s and then processed.
+    /// In terminal mode, keys are routed through the same semantic
+    /// key-handling path as monolithic herdr so they are re-encoded for the
+    /// focused pane's negotiated keyboard protocol instead of passing host
+    /// terminal escape sequences through unchanged.
+    pub(crate) fn route_client_input(&mut self, data: Vec<u8>) {
+        let events = crate::raw_input::parse_raw_input_bytes_sync(&data);
+
+        for event in events {
+            match event {
+                crate::raw_input::RawInputEvent::Key(key) => {
+                    let key_id = repeat_key_identity(&key);
+                    match key.kind {
+                        crossterm::event::KeyEventKind::Press => {
+                            if self.state.mode == Mode::Terminal {
+                                self.suppressed_repeat_keys.remove(&key_id);
+                                self.handle_terminal_key_headless(key);
+                            } else {
+                                self.suppressed_repeat_keys.insert(key_id);
+                                self.handle_non_terminal_key(key);
+                            }
+                        }
+                        crossterm::event::KeyEventKind::Repeat => {
+                            if self.state.mode == Mode::Terminal
+                                && !self.suppressed_repeat_keys.contains(&key_id)
+                            {
+                                self.handle_terminal_key_headless(key);
+                            }
+                            // Repeats in non-terminal modes are ignored
+                            // (same as monolithic behavior).
+                        }
+                        crossterm::event::KeyEventKind::Release => {
+                            self.suppressed_repeat_keys.remove(&key_id);
+                        }
+                    }
+                }
+                crate::raw_input::RawInputEvent::Mouse(mouse) => {
+                    self.handle_mouse_event_headless(mouse);
+                }
+                crate::raw_input::RawInputEvent::Paste(text) => {
+                    if self.state.mode == Mode::Terminal {
+                        if let Some(ws_idx) = self.state.active {
+                            if let Some(ws) = self.state.workspaces.get(ws_idx) {
+                                if let Some(focused) = ws.focused_pane_id() {
+                                    if let Some(runtime) = ws.runtimes.get(&focused) {
+                                        let _ = runtime.try_send_bytes(bytes::Bytes::from(
+                                            if runtime
+                                                .input_state()
+                                                .map(|s| s.bracketed_paste)
+                                                .unwrap_or(false)
+                                            {
+                                                format!("\x1b[200~{text}\x1b[201~")
+                                            } else {
+                                                text
+                                            },
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
+                    self.update_host_terminal_theme(kind, color);
+                }
+                crate::raw_input::RawInputEvent::Unsupported => {}
+            }
+        }
+    }
+
+    /// Handles a key event in non-terminal mode for the headless server.
+    ///
+    /// Uses the standalone handler functions that work on `&mut AppState`
+    /// since the server doesn't have the async context of the monolithic App.
+    fn handle_non_terminal_key(&mut self, key: crate::input::TerminalKey) {
+        let key_event = key.as_key_event();
+        match self.state.mode {
+            Mode::Navigate => {
+                input::handle_navigate_key(&mut self.state, key_event);
+            }
+            Mode::RenameWorkspace | Mode::RenameTab => {
+                input::handle_rename_key(&mut self.state, key_event);
+            }
+            Mode::Resize => {
+                input::handle_resize_key(&mut self.state, key_event);
+            }
+            Mode::ConfirmClose => {
+                input::handle_confirm_close_key(&mut self.state, key_event);
+            }
+            Mode::ContextMenu => {
+                input::handle_context_menu_key(&mut self.state, key_event);
+            }
+            Mode::KeybindHelp => {
+                input::handle_keybind_help_key(&mut self.state, key_event);
+            }
+            Mode::GlobalMenu => {
+                input::handle_global_menu_key(&mut self.state, key_event);
+            }
+            Mode::Onboarding => {
+                // Onboarding is handled by the App method since it may
+                // need runtime access. For the server, skip onboarding.
+            }
+            Mode::ReleaseNotes => {
+                // Release notes handling — simplified for server.
+            }
+            Mode::Settings => {
+                // Settings handling — may need runtime access for saving.
+                // For the server, we use a simplified approach.
+            }
+            Mode::Terminal => {
+                // Should not be called in terminal mode.
+            }
+        }
+    }
+
+    /// Handles a mouse event for the headless server.
+    ///
+    /// Delegates to the same mouse handling logic used in the monolithic
+    /// mode (hit-testing against the rendered UI), which works because
+    /// the server's AppState maintains view geometry from virtual rendering.
+    fn handle_mouse_event_headless(&mut self, mouse: crossterm::event::MouseEvent) {
+        self.handle_mouse(mouse);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Config;
     use crate::detect::{Agent, AgentState};
+    use crate::pane::PaneRuntime;
     use crate::workspace::Workspace;
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
     use std::sync::{Mutex, OnceLock};
@@ -1614,6 +3300,22 @@ mod tests {
     }
 
     #[test]
+    fn server_stop_request_sets_should_quit_flag() {
+        let mut app = test_app();
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_server_stop".into(),
+            method: crate::api::schema::Method::ServerStop(
+                crate::api::schema::EmptyParams::default(),
+            ),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["result"]["type"], "ok");
+        assert!(app.state.should_quit);
+    }
+
+    #[test]
     fn pane_close_request_closes_only_the_target_tab_when_other_tabs_exist() {
         let mut app = test_app();
         let mut workspace = Workspace::test_new("api-pane-close");
@@ -1756,6 +3458,190 @@ mod tests {
             app.state.workspaces[0].pane_state(pane_id).unwrap().state,
             AgentState::Idle,
             "Working→Idle should still apply after temporary queue pressure"
+        );
+    }
+
+    #[test]
+    fn route_client_input_dispatches_navigate_mode_keybinds() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        // Start in navigate mode.
+        app.state.mode = Mode::Navigate;
+
+        // Send Ctrl+B then Esc (prefix → leave navigate mode).
+        // Ctrl+B is 0x02 in raw terminal input.
+        // After entering navigate mode and pressing Esc, we should leave navigate mode.
+        let esc_bytes = vec![0x1b]; // Esc
+        app.route_client_input(esc_bytes);
+        // Esc in navigate mode should leave navigate mode.
+        assert_eq!(
+            app.state.mode,
+            Mode::Terminal,
+            "Esc should leave navigate mode and return to Terminal mode"
+        );
+    }
+
+    #[test]
+    fn route_client_input_q_detaches_in_persistence_mode() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.quit_detaches = true;
+
+        // Start in navigate mode.
+        app.state.mode = Mode::Navigate;
+        assert!(!app.state.detach_requested);
+
+        let q_bytes = b"q".to_vec();
+        app.route_client_input(q_bytes);
+
+        assert!(
+            app.state.detach_requested,
+            "q should detach in persistence mode"
+        );
+        assert_eq!(
+            app.state.mode,
+            Mode::Terminal,
+            "q should leave navigate mode"
+        );
+    }
+
+    #[test]
+    fn route_client_input_prefix_then_q_detaches_in_persistence_mode() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.quit_detaches = true;
+
+        // Start in terminal mode (default after workspace creation).
+        app.state.mode = Mode::Terminal;
+        assert!(!app.state.detach_requested);
+
+        // Send Ctrl+B (prefix key, raw byte 0x02).
+        let prefix_bytes = vec![0x02];
+        app.route_client_input(prefix_bytes);
+
+        assert_eq!(
+            app.state.mode,
+            Mode::Navigate,
+            "prefix key should enter navigate mode"
+        );
+        assert!(
+            !app.state.detach_requested,
+            "prefix key should not set detach flag"
+        );
+
+        let q_bytes = b"q".to_vec();
+        app.route_client_input(q_bytes);
+
+        assert!(
+            app.state.detach_requested,
+            "q should detach in persistence mode"
+        );
+        assert_eq!(
+            app.state.mode,
+            Mode::Terminal,
+            "q should leave navigate mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn route_client_input_reencodes_terminal_keys_for_focused_pane_protocol() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut rx) = PaneRuntime::test_with_channel(80, 24);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        // Ghostty/kitty-style Ctrl-C should be normalized back to the pane's
+        // negotiated encoding instead of being forwarded verbatim.
+        app.route_client_input(b"\x1b[99;5u".to_vec());
+
+        assert_eq!(rx.recv().await.unwrap(), bytes::Bytes::from(vec![3]));
+    }
+
+    #[tokio::test]
+    async fn route_client_input_splits_multi_event_payloads_before_forwarding() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut rx) = PaneRuntime::test_with_channel(80, 24);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        app.route_client_input(b"ab".to_vec());
+
+        assert_eq!(rx.recv().await.unwrap(), bytes::Bytes::from_static(b"a"));
+        assert_eq!(rx.recv().await.unwrap(), bytes::Bytes::from_static(b"b"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn route_client_input_handles_mouse_events() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        // Send a mouse scroll-up event via SGR encoding.
+        let mouse_bytes = b"\x1b[<64;10;5M".to_vec();
+        // This should not panic even though mouse handling is simplified
+        // in headless mode.
+        app.route_client_input(mouse_bytes);
+        // No assertions on specific behavior — just no panic.
+    }
+
+    #[test]
+    fn route_client_input_updates_host_terminal_theme_from_osc_response() {
+        let mut app = test_app();
+
+        app.route_client_input(b"\x1b]11;#123456\x07".to_vec());
+
+        assert_eq!(
+            app.state.host_terminal_theme.background,
+            Some(crate::terminal_theme::RgbColor {
+                r: 0x12,
+                g: 0x34,
+                b: 0x56,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_raw_input_bytes_with_ranges_tracks_offsets() {
+        // Verify that the range-aware parser correctly tracks byte offsets
+        // for events within a multi-event input buffer.
+        let input = b"\x1b[Aa".to_vec(); // Up arrow + 'a'
+        let events = crate::raw_input::parse_raw_input_bytes_with_ranges(&input);
+
+        assert_eq!(events.len(), 2, "should parse Up arrow and 'a'");
+        // Up arrow: \x1b[A = 3 bytes starting at offset 0
+        assert_eq!(events[0].start, 0);
+        assert_eq!(events[0].len, 3);
+        // 'a': 1 byte starting at offset 3
+        assert_eq!(events[1].start, 3);
+        assert_eq!(events[1].len, 1);
+
+        // Verify the raw bytes for each event are correct.
+        assert_eq!(
+            &input[events[0].start..events[0].start + events[0].len],
+            b"\x1b[A"
+        );
+        assert_eq!(
+            &input[events[1].start..events[1].start + events[1].len],
+            b"a"
         );
     }
 }

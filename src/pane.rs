@@ -2464,16 +2464,12 @@ impl PaneRuntime {
 
 #[cfg(test)]
 impl PaneRuntime {
-    pub(crate) fn test_with_screen_bytes(cols: u16, rows: u16, bytes: &[u8]) -> Self {
-        Self::test_with_scrollback_bytes(cols, rows, 0, bytes)
+    pub(crate) fn test_with_channel(cols: u16, rows: u16) -> (Self, mpsc::Receiver<Bytes>) {
+        Self::test_with_channel_and_scrollback_bytes(cols, rows, 0, &[])
     }
 
-    pub(crate) fn test_with_screen_bytes_and_receiver(
-        cols: u16,
-        rows: u16,
-        bytes: &[u8],
-    ) -> (Self, mpsc::Receiver<Bytes>) {
-        Self::test_with_scrollback_bytes_and_receiver(cols, rows, 0, bytes)
+    pub(crate) fn test_with_screen_bytes(cols: u16, rows: u16, bytes: &[u8]) -> Self {
+        Self::test_with_scrollback_bytes(cols, rows, 0, bytes)
     }
 
     pub(crate) fn test_with_scrollback_bytes(
@@ -2482,10 +2478,10 @@ impl PaneRuntime {
         scrollback_limit_bytes: usize,
         bytes: &[u8],
     ) -> Self {
-        Self::test_with_scrollback_bytes_and_receiver(cols, rows, scrollback_limit_bytes, bytes).0
+        Self::test_with_channel_and_scrollback_bytes(cols, rows, scrollback_limit_bytes, bytes).0
     }
 
-    fn test_with_scrollback_bytes_and_receiver(
+    fn test_with_channel_and_scrollback_bytes(
         cols: u16,
         rows: u16,
         scrollback_limit_bytes: usize,
