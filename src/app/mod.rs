@@ -260,6 +260,7 @@ impl App {
             request_new_workspace: false,
             request_new_tab: false,
             request_reload_keybinds: false,
+            request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
             request_complete_onboarding: false,
@@ -631,10 +632,17 @@ impl App {
         color: crate::terminal_theme::RgbColor,
     ) -> bool {
         let next_theme = self.state.host_terminal_theme.with_color(kind, color);
-        if next_theme == self.state.host_terminal_theme {
+        self.set_host_terminal_theme(next_theme)
+    }
+
+    pub(crate) fn set_host_terminal_theme(
+        &mut self,
+        theme: crate::terminal_theme::TerminalTheme,
+    ) -> bool {
+        if theme.is_empty() || theme == self.state.host_terminal_theme {
             return false;
         }
-        self.state.host_terminal_theme = next_theme;
+        self.state.host_terminal_theme = theme;
         self.apply_host_terminal_theme_to_panes();
         true
     }
@@ -2845,9 +2853,17 @@ impl App {
     /// key-handling path as monolithic herdr so they are re-encoded for the
     /// focused pane's negotiated keyboard protocol instead of passing host
     /// terminal escape sequences through unchanged.
+    #[cfg(test)]
     pub(crate) fn route_client_input(&mut self, data: Vec<u8>) {
         let events = crate::raw_input::parse_raw_input_bytes_sync(&data);
+        self.route_client_events(events, true);
+    }
 
+    pub(crate) fn route_client_events(
+        &mut self,
+        events: Vec<crate::raw_input::RawInputEvent>,
+        apply_host_terminal_theme: bool,
+    ) {
         for event in events {
             match event {
                 crate::raw_input::RawInputEvent::Key(key) => {
@@ -2903,7 +2919,9 @@ impl App {
                     }
                 }
                 crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
-                    self.update_host_terminal_theme(kind, color);
+                    if apply_host_terminal_theme {
+                        self.update_host_terminal_theme(kind, color);
+                    }
                 }
                 crate::raw_input::RawInputEvent::Unsupported => {}
             }

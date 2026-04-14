@@ -152,6 +152,10 @@ pub fn clamp_terminal_size(cols: u16, rows: u16) -> (u16, u16) {
 struct ClientConnection {
     /// The client's terminal size (after clamping).
     terminal_size: (u16, u16),
+    /// Last known host terminal default colors for this client.
+    host_terminal_theme: crate::terminal_theme::TerminalTheme,
+    /// Monotonic activity stamp used to choose the fallback foreground client.
+    last_activity: u64,
     /// Channel for sending framed ServerMessage data to the client writer thread.
     writer: Option<std::sync::mpsc::Sender<Vec<u8>>>,
 }
@@ -306,8 +310,13 @@ impl Backend for CursorTrackingBackend {
 fn render_virtual(
     app_state: &mut AppState,
     area: Rect,
+    resize_panes: bool,
 ) -> (ratatui::buffer::Buffer, Option<CursorState>) {
-    crate::ui::compute_view(app_state, area);
+    if resize_panes {
+        crate::ui::compute_view(app_state, area);
+    } else {
+        crate::ui::compute_view_without_resizing_panes(app_state, area);
+    }
 
     let backend = CursorTrackingBackend::new(area.width, area.height);
     let mut terminal = ratatui::Terminal::new(backend).expect("TestBackend::new should never fail");
@@ -335,7 +344,11 @@ pub struct HeadlessServer {
     client_socket_path: PathBuf,
     clients: HashMap<u64, ClientConnection>,
     next_client_id: u64,
-    /// Effective terminal size = minimum across all connected clients,
+    /// The client currently driving the shared pane runtime size and theme.
+    foreground_client_id: Option<u64>,
+    /// Monotonic activity counter used to pick the most recently active client.
+    next_activity_stamp: u64,
+    /// Shared pane runtime size derived from the foreground client,
     /// or MIN_COLS × MIN_ROWS when no clients are connected.
     effective_size: (u16, u16),
     /// Flag set when shutdown is initiated.
@@ -377,6 +390,8 @@ impl HeadlessServer {
             client_socket_path: client_path,
             clients: HashMap::new(),
             next_client_id: 1,
+            foreground_client_id: None,
+            next_activity_stamp: 1,
             effective_size: (MIN_COLS, MIN_ROWS),
             shutting_down: false,
             should_quit,
@@ -545,20 +560,110 @@ impl HeadlessServer {
         Ok(())
     }
 
-    /// Recalculates the effective terminal size from all connected clients.
-    fn recalculate_effective_size(&mut self) {
-        if self.clients.is_empty() {
-            self.effective_size = (MIN_COLS, MIN_ROWS);
+    fn allocate_activity_stamp(&mut self) -> u64 {
+        let stamp = self.next_activity_stamp;
+        self.next_activity_stamp = self.next_activity_stamp.saturating_add(1);
+        stamp
+    }
+
+    fn resize_shared_runtime_to_effective_size(&mut self) {
+        if self.foreground_client_id.is_none() {
             return;
         }
+        let (cols, rows) = self.effective_size;
+        let area = Rect::new(0, 0, cols, rows);
+        crate::ui::compute_view(&mut self.app.state, area);
+    }
 
-        let mut min_cols = u16::MAX;
-        let mut min_rows = u16::MAX;
-        for client in self.clients.values() {
-            min_cols = min_cols.min(client.terminal_size.0);
-            min_rows = min_rows.min(client.terminal_size.1);
+    fn sync_foreground_client_state(&mut self) {
+        let Some(client_id) = self.foreground_client_id else {
+            self.effective_size = (MIN_COLS, MIN_ROWS);
+            return;
+        };
+        let Some(client) = self.clients.get(&client_id) else {
+            self.foreground_client_id = None;
+            self.effective_size = (MIN_COLS, MIN_ROWS);
+            return;
+        };
+
+        self.effective_size = client.terminal_size;
+        if !client.host_terminal_theme.is_empty() {
+            self.app.set_host_terminal_theme(client.host_terminal_theme);
         }
-        self.effective_size = (min_cols, min_rows);
+    }
+
+    fn promote_client_to_foreground(&mut self, client_id: u64) -> bool {
+        let stamp = self.allocate_activity_stamp();
+        let Some(client) = self.clients.get_mut(&client_id) else {
+            return false;
+        };
+        client.last_activity = stamp;
+
+        let changed = self.foreground_client_id != Some(client_id);
+        self.foreground_client_id = Some(client_id);
+        self.sync_foreground_client_state();
+        changed
+    }
+
+    fn promote_latest_remaining_client(&mut self) -> bool {
+        let next_foreground = self
+            .clients
+            .iter()
+            .max_by_key(|(_, client)| client.last_activity)
+            .map(|(&client_id, _)| client_id);
+        let changed = next_foreground != self.foreground_client_id;
+        self.foreground_client_id = next_foreground;
+        self.sync_foreground_client_state();
+        changed
+    }
+
+    fn remove_client(&mut self, client_id: u64) -> bool {
+        let was_foreground = self.foreground_client_id == Some(client_id);
+        self.clients.remove(&client_id);
+        if was_foreground {
+            self.promote_latest_remaining_client()
+        } else {
+            false
+        }
+    }
+
+    fn update_client_host_theme_from_events(
+        &mut self,
+        client_id: u64,
+        events: &[crate::raw_input::RawInputEvent],
+    ) -> bool {
+        let Some(client) = self.clients.get_mut(&client_id) else {
+            return false;
+        };
+
+        let mut next_theme = client.host_terminal_theme;
+        for event in events {
+            if let crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } = event {
+                next_theme = next_theme.with_color(*kind, *color);
+            }
+        }
+
+        if next_theme == client.host_terminal_theme {
+            return false;
+        }
+
+        client.host_terminal_theme = next_theme;
+        if self.foreground_client_id == Some(client_id) {
+            self.app.set_host_terminal_theme(next_theme)
+        } else {
+            false
+        }
+    }
+
+    fn events_include_interaction(events: &[crate::raw_input::RawInputEvent]) -> bool {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                crate::raw_input::RawInputEvent::Key(_)
+                    | crate::raw_input::RawInputEvent::Mouse(_)
+                    | crate::raw_input::RawInputEvent::Paste(_)
+            )
+        })
     }
 
     /// Accepts pending client connections from the non-blocking listener.
@@ -871,8 +976,10 @@ impl HeadlessServer {
 
         // Remove broken clients.
         for client_id in broken_clients {
-            self.clients.remove(&client_id);
-            self.recalculate_effective_size();
+            let foreground_changed = self.remove_client(client_id);
+            if foreground_changed {
+                self.resize_shared_runtime_to_effective_size();
+            }
         }
     }
 
@@ -894,8 +1001,10 @@ impl HeadlessServer {
                         client_id,
                         "client writer channel closed during targeted send"
                     );
-                    self.clients.remove(&client_id);
-                    self.recalculate_effective_size();
+                    let foreground_changed = self.remove_client(client_id);
+                    if foreground_changed {
+                        self.resize_shared_runtime_to_effective_size();
+                    }
                     return false;
                 }
             }
@@ -915,20 +1024,36 @@ impl HeadlessServer {
                 writer,
             } => {
                 info!(client_id, cols, rows, "client connected");
+                let last_activity = self.allocate_activity_stamp();
                 self.clients.insert(
                     client_id,
                     ClientConnection {
                         terminal_size: (cols, rows),
+                        host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
+                        last_activity,
                         writer: Some(writer),
                     },
                 );
-                self.recalculate_effective_size();
-                // New client may change the effective size — trigger a render.
+                self.foreground_client_id = Some(client_id);
+                self.sync_foreground_client_state();
+                self.resize_shared_runtime_to_effective_size();
                 true
             }
             ServerEvent::ClientInput { client_id, data } => {
                 debug!(client_id, len = data.len(), "client input received");
-                self.app.route_client_input(data);
+                let events = crate::raw_input::parse_raw_input_bytes_sync(&data);
+                let interaction = Self::events_include_interaction(&events);
+                let foreground_changed = if interaction {
+                    self.promote_client_to_foreground(client_id)
+                } else {
+                    false
+                };
+                if foreground_changed {
+                    self.resize_shared_runtime_to_effective_size();
+                }
+                let theme_changed = self.update_client_host_theme_from_events(client_id, &events);
+                self.app
+                    .route_client_events(events, self.foreground_client_id == Some(client_id));
 
                 // Check if the detach keybind was triggered during input processing.
                 if self.app.state.detach_requested {
@@ -961,7 +1086,7 @@ impl HeadlessServer {
                     // No re-render needed for remaining clients.
                     false
                 } else {
-                    true
+                    foreground_changed || theme_changed || interaction
                 }
             }
             ServerEvent::ClientResize {
@@ -973,19 +1098,24 @@ impl HeadlessServer {
                 if let Some(client) = self.clients.get_mut(&client_id) {
                     client.terminal_size = (cols, rows);
                 }
-                self.recalculate_effective_size();
+                self.promote_client_to_foreground(client_id);
+                self.resize_shared_runtime_to_effective_size();
                 true
             }
             ServerEvent::ClientDetach { client_id } => {
                 info!(client_id, "client detached");
-                self.clients.remove(&client_id);
-                self.recalculate_effective_size();
+                let foreground_changed = self.remove_client(client_id);
+                if foreground_changed {
+                    self.resize_shared_runtime_to_effective_size();
+                }
                 true
             }
             ServerEvent::ClientDisconnected { client_id } => {
                 info!(client_id, "client disconnected");
-                self.clients.remove(&client_id);
-                self.recalculate_effective_size();
+                let foreground_changed = self.remove_client(client_id);
+                if foreground_changed {
+                    self.resize_shared_runtime_to_effective_size();
+                }
                 true
             }
             ServerEvent::QuitSignal => {
@@ -1176,49 +1306,69 @@ impl HeadlessServer {
         changed
     }
 
-    /// Renders the current state to a virtual buffer and streams frames
-    /// to all connected clients.
+    /// Renders the current state to client-sized virtual buffers and streams
+    /// frames to all connected clients.
     fn render_and_stream(&mut self) {
-        let (cols, rows) = self.effective_size;
-        let area = Rect::new(0, 0, cols, rows);
+        let foreground_client_id = self.foreground_client_id;
+        let mut render_targets: Vec<(u64, (u16, u16), std::sync::mpsc::Sender<Vec<u8>>, bool)> =
+            self.clients
+                .iter()
+                .filter_map(|(&client_id, client)| {
+                    client.writer.as_ref().map(|writer| {
+                        (
+                            client_id,
+                            client.terminal_size,
+                            writer.clone(),
+                            foreground_client_id == Some(client_id),
+                        )
+                    })
+                })
+                .collect();
 
-        let (buffer, cursor) = render_virtual(&mut self.app.state, area);
+        render_targets.sort_by_key(|(client_id, _, _, is_foreground)| (*is_foreground, *client_id));
 
-        // Convert buffer to FrameData.
-        let frame_data = FrameData::from_ratatui_buffer(&buffer, cursor);
+        if render_targets.is_empty() {
+            let (cols, rows) = self.effective_size;
+            let area = Rect::new(0, 0, cols, rows);
+            let _ = render_virtual(&mut self.app.state, area, true);
+            debug!(
+                cols,
+                rows, "rendered virtual frame with no attached clients"
+            );
+            return;
+        }
 
-        let message = ServerMessage::Frame(frame_data);
-
-        // Stream to all connected clients.
-        // Remove clients that fail to receive (broken connection).
         let mut broken_clients: Vec<u64> = Vec::new();
-        for (&client_id, client) in &mut self.clients {
-            // Try to send the frame to the client's writer channel.
-            if let Some(writer) = &client.writer {
-                let serialized = match Self::frame_server_message(&message) {
-                    Ok(framed) => framed,
-                    Err(err) => {
-                        warn!(client_id, err = %err, "failed to serialize frame for client");
-                        broken_clients.push(client_id);
-                        continue;
-                    }
-                };
-
-                if writer.send(serialized).is_err() {
-                    debug!(client_id, "client writer channel closed, marking as broken");
+        for (client_id, (cols, rows), writer, is_foreground) in render_targets {
+            let area = Rect::new(0, 0, cols, rows);
+            let (buffer, cursor) = render_virtual(&mut self.app.state, area, is_foreground);
+            let message = ServerMessage::Frame(FrameData::from_ratatui_buffer(&buffer, cursor));
+            let serialized = match Self::frame_server_message(&message) {
+                Ok(framed) => framed,
+                Err(err) => {
+                    warn!(client_id, err = %err, "failed to serialize frame for client");
                     broken_clients.push(client_id);
+                    continue;
                 }
+            };
+
+            if writer.send(serialized).is_err() {
+                debug!(client_id, "client writer channel closed, marking as broken");
+                broken_clients.push(client_id);
             }
         }
 
         if !broken_clients.is_empty() {
             for client_id in broken_clients {
-                self.clients.remove(&client_id);
+                let foreground_changed = self.remove_client(client_id);
+                if foreground_changed {
+                    self.resize_shared_runtime_to_effective_size();
+                }
             }
-            self.recalculate_effective_size();
         }
 
-        debug!(cols, rows, "rendered virtual frame");
+        let (cols, rows) = self.effective_size;
+        debug!(cols, rows, foreground_client_id = ?self.foreground_client_id, "rendered virtual frame(s)");
     }
 
     /// Handle scheduled tasks for the headless server.
@@ -1754,6 +1904,51 @@ mod tests {
 
     use crate::server::protocol::CursorState;
 
+    fn test_headless_server() -> HeadlessServer {
+        let config = crate::config::Config::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let app = crate::app::App::new(&config, true, None, None, api_rx, api::EventHub::default());
+
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-headless-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let socket_path = dir.join("client.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind test listener");
+        listener
+            .set_nonblocking(true)
+            .expect("set listener nonblocking");
+        let (server_event_tx, server_event_rx) = mpsc::channel(64);
+
+        HeadlessServer {
+            app,
+            client_listener: listener,
+            client_socket_path: socket_path,
+            clients: HashMap::new(),
+            next_client_id: 1,
+            foreground_client_id: None,
+            next_activity_stamp: 1,
+            effective_size: (MIN_COLS, MIN_ROWS),
+            shutting_down: false,
+            should_quit: Arc::new(AtomicBool::new(false)),
+            server_event_rx,
+            server_event_tx,
+        }
+    }
+
+    fn read_server_frame(bytes: Vec<u8>) -> FrameData {
+        let mut cursor = std::io::Cursor::new(bytes);
+        match protocol::read_message(&mut cursor, MAX_FRAME_SIZE).expect("decode server message") {
+            ServerMessage::Frame(frame) => frame,
+            other => panic!("expected frame, got {other:?}"),
+        }
+    }
+
     #[test]
     fn clamp_terminal_size_zero_zero() {
         assert_eq!(clamp_terminal_size(0, 0), (MIN_COLS, MIN_ROWS));
@@ -1869,7 +2064,7 @@ mod tests {
     fn virtual_render_produces_nonempty_buffer() {
         let mut state = AppState::test_new();
         let area = Rect::new(0, 0, 80, 24);
-        let (buffer, _cursor) = render_virtual(&mut state, area);
+        let (buffer, _cursor) = render_virtual(&mut state, area, true);
         assert_eq!(buffer.area.width, 80);
         assert_eq!(buffer.area.height, 24);
     }
@@ -1878,7 +2073,7 @@ mod tests {
     fn virtual_render_without_frame_cursor_keeps_cursor_hidden() {
         let mut state = AppState::test_new();
         let area = Rect::new(0, 0, 80, 24);
-        let (_buffer, cursor) = render_virtual(&mut state, area);
+        let (_buffer, cursor) = render_virtual(&mut state, area, true);
 
         assert_eq!(cursor, None);
     }
@@ -1899,7 +2094,7 @@ mod tests {
         state.mode = crate::app::Mode::Terminal;
 
         let area = Rect::new(0, 0, 80, 24);
-        let (_buffer, cursor) = render_virtual(&mut state, area);
+        let (_buffer, cursor) = render_virtual(&mut state, area, true);
         let pane = state
             .view
             .pane_infos
@@ -1915,6 +2110,118 @@ mod tests {
                 visible: true,
             })
         );
+    }
+
+    #[test]
+    fn latest_active_client_drives_shared_size_theme_and_fallback() {
+        let mut server = test_headless_server();
+
+        server.clients.insert(
+            1,
+            ClientConnection {
+                terminal_size: (160, 45),
+                host_terminal_theme: crate::terminal_theme::TerminalTheme {
+                    foreground: Some(crate::terminal_theme::RgbColor {
+                        r: 0xaa,
+                        g: 0xbb,
+                        b: 0xcc,
+                    }),
+                    background: Some(crate::terminal_theme::RgbColor {
+                        r: 0x11,
+                        g: 0x22,
+                        b: 0x33,
+                    }),
+                },
+                last_activity: 1,
+                writer: None,
+            },
+        );
+        server.clients.insert(
+            2,
+            ClientConnection {
+                terminal_size: (80, 24),
+                host_terminal_theme: crate::terminal_theme::TerminalTheme {
+                    foreground: Some(crate::terminal_theme::RgbColor {
+                        r: 0x10,
+                        g: 0x20,
+                        b: 0x30,
+                    }),
+                    background: Some(crate::terminal_theme::RgbColor {
+                        r: 0xdd,
+                        g: 0xee,
+                        b: 0xff,
+                    }),
+                },
+                last_activity: 2,
+                writer: None,
+            },
+        );
+
+        assert!(server.promote_client_to_foreground(1));
+        assert_eq!(server.foreground_client_id, Some(1));
+        assert_eq!(server.effective_size, (160, 45));
+        assert_eq!(
+            server.app.state.host_terminal_theme,
+            server.clients[&1].host_terminal_theme
+        );
+
+        assert!(server.promote_client_to_foreground(2));
+        assert_eq!(server.foreground_client_id, Some(2));
+        assert_eq!(server.effective_size, (80, 24));
+        assert_eq!(
+            server.app.state.host_terminal_theme,
+            server.clients[&2].host_terminal_theme
+        );
+
+        assert!(server.remove_client(2));
+        assert_eq!(server.foreground_client_id, Some(1));
+        assert_eq!(server.effective_size, (160, 45));
+        assert_eq!(
+            server.app.state.host_terminal_theme,
+            server.clients[&1].host_terminal_theme
+        );
+    }
+
+    #[test]
+    fn render_and_stream_uses_each_client_terminal_size() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("test")];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+
+        let (desktop_tx, desktop_rx) = std::sync::mpsc::channel();
+        let (phone_tx, phone_rx) = std::sync::mpsc::channel();
+
+        server.clients.insert(
+            1,
+            ClientConnection {
+                terminal_size: (120, 40),
+                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
+                last_activity: 1,
+                writer: Some(desktop_tx),
+            },
+        );
+        server.clients.insert(
+            2,
+            ClientConnection {
+                terminal_size: (80, 24),
+                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
+                last_activity: 2,
+                writer: Some(phone_tx),
+            },
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.resize_shared_runtime_to_effective_size();
+
+        server.render_and_stream();
+
+        let desktop_frame = read_server_frame(desktop_rx.recv().expect("desktop frame"));
+        let phone_frame = read_server_frame(phone_rx.recv().expect("phone frame"));
+
+        assert_eq!((desktop_frame.width, desktop_frame.height), (120, 40));
+        assert_eq!((phone_frame.width, phone_frame.height), (80, 24));
     }
 
     #[test]

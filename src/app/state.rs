@@ -594,6 +594,9 @@ pub struct AppState {
     pub request_new_workspace: bool,
     pub request_new_tab: bool,
     pub request_reload_keybinds: bool,
+    /// Set when UI interaction requested a clipboard write that must be
+    /// handled by the outer App/event loop instead of directly from AppState.
+    pub request_clipboard_write: Option<Vec<u8>>,
     pub creating_new_tab: bool,
     pub requested_new_tab_name: Option<String>,
     pub request_complete_onboarding: bool,
@@ -713,6 +716,7 @@ impl AppState {
             request_new_workspace: false,
             request_new_tab: false,
             request_reload_keybinds: false,
+            request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
             request_complete_onboarding: false,

@@ -225,6 +225,19 @@ fn format_agent_panel_primary_label(entry: &AgentPanelEntry, max_width: usize) -
 /// Compute view geometry and reconcile pane sizes.
 /// Called before render to separate mutation from drawing.
 pub fn compute_view(app: &mut AppState, area: Rect) {
+    compute_view_internal(app, area, true);
+}
+
+/// Compute view geometry for a client-sized render without resizing pane runtimes.
+///
+/// This is used by the headless server when a non-foreground client needs its
+/// own frame size while the shared pane runtimes stay pinned to the foreground
+/// client.
+pub(crate) fn compute_view_without_resizing_panes(app: &mut AppState, area: Rect) {
+    compute_view_internal(app, area, false);
+}
+
+fn compute_view_internal(app: &mut AppState, area: Rect, resize_panes: bool) {
     let sidebar_w = if app.sidebar_collapsed {
         COLLAPSED_WIDTH
     } else {
@@ -281,7 +294,7 @@ pub fn compute_view(app: &mut AppState, area: Rect) {
         .map(|ws| ws.layout.splits(terminal_area))
         .unwrap_or_default();
 
-    let pane_infos = compute_pane_infos(app, terminal_area);
+    let pane_infos = compute_pane_infos(app, terminal_area, resize_panes);
 
     app.view = crate::app::ViewState {
         sidebar_rect: sidebar_area,
@@ -854,8 +867,8 @@ fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     }
 }
 
-/// Compute pane layout info and resize pane runtimes to match.
-fn compute_pane_infos(app: &AppState, area: Rect) -> Vec<PaneInfo> {
+/// Compute pane layout info and optionally resize pane runtimes to match.
+fn compute_pane_infos(app: &AppState, area: Rect, resize_panes: bool) -> Vec<PaneInfo> {
     let Some(ws_idx) = app.active else {
         return Vec::new();
     };
@@ -883,7 +896,9 @@ fn compute_pane_infos(app: &AppState, area: Rect) -> Vec<PaneInfo> {
                     area.height,
                 ));
             }
-            rt.resize(inner_rect.height, inner_rect.width);
+            if resize_panes {
+                rt.resize(inner_rect.height, inner_rect.width);
+            }
         }
         return vec![PaneInfo {
             id: focused_id,
@@ -926,7 +941,9 @@ fn compute_pane_infos(app: &AppState, area: Rect) -> Vec<PaneInfo> {
                     pane_inner.height,
                 ));
             }
-            rt.resize(inner_rect.height, inner_rect.width);
+            if resize_panes {
+                rt.resize(inner_rect.height, inner_rect.width);
+            }
         }
 
         info.inner_rect = inner_rect;

@@ -445,8 +445,8 @@ impl AppState {
 
         if let Some(text) = text {
             if !text.is_empty() {
-                crate::selection::write_osc52(&text);
-                info!(len = text.len(), "copied selection to clipboard");
+                self.request_clipboard_write = Some(text.into_bytes());
+                info!("copied selection to clipboard");
             }
         }
 

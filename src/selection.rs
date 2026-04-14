@@ -11,7 +11,7 @@
 //! coordinates. That keeps selection stable while the pane scrolls.
 
 use ratatui::layout::Rect;
-use std::io::Write;
+use std::{ffi::OsStr, io::Write};
 
 use crate::{layout::PaneId, pane::ScrollMetrics};
 
@@ -171,6 +171,17 @@ fn osc52_sequence(bytes: &[u8]) -> String {
     format!("\x1b]52;c;{encoded}\x07")
 }
 
+fn should_prefer_osc52_for_env(ssh_connection: Option<&OsStr>, ssh_tty: Option<&OsStr>) -> bool {
+    ssh_connection.is_some() || ssh_tty.is_some()
+}
+
+fn should_prefer_osc52() -> bool {
+    should_prefer_osc52_for_env(
+        std::env::var_os("SSH_CONNECTION").as_deref(),
+        std::env::var_os("SSH_TTY").as_deref(),
+    )
+}
+
 /// Write clipboard bytes to the system clipboard via OSC 52.
 ///
 /// OSC 52 format: `ESC ] 52 ; c ; <base64> BEL`
@@ -178,18 +189,13 @@ fn osc52_sequence(bytes: &[u8]) -> String {
 /// Some terminals still only honor BEL-terminated OSC 52 writes, so herdr
 /// emits BEL here even though ST works in newer emulators.
 pub fn write_osc52_bytes(bytes: &[u8]) {
-    if crate::platform::write_clipboard(bytes) {
+    if !should_prefer_osc52() && crate::platform::write_clipboard(bytes) {
         return;
     }
 
     let sequence = osc52_sequence(bytes);
     let _ = std::io::stdout().write_all(sequence.as_bytes());
     let _ = std::io::stdout().flush();
-}
-
-/// Write text to the system clipboard via OSC 52.
-pub fn write_osc52(text: &str) {
-    write_osc52_bytes(text.as_bytes());
 }
 
 #[cfg(test)]
@@ -207,6 +213,19 @@ mod tests {
     #[test]
     fn osc52_sequence_uses_bel_terminator() {
         assert_eq!(osc52_sequence(b"hello"), "\x1b]52;c;aGVsbG8=\x07");
+    }
+
+    #[test]
+    fn ssh_sessions_prefer_osc52() {
+        assert!(should_prefer_osc52_for_env(
+            Some(OsStr::new("1 2 3 4")),
+            None
+        ));
+        assert!(should_prefer_osc52_for_env(
+            None,
+            Some(OsStr::new("/dev/ttys001"))
+        ));
+        assert!(!should_prefer_osc52_for_env(None, None));
     }
 
     #[test]

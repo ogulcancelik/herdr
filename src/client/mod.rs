@@ -30,7 +30,7 @@ use tracing::{debug, info, warn};
 
 use crate::server::headless::client_socket_path;
 use crate::server::protocol::{
-    self, ClientMessage, FrameData, NotifyKind, ServerMessage, MAX_FRAME_SIZE, PROTOCOL_VERSION,
+    self, ClientMessage, FrameData, ServerMessage, MAX_FRAME_SIZE, PROTOCOL_VERSION,
 };
 
 // ---------------------------------------------------------------------------
@@ -417,10 +417,7 @@ async fn run_client_loop(
                 ServerMessage::ServerShutdown { reason } => {
                     return Err(ClientError::ServerShutdown { reason });
                 }
-                ServerMessage::Notify { kind, message } => {
-                    handle_notification(kind, &message);
-                    let _ = io::stdout().flush();
-                }
+                ServerMessage::Notify { .. } => {}
                 ServerMessage::Clipboard { data } => {
                     forward_clipboard(&data);
                     let _ = io::stdout().flush();
@@ -511,39 +508,6 @@ fn server_reader_thread(
 fn write_to_server(stream: &mut UnixStream, msg: &ClientMessage) -> io::Result<()> {
     protocol::write_message(stream, msg)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
-}
-
-// ---------------------------------------------------------------------------
-// Notification handling
-// ---------------------------------------------------------------------------
-
-/// Handles a notification from the server.
-fn handle_notification(kind: NotifyKind, message: &str) {
-    match kind {
-        NotifyKind::Sound => {
-            // Play sound locally using the same sound module as monolithic herdr.
-            let config = crate::config::Config::load();
-            let sound_config = &config.config.ui.sound;
-            if sound_config.enabled {
-                // Determine which sound to play based on the message content.
-                let sound = if message.contains("attention") || message.contains("blocked") {
-                    crate::sound::Sound::Request
-                } else {
-                    crate::sound::Sound::Done
-                };
-                crate::sound::play(sound, sound_config);
-            }
-            debug!(message, "sound notification");
-        }
-        NotifyKind::Toast => {
-            // Display a toast notification locally in the terminal.
-            // Write a visible notification line to stderr so the user sees
-            // it even when the TUI is running (stderr is not captured by
-            // ratatui's raw mode output on stdout).
-            eprintln!("herdr: {message}");
-            debug!(message, "toast notification");
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -718,20 +682,5 @@ mod tests {
         // Just verify the function doesn't panic.
         // We can't easily test stdout output in unit tests.
         forward_clipboard("dGVzdA==");
-    }
-
-    #[test]
-    fn toast_notification_produces_stderr_output() {
-        // Verify that handle_notification for Toast kind doesn't panic
-        // and would produce user-visible output. We can't easily
-        // capture stderr in unit tests, so just verify no panic.
-        handle_notification(NotifyKind::Toast, "agent finished: test");
-    }
-
-    #[test]
-    fn sound_notification_does_not_panic() {
-        // Verify that handle_notification for Sound kind doesn't panic.
-        // Sound playback may fail silently (no audio player), which is fine.
-        handle_notification(NotifyKind::Sound, "agent done");
     }
 }
