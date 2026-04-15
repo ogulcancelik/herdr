@@ -1663,6 +1663,11 @@ fn ghostty_normalize_buffer_symbol(symbol: &str, wide: crate::ghostty::CellWide)
     if actual_width == expected_width {
         return symbol.to_string();
     }
+
+    if wide == crate::ghostty::CellWide::Narrow && actual_width == 2 {
+        return symbol.to_string();
+    }
+
     ghostty_blank_symbol_for_width(wide).to_string()
 }
 
@@ -2765,10 +2770,14 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_normalize_buffer_symbol_uses_ratatui_width_contract() {
+    fn ghostty_normalize_buffer_symbol_prefers_grapheme_width_when_metadata_disagrees() {
+        const WIDE_GRAPHEME: &str = "🙂";
+        const VS16_GRAPHEME: &str = "⚠️";
+        const EMOJI_GRAPHEME: &str = "💳";
+
         assert_eq!(
-            ghostty_normalize_buffer_symbol("🙂", crate::ghostty::CellWide::Wide),
-            "🙂"
+            ghostty_normalize_buffer_symbol(WIDE_GRAPHEME, crate::ghostty::CellWide::Wide),
+            WIDE_GRAPHEME
         );
         assert_eq!(
             ghostty_normalize_buffer_symbol("a", crate::ghostty::CellWide::Wide),
@@ -2776,7 +2785,15 @@ mod tests {
         );
         assert_eq!(
             ghostty_normalize_buffer_symbol("⌨️", crate::ghostty::CellWide::Narrow),
-            " "
+            "⌨️"
+        );
+        assert_eq!(
+            ghostty_normalize_buffer_symbol(VS16_GRAPHEME, crate::ghostty::CellWide::Narrow),
+            VS16_GRAPHEME
+        );
+        assert_eq!(
+            ghostty_normalize_buffer_symbol(EMOJI_GRAPHEME, crate::ghostty::CellWide::Narrow),
+            EMOJI_GRAPHEME
         );
         assert_eq!(
             ghostty_normalize_buffer_symbol(" ", crate::ghostty::CellWide::SpacerTail),

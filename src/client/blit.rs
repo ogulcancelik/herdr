@@ -14,7 +14,10 @@
 //! The goal is minimal output: skip unchanged cells, batch adjacent changes,
 //! and minimize cursor movement.
 
+use std::cmp;
 use std::io::{self, Write};
+
+use unicode_width::UnicodeWidthStr;
 
 use crate::server::protocol::{CellData, FrameData};
 
@@ -164,6 +167,7 @@ fn build_sgr(fg: u32, bg: u32, modifier: u16) -> String {
 // ---------------------------------------------------------------------------
 
 /// Checks if two cells are visually identical.
+#[cfg(test)]
 fn cells_equal(a: &CellData, b: &CellData) -> bool {
     a.symbol == b.symbol && a.fg == b.fg && a.bg == b.bg && a.modifier == b.modifier
     // Skip flag is only for ratatui internal use, not visual.
@@ -217,9 +221,19 @@ fn blit_frame_to(mut writer: impl Write, frame: &FrameData, prev: Option<&FrameD
 }
 
 /// Writes all cells in the frame (full redraw).
+fn cell_width(cell: &CellData) -> usize {
+    cell.symbol.width()
+}
+
 fn write_all_cells(writer: &mut impl Write, frame: &FrameData) {
     for row in 0..frame.height {
+        let mut to_skip = 0usize;
         for col in 0..frame.width {
+            if to_skip > 0 {
+                to_skip -= 1;
+                continue;
+            }
+
             let idx = (row as usize) * (frame.width as usize) + (col as usize);
             let cell = &frame.cells[idx];
 
@@ -236,6 +250,7 @@ fn write_all_cells(writer: &mut impl Write, frame: &FrameData) {
 
             // Write the symbol.
             let _ = writer.write_all(cell.symbol.as_bytes());
+            to_skip = cell_width(cell).saturating_sub(1);
         }
     }
 
@@ -259,40 +274,26 @@ fn write_cell(writer: &mut impl Write, row: u16, col: u16, cell: &CellData, last
     let _ = writer.write_all(cell.symbol.as_bytes());
 }
 
-fn row_has_skip_transition(frame: &FrameData, prev: &FrameData, row: u16) -> bool {
-    (0..frame.width).any(|col| {
-        let idx = (row as usize) * (frame.width as usize) + (col as usize);
-        frame.cells[idx].skip != prev.cells[idx].skip
-    })
-}
-
-fn write_row(writer: &mut impl Write, frame: &FrameData, row: u16, last_sgr: &mut String) {
-    for col in 0..frame.width {
-        let idx = (row as usize) * (frame.width as usize) + (col as usize);
-        write_cell(writer, row, col, &frame.cells[idx], last_sgr);
-    }
-}
-
 /// Writes only the cells that changed between the previous and current frame.
 fn write_changed_cells(writer: &mut impl Write, frame: &FrameData, prev: &FrameData) {
     let mut last_sgr = String::new(); // Track last SGR to avoid redundant style changes.
 
     for row in 0..frame.height {
-        if row_has_skip_transition(frame, prev, row) {
-            write_row(writer, frame, row, &mut last_sgr);
-            continue;
-        }
+        let mut invalidated = 0usize;
+        let mut to_skip = 0usize;
 
         for col in 0..frame.width {
             let idx = (row as usize) * (frame.width as usize) + (col as usize);
             let cell = &frame.cells[idx];
             let prev_cell = &prev.cells[idx];
 
-            if cell.skip || cells_equal(cell, prev_cell) {
-                continue;
+            if !cell.skip && (cell != prev_cell || invalidated > 0) && to_skip == 0 {
+                write_cell(writer, row, col, cell, &mut last_sgr);
             }
 
-            write_cell(writer, row, col, cell, &mut last_sgr);
+            to_skip = cell_width(cell).saturating_sub(1);
+            let affected_width = cmp::max(cell_width(cell), cell_width(prev_cell));
+            invalidated = cmp::max(affected_width, invalidated).saturating_sub(1);
         }
     }
 
@@ -310,6 +311,8 @@ fn write_changed_cells(writer: &mut impl Write, frame: &FrameData, prev: &FrameD
 mod tests {
     use super::*;
     use crate::server::protocol::{CellData, CursorState};
+
+    const WIDE_GRAPHEME: &str = "💡";
 
     fn make_cell(symbol: &str, fg: u32, bg: u32, modifier: u16) -> CellData {
         CellData {
@@ -637,23 +640,33 @@ mod tests {
     }
 
     #[test]
-    fn blit_frame_redraws_row_when_skip_state_changes() {
+    fn full_redraw_skips_trailing_cells_covered_by_wide_graphemes() {
+        let frame = FrameData {
+            cells: vec![
+                make_cell(WIDE_GRAPHEME, 0, 0, 0),
+                make_cell(" ", 0, 0, 0),
+                make_cell("Z", 0, 0, 0),
+            ],
+            width: 3,
+            height: 1,
+            cursor: None,
+        };
+
+        let mut output = Vec::new();
+        blit_frame_to(&mut output, &frame, None);
+        let output_str = String::from_utf8(output).unwrap();
+
+        assert!(output_str.contains("\x1b[1;1H"));
+        assert!(!output_str.contains("\x1b[1;2H"));
+        assert!(output_str.contains("\x1b[1;3H"));
+    }
+
+    #[test]
+    fn diff_redraw_reveals_cells_hidden_by_previous_wide_graphemes() {
         let prev = FrameData {
             cells: vec![
-                CellData {
-                    symbol: "🦀".to_owned(),
-                    fg: 0,
-                    bg: 0,
-                    modifier: 0,
-                    skip: false,
-                },
-                CellData {
-                    symbol: " ".to_owned(),
-                    fg: 0,
-                    bg: 0,
-                    modifier: 0,
-                    skip: true,
-                },
+                make_cell(WIDE_GRAPHEME, 0, 0, 0),
+                make_cell(" ", 0, 0, 0),
                 make_cell("Z", 0, 0, 0),
             ],
             width: 3,
@@ -675,13 +688,41 @@ mod tests {
         blit_frame_to(&mut output, &curr, Some(&prev));
         let output_str = String::from_utf8(output).unwrap();
 
+        assert!(output_str.contains("\x1b[1;1H"));
         assert!(
             output_str.contains("\x1b[1;2H"),
-            "skip-state transitions should redraw the row so newly visible cells are cleared"
+            "cells hidden by a previous wide grapheme must be redrawn when they become visible"
         );
-        assert!(
-            output_str.contains("\x1b[1;3H"),
-            "row redraw should keep trailing cells consistent after a wide-cell transition"
-        );
+    }
+
+    #[test]
+    fn diff_redraw_skips_new_trailing_cells_covered_by_wide_graphemes() {
+        let prev = FrameData {
+            cells: vec![
+                make_cell("A", 0, 0, 0),
+                make_cell("B", 0, 0, 0),
+                make_cell("Z", 0, 0, 0),
+            ],
+            width: 3,
+            height: 1,
+            cursor: None,
+        };
+        let curr = FrameData {
+            cells: vec![
+                make_cell(WIDE_GRAPHEME, 0, 0, 0),
+                make_cell(" ", 0, 0, 0),
+                make_cell("Z", 0, 0, 0),
+            ],
+            width: 3,
+            height: 1,
+            cursor: None,
+        };
+
+        let mut output = Vec::new();
+        blit_frame_to(&mut output, &curr, Some(&prev));
+        let output_str = String::from_utf8(output).unwrap();
+
+        assert!(output_str.contains("\x1b[1;1H"));
+        assert!(!output_str.contains("\x1b[1;2H"));
     }
 }
