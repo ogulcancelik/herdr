@@ -514,12 +514,20 @@ fn write_to_server(stream: &mut UnixStream, msg: &ClientMessage) -> io::Result<(
 // Clipboard forwarding
 // ---------------------------------------------------------------------------
 
-/// Forwards an OSC 52 clipboard write from the server to the client's stdout.
+/// Decode a clipboard payload forwarded by the server.
+fn decode_clipboard_payload(data: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(data).ok()
+}
+
+/// Forwards a clipboard write from the server to the local client clipboard.
 fn forward_clipboard(data: &str) {
-    // The data is already base64-encoded from the server.
-    // Re-emit the OSC 52 sequence to our stdout.
-    let sequence = format!("\x1b]52;c;{data}\x07");
-    let _ = io::stdout().write_all(sequence.as_bytes());
+    let Some(bytes) = decode_clipboard_payload(data) else {
+        warn!("received invalid clipboard payload from server");
+        return;
+    };
+
+    crate::selection::write_osc52_bytes(&bytes);
 }
 
 // ---------------------------------------------------------------------------
@@ -678,9 +686,23 @@ mod tests {
     }
 
     #[test]
-    fn forward_clipboard_emits_osc52() {
-        // Just verify the function doesn't panic.
-        // We can't easily test stdout output in unit tests.
+    fn decode_clipboard_payload_decodes_base64() {
+        assert_eq!(decode_clipboard_payload("dGVzdA=="), Some(b"test".to_vec()));
+    }
+
+    #[test]
+    fn decode_clipboard_payload_rejects_invalid_base64() {
+        assert_eq!(decode_clipboard_payload("not-base64!!!"), None);
+    }
+
+    #[test]
+    fn forward_clipboard_uses_local_clipboard_path() {
+        unsafe {
+            std::env::set_var("SSH_CONNECTION", "1 2 3 4");
+        }
         forward_clipboard("dGVzdA==");
+        unsafe {
+            std::env::remove_var("SSH_CONNECTION");
+        }
     }
 }
