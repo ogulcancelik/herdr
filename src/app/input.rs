@@ -1446,7 +1446,10 @@ impl AppState {
     }
 
     fn release_notes_modal_inner(&self) -> Option<ratatui::layout::Rect> {
-        self.onboarding_modal_inner(76, 20)
+        self.onboarding_modal_inner(
+            crate::ui::RELEASE_NOTES_MODAL_SIZE.0,
+            crate::ui::RELEASE_NOTES_MODAL_SIZE.1,
+        )
     }
 
     fn release_notes_close_button_at(&self, col: u16, row: u16) -> bool {
@@ -1473,7 +1476,12 @@ impl AppState {
         if inner.height < 8 || inner.width < 4 {
             return None;
         }
-        Some(crate::ui::modal_stack_areas(inner, 2, 1, 0, 1).content)
+        let body = crate::ui::modal_stack_areas(inner, 2, 1, 0, 1).content;
+        let preview = self
+            .release_notes
+            .as_ref()
+            .is_some_and(|notes| notes.preview);
+        Some(crate::ui::release_notes_sections(body, preview).notes_body)
     }
 
     fn release_notes_scroll_metrics(&self) -> Option<crate::pane::ScrollMetrics> {
@@ -1774,14 +1782,12 @@ impl AppState {
 
     pub(crate) fn global_menu_labels(&self) -> Vec<&'static str> {
         let mut labels = vec!["settings", "keybinds", "reload keybinds"];
-        if self.latest_release_notes_available || self.update_available.is_some() {
+        if self.update_available.is_some() {
+            labels.push("update available");
+        } else if self.latest_release_notes_available {
             labels.push("what's new");
         }
-        labels.push(if self.update_available.is_some() {
-            "quit to apply update"
-        } else {
-            "quit"
-        });
+        labels.push("quit");
         labels
     }
 
@@ -1791,7 +1797,10 @@ impl AppState {
         let labels = self.global_menu_labels();
         let content_width = labels
             .iter()
-            .map(|label| label.chars().count() as u16)
+            .map(|label| {
+                let extra = if *label == "update available" { 2 } else { 0 };
+                label.chars().count() as u16 + extra
+            })
             .max()
             .unwrap_or(8)
             .saturating_add(2);
@@ -4269,7 +4278,7 @@ mod tests {
     }
 
     #[test]
-    fn update_pending_menu_surfaces_quit_to_apply_update_action() {
+    fn update_available_menu_surfaces_update_status_without_apply_action() {
         let mut app = app_for_mouse_test();
         app.state.update_available = Some("0.3.2".into());
         app.state.latest_release_notes_available = true;
@@ -4287,8 +4296,8 @@ mod tests {
                 "settings",
                 "keybinds",
                 "reload keybinds",
-                "what's new",
-                "quit to apply update"
+                "update available",
+                "quit"
             ]
         );
 

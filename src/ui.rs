@@ -1829,6 +1829,8 @@ fn panel_contrast_fg(p: &Palette) -> Color {
     }
 }
 
+pub(crate) const RELEASE_NOTES_MODAL_SIZE: (u16, u16) = (80, 24);
+
 pub(crate) fn centered_popup_rect(area: Rect, popup_w: u16, popup_h: u16) -> Option<Rect> {
     let popup_w = popup_w.min(area.width.saturating_sub(4));
     let popup_h = popup_h.min(area.height.saturating_sub(2));
@@ -1853,13 +1855,15 @@ fn render_modal_shell(
 }
 
 fn render_modal_header(frame: &mut Frame, area: Rect, title: &str, p: &Palette) {
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            format!(" {title} "),
+    let line = Line::from(vec![
+        Span::styled(
+            title,
             Style::default().fg(p.text).add_modifier(Modifier::BOLD),
-        )),
-        area,
-    );
+        ),
+        Span::raw("  "),
+        Span::styled("⬆", Style::default().fg(p.accent)),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1943,7 +1947,13 @@ fn render_release_notes_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
 
     dim_background(frame, area);
 
-    let Some(inner) = render_modal_shell(frame, area, 76, 20, &app.palette) else {
+    let Some(inner) = render_modal_shell(
+        frame,
+        area,
+        RELEASE_NOTES_MODAL_SIZE.0,
+        RELEASE_NOTES_MODAL_SIZE.1,
+        &app.palette,
+    ) else {
         return;
     };
     if inner.height < 8 || inner.width < 20 {
@@ -1954,16 +1964,33 @@ fn render_release_notes_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     let header_rows =
         Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas::<2>(stack.header);
 
+    let header_title_area = Rect::new(
+        header_rows[0].x + 1,
+        header_rows[0].y,
+        header_rows[0].width.saturating_sub(2),
+        header_rows[0].height,
+    );
+    let header_subtitle_area = Rect::new(
+        header_rows[1].x + 1,
+        header_rows[1].y,
+        header_rows[1].width.saturating_sub(2),
+        header_rows[1].height,
+    );
+
     render_modal_header(
         frame,
-        header_rows[0],
+        header_title_area,
         &format!("v{}", notes.version),
         &app.palette,
     );
+    let subtitle = if notes.preview {
+        "preview before updating"
+    } else {
+        "what's new in this release"
+    };
     frame.render_widget(
-        Paragraph::new(" what's new in this release")
-            .style(Style::default().fg(app.palette.overlay1)),
-        header_rows[1],
+        Paragraph::new(subtitle).style(Style::default().fg(app.palette.overlay1)),
+        header_subtitle_area,
     );
     render_action_button(
         frame,
@@ -1976,23 +2003,27 @@ fn render_release_notes_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
             .add_modifier(Modifier::BOLD),
     );
 
-    let body_area = stack.content;
+    let sections = release_notes_sections(stack.content, notes.preview);
     let metrics = crate::pane::ScrollMetrics {
         offset_from_bottom: app.release_notes_max_scroll().saturating_sub(notes.scroll) as usize,
         max_offset_from_bottom: app.release_notes_max_scroll() as usize,
-        viewport_rows: body_area.height.max(1) as usize,
+        viewport_rows: sections.notes_body.height.max(1) as usize,
     };
-    let track = release_notes_scrollbar_rect(body_area, metrics);
-    let text_area = track
+    let track = release_notes_scrollbar_rect(sections.notes_body, metrics);
+    let notes_text_area = track
         .map(|_| {
             Rect::new(
-                body_area.x,
-                body_area.y,
-                body_area.width.saturating_sub(1),
-                body_area.height,
+                sections.notes_body.x,
+                sections.notes_body.y,
+                sections.notes_body.width.saturating_sub(1),
+                sections.notes_body.height,
             )
         })
-        .unwrap_or(body_area);
+        .unwrap_or(sections.notes_body);
+
+    if let Some(instructions_area) = sections.instructions {
+        render_release_notes_preview_panel(frame, instructions_area, &notes.version, &app.palette);
+    }
 
     let body = Paragraph::new(
         release_notes_lines(notes.body.as_str(), &app.palette)
@@ -2002,7 +2033,7 @@ fn render_release_notes_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     )
     .wrap(Wrap { trim: false })
     .scroll((notes.scroll, 0));
-    frame.render_widget(body, text_area);
+    frame.render_widget(body, notes_text_area);
     if let Some(track) = track {
         render_scrollbar(
             frame,
@@ -2109,14 +2140,18 @@ pub(crate) fn release_notes_lines<'a>(body: &'a str, p: &Palette) -> Vec<(usize,
         }
 
         if let Some(rest) = trimmed.strip_prefix("### ") {
-            let text = rest.to_lowercase();
+            let text = rest.trim().to_string();
+            if text.is_empty() {
+                lines.push((0, Line::raw("")));
+                continue;
+            }
             let width = 1 + text.chars().count();
             lines.push((
                 width,
                 Line::from(vec![
                     Span::raw(" "),
                     Span::styled(
-                        text,
+                        text.to_uppercase(),
                         Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
                     ),
                 ]),
@@ -2143,6 +2178,80 @@ pub(crate) fn release_notes_lines<'a>(body: &'a str, p: &Palette) -> Vec<(usize,
     }
 
     lines
+}
+
+pub(crate) struct ReleaseNotesSections {
+    pub instructions: Option<Rect>,
+    pub notes_body: Rect,
+}
+
+pub(crate) fn release_notes_sections(area: Rect, preview: bool) -> ReleaseNotesSections {
+    if preview && area.height >= 6 {
+        let rows = Layout::vertical([Constraint::Length(5), Constraint::Min(0)]).areas::<2>(area);
+        ReleaseNotesSections {
+            instructions: Some(rows[0]),
+            notes_body: rows[1],
+        }
+    } else {
+        ReleaseNotesSections {
+            instructions: None,
+            notes_body: area,
+        }
+    }
+}
+
+fn release_notes_preview_lines<'a>(_version: &str, p: &Palette) -> Vec<Line<'a>> {
+    let title_style = Style::default().fg(p.text).add_modifier(Modifier::BOLD);
+    let text_style = Style::default().fg(p.text);
+    let code_style = Style::default()
+        .fg(p.accent)
+        .bg(p.surface0)
+        .add_modifier(Modifier::BOLD);
+
+    vec![
+        Line::from(vec![
+            Span::styled(
+                "●",
+                Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" update available", title_style),
+        ]),
+        Line::from(vec![
+            Span::styled("quit herdr and run ", text_style),
+            Span::styled("herdr update", code_style),
+            Span::styled(" to install", text_style),
+        ]),
+    ]
+}
+
+fn render_release_notes_preview_panel(frame: &mut Frame, area: Rect, _version: &str, p: &Palette) {
+    let rows = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas::<4>(area);
+
+    let text_area = Rect::new(
+        rows[0].x + 1,
+        rows[0].y,
+        rows[0].width.saturating_sub(2),
+        rows[0].height,
+    );
+    frame.render_widget(
+        Paragraph::new(release_notes_preview_lines(_version, p)).wrap(Wrap { trim: false }),
+        text_area,
+    );
+
+    let divider_area = Rect::new(rows[2].x + 1, rows[2].y, rows[2].width.saturating_sub(2), 1);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            "─".repeat(divider_area.width as usize),
+            Style::default().fg(p.surface1),
+        )])),
+        divider_area,
+    );
 }
 
 pub(crate) fn release_notes_close_button_rect(area: Rect) -> Rect {
@@ -2414,7 +2523,7 @@ fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
 
     if app.update_available.is_some() {
         let status = Line::from(vec![Span::styled(
-            " update ready",
+            " update available",
             Style::default()
                 .fg(app.palette.accent)
                 .add_modifier(Modifier::BOLD),
@@ -2448,6 +2557,41 @@ fn render_global_launcher_menu(app: &AppState, frame: &mut Frame) {
             break;
         }
         let selected = idx == app.global_menu.highlighted;
+        let rect = Rect::new(inner.x, y, inner.width, 1);
+
+        if *item == "update available" {
+            let line = if selected {
+                Line::from(vec![
+                    Span::styled(
+                        " update available ",
+                        Style::default()
+                            .fg(panel_contrast_fg(&app.palette))
+                            .bg(app.palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        "● ",
+                        Style::default()
+                            .fg(panel_contrast_fg(&app.palette))
+                            .bg(app.palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled(" update available ", Style::default().fg(app.palette.text)),
+                    Span::styled(
+                        "● ",
+                        Style::default()
+                            .fg(app.palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ])
+            };
+            frame.render_widget(Paragraph::new(line).alignment(Alignment::Left), rect);
+            continue;
+        }
+
         let style = if selected {
             Style::default()
                 .fg(panel_contrast_fg(&app.palette))
@@ -2460,7 +2604,7 @@ fn render_global_launcher_menu(app: &AppState, frame: &mut Frame) {
             Paragraph::new(format!(" {item} "))
                 .style(style)
                 .alignment(Alignment::Left),
-            Rect::new(inner.x, y, inner.width, 1),
+            rect,
         );
     }
 }
@@ -3784,6 +3928,21 @@ mod tests {
     }
 
     #[test]
+    fn release_notes_preview_lines_show_update_steps() {
+        let palette = Palette::catppuccin();
+        let lines = release_notes_preview_lines("0.5.0", &palette);
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(line_text(&lines[0]), "● update available");
+        assert_eq!(
+            line_text(&lines[1]),
+            "quit herdr and run herdr update to install"
+        );
+        assert_eq!(lines[0].spans[0].style.fg, Some(palette.accent));
+        assert_eq!(lines[0].spans[1].style.fg, Some(palette.text));
+    }
+
+    #[test]
     fn release_notes_fenced_code_blocks_render_as_preformatted_lines() {
         let palette = Palette::catppuccin();
         let lines = release_notes_lines(
@@ -3792,7 +3951,7 @@ mod tests {
         );
 
         assert_eq!(lines.len(), 4);
-        assert_eq!(line_text(&lines[0].1), " fixed");
+        assert_eq!(line_text(&lines[0].1), " FIXED");
         assert_eq!(line_text(&lines[1].1), "▏ just check");
         assert_eq!(line_text(&lines[2].1), "▏ - not a bullet");
         assert_eq!(line_text(&lines[3].1), " • after");

@@ -205,7 +205,12 @@ impl App {
             "using pane scrollback configuration"
         );
 
-        let latest_release_notes_available = crate::release_notes::load_latest().is_some();
+        let latest_release_notes = crate::release_notes::load_latest();
+        let update_available = latest_release_notes
+            .as_ref()
+            .filter(|notes| notes.preview)
+            .map(|notes| notes.version.clone());
+        let latest_release_notes_available = latest_release_notes.is_some();
 
         let mode = if config.should_show_onboarding() {
             state::Mode::Onboarding
@@ -261,7 +266,7 @@ impl App {
             tab_press: None,
             selection: None,
             context_menu: None,
-            update_available: None,
+            update_available,
             latest_release_notes_available,
             update_dismissed: false,
             config_diagnostic,
@@ -1359,6 +1364,23 @@ mod tests {
                 .as_nanos()
         );
         std::env::temp_dir().join(unique).join("config.toml")
+    }
+
+    #[test]
+    fn startup_restores_preview_update_available_from_saved_notes() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("startup-preview-update-available");
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        crate::release_notes::save_pending("0.5.0", "### Changed\n- One").unwrap();
+
+        let app = test_app();
+
+        assert_eq!(app.state.update_available.as_deref(), Some("0.5.0"));
+        assert!(app.state.latest_release_notes_available);
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

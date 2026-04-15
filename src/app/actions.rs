@@ -481,8 +481,8 @@ impl AppState {
                 self.update_dismissed = true;
                 self.toast = Some(ToastNotification {
                     kind: ToastKind::UpdateInstalled,
-                    title: format!("updated to v{version}"),
-                    context: "restart to use it".to_string(),
+                    title: format!("v{version} available"),
+                    context: "run `herdr update`".to_string(),
                 });
                 Vec::new()
             }
@@ -1006,6 +1006,24 @@ mod tests {
         });
 
         assert!(state.toast.is_none());
+    }
+
+    #[test]
+    fn update_ready_sets_manual_update_toast() {
+        let mut state = AppState::test_new();
+
+        let updates = state.handle_app_event(AppEvent::UpdateReady {
+            version: "0.5.0".into(),
+        });
+
+        assert!(updates.is_empty());
+        assert_eq!(state.update_available.as_deref(), Some("0.5.0"));
+        assert!(state.latest_release_notes_available);
+        assert!(state.update_dismissed);
+        let toast = state.toast.as_ref().expect("update toast");
+        assert_eq!(toast.kind, ToastKind::UpdateInstalled);
+        assert_eq!(toast.title, "v0.5.0 available");
+        assert_eq!(toast.context, "run `herdr update`");
     }
 
     #[test]
