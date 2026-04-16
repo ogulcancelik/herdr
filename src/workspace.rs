@@ -753,6 +753,7 @@ fn agent_name(agent: Agent) -> &'static str {
         Agent::Kimi => "kimi",
         Agent::Droid => "droid",
         Agent::Amp => "amp",
+        Agent::Hermes => "hermes",
     }
 }
 

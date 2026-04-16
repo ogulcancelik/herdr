@@ -1288,6 +1288,7 @@ fn parse_agent_name(agent: &str) -> Option<crate::detect::Agent> {
         "kimi" => Some(crate::detect::Agent::Kimi),
         "droid" => Some(crate::detect::Agent::Droid),
         "amp" => Some(crate::detect::Agent::Amp),
+        "hermes" => Some(crate::detect::Agent::Hermes),
         _ => None,
     }
 }
@@ -1305,6 +1306,7 @@ fn agent_name(agent: crate::detect::Agent) -> String {
         crate::detect::Agent::Kimi => "kimi",
         crate::detect::Agent::Droid => "droid",
         crate::detect::Agent::Amp => "amp",
+        crate::detect::Agent::Hermes => "hermes",
     }
     .to_string()
 }

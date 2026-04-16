@@ -66,6 +66,7 @@ fn agent_label(agent: Agent) -> &'static str {
         crate::detect::Agent::Kimi => "kimi",
         crate::detect::Agent::Droid => "droid",
         crate::detect::Agent::Amp => "amp",
+        crate::detect::Agent::Hermes => "hermes",
     }
 }
 
