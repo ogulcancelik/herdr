@@ -75,9 +75,9 @@ main() {
     echo ""
 }
 
-log()  { echo "  \033[32m>\033[0m $1"; }
-warn() { echo "  \033[33m!\033[0m $1"; }
-err()  { echo "  \033[31m✗\033[0m $1" >&2; exit 1; }
+log()  { printf '  \033[32m>\033[0m %s\n' "$1"; }
+warn() { printf '  \033[33m!\033[0m %s\n' "$1"; }
+err()  { printf '  \033[31m✗\033[0m %s\n' "$1" >&2; exit 1; }
 
 need() {
     if ! command -v "$1" >/dev/null 2>&1; then
