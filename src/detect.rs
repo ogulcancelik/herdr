@@ -447,11 +447,17 @@ fn detect_amp(content: &str) -> AgentState {
 fn detect_hermes(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
-    if lower.contains("resumed session") || lower.contains("previous conversation") {
+    if lower.contains("resumed session")
+        || lower.contains("previous conversation")
+        || has_hermes_session_boundary_banner(content)
+    {
         return AgentState::Idle;
     }
 
-    if has_hermes_thinking_spinner(content) || has_hermes_tool_spinner(content) {
+    if has_hermes_retry_status(content)
+        || has_hermes_thinking_spinner(content)
+        || has_hermes_tool_spinner(content)
+    {
         return AgentState::Working;
     }
 
@@ -482,44 +488,59 @@ fn has_braille_spinner(content: &str) -> bool {
 
 fn has_hermes_thinking_spinner(content: &str) -> bool {
     const THINKING_VERBS: &[&str] = &[
-        "pondering...",
-        "contemplating...",
-        "musing...",
-        "cogitating...",
-        "ruminating...",
-        "deliberating...",
-        "mulling...",
-        "reflecting...",
-        "processing...",
-        "reasoning...",
-        "analyzing...",
-        "computing...",
-        "synthesizing...",
-        "formulating...",
-        "brainstorming...",
+        "pondering",
+        "contemplating",
+        "musing",
+        "cogitating",
+        "ruminating",
+        "deliberating",
+        "mulling",
+        "reflecting",
+        "processing",
+        "reasoning",
+        "analyzing",
+        "computing",
+        "synthesizing",
+        "formulating",
+        "brainstorming",
     ];
     hermes_recent_lines(content).iter().any(|line| {
-        let trimmed = line.trim().to_lowercase();
-        THINKING_VERBS.iter().any(|verb| trimmed.ends_with(verb))
+        let trimmed = normalize_hermes_status_line(line);
+        THINKING_VERBS.iter().any(|verb| {
+            trimmed.ends_with(&format!("{verb}..."))
+                || trimmed.ends_with(&format!("{verb}…"))
+                || trimmed == *verb
+        })
     })
 }
 
 fn has_hermes_tool_spinner(content: &str) -> bool {
     hermes_recent_lines(content).iter().any(|line| {
-        let trimmed = line.trim();
-        trimmed.starts_with('🖥')
-            || trimmed.starts_with('💻')
-            || trimmed.starts_with('📄')
-            || trimmed.starts_with('✏')
-            || trimmed.starts_with('🔎')
-            || trimmed.starts_with('🌐')
-            || trimmed.starts_with('🧠')
-            || trimmed.starts_with('🔀')
-            || trimmed.starts_with('📁')
-            || trimmed.starts_with('⚙')
-            || trimmed.starts_with('⚡')
-            || trimmed.starts_with('📚')
-            || trimmed.starts_with('🐍')
+        let normalized = normalize_hermes_status_line(line);
+        normalized.starts_with('🖥')
+            || normalized.starts_with('💻')
+            || normalized.starts_with('📄')
+            || normalized.starts_with('✏')
+            || normalized.starts_with('🔧')
+            || normalized.starts_with('🔎')
+            || normalized.starts_with('🌐')
+            || normalized.starts_with('🧠')
+            || normalized.starts_with('🔀')
+            || normalized.starts_with('📁')
+            || normalized.starts_with('⚙')
+            || normalized.starts_with('⚡')
+            || normalized.starts_with('📚')
+            || normalized.starts_with('📋')
+            || normalized.starts_with('🐍')
+    })
+}
+
+fn has_hermes_retry_status(content: &str) -> bool {
+    hermes_recent_lines(content).iter().any(|line| {
+        let normalized = normalize_hermes_status_line(line);
+        normalized.starts_with('⏳')
+            && normalized.contains("retrying in ")
+            && normalized.contains("attempt ")
     })
 }
 
@@ -539,6 +560,56 @@ fn has_hermes_blocked_prompt(content: &str) -> bool {
         || recent.contains("↑/↓ to select, enter to confirm")
         || recent.contains("sudo password required")
         || recent.contains("enter password below")
+}
+
+fn has_hermes_session_boundary_banner(content: &str) -> bool {
+    let recent = hermes_recent_lines(content)
+        .into_iter()
+        .map(normalize_hermes_status_line)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    recent.contains("new session started!") || recent.contains("session reset! starting fresh.")
+}
+
+fn normalize_hermes_status_line(line: &str) -> String {
+    strip_ansi_sequences(line).trim().to_lowercase()
+}
+
+fn strip_ansi_sequences(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    while let Some(next) = chars.next() {
+                        if ('@'..='~').contains(&next) {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                Some(']') => {
+                    chars.next();
+                    let mut prev = None;
+                    while let Some(next) = chars.next() {
+                        if next == '\u{07}' || (prev == Some('\u{1b}') && next == '\\') {
+                            break;
+                        }
+                        prev = Some(next);
+                    }
+                    continue;
+                }
+                _ => continue,
+            }
+        }
+        result.push(ch);
+    }
+
+    result
 }
 
 fn hermes_recent_lines(content: &str) -> Vec<&str> {
@@ -1336,6 +1407,51 @@ mod tests {
     }
 
     #[test]
+    fn hermes_working_when_thinking_spinner_uses_exact_user_face_variant() {
+        let screen = "( ° ʖ °) cogitating...\n⚕ gpt-5.4 │ ctx -- │ [░░░░░░░░░░] -- │ 2s\n\n────────────────────\n❯ \n────────────────────";
+        assert_eq!(
+            detect_state(Some(Agent::Hermes), screen),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn hermes_working_when_thinking_spinner_uses_unicode_ellipsis() {
+        let screen = "( ° ʖ °) cogitating…\n⚕ gpt-5.4 │ ctx -- │ [░░░░░░░░░░] -- │ 2s\n\n────────────────────\n❯ \n────────────────────";
+        assert_eq!(
+            detect_state(Some(Agent::Hermes), screen),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn hermes_working_when_thinking_spinner_line_has_ansi_color() {
+        let screen = "\x1b[38;5;205m( ° ʖ °) cogitating...\x1b[0m\n⚕ gpt-5.4 │ ctx -- │ [░░░░░░░░░░] -- │ 2s\n\n────────────────────\n❯ \n────────────────────";
+        assert_eq!(
+            detect_state(Some(Agent::Hermes), screen),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn hermes_working_when_retry_status_visible() {
+        let screen = "⏳ Retrying in 2.2199081172530937s (attempt 1/3)...\n⚕ gpt-5.4 │ ctx -- │ [░░░░░░░░░░] -- │ 2s\n\n────────────────────\n❯ \n────────────────────";
+        assert_eq!(
+            detect_state(Some(Agent::Hermes), screen),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn hermes_working_when_retry_status_has_ansi_color() {
+        let screen = "\x1b[38;5;214m⏳ Retrying in 2.2199081172530937s (attempt 1/3)...\x1b[0m\n⚕ gpt-5.4 │ ctx -- │ [░░░░░░░░░░] -- │ 2s\n\n────────────────────\n❯ \n────────────────────";
+        assert_eq!(
+            detect_state(Some(Agent::Hermes), screen),
+            AgentState::Working
+        );
+    }
+
+    #[test]
     fn hermes_working_when_tool_spinner_visible() {
         let screen = "🖥 terminal ls -la  (0.4s)\n⚕ gpt-5.4 │ ctx -- │ [░░░░░░░░░░] -- │ 3s\n\n────────────────────\n❯ \n────────────────────";
         assert_eq!(
@@ -1372,6 +1488,33 @@ mod tests {
     }
 
     #[test]
+    fn hermes_working_when_plan_tool_progress_visible() {
+        let screen = "📋 plan      update 3 task(s)  0.0s\n⚕ gpt-5.4 │ ctx -- │ [░░░░░░░░░░] -- │ 3s\n\n────────────────────\n❯ \n────────────────────";
+        assert_eq!(
+            detect_state(Some(Agent::Hermes), screen),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn hermes_working_when_patch_tool_progress_visible() {
+        let screen = "🔧 patch     /home/user/projects/metroscale-agent/apps/agent/src/main/java/io/metroscale/agent/chao/runtime/DefaultConversationCoordinator.kt  0.9s\n⚕ gpt-5.4 │ ctx -- │ [░░░░░░░░░░] -- │ 3s\n\n────────────────────\n❯ \n────────────────────";
+        assert_eq!(
+            detect_state(Some(Agent::Hermes), screen),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn hermes_working_when_patch_tool_progress_line_has_ansi_color() {
+        let screen = "\x1b[38;5;205m🔧 patch     /home/user/projects/metroscale-agent/apps/agent/src/main/java/io/metroscale/agent/chao/runtime/DefaultConversationCoordinator.kt  0.9s\x1b[0m\n⚕ gpt-5.4 │ ctx -- │ [░░░░░░░░░░] -- │ 3s\n\n────────────────────\n❯ \n────────────────────";
+        assert_eq!(
+            detect_state(Some(Agent::Hermes), screen),
+            AgentState::Working
+        );
+    }
+
+    #[test]
     fn hermes_blocked_on_approval_prompt() {
         let screen = "╭────────────────────────────────────────────╮\n│ Dangerous Command                          │\n│ rm -rf /tmp/demo                           │\n│ ❯ Allow once                               │\n│   Allow for this session                   │\n│   Add to permanent allowlist               │\n│   Deny                                     │\n╰────────────────────────────────────────────╯";
         assert_eq!(
@@ -1392,6 +1535,12 @@ mod tests {
     #[test]
     fn hermes_resume_recap_without_prompt_is_idle() {
         let screen = "↻ Resumed session 20260416_071429_2b732a \"Fixing Hermes Agent Autodetection\" (9 user messages, 338 total messages)\n╭─────────────────────────────────────────────── Previous Conversation ────────────────────────────────────────────────╮\n│   ... 119 earlier messages ...                                                                                       │\n│   ● You: okay lets test it                                                                                           │\n│   ◆ Hermes: Yep — I found the actual cause and patched it.                                                           │\n╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\nWelcome to Hermes Agent! Type your message or /help for commands.";
+        assert_eq!(detect_state(Some(Agent::Hermes), screen), AgentState::Idle);
+    }
+
+    #[test]
+    fn hermes_new_session_banner_without_prompt_is_idle() {
+        let screen = "🖥 terminal ls -la  (0.4s)\nold output\n(^_^)v New session started!";
         assert_eq!(detect_state(Some(Agent::Hermes), screen), AgentState::Idle);
     }
 
