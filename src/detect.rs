@@ -30,6 +30,7 @@ pub enum Agent {
     Kimi,
     Droid,
     Amp,
+    Hermes,
 }
 
 pub fn agent_label(agent: Agent) -> &'static str {
@@ -45,6 +46,7 @@ pub fn agent_label(agent: Agent) -> &'static str {
         Agent::Kimi => "kimi",
         Agent::Droid => "droid",
         Agent::Amp => "amp",
+        Agent::Hermes => "hermes",
     }
 }
 
@@ -62,6 +64,7 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
         "kimi" => Some(Agent::Kimi),
         "droid" => Some(Agent::Droid),
         "amp" | "amp-local" => Some(Agent::Amp),
+        "hermes" => Some(Agent::Hermes),
         _ => None,
     }
 }
@@ -83,6 +86,7 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
         "kimi" => Some(Agent::Kimi),
         "droid" => Some(Agent::Droid),
         "amp" | "amp-local" => Some(Agent::Amp),
+        "hermes" => Some(Agent::Hermes),
         _ => None,
     }
 }
@@ -124,6 +128,7 @@ pub fn detect_state(agent: Option<Agent>, screen_content: &str) -> AgentState {
         Agent::Kimi => detect_kimi(screen_content),
         Agent::Droid => detect_droid(screen_content),
         Agent::Amp => detect_amp(screen_content),
+        Agent::Hermes => detect_hermes(screen_content),
     }
 }
 
@@ -439,6 +444,28 @@ fn detect_amp(content: &str) -> AgentState {
     AgentState::Idle
 }
 
+fn detect_hermes(content: &str) -> AgentState {
+    let lower = content.to_lowercase();
+
+    if lower.contains("resumed session") || lower.contains("previous conversation") {
+        return AgentState::Idle;
+    }
+
+    if has_hermes_thinking_spinner(content) || has_hermes_tool_spinner(content) {
+        return AgentState::Working;
+    }
+
+    if has_standard_prompt_box(content) {
+        return AgentState::Idle;
+    }
+
+    if has_hermes_blocked_prompt(content) {
+        return AgentState::Blocked;
+    }
+
+    AgentState::Unknown
+}
+
 /// Check for braille spinner characters at the start of a line.
 /// These are the Unicode braille pattern dots used by CLI spinners.
 fn has_braille_spinner(content: &str) -> bool {
@@ -451,6 +478,76 @@ fn has_braille_spinner(content: &str) -> bool {
         }
     }
     false
+}
+
+fn has_hermes_thinking_spinner(content: &str) -> bool {
+    const THINKING_VERBS: &[&str] = &[
+        "pondering...",
+        "contemplating...",
+        "musing...",
+        "cogitating...",
+        "ruminating...",
+        "deliberating...",
+        "mulling...",
+        "reflecting...",
+        "processing...",
+        "reasoning...",
+        "analyzing...",
+        "computing...",
+        "synthesizing...",
+        "formulating...",
+        "brainstorming...",
+    ];
+    hermes_recent_lines(content).iter().any(|line| {
+        let trimmed = line.trim().to_lowercase();
+        THINKING_VERBS.iter().any(|verb| trimmed.ends_with(verb))
+    })
+}
+
+fn has_hermes_tool_spinner(content: &str) -> bool {
+    hermes_recent_lines(content).iter().any(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with('🖥')
+            || trimmed.starts_with('💻')
+            || trimmed.starts_with('📄')
+            || trimmed.starts_with('✏')
+            || trimmed.starts_with('🔎')
+            || trimmed.starts_with('🌐')
+            || trimmed.starts_with('🧠')
+            || trimmed.starts_with('🔀')
+            || trimmed.starts_with('📁')
+            || trimmed.starts_with('⚙')
+            || trimmed.starts_with('⚡')
+            || trimmed.starts_with('📚')
+            || trimmed.starts_with('🐍')
+    })
+}
+
+fn has_hermes_blocked_prompt(content: &str) -> bool {
+    let recent = hermes_recent_lines(content)
+        .into_iter()
+        .map(|line| line.trim().to_lowercase())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    recent.contains("dangerous command")
+        || recent.contains("allow once")
+        || recent.contains("allow for this session")
+        || recent.contains("add to permanent allowlist")
+        || recent.contains("hermes needs your input")
+        || recent.contains("type your answer and press enter")
+        || recent.contains("↑/↓ to select, enter to confirm")
+        || recent.contains("sudo password required")
+        || recent.contains("enter password below")
+}
+
+fn hermes_recent_lines(content: &str) -> Vec<&str> {
+    let lines: Vec<&str> = content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let start = lines.len().saturating_sub(6);
+    lines[start..].to_vec()
 }
 
 // ---------------------------------------------------------------------------
@@ -587,6 +684,10 @@ fn content_above_prompt_box(content: &str) -> &str {
     content
 }
 
+fn has_standard_prompt_box(content: &str) -> bool {
+    !std::ptr::eq(content_above_prompt_box(content), content)
+}
+
 // ---------------------------------------------------------------------------
 // Process identification (platform-specific)
 // ---------------------------------------------------------------------------
@@ -655,6 +756,7 @@ mod tests {
         assert_eq!(identify_agent("opencode"), Some(Agent::OpenCode));
         assert_eq!(identify_agent("kimi"), Some(Agent::Kimi));
         assert_eq!(identify_agent("ghcs"), Some(Agent::GithubCopilot));
+        assert_eq!(identify_agent("hermes"), Some(Agent::Hermes));
     }
 
     #[test]
@@ -1211,6 +1313,98 @@ mod tests {
     fn amp_identified_by_process_name() {
         assert_eq!(identify_agent("amp"), Some(Agent::Amp));
         assert_eq!(identify_agent("amp-local"), Some(Agent::Amp));
+    }
+
+    #[test]
+    fn hermes_identified_by_process_name() {
+        assert_eq!(identify_agent("hermes"), Some(Agent::Hermes));
+    }
+
+    #[test]
+    fn hermes_idle_at_prompt() {
+        let screen = "⚕ gpt-5.4 │ ctx -- │ [░░░░░░░░░░] -- │ 0s\n\n────────────────────\n❯ \n────────────────────";
+        assert_eq!(detect_state(Some(Agent::Hermes), screen), AgentState::Idle);
+    }
+
+    #[test]
+    fn hermes_working_when_thinking_spinner_visible() {
+        let screen = "(｡•́︿•̀｡) pondering...\n⚕ gpt-5.4 │ ctx -- │ [░░░░░░░░░░] -- │ 2s\n\n────────────────────\n❯ \n────────────────────";
+        assert_eq!(
+            detect_state(Some(Agent::Hermes), screen),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn hermes_working_when_tool_spinner_visible() {
+        let screen = "🖥 terminal ls -la  (0.4s)\n⚕ gpt-5.4 │ ctx -- │ [░░░░░░░░░░] -- │ 3s\n\n────────────────────\n❯ \n────────────────────";
+        assert_eq!(
+            detect_state(Some(Agent::Hermes), screen),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn hermes_working_when_terminal_tool_progress_visible() {
+        let screen = "💻 $         pwd && echo '---'  0.3s\n⚕ gpt-5.4 │ ctx -- │ [░░░░░░░░░░] -- │ 3s\n\n────────────────────\n❯ \n────────────────────";
+        assert_eq!(
+            detect_state(Some(Agent::Hermes), screen),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn hermes_working_when_execute_code_progress_visible() {
+        let screen = "🐍 exec      from pathlib import Path  3.2s\n⚕ gpt-5.4 │ ctx -- │ [░░░░░░░░░░] -- │ 3s\n\n────────────────────\n❯ \n────────────────────";
+        assert_eq!(
+            detect_state(Some(Agent::Hermes), screen),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn hermes_working_when_skill_tool_progress_visible() {
+        let screen = "📚 skill     code-review  0.0s\n⚕ gpt-5.4 │ ctx -- │ [░░░░░░░░░░] -- │ 3s\n\n────────────────────\n❯ \n────────────────────";
+        assert_eq!(
+            detect_state(Some(Agent::Hermes), screen),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn hermes_blocked_on_approval_prompt() {
+        let screen = "╭────────────────────────────────────────────╮\n│ Dangerous Command                          │\n│ rm -rf /tmp/demo                           │\n│ ❯ Allow once                               │\n│   Allow for this session                   │\n│   Add to permanent allowlist               │\n│   Deny                                     │\n╰────────────────────────────────────────────╯";
+        assert_eq!(
+            detect_state(Some(Agent::Hermes), screen),
+            AgentState::Blocked
+        );
+    }
+
+    #[test]
+    fn hermes_blocked_on_clarify_prompt() {
+        let screen = "╭────────────────────────────────────────────╮\n│ Hermes needs your input                    │\n│ Which environment should I use?            │\n│ ❯ prod                                     │\n│   staging                                  │\n╰────────────────────────────────────────────╯\n  ↑/↓ to select, Enter to confirm";
+        assert_eq!(
+            detect_state(Some(Agent::Hermes), screen),
+            AgentState::Blocked
+        );
+    }
+
+    #[test]
+    fn hermes_resume_recap_without_prompt_is_idle() {
+        let screen = "↻ Resumed session 20260416_071429_2b732a \"Fixing Hermes Agent Autodetection\" (9 user messages, 338 total messages)\n╭─────────────────────────────────────────────── Previous Conversation ────────────────────────────────────────────────╮\n│   ... 119 earlier messages ...                                                                                       │\n│   ● You: okay lets test it                                                                                           │\n│   ◆ Hermes: Yep — I found the actual cause and patched it.                                                           │\n╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\nWelcome to Hermes Agent! Type your message or /help for commands.";
+        assert_eq!(detect_state(Some(Agent::Hermes), screen), AgentState::Idle);
+    }
+
+    #[test]
+    fn hermes_ignores_stale_tool_spinner_above_prompt() {
+        let screen = "🖥 terminal ls -la  (0.4s)\nold output\nmore old output\n⚕ gpt-5.4 │ ctx -- │ [░░░░░░░░░░] -- │ 0s\n────────────────────\n❯ \n────────────────────";
+        assert_eq!(detect_state(Some(Agent::Hermes), screen), AgentState::Idle);
+    }
+
+    #[test]
+    fn hermes_search_output_with_blocked_keywords_is_not_blocked() {
+        let screen = "🔎 grep      Hermes needs your input|Enter password below|Dangerous Command|Allow once\nmatch 1\nmatch 2\n⚕ gpt-5.4 │ ctx -- │ [░░░░░░░░░░] -- │ 0s\n────────────────────\n❯ \n────────────────────";
+        assert_eq!(detect_state(Some(Agent::Hermes), screen), AgentState::Idle);
     }
 
     // ---- Helpers ----

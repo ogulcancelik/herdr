@@ -316,6 +316,7 @@ impl AgentSoundOverrides {
             Some(Agent::Kimi) => self.kimi,
             Some(Agent::Droid) => self.droid,
             Some(Agent::Amp) => self.amp,
+            Some(Agent::Hermes) => AgentSoundSetting::Default,
             None => AgentSoundSetting::Default,
         }
     }

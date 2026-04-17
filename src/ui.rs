@@ -125,17 +125,33 @@ pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
             let Some(ws) = app.workspaces.get(ws_idx) else {
                 return Vec::new();
             };
-            ws.pane_details()
+            let details = ws.pane_details();
+            let mut label_counts = std::collections::HashMap::new();
+            for detail in &details {
+                *label_counts.entry(detail.label.clone()).or_insert(0usize) += 1;
+            }
+            details
                 .into_iter()
-                .map(|detail| AgentPanelEntry {
-                    ws_idx,
-                    tab_idx: detail.tab_idx,
-                    pane_id: detail.pane_id,
-                    primary_label: detail.label,
-                    primary_tab_label: None,
-                    agent_label: None,
-                    state: detail.state,
-                    seen: detail.seen,
+                .map(|detail| {
+                    let primary_label = if label_counts.get(&detail.label).copied().unwrap_or(0) > 1
+                    {
+                        let pane_number = ws
+                            .public_pane_number(detail.pane_id)
+                            .unwrap_or(detail.tab_idx + 1);
+                        format!("{}·{}", pane_number, detail.label)
+                    } else {
+                        detail.label
+                    };
+                    AgentPanelEntry {
+                        ws_idx,
+                        tab_idx: detail.tab_idx,
+                        pane_id: detail.pane_id,
+                        primary_label,
+                        primary_tab_label: None,
+                        agent_label: None,
+                        state: detail.state,
+                        seen: detail.seen,
+                    }
                 })
                 .collect()
         }
@@ -3814,6 +3830,33 @@ mod tests {
         let label = format_agent_panel_primary_label(&entry, 18);
 
         assert_eq!(label, "agent-bro… · test…");
+    }
+
+    #[test]
+    fn current_workspace_agent_panel_disambiguates_duplicate_agents() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("one");
+        let first_pane = ws.tabs[0].root_pane;
+        let second_pane = ws.test_split(ratatui::layout::Direction::Horizontal);
+        ws.tabs[0]
+            .panes
+            .get_mut(&first_pane)
+            .unwrap()
+            .detected_agent = Some(Agent::Hermes);
+        ws.tabs[0]
+            .panes
+            .get_mut(&second_pane)
+            .unwrap()
+            .detected_agent = Some(Agent::Hermes);
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.selected = 0;
+        app.agent_panel_scope = AgentPanelScope::CurrentWorkspace;
+
+        let entries = agent_panel_entries(&app);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].primary_label, "1·hermes");
+        assert_eq!(entries[1].primary_label, "2·hermes");
     }
 
     #[test]
