@@ -840,6 +840,7 @@ mod tests {
             Some(Agent::GithubCopilot)
         );
         assert_eq!(parse_agent_label("amp-local"), Some(Agent::Amp));
+        assert_eq!(parse_agent_label("hermes"), Some(Agent::Hermes));
     }
 
     #[test]

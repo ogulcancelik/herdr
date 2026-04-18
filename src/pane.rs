@@ -3386,7 +3386,7 @@ mod tests {
     }
 
     #[test]
-    fn hook_authority_can_override_with_unknown_agent_label() {
+    fn hook_authority_can_override_with_hermes_label() {
         let mut pane = PaneState::new();
         pane.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         pane.set_hook_authority(
@@ -3398,7 +3398,7 @@ mod tests {
 
         assert_eq!(pane.detected_agent, Some(Agent::Pi));
         assert_eq!(pane.effective_agent_label(), Some("hermes"));
-        assert_eq!(pane.effective_known_agent(), None);
+        assert_eq!(pane.effective_known_agent(), Some(Agent::Hermes));
         assert_eq!(pane.state, AgentState::Working);
     }
 
