@@ -147,6 +147,24 @@ pub(crate) fn action_button_width(hint: Option<&str>, label: &str) -> u16 {
     action_button_text(hint, label).chars().count() as u16
 }
 
+pub(crate) struct ActionButtonSpec<'a> {
+    pub hint: Option<&'a str>,
+    pub label: &'a str,
+}
+
+pub(crate) fn action_button_row_rects(
+    area: Rect,
+    buttons: &[ActionButtonSpec<'_>],
+    gap: u16,
+    row_offset: u16,
+) -> Vec<Rect> {
+    let widths: Vec<u16> = buttons
+        .iter()
+        .map(|button| action_button_width(button.hint, button.label))
+        .collect();
+    centered_button_row(area, &widths, gap, row_offset)
+}
+
 pub(super) fn render_action_button(
     frame: &mut Frame,
     rect: Rect,
