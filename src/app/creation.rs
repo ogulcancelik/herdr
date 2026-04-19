@@ -1,6 +1,9 @@
 use tracing::error;
 
-use super::{pane_agent_status, tab_attention_priority, App, Mode};
+use super::{
+    api_helpers::{pane_agent_status, tab_attention_priority},
+    App, Mode,
+};
 use crate::workspace::Workspace;
 
 impl App {

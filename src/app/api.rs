@@ -1,8 +1,11 @@
 use std::time::{Duration, Instant};
 
 use super::{
-    detect_state_from_api, encode_api_keys, encode_api_text, normalize_reported_agent_label,
-    pane_agent_status, App, Mode, OverlayPaneState, ToastKind,
+    api_helpers::{
+        detect_state_from_api, encode_api_keys, encode_api_text, normalize_reported_agent_label,
+        pane_agent_status,
+    },
+    App, Mode, OverlayPaneState, ToastKind,
 };
 use crate::events::AppEvent;
 
