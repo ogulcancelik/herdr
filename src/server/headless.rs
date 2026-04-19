@@ -17,7 +17,6 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -175,52 +174,17 @@ struct ClientConnection {
 /// removes stale socket files (where no server is listening), and
 /// returns an error if a live server is already bound.
 fn prepare_socket_path(path: &Path) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    if !path.exists() {
-        return Ok(());
-    }
-
-    // Check if a server is already listening on this socket.
-    match UnixStream::connect(path) {
-        Ok(_) => {
-            return Err(io::Error::new(
-                io::ErrorKind::AddrInUse,
-                format!(
-                    "herdr server is already running (socket busy at {})",
-                    path.display()
-                ),
-            ));
-        }
-        Err(err)
-            if matches!(
-                err.kind(),
-                io::ErrorKind::ConnectionRefused
-                    | io::ErrorKind::NotFound
-                    | io::ErrorKind::TimedOut
-            ) =>
-        {
-            // Stale socket — safe to remove.
-        }
-        Err(err) => return Err(err),
-    }
-
-    if let Err(err) = fs::remove_file(path) {
-        if err.kind() != io::ErrorKind::NotFound {
-            return Err(err);
-        }
-    }
-
-    Ok(())
+    crate::ipc::prepare_socket_path(path, |path| {
+        format!(
+            "herdr server is already running (socket busy at {})",
+            path.display()
+        )
+    })
 }
 
 /// Restricts socket file permissions to owner-only (0o600).
 fn restrict_socket_permissions(path: &Path) -> io::Result<()> {
-    let mut permissions = fs::metadata(path)?.permissions();
-    permissions.set_mode(SOCKET_PERMISSION_MODE);
-    fs::set_permissions(path, permissions)
+    crate::ipc::restrict_socket_permissions(path, SOCKET_PERMISSION_MODE)
 }
 
 // ---------------------------------------------------------------------------
@@ -1167,7 +1131,7 @@ impl HeadlessServer {
             return false;
         }
 
-        let changed = api_request_changes_ui(&msg.request);
+        let changed = api::request_changes_ui(&msg.request);
 
         // Capture toast and pane agent states before the API call so we can
         // forward any resulting notifications to connected clients.
@@ -1754,28 +1718,6 @@ fn client_read_loop(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Checks whether an API request would change the UI (requiring a re-render).
-fn api_request_changes_ui(request: &api::schema::Request) -> bool {
-    use api::schema::Method;
-
-    matches!(
-        &request.method,
-        Method::WorkspaceCreate(_)
-            | Method::WorkspaceFocus(_)
-            | Method::WorkspaceRename(_)
-            | Method::WorkspaceClose(_)
-            | Method::TabCreate(_)
-            | Method::TabFocus(_)
-            | Method::TabRename(_)
-            | Method::TabClose(_)
-            | Method::PaneSplit(_)
-            | Method::PaneReportAgent(_)
-            | Method::PaneClearAgentAuthority(_)
-            | Method::PaneReleaseAgent(_)
-            | Method::PaneClose(_)
-    )
-}
-
 /// Installs a Ctrl+C handler that sets the should_quit flag and wakes up
 /// the event loop by sending a QuitSignal on the server event channel.
 fn ctrlc_handler(should_quit: Arc<AtomicBool>, server_event_tx: mpsc::Sender<ServerEvent>) {
@@ -1867,34 +1809,7 @@ pub fn run_server() -> io::Result<()> {
 
 /// Initialize logging for the server process.
 fn init_logging() {
-    use std::fs::{self, OpenOptions};
-    use tracing_subscriber::EnvFilter;
-
-    let log_dir = config::config_dir();
-    let _ = fs::create_dir_all(&log_dir);
-    let log_path = log_dir.join("herdr-server.log");
-
-    // Rotate: truncate if over 5MB.
-    if let Ok(meta) = fs::metadata(&log_path) {
-        if meta.len() > 5 * 1024 * 1024 {
-            let _ = fs::remove_file(&log_path);
-        }
-    }
-
-    let file = match OpenOptions::new().create(true).append(true).open(&log_path) {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-
-    let filter =
-        EnvFilter::try_from_env("HERDR_LOG").unwrap_or_else(|_| EnvFilter::new("herdr=info"));
-
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(file)
-        .with_ansi(false)
-        .with_target(false)
-        .try_init();
+    crate::logging::init_file_logging("herdr-server.log");
 }
 
 // ---------------------------------------------------------------------------

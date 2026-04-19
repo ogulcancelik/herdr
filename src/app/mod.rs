@@ -105,27 +105,6 @@ fn auto_updates_enabled(no_session: bool) -> bool {
     !no_session && !cfg!(debug_assertions)
 }
 
-fn api_request_changes_ui(request: &crate::api::schema::Request) -> bool {
-    use crate::api::schema::Method;
-
-    matches!(
-        &request.method,
-        Method::WorkspaceCreate(_)
-            | Method::WorkspaceFocus(_)
-            | Method::WorkspaceRename(_)
-            | Method::WorkspaceClose(_)
-            | Method::TabCreate(_)
-            | Method::TabFocus(_)
-            | Method::TabRename(_)
-            | Method::TabClose(_)
-            | Method::PaneSplit(_)
-            | Method::PaneReportAgent(_)
-            | Method::PaneClearAgentAuthority(_)
-            | Method::PaneReleaseAgent(_)
-            | Method::PaneClose(_)
-    )
-}
-
 /// Resolve the palette from config: base theme + optional custom overrides.
 fn resolve_palette(config: &crate::config::Config) -> state::Palette {
     // Start with the named theme (default: catppuccin)
@@ -550,7 +529,7 @@ impl App {
     }
 
     fn handle_api_request_message(&mut self, msg: crate::api::ApiRequestMessage) -> bool {
-        let changed = api_request_changes_ui(&msg.request);
+        let changed = crate::api::request_changes_ui(&msg.request);
         let response = self.handle_api_request(msg.request);
         let _ = msg.respond_to.send(response);
         changed
@@ -3221,8 +3200,8 @@ mod tests {
             ),
         };
 
-        assert!(!api_request_changes_ui(&read_only));
-        assert!(api_request_changes_ui(&mutating));
+        assert!(!crate::api::request_changes_ui(&read_only));
+        assert!(crate::api::request_changes_ui(&mutating));
     }
 
     #[test]
