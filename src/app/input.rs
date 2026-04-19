@@ -689,7 +689,7 @@ fn global_menu_actions(state: &AppState) -> Vec<GlobalMenuAction> {
         GlobalMenuAction::Keybinds,
         GlobalMenuAction::ReloadKeybinds,
     ];
-    if state.latest_release_notes_available || state.update_available.is_some() {
+    if state.update_available.is_some() || state.latest_release_notes_available {
         actions.push(GlobalMenuAction::WhatsNew);
     }
     actions.push(GlobalMenuAction::Quit);
@@ -1588,7 +1588,7 @@ impl AppState {
         let notes = self.release_notes.as_ref()?;
         let body = self.release_notes_body_rect()?;
         let viewport_rows = body.height.max(1) as usize;
-        let lines = crate::ui::release_notes_lines(&notes.body, &self.palette);
+        let lines = crate::ui::release_notes_display_lines(notes, &self.palette);
 
         let rows_for_width = |wrap_width: usize| {
             lines
@@ -1883,7 +1883,7 @@ impl AppState {
     pub(crate) fn global_menu_labels(&self) -> Vec<&'static str> {
         let mut labels = vec!["settings", "keybinds", "reload keybinds"];
         if self.update_available.is_some() {
-            labels.push("update available");
+            labels.push("update ready");
         } else if self.latest_release_notes_available {
             labels.push("what's new");
         }
@@ -1898,7 +1898,7 @@ impl AppState {
         let content_width = labels
             .iter()
             .map(|label| {
-                let extra = if *label == "update available" { 2 } else { 0 };
+                let extra = if *label == "update ready" { 2 } else { 0 };
                 label.chars().count() as u16 + extra
             })
             .max()
@@ -4269,7 +4269,7 @@ mod tests {
     }
 
     #[test]
-    fn update_available_menu_surfaces_update_status_without_apply_action() {
+    fn update_pending_menu_surfaces_update_ready_entry() {
         let mut app = app_for_mouse_test();
         app.state.update_available = Some("0.3.2".into());
         app.state.latest_release_notes_available = true;
@@ -4287,19 +4287,12 @@ mod tests {
                 "settings",
                 "keybinds",
                 "reload keybinds",
-                "update available",
+                "update ready",
                 "quit"
             ]
         );
 
-        let menu = app.state.global_menu_rect();
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            menu.x + 2,
-            menu.y + 5,
-        ));
-
-        assert!(app.state.should_quit);
+        assert!(!app.state.should_quit);
     }
 
     #[test]

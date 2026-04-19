@@ -1988,7 +1988,7 @@ fn render_release_notes_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
         &app.palette,
     );
     let subtitle = if notes.preview {
-        "preview before updating"
+        "update ready"
     } else {
         "what's new in this release"
     };
@@ -2030,7 +2030,7 @@ fn render_release_notes_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     }
 
     let body = Paragraph::new(
-        release_notes_lines(notes.body.as_str(), &app.palette)
+        release_notes_display_lines(notes, &app.palette)
             .into_iter()
             .map(|(_, line)| line)
             .collect::<Vec<_>>(),
@@ -2218,12 +2218,12 @@ fn release_notes_preview_lines<'a>(_version: &str, p: &Palette) -> Vec<Line<'a>>
                 "●",
                 Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" update available", title_style),
+            Span::styled(" update ready", title_style),
         ]),
         Line::from(vec![
-            Span::styled("quit herdr and run ", text_style),
+            Span::styled("detach from this session, then run ", text_style),
             Span::styled("herdr update", code_style),
-            Span::styled(" to install", text_style),
+            Span::styled(" in your shell", text_style),
         ]),
     ]
 }
@@ -2256,6 +2256,13 @@ fn render_release_notes_preview_panel(frame: &mut Frame, area: Rect, _version: &
         )])),
         divider_area,
     );
+}
+
+pub(crate) fn release_notes_display_lines<'a>(
+    notes: &'a crate::app::state::ReleaseNotesState,
+    p: &Palette,
+) -> Vec<(usize, Line<'a>)> {
+    release_notes_lines(notes.body.as_str(), p)
 }
 
 pub(crate) fn release_notes_close_button_rect(area: Rect) -> Rect {
@@ -2527,7 +2534,7 @@ fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
 
     if app.update_available.is_some() {
         let status = Line::from(vec![Span::styled(
-            " update available",
+            " update ready",
             Style::default()
                 .fg(app.palette.accent)
                 .add_modifier(Modifier::BOLD),
@@ -2563,11 +2570,11 @@ fn render_global_launcher_menu(app: &AppState, frame: &mut Frame) {
         let selected = idx == app.global_menu.highlighted;
         let rect = Rect::new(inner.x, y, inner.width, 1);
 
-        if *item == "update available" {
+        if *item == "update ready" {
             let line = if selected {
                 Line::from(vec![
                     Span::styled(
-                        " update available ",
+                        " update ready ",
                         Style::default()
                             .fg(panel_contrast_fg(&app.palette))
                             .bg(app.palette.accent)
@@ -2583,7 +2590,7 @@ fn render_global_launcher_menu(app: &AppState, frame: &mut Frame) {
                 ])
             } else {
                 Line::from(vec![
-                    Span::styled(" update available ", Style::default().fg(app.palette.text)),
+                    Span::styled(" update ready ", Style::default().fg(app.palette.text)),
                     Span::styled(
                         "● ",
                         Style::default()
@@ -4028,10 +4035,10 @@ mod tests {
         let lines = release_notes_preview_lines("0.5.0", &palette);
 
         assert_eq!(lines.len(), 2);
-        assert_eq!(line_text(&lines[0]), "● update available");
+        assert_eq!(line_text(&lines[0]), "● update ready");
         assert_eq!(
             line_text(&lines[1]),
-            "quit herdr and run herdr update to install"
+            "detach from this session, then run herdr update in your shell"
         );
         assert_eq!(lines[0].spans[0].style.fg, Some(palette.accent));
         assert_eq!(lines[0].spans[1].style.fg, Some(palette.text));

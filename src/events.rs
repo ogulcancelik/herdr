@@ -37,7 +37,7 @@ pub enum AppEvent {
         agent_label: String,
         known_agent: Option<Agent>,
     },
-    /// A new version was downloaded and installed. Restart to use it.
+    /// A new version is available and ready to install explicitly.
     UpdateReady { version: String },
     /// A pane child emitted a valid OSC 52 clipboard write. The main loop
     /// re-emits it through herdr's own clipboard writer.

@@ -222,7 +222,9 @@ fn main() -> io::Result<()> {
         println!("  server              Run as headless server (no terminal, persists after client disconnect)");
         println!("  server stop         Stop the running server via the API socket");
         println!("  client             Connect to a running server as a thin client");
-        println!("  update              Download and install the latest version");
+        println!(
+            "  update              Download and install the latest version (run outside herdr)"
+        );
         println!("  workspace           workspace helpers over the socket api");
         println!("  tab                 tab helpers over the socket api");
         println!("  pane                pane control helpers over the socket api");
