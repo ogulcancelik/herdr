@@ -2935,15 +2935,13 @@ impl App {
                 input::handle_global_menu_key(&mut self.state, key_event);
             }
             Mode::Onboarding => {
-                // Onboarding is handled by the App method since it may
-                // need runtime access. For the server, skip onboarding.
+                self.handle_onboarding_key(key_event);
             }
             Mode::ReleaseNotes => {
-                // Release notes handling — simplified for server.
+                self.handle_release_notes_key(key_event);
             }
             Mode::Settings => {
-                // Settings handling — may need runtime access for saving.
-                // For the server, we use a simplified approach.
+                self.handle_settings_key(key_event);
             }
             Mode::Terminal => {
                 // Should not be called in terminal mode.
@@ -3597,6 +3595,48 @@ mod tests {
         // in headless mode.
         app.route_client_input(mouse_bytes);
         // No assertions on specific behavior — just no panic.
+    }
+
+    #[test]
+    fn route_client_input_advances_onboarding_modal() {
+        let mut app = test_app();
+        app.state.mode = Mode::Onboarding;
+        app.state.onboarding_step = 0;
+
+        app.route_client_input(b"\r".to_vec());
+
+        assert_eq!(app.state.onboarding_step, 1);
+        assert_eq!(app.state.mode, Mode::Onboarding);
+    }
+
+    #[test]
+    fn route_client_input_closes_release_notes_modal() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::ReleaseNotes;
+        app.state.release_notes = Some(release_notes_state());
+
+        app.route_client_input(b"\x1b".to_vec());
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app.state.release_notes.is_none());
+    }
+
+    #[test]
+    fn route_client_input_closes_settings_modal() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Settings;
+        app.state.settings.original_theme = Some(app.state.theme_name.clone());
+        app.state.settings.original_palette = Some(app.state.palette.clone());
+
+        app.route_client_input(b"\x1b".to_vec());
+
+        assert_eq!(app.state.mode, Mode::Terminal);
     }
 
     #[test]

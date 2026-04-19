@@ -141,7 +141,7 @@ impl App {
         }
     }
 
-    fn handle_onboarding_key(&mut self, key: KeyEvent) {
+    pub(crate) fn handle_onboarding_key(&mut self, key: KeyEvent) {
         match self.state.onboarding_step {
             0 => match key.code {
                 KeyCode::Right | KeyCode::Char('l') => {
@@ -172,7 +172,7 @@ impl App {
         }
     }
 
-    fn handle_release_notes_key(&mut self, key: KeyEvent) {
+    pub(crate) fn handle_release_notes_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => self.scroll_release_notes(-1),
             KeyCode::Down | KeyCode::Char('j') => self.scroll_release_notes(1),
@@ -196,7 +196,7 @@ impl App {
         }
     }
 
-    fn handle_settings_key(&mut self, key: KeyEvent) {
+    pub(crate) fn handle_settings_key(&mut self, key: KeyEvent) {
         if let Some(action) = update_settings_state(&mut self.state, key) {
             match action {
                 SettingsAction::SaveTheme(name) => self.save_theme(&name),

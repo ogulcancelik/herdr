@@ -2,7 +2,7 @@
 //!
 //! Stored at `~/.config/herdr/session.json`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -363,24 +363,19 @@ fn restore_tab(
     render_dirty: Arc<AtomicBool>,
 ) -> Option<crate::workspace::Tab> {
     let (node, id_map) = restore_node_remapped(&snap.layout);
+    let reverse_id_map: HashMap<PaneId, u32> = id_map
+        .iter()
+        .map(|(&old_id, &new_id)| (new_id, old_id))
+        .collect();
     let pane_ids = collect_pane_ids(&node);
-    let focus = snap
-        .focused
-        .and_then(|old_raw| id_map.get(&old_raw).copied())
-        .or_else(|| pane_ids.first().copied())
-        .unwrap_or(PaneId::from_raw(0));
-    let layout = TileLayout::from_saved(node, focus);
 
     let mut panes = HashMap::new();
     let mut pane_cwds = HashMap::new();
     let mut runtimes = HashMap::new();
     for id in &pane_ids {
-        let old_id = id_map
-            .iter()
-            .find(|(_, new)| **new == *id)
-            .map(|(old, _)| old);
-        let saved_cwd = old_id
-            .and_then(|old| snap.panes.get(old))
+        let saved_cwd = reverse_id_map
+            .get(id)
+            .and_then(|old_id| snap.panes.get(old_id))
             .map(|p| p.cwd.clone())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
 
@@ -442,11 +437,18 @@ fn restore_tab(
         return None;
     }
 
-    let root_pane = snap
-        .root_pane
-        .and_then(|old_raw| id_map.get(&old_raw).copied())
-        .or_else(|| pane_ids.first().copied())
-        .unwrap_or(PaneId::from_raw(0));
+    let surviving: HashSet<PaneId> = panes.keys().copied().collect();
+    let Some(node) = prune_restored_node(node, &surviving) else {
+        warn!(
+            tab = ?snap.custom_name,
+            "restored tab lost all panes after pruning missing layout nodes"
+        );
+        return None;
+    };
+    let pane_ids = collect_pane_ids(&node);
+    let focus = resolve_restored_pane(snap.focused, &id_map, &surviving, &pane_ids)?;
+    let root_pane = resolve_restored_pane(snap.root_pane, &id_map, &surviving, &pane_ids)?;
+    let layout = TileLayout::from_saved(node, focus);
 
     Some(crate::workspace::Tab {
         custom_name: snap.custom_name.clone(),
@@ -461,6 +463,43 @@ fn restore_tab(
         render_notify,
         render_dirty,
     })
+}
+
+fn prune_restored_node(node: Node, surviving: &HashSet<PaneId>) -> Option<Node> {
+    match node {
+        Node::Pane(id) => surviving.contains(&id).then_some(Node::Pane(id)),
+        Node::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } => {
+            let first = prune_restored_node(*first, surviving);
+            let second = prune_restored_node(*second, surviving);
+            match (first, second) {
+                (Some(first), Some(second)) => Some(Node::Split {
+                    direction,
+                    ratio,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                }),
+                (Some(remaining), None) | (None, Some(remaining)) => Some(remaining),
+                (None, None) => None,
+            }
+        }
+    }
+}
+
+fn resolve_restored_pane(
+    saved_old_id: Option<u32>,
+    id_map: &HashMap<u32, PaneId>,
+    surviving: &HashSet<PaneId>,
+    pane_ids: &[PaneId],
+) -> Option<PaneId> {
+    saved_old_id
+        .and_then(|old_id| id_map.get(&old_id).copied())
+        .filter(|pane_id| surviving.contains(pane_id))
+        .or_else(|| pane_ids.first().copied())
 }
 
 /// Restore a layout tree, remapping every pane ID to a fresh globally unique one.
@@ -1065,6 +1104,41 @@ mod tests {
         assert_eq!(workspace.identity_cwd, PathBuf::from("/tmp/pion"));
         assert_eq!(tab.panes[&root.raw()].cwd, PathBuf::from("/tmp/pion"));
         assert_eq!(tab.panes[&second.raw()].cwd, PathBuf::from("/tmp/herdr"));
+    }
+
+    #[test]
+    fn prune_restored_node_collapses_missing_branch() {
+        let keep = PaneId::from_raw(11);
+        let missing = PaneId::from_raw(12);
+        let node = Node::Split {
+            direction: Direction::Horizontal,
+            ratio: 0.5,
+            first: Box::new(Node::Pane(keep)),
+            second: Box::new(Node::Pane(missing)),
+        };
+        let surviving = std::collections::HashSet::from([keep]);
+
+        let pruned = prune_restored_node(node, &surviving).expect("remaining pane should survive");
+
+        assert!(matches!(pruned, Node::Pane(id) if id == keep));
+    }
+
+    #[test]
+    fn resolve_restored_pane_prefers_surviving_saved_id_and_falls_back_to_first_remaining() {
+        let first = PaneId::from_raw(21);
+        let second = PaneId::from_raw(22);
+        let id_map = HashMap::from([(0_u32, first), (1_u32, second)]);
+        let surviving = std::collections::HashSet::from([first]);
+        let pane_ids = vec![first];
+
+        assert_eq!(
+            resolve_restored_pane(Some(0), &id_map, &surviving, &pane_ids),
+            Some(first)
+        );
+        assert_eq!(
+            resolve_restored_pane(Some(1), &id_map, &surviving, &pane_ids),
+            Some(first)
+        );
     }
 
     #[test]

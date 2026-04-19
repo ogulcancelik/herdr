@@ -30,7 +30,7 @@ use tracing::{debug, info, warn};
 
 use crate::server::headless::client_socket_path;
 use crate::server::protocol::{
-    self, ClientMessage, FrameData, ServerMessage, MAX_FRAME_SIZE, PROTOCOL_VERSION,
+    self, ClientMessage, FrameData, NotifyKind, ServerMessage, MAX_FRAME_SIZE, PROTOCOL_VERSION,
 };
 
 // ---------------------------------------------------------------------------
@@ -242,6 +242,9 @@ enum ClientLoopEvent {
 pub fn run_client() -> io::Result<()> {
     init_logging();
 
+    let loaded_config = crate::config::Config::load();
+    let sound_config = loaded_config.config.ui.sound;
+
     let socket_path = client_socket_path();
     info!(path = %socket_path.display(), "connecting to server");
 
@@ -304,7 +307,8 @@ pub fn run_client() -> io::Result<()> {
         quit_flag.store(true, Ordering::Release);
     });
 
-    let result = rt.block_on(async { run_client_loop(stream, cols, rows, should_quit).await });
+    let result =
+        rt.block_on(async { run_client_loop(stream, cols, rows, should_quit, sound_config).await });
 
     // Restore the terminal before printing any final status message.
     drop(_guard);
@@ -343,6 +347,7 @@ async fn run_client_loop(
     cols: u16,
     rows: u16,
     should_quit: Arc<AtomicBool>,
+    sound_config: crate::config::SoundConfig,
 ) -> Result<(), ClientError> {
     let mut state = ClientState {
         last_frame: None,
@@ -417,7 +422,9 @@ async fn run_client_loop(
                 ServerMessage::ServerShutdown { reason } => {
                     return Err(ClientError::ServerShutdown { reason });
                 }
-                ServerMessage::Notify { .. } => {}
+                ServerMessage::Notify { kind, message } => {
+                    handle_notify(kind, &message, &sound_config);
+                }
                 ServerMessage::Clipboard { data } => {
                     forward_clipboard(&data);
                     let _ = io::stdout().flush();
@@ -508,6 +515,38 @@ fn server_reader_thread(
 fn write_to_server(stream: &mut UnixStream, msg: &ClientMessage) -> io::Result<()> {
     protocol::write_message(stream, msg)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+fn handle_notify(kind: NotifyKind, message: &str, sound_config: &crate::config::SoundConfig) {
+    match kind {
+        NotifyKind::Sound => {
+            let Some(sound) = sound_from_notify_message(message) else {
+                warn!(
+                    message = message,
+                    "received unknown sound notification from server"
+                );
+                return;
+            };
+            if sound_config.enabled {
+                crate::sound::play(sound, sound_config);
+            }
+        }
+        NotifyKind::Toast => {
+            debug!(message = message, "received toast notification from server");
+        }
+    }
+}
+
+fn sound_from_notify_message(message: &str) -> Option<crate::sound::Sound> {
+    match message {
+        "agent done" => Some(crate::sound::Sound::Done),
+        "agent attention" => Some(crate::sound::Sound::Request),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -683,6 +722,27 @@ mod tests {
             msg.contains("lost connection to server"),
             "should mention lost connection: {msg}"
         );
+    }
+
+    #[test]
+    fn sound_from_notify_message_maps_done() {
+        assert_eq!(
+            sound_from_notify_message("agent done"),
+            Some(crate::sound::Sound::Done)
+        );
+    }
+
+    #[test]
+    fn sound_from_notify_message_maps_attention() {
+        assert_eq!(
+            sound_from_notify_message("agent attention"),
+            Some(crate::sound::Sound::Request)
+        );
+    }
+
+    #[test]
+    fn sound_from_notify_message_rejects_unknown_payloads() {
+        assert_eq!(sound_from_notify_message("toast"), None);
     }
 
     #[test]
