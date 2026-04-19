@@ -1777,12 +1777,12 @@ impl App {
                     })
                     .unwrap();
                 };
-                let Some(agent) = parse_agent_name(&params.agent) else {
+                let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
                         error: ErrorBody {
                             code: "invalid_agent".into(),
-                            message: format!("unsupported agent {}", params.agent),
+                            message: "agent label must not be empty".into(),
                         },
                     })
                     .unwrap();
@@ -1790,7 +1790,7 @@ impl App {
                 self.handle_internal_event(crate::events::AppEvent::HookStateReported {
                     pane_id,
                     source: params.source,
-                    agent,
+                    agent_label,
                     state: detect_state_from_api(params.state),
                     message: params.message,
                 });
@@ -1830,12 +1830,12 @@ impl App {
                     })
                     .unwrap();
                 };
-                let Some(agent) = parse_agent_name(&params.agent) else {
+                let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
                         error: ErrorBody {
                             code: "invalid_agent".into(),
-                            message: format!("unsupported agent {}", params.agent),
+                            message: "agent label must not be empty".into(),
                         },
                     })
                     .unwrap();
@@ -1843,7 +1843,8 @@ impl App {
                 self.handle_internal_event(crate::events::AppEvent::HookAgentReleased {
                     pane_id,
                     source: params.source,
-                    agent,
+                    known_agent: crate::detect::parse_agent_label(&agent_label),
+                    agent_label,
                 });
                 SuccessResponse {
                     id: request.id,
@@ -2684,7 +2685,7 @@ impl App {
             cwd: runtime
                 .and_then(|rt| rt.cwd())
                 .map(|cwd| cwd.display().to_string()),
-            agent: pane.detected_agent.map(agent_name),
+            agent: pane.effective_agent_label().map(str::to_string),
             agent_status: pane_agent_status(pane.state, pane.seen),
             revision: 0,
         })
@@ -2807,38 +2808,15 @@ fn pane_agent_status(
     }
 }
 
-fn parse_agent_name(agent: &str) -> Option<crate::detect::Agent> {
-    match agent {
-        "pi" => Some(crate::detect::Agent::Pi),
-        "claude" => Some(crate::detect::Agent::Claude),
-        "codex" => Some(crate::detect::Agent::Codex),
-        "gemini" => Some(crate::detect::Agent::Gemini),
-        "cursor" => Some(crate::detect::Agent::Cursor),
-        "cline" => Some(crate::detect::Agent::Cline),
-        "opencode" => Some(crate::detect::Agent::OpenCode),
-        "copilot" => Some(crate::detect::Agent::GithubCopilot),
-        "kimi" => Some(crate::detect::Agent::Kimi),
-        "droid" => Some(crate::detect::Agent::Droid),
-        "amp" => Some(crate::detect::Agent::Amp),
-        _ => None,
+fn normalize_reported_agent_label(agent: &str) -> Option<String> {
+    let trimmed = agent.trim();
+    if trimmed.is_empty() {
+        return None;
     }
-}
-
-fn agent_name(agent: crate::detect::Agent) -> String {
-    match agent {
-        crate::detect::Agent::Pi => "pi",
-        crate::detect::Agent::Claude => "claude",
-        crate::detect::Agent::Codex => "codex",
-        crate::detect::Agent::Gemini => "gemini",
-        crate::detect::Agent::Cursor => "cursor",
-        crate::detect::Agent::Cline => "cline",
-        crate::detect::Agent::OpenCode => "opencode",
-        crate::detect::Agent::GithubCopilot => "copilot",
-        crate::detect::Agent::Kimi => "kimi",
-        crate::detect::Agent::Droid => "droid",
-        crate::detect::Agent::Amp => "amp",
+    if let Some(agent) = crate::detect::parse_agent_label(trimmed) {
+        return Some(crate::detect::agent_label(agent).to_string());
     }
-    .to_string()
+    Some(trimmed.to_string())
 }
 
 // ---------------------------------------------------------------------------

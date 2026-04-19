@@ -825,17 +825,16 @@ impl HeadlessServer {
             }
             AppEvent::HookStateReported {
                 pane_id,
-                agent,
+                agent_label,
                 state,
                 ..
             } => {
-                // HookStateReported has agent: Agent (not Option<Agent>).
                 // The hook authority may not change the effective pane state if
-                // the detected_agent doesn't match. We forward based on the
+                // the detected agent doesn't match. We forward based on the
                 // hook-reported state transition regardless.
                 let toast_before = self.app.state.toast.clone();
                 let pane_id_val = *pane_id;
-                let agent_val = Some(*agent); // wrap as Option for for_agent()
+                let agent_val = crate::detect::parse_agent_label(agent_label);
                 let hook_state_val = *state;
 
                 // Capture the previous hook authority state for this pane.
@@ -1266,12 +1265,9 @@ impl HeadlessServer {
 
                 let is_active_tab = self.app.state.pane_is_in_active_tab(*ws_idx, *pane_id);
 
-                // Get the agent — prefer hook authority agent (from API), then detected_agent.
-                let agent = pane_after
-                    .hook_authority
-                    .as_ref()
-                    .map(|h| h.agent)
-                    .or(pane_after.detected_agent);
+                // Get the known agent for sound settings. Unknown custom labels
+                // fall back to None so clients use the generic sound behavior.
+                let agent = pane_after.effective_known_agent();
 
                 debug!(
                     ws_idx,
