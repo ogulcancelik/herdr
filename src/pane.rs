@@ -98,6 +98,53 @@ fn stabilize_agent_state(
     }
 }
 
+const AGENT_MISS_CONFIRMATION_ATTEMPTS: u8 = 6;
+
+#[derive(Debug, Clone, Copy)]
+struct AgentDetectionPresence {
+    current_agent: Option<Agent>,
+    consecutive_misses: u8,
+}
+
+impl AgentDetectionPresence {
+    fn from_agent(current_agent: Option<Agent>) -> Self {
+        Self {
+            current_agent,
+            consecutive_misses: 0,
+        }
+    }
+
+    fn current_agent(&self) -> Option<Agent> {
+        self.current_agent
+    }
+
+    fn observe_process_probe(&mut self, identified_agent: Option<Agent>) -> bool {
+        match identified_agent {
+            Some(agent) => {
+                self.consecutive_misses = 0;
+                if Some(agent) == self.current_agent {
+                    return false;
+                }
+                self.current_agent = Some(agent);
+                true
+            }
+            None => {
+                if self.current_agent.is_none() {
+                    self.consecutive_misses = 0;
+                    return false;
+                }
+                self.consecutive_misses = self.consecutive_misses.saturating_add(1);
+                if self.consecutive_misses < AGENT_MISS_CONFIRMATION_ATTEMPTS {
+                    return false;
+                }
+                self.current_agent = None;
+                self.consecutive_misses = 0;
+                true
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PaneState — pure data, constructable without PTYs, testable
 // ---------------------------------------------------------------------------
@@ -2050,7 +2097,7 @@ impl PaneRuntime {
             let pending_release_for_task = pending_release.clone();
 
             let handle = tokio::spawn(async move {
-                let mut agent: Option<Agent> = None;
+                let mut agent_presence = AgentDetectionPresence::from_agent(None);
                 let mut state = AgentState::Unknown;
                 let mut last_process_check = Instant::now();
                 let mut last_claude_working_at = None;
@@ -2063,7 +2110,7 @@ impl PaneRuntime {
                         || terminal.has_transient_default_color_override()
                     {
                         TICK_PENDING_RELEASE
-                    } else if agent.is_none() {
+                    } else if agent_presence.current_agent().is_none() {
                         TICK_UNIDENTIFIED
                     } else {
                         TICK_IDENTIFIED
@@ -2071,7 +2118,7 @@ impl PaneRuntime {
                     tokio::select! {
                         _ = tokio::time::sleep(tick) => {}
                         _ = detect_reset.notified() => {
-                            agent = None;
+                            agent_presence = AgentDetectionPresence::from_agent(None);
                             state = AgentState::Unknown;
                             last_claude_working_at = None;
                         }
@@ -2080,48 +2127,60 @@ impl PaneRuntime {
                     let now = Instant::now();
                     let suppressed_agent = active_pending_release(&pending_release_for_task, now);
                     let should_check_process = suppressed_agent.is_some()
-                        || agent.is_none()
+                        || agent_presence.current_agent().is_none()
                         || now.duration_since(last_process_check) >= PROCESS_RECHECK;
 
                     let mut agent_changed = false;
+                    let mut agent = agent_presence.current_agent();
                     if should_check_process {
                         last_process_check = now;
                         let pid = child_pid.load(Ordering::Acquire);
                         if pid > 0 {
+                            let mut process_name = None;
+                            let mut process_group_id = None;
+                            let mut new_agent = None;
+
                             if let Some(job) = detect::foreground_job(pid) {
+                                process_group_id = Some(job.process_group_id);
                                 let identified = detect::identify_agent_in_job(&job);
-                                let mut new_agent = identified.as_ref().map(|(agent, _)| *agent);
+                                process_name = identified
+                                    .as_ref()
+                                    .map(|(_, process_name)| process_name.clone());
+                                new_agent = identified.as_ref().map(|(agent, _)| *agent);
+                            }
 
-                                if let Some(suppressed_agent) = suppressed_agent {
-                                    if new_agent == Some(suppressed_agent) {
-                                        new_agent = None;
-                                    } else if let Ok(mut pending_release) =
-                                        pending_release_for_task.lock()
-                                    {
-                                        *pending_release = None;
-                                    }
+                            if let Some(suppressed_agent) = suppressed_agent {
+                                if new_agent == Some(suppressed_agent) {
+                                    new_agent = None;
+                                } else if let Ok(mut pending_release) =
+                                    pending_release_for_task.lock()
+                                {
+                                    *pending_release = None;
                                 }
+                            }
 
-                                if new_agent != agent {
-                                    if let Some((_, process_name)) = identified {
-                                        info!(
-                                            pane = pane_id.raw(),
-                                            ?new_agent,
-                                            process = %process_name,
-                                            pgid = job.process_group_id,
-                                            "agent changed"
-                                        );
-                                    } else {
-                                        info!(
-                                            pane = pane_id.raw(),
-                                            ?new_agent,
-                                            pgid = job.process_group_id,
-                                            "agent changed"
-                                        );
-                                    }
-                                    agent = new_agent;
-                                    agent_changed = true;
+                            let previous_agent = agent_presence.current_agent();
+                            if agent_presence.observe_process_probe(new_agent) {
+                                agent = agent_presence.current_agent();
+                                if let Some(process_name) = process_name {
+                                    info!(
+                                        pane = pane_id.raw(),
+                                        previous_agent = ?previous_agent,
+                                        ?agent,
+                                        process = %process_name,
+                                        pgid = ?process_group_id,
+                                        "agent changed"
+                                    );
+                                } else {
+                                    info!(
+                                        pane = pane_id.raw(),
+                                        previous_agent = ?previous_agent,
+                                        ?agent,
+                                        pgid = ?process_group_id,
+                                        "agent changed"
+                                    );
                                 }
+                                agent_changed = true;
                             }
                         }
                     }
@@ -3328,6 +3387,34 @@ mod tests {
             &mut last_working,
         );
         assert_eq!(state, AgentState::Idle);
+    }
+
+    #[test]
+    fn transient_process_miss_keeps_current_agent_detected() {
+        let mut presence = AgentDetectionPresence::from_agent(Some(Agent::Pi));
+
+        let changed = presence.observe_process_probe(None);
+
+        assert!(!changed, "one miss should not clear the detected agent");
+        assert_eq!(presence.current_agent(), Some(Agent::Pi));
+    }
+
+    #[test]
+    fn agent_only_clears_after_confirmation_misses() {
+        let mut presence = AgentDetectionPresence::from_agent(Some(Agent::Pi));
+
+        for attempt in 1..AGENT_MISS_CONFIRMATION_ATTEMPTS {
+            let changed = presence.observe_process_probe(None);
+            assert!(
+                !changed,
+                "miss {attempt} should stay in the confirmation window"
+            );
+            assert_eq!(presence.current_agent(), Some(Agent::Pi));
+        }
+
+        let changed = presence.observe_process_probe(None);
+        assert!(changed, "last confirmation miss should clear the agent");
+        assert_eq!(presence.current_agent(), None);
     }
 
     #[test]

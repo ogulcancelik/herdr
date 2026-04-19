@@ -1206,20 +1206,14 @@ fn render_workspace_list(app: &AppState, frame: &mut Frame, area: Rect, is_navig
         } else {
             Style::default().fg(p.subtext0)
         };
-        let num_style = if selected || is_active {
-            Style::default().fg(p.overlay1)
-        } else {
-            Style::default().fg(p.overlay0)
-        };
 
-        let mut line1 = vec![
-            Span::styled(" ", Style::default()),
-            Span::styled(format!("{} ", i + 1), num_style),
-            Span::styled(ws.display_name(), name_style),
-            Span::styled(" ", Style::default()),
-        ];
         let (icon, icon_style) = state_dot(agg_state, agg_seen, p);
-        line1.push(Span::styled(icon, icon_style));
+        let line1 = vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(icon, icon_style),
+            Span::styled(" ", Style::default()),
+            Span::styled(ws.display_name(), name_style),
+        ];
 
         frame.render_widget(
             Paragraph::new(Line::from(line1)),
@@ -3607,6 +3601,37 @@ mod tests {
     }
 
     #[test]
+    fn expanded_sidebar_workspace_rows_show_state_before_name_without_numbers() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("one");
+        let repo = temp_git_repo("main");
+        ws.identity_cwd = repo.clone();
+        let root_pane = ws.tabs[0].root_pane;
+        ws.tabs[0].pane_cwds.insert(root_pane, repo.clone());
+
+        app.workspaces = vec![ws];
+        app.selected = 0;
+        app.mode = Mode::Navigate;
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let card = app.view.workspace_card_areas[0].rect;
+        let line1 = buffer_row_text(buffer, card, card.y);
+        let line2 = buffer_row_text(buffer, card, card.y + 1);
+
+        assert!(line1.starts_with(" · one"));
+        assert!(!line1.contains("1 one"));
+        assert_eq!(line2, "   main");
+
+        std::fs::remove_dir_all(repo).ok();
+    }
+
+    #[test]
     fn tab_bar_dims_auto_named_tabs_and_emphasizes_custom_tabs() {
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("test");
@@ -3913,6 +3938,29 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>()
+    }
+
+    fn buffer_row_text(buffer: &ratatui::buffer::Buffer, area: Rect, row: u16) -> String {
+        (area.x..area.x + area.width)
+            .map(|x| buffer[(x, row)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    fn temp_git_repo(branch: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("unix time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("herdr-ui-test-{unique}"));
+        std::fs::create_dir_all(root.join(".git")).expect("create .git dir");
+        std::fs::write(
+            root.join(".git/HEAD"),
+            format!("ref: refs/heads/{branch}\n"),
+        )
+        .expect("write HEAD");
+        root
     }
 
     #[test]
