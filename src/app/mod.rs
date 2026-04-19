@@ -5,8 +5,12 @@
 //! - `input.rs` — key/mouse → action translation
 
 pub(crate) mod actions;
+mod config_io;
+mod creation;
+mod ids;
 mod input;
 pub mod state;
+mod theme_sync;
 
 use std::collections::{HashMap, HashSet};
 use std::future::pending;
@@ -27,7 +31,7 @@ use crossterm::terminal;
 use ratatui::layout::Rect;
 use ratatui::DefaultTerminal;
 use tokio::sync::{mpsc, Notify};
-use tracing::{error, info};
+use tracing::info;
 
 use crate::config::Config;
 use crate::events::AppEvent;
@@ -597,52 +601,6 @@ impl App {
         }
     }
 
-    fn query_host_terminal_theme(&self) {
-        use std::io::Write;
-
-        let _ = std::io::stdout()
-            .write_all(crate::terminal_theme::HOST_COLOR_QUERY_SEQUENCE.as_bytes());
-        let _ = std::io::stdout().flush();
-    }
-
-    fn update_host_terminal_theme(
-        &mut self,
-        kind: crate::terminal_theme::DefaultColorKind,
-        color: crate::terminal_theme::RgbColor,
-    ) -> bool {
-        let next_theme = self.state.host_terminal_theme.with_color(kind, color);
-        self.set_host_terminal_theme(next_theme)
-    }
-
-    pub(crate) fn set_host_terminal_theme(
-        &mut self,
-        theme: crate::terminal_theme::TerminalTheme,
-    ) -> bool {
-        if theme.is_empty() || theme == self.state.host_terminal_theme {
-            return false;
-        }
-        self.state.host_terminal_theme = theme;
-        self.apply_host_terminal_theme_to_panes();
-        true
-    }
-
-    fn apply_host_terminal_theme_to_panes(&self) {
-        if self.state.host_terminal_theme.is_empty() {
-            return;
-        }
-
-        for workspace in &self.state.workspaces {
-            for tab in &workspace.tabs {
-                for runtime in tab.runtimes.values() {
-                    runtime.apply_host_terminal_theme(self.state.host_terminal_theme);
-                }
-            }
-        }
-
-        self.render_dirty.store(true, Ordering::Release);
-        self.render_notify.notify_one();
-    }
-
     fn handle_resize_poll(&mut self) -> bool {
         let Ok(size) = terminal::size() else {
             return false;
@@ -1001,81 +959,6 @@ impl App {
             return;
         };
         runtime.try_send_focus_event(event);
-    }
-
-    fn find_pane(
-        &self,
-        pane_id: crate::layout::PaneId,
-    ) -> Option<(usize, &crate::pane::PaneState)> {
-        self.state
-            .workspaces
-            .iter()
-            .enumerate()
-            .find_map(|(ws_idx, ws)| ws.pane_state(pane_id).map(|pane| (ws_idx, pane)))
-    }
-
-    fn public_workspace_id(&self, ws_idx: usize) -> String {
-        self.state.workspaces[ws_idx].id.clone()
-    }
-
-    fn public_tab_id(&self, ws_idx: usize, tab_idx: usize) -> Option<String> {
-        let ws = self.state.workspaces.get(ws_idx)?;
-        ws.tabs.get(tab_idx)?;
-        Some(format!("{}:{}", ws.id, tab_idx + 1))
-    }
-
-    fn public_pane_id(&self, ws_idx: usize, pane_id: crate::layout::PaneId) -> Option<String> {
-        let ws = self.state.workspaces.get(ws_idx)?;
-        let pane_number = ws.public_pane_number(pane_id)?;
-        Some(format!("{}-{pane_number}", ws.id))
-    }
-
-    fn parse_workspace_id(&self, id: &str) -> Option<usize> {
-        self.state
-            .workspaces
-            .iter()
-            .position(|workspace| workspace.id == id)
-            .or_else(|| id.strip_prefix("w_")?.parse::<usize>().ok()?.checked_sub(1))
-            .or_else(|| id.parse::<usize>().ok()?.checked_sub(1))
-    }
-
-    fn parse_tab_id(&self, id: &str) -> Option<(usize, usize)> {
-        if let Some(rest) = id.strip_prefix("t_") {
-            let (ws_raw, tab_raw) = rest.rsplit_once('_')?;
-            let ws_idx = self.parse_workspace_id(ws_raw)?;
-            let tab_idx = tab_raw.parse::<usize>().ok()?.checked_sub(1)?;
-            self.state.workspaces.get(ws_idx)?.tabs.get(tab_idx)?;
-            return Some((ws_idx, tab_idx));
-        }
-
-        let (ws_raw, tab_raw) = id.rsplit_once(':')?;
-        let ws_idx = self.parse_workspace_id(ws_raw)?;
-        let tab_idx = tab_raw.parse::<usize>().ok()?.checked_sub(1)?;
-        self.state.workspaces.get(ws_idx)?.tabs.get(tab_idx)?;
-        Some((ws_idx, tab_idx))
-    }
-
-    fn parse_pane_id(&self, id: &str) -> Option<(usize, crate::layout::PaneId)> {
-        if let Some(rest) = id.strip_prefix("p_") {
-            if let Some((ws_raw, pane_raw)) = rest.rsplit_once('_') {
-                let ws_idx = self.parse_workspace_id(ws_raw)?;
-                let pane_id = crate::layout::PaneId::from_raw(pane_raw.parse::<u32>().ok()?);
-                return Some((ws_idx, pane_id));
-            }
-
-            let pane_id = crate::layout::PaneId::from_raw(rest.parse::<u32>().ok()?);
-            return self.find_pane(pane_id).map(|(ws_idx, _)| (ws_idx, pane_id));
-        }
-
-        let (ws_raw, pane_number_raw) = id.rsplit_once('-')?;
-        let ws_idx = self.parse_workspace_id(ws_raw)?;
-        let pane_number = pane_number_raw.parse::<usize>().ok()?;
-        let ws = self.state.workspaces.get(ws_idx)?;
-        let pane_id = ws
-            .public_pane_numbers
-            .iter()
-            .find_map(|(pane_id, number)| (*number == pane_number).then_some(*pane_id))?;
-        Some((ws_idx, pane_id))
     }
 
     pub(crate) fn handle_api_request(&mut self, request: crate::api::schema::Request) -> String {
@@ -2370,28 +2253,6 @@ impl App {
         }
     }
 
-    fn update_config_file<F>(&mut self, error_context: &str, update: F)
-    where
-        F: FnOnce(&str) -> String,
-    {
-        let path = crate::config::config_path();
-        if let Some(parent) = path.parent() {
-            if let Err(err) = std::fs::create_dir_all(parent) {
-                self.state.config_diagnostic =
-                    Some(format!("failed to save {error_context}: {err}"));
-                self.config_diagnostic_deadline = Some(Instant::now() + Duration::from_secs(5));
-                return;
-            }
-        }
-
-        let content = std::fs::read_to_string(&path).unwrap_or_default();
-        let new_content = update(&content);
-        if let Err(err) = std::fs::write(&path, new_content) {
-            self.state.config_diagnostic = Some(format!("failed to save {error_context}: {err}"));
-            self.config_diagnostic_deadline = Some(Instant::now() + Duration::from_secs(5));
-        }
-    }
-
     pub(crate) fn reload_keybinds(&mut self) {
         let previous_toast = self.state.toast.clone();
         match crate::config::load_live_keybinds() {
@@ -2418,292 +2279,6 @@ impl App {
             }
         }
         self.sync_toast_deadline(previous_toast);
-    }
-
-    fn save_theme(&mut self, name: &str) {
-        self.update_config_file("theme", |content| {
-            crate::config::upsert_section_value(content, "theme", "name", &format!("\"{name}\""))
-        });
-    }
-
-    fn save_sound(&mut self, enabled: bool) {
-        self.update_config_file("sound setting", |content| {
-            crate::config::upsert_section_bool(content, "ui.sound", "enabled", enabled)
-        });
-    }
-
-    fn save_toast(&mut self, enabled: bool) {
-        self.update_config_file("toast setting", |content| {
-            crate::config::upsert_section_bool(content, "ui.toast", "enabled", enabled)
-        });
-    }
-
-    fn seed_cwd_from_workspace(&self, ws_idx: usize) -> Option<std::path::PathBuf> {
-        self.state.workspaces.get(ws_idx)?.resolved_identity_cwd()
-    }
-
-    fn workspace_creation_source(&self) -> Option<usize> {
-        if self.state.mode == Mode::Navigate
-            && self.state.workspaces.get(self.state.selected).is_some()
-        {
-            return Some(self.state.selected);
-        }
-
-        self.state.active.or_else(|| {
-            self.state
-                .workspaces
-                .get(self.state.selected)
-                .map(|_| self.state.selected)
-        })
-    }
-
-    /// Create a workspace with a real PTY (needs event_tx).
-    pub(crate) fn create_workspace(&mut self) {
-        let initial_cwd = self
-            .workspace_creation_source()
-            .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx))
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| std::path::PathBuf::from("/"));
-        if let Err(e) = self.create_workspace_with_options(initial_cwd, true) {
-            error!(err = %e, "failed to create workspace");
-            self.state.mode = Mode::Navigate;
-        }
-    }
-
-    pub(crate) fn create_tab(&mut self) {
-        let custom_name = self.state.requested_new_tab_name.take();
-        let initial_cwd = self
-            .state
-            .active
-            .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx))
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| std::path::PathBuf::from("/"));
-        match self.create_tab_with_options(initial_cwd, true) {
-            Ok(tab_idx) => {
-                if let Some(name) = custom_name {
-                    if let Some(ws) = self
-                        .state
-                        .active
-                        .and_then(|ws_idx| self.state.workspaces.get_mut(ws_idx))
-                    {
-                        if let Some(tab) = ws.tabs.get_mut(tab_idx) {
-                            tab.set_custom_name(name);
-                        }
-                        self.schedule_session_save();
-                    }
-                }
-            }
-            Err(e) => {
-                error!(err = %e, "failed to create tab");
-            }
-        }
-    }
-
-    fn create_tab_with_options(
-        &mut self,
-        initial_cwd: std::path::PathBuf,
-        focus: bool,
-    ) -> std::io::Result<usize> {
-        let Some(ws_idx) = self.state.active else {
-            return self.create_workspace_with_options(initial_cwd, focus);
-        };
-        let (rows, cols) = self.state.estimate_pane_size();
-        let ws = &mut self.state.workspaces[ws_idx];
-        let idx = ws.create_tab(
-            rows,
-            cols,
-            initial_cwd,
-            self.state.pane_scrollback_limit_bytes,
-            self.state.host_terminal_theme,
-        )?;
-        if focus {
-            ws.switch_tab(idx);
-            self.state.mode = Mode::Terminal;
-        }
-        self.schedule_session_save();
-        Ok(idx)
-    }
-
-    fn create_workspace_with_options(
-        &mut self,
-        initial_cwd: std::path::PathBuf,
-        focus: bool,
-    ) -> std::io::Result<usize> {
-        let (rows, cols) = self.state.estimate_pane_size();
-        let mut ws = Workspace::new(
-            initial_cwd,
-            rows,
-            cols,
-            self.state.pane_scrollback_limit_bytes,
-            self.state.host_terminal_theme,
-            self.event_tx.clone(),
-            self.render_notify.clone(),
-            self.render_dirty.clone(),
-        )?;
-        ws.refresh_git_ahead_behind();
-        self.state.workspaces.push(ws);
-        let idx = self.state.workspaces.len() - 1;
-        if focus || self.state.active.is_none() {
-            self.state.switch_workspace(idx);
-            self.state.mode = Mode::Terminal;
-        }
-        self.schedule_session_save();
-        Ok(idx)
-    }
-
-    fn collect_panes_for_workspace(
-        &self,
-        workspace_id: Option<&str>,
-    ) -> Result<Vec<crate::api::schema::PaneInfo>, (String, String)> {
-        if let Some(workspace_id) = workspace_id {
-            let Some(ws_idx) = self.parse_workspace_id(workspace_id) else {
-                return Err((
-                    "workspace_not_found".into(),
-                    format!("workspace {workspace_id} not found"),
-                ));
-            };
-            let Some(ws) = self.state.workspaces.get(ws_idx) else {
-                return Err((
-                    "workspace_not_found".into(),
-                    format!("workspace {workspace_id} not found"),
-                ));
-            };
-            Ok(ws
-                .tabs
-                .iter()
-                .flat_map(|tab| tab.layout.pane_ids().into_iter())
-                .filter_map(|pane_id| self.pane_info(ws_idx, pane_id))
-                .collect())
-        } else {
-            Ok(self
-                .state
-                .workspaces
-                .iter()
-                .enumerate()
-                .flat_map(|(ws_idx, ws)| {
-                    ws.tabs
-                        .iter()
-                        .flat_map(|tab| tab.layout.pane_ids().into_iter())
-                        .filter_map(move |pane_id| self.pane_info(ws_idx, pane_id))
-                })
-                .collect())
-        }
-    }
-
-    fn tab_info(&self, ws_idx: usize, tab_idx: usize) -> Option<crate::api::schema::TabInfo> {
-        let ws = self.state.workspaces.get(ws_idx)?;
-        let tab = ws.tabs.get(tab_idx)?;
-        let (agg_state, seen) = tab
-            .panes
-            .values()
-            .map(|pane| (pane.state, pane.seen))
-            .max_by_key(|(state, seen)| tab_attention_priority(*state, *seen))
-            .unwrap_or((crate::detect::AgentState::Unknown, true));
-        Some(crate::api::schema::TabInfo {
-            tab_id: self.public_tab_id(ws_idx, tab_idx)?,
-            workspace_id: self.public_workspace_id(ws_idx),
-            number: tab_idx + 1,
-            label: tab.display_name(),
-            focused: self.state.active == Some(ws_idx) && ws.active_tab == tab_idx,
-            pane_count: tab.panes.len(),
-            agent_status: pane_agent_status(agg_state, seen),
-        })
-    }
-
-    fn workspace_created_result(
-        &self,
-        ws_idx: usize,
-    ) -> Option<crate::api::schema::ResponseResult> {
-        Some(crate::api::schema::ResponseResult::WorkspaceCreated {
-            workspace: self.workspace_info(ws_idx),
-            tab: self.tab_info(ws_idx, 0)?,
-            root_pane: self.root_pane_info(ws_idx, 0)?,
-        })
-    }
-
-    fn tab_created_result(
-        &self,
-        ws_idx: usize,
-        tab_idx: usize,
-    ) -> Option<crate::api::schema::ResponseResult> {
-        Some(crate::api::schema::ResponseResult::TabCreated {
-            tab: self.tab_info(ws_idx, tab_idx)?,
-            root_pane: self.root_pane_info(ws_idx, tab_idx)?,
-        })
-    }
-
-    fn root_pane_info(
-        &self,
-        ws_idx: usize,
-        tab_idx: usize,
-    ) -> Option<crate::api::schema::PaneInfo> {
-        let ws = self.state.workspaces.get(ws_idx)?;
-        let tab = ws.tabs.get(tab_idx)?;
-        self.pane_info(ws_idx, tab.root_pane)
-    }
-
-    fn pane_info(
-        &self,
-        ws_idx: usize,
-        pane_id: crate::layout::PaneId,
-    ) -> Option<crate::api::schema::PaneInfo> {
-        let ws = self.state.workspaces.get(ws_idx)?;
-        let pane = ws.pane_state(pane_id)?;
-        let runtime = ws.runtime(pane_id);
-        let tab_idx = ws.find_tab_index_for_pane(pane_id)?;
-        let focused = self.state.active == Some(ws_idx)
-            && ws.active_tab == tab_idx
-            && ws
-                .focused_pane_id()
-                .is_some_and(|focused| focused == pane_id);
-        Some(crate::api::schema::PaneInfo {
-            pane_id: self.public_pane_id(ws_idx, pane_id)?,
-            workspace_id: self.public_workspace_id(ws_idx),
-            tab_id: self.public_tab_id(ws_idx, tab_idx)?,
-            focused,
-            cwd: runtime
-                .and_then(|rt| rt.cwd())
-                .map(|cwd| cwd.display().to_string()),
-            agent: pane.effective_agent_label().map(str::to_string),
-            agent_status: pane_agent_status(pane.state, pane.seen),
-            revision: 0,
-        })
-    }
-
-    fn lookup_runtime(
-        &self,
-        ws_idx: usize,
-        pane_id: crate::layout::PaneId,
-    ) -> Option<(&crate::pane::PaneRuntime, String)> {
-        let ws = self.state.workspaces.get(ws_idx)?;
-        let runtime = ws.runtime(pane_id)?;
-        Some((runtime, self.public_workspace_id(ws_idx)))
-    }
-
-    fn lookup_runtime_sender(
-        &self,
-        ws_idx: usize,
-        pane_id: crate::layout::PaneId,
-    ) -> Option<&crate::pane::PaneRuntime> {
-        let ws = self.state.workspaces.get(ws_idx)?;
-        ws.runtime(pane_id)
-    }
-
-    fn workspace_info(&self, index: usize) -> crate::api::schema::WorkspaceInfo {
-        let ws = &self.state.workspaces[index];
-        let (agg_state, seen) = ws.aggregate_state();
-        crate::api::schema::WorkspaceInfo {
-            workspace_id: self.public_workspace_id(index),
-            number: index + 1,
-            label: ws.display_name(),
-            focused: self.state.active == Some(index),
-            pane_count: ws.public_pane_numbers.len(),
-            tab_count: ws.tabs.len(),
-            active_tab_id: self
-                .public_tab_id(index, ws.active_tab)
-                .unwrap_or_else(|| format!("{}:{}", ws.id, ws.active_tab + 1)),
-            agent_status: pane_agent_status(agg_state, seen),
-        }
     }
 }
 
