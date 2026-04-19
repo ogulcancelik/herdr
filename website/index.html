@@ -1,978 +1,702 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>herdr — supervise multiple coding agents in one terminal</title>
-    <meta name="description" content="Run Claude Code, Codex, pi, opencode, droid, and amp side by side in your existing terminal. Workspaces, panes, agent detection, and notifications for blocked, done, and working states.">
-    <meta name="theme-color" content="#0d1117">
-    <link rel="canonical" href="https://herdr.dev/">
-
-    <!-- Open Graph -->
-    <meta property="og:type" content="website">
-    <meta property="og:site_name" content="herdr">
-    <meta property="og:title" content="herdr — supervise multiple coding agents in one terminal">
-    <meta property="og:description" content="Run Claude Code, Codex, pi, opencode, droid, and amp side by side in your existing terminal. Workspaces, panes, agent detection, and notifications for blocked, done, and working states.">
-    <meta property="og:url" content="https://herdr.dev/">
-    <meta property="og:image" content="https://herdr.dev/assets/og-card.png">
-    <meta property="og:image:width" content="1200">
-    <meta property="og:image:height" content="630">
-
-    <!-- Twitter / X -->
-    <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="herdr — supervise multiple coding agents in one terminal">
-    <meta name="twitter:description" content="Run Claude Code, Codex, pi, opencode, droid, and amp side by side in your existing terminal with workspaces, panes, and agent state detection.">
-    <meta name="twitter:image" content="https://herdr.dev/assets/og-card.png">
-
-    <link rel="icon" type="image/png" href="/assets/logo.png">
-    <link rel="apple-touch-icon" href="/assets/logo.png">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <style>
-        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
-
-        :root {
-            --bg: #0d1117;
-            --bg-raised: #161b22;
-            --bg-surface: #1c2129;
-            --border: #21262d;
-            --border-bright: #30363d;
-            --text: #e6edf3;
-            --text-muted: #8b949e;
-            --text-dim: #484f58;
-            --green: #4ade80;
-            --green-dim: rgba(74, 222, 128, 0.12);
-            --red: #f87171;
-            --blue: #60a5fa;
-            --yellow: #fbbf24;
-            --max-w: 1080px;
-        }
-
-        html {
-            background: var(--bg);
-            color: var(--text);
-            font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
-            -webkit-font-smoothing: antialiased;
-            scroll-behavior: smooth;
-        }
-
-        body { overflow-x: hidden; }
-
-        /* ── Hero ── */
-        .hero {
-            position: relative;
-            max-width: var(--max-w);
-            margin: 0 auto;
-            padding: 4rem 2rem 0;
-            text-align: center;
-            overflow: hidden;
-        }
-
-        .hero-pasture {
-            position: absolute;
-            inset: 0;
-            overflow: hidden;
-            pointer-events: none;
-            z-index: 0;
-        }
-
-        .hero > *:not(.hero-pasture) {
-            position: relative;
-            z-index: 1;
-        }
-
-        .hero .sheep-el {
-            position: absolute;
-            font-family: 'JetBrains Mono', monospace;
-            line-height: 1.15;
-            white-space: pre;
-            pointer-events: none;
-            user-select: none;
-            will-change: transform;
-        }
-
-        .hero-logo {
-            width: 80px;
-            height: 80px;
-            border-radius: 18px;
-            margin-bottom: 1.25rem;
-        }
-
-        .hero h1 {
-            font-size: 3rem;
-            font-weight: 700;
-            letter-spacing: -0.03em;
-            color: #fff;
-        }
-
-        .hero-tagline {
-            font-size: 1.1rem;
-            color: var(--green);
-            margin: 0.25rem 0 1.25rem;
-        }
-
-        .hero-desc {
-            font-size: 0.875rem;
-            color: var(--text-muted);
-            line-height: 1.8;
-            max-width: 640px;
-            margin: 0 auto 2rem;
-        }
-
-        .hero-desc p + p { margin-top: 0.6rem; }
-
-        /* install box */
-        .install-box {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.75rem;
-            background: var(--bg-raised);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 0.65rem 1rem;
-            font-size: 0.825rem;
-            margin-bottom: 0.75rem;
-            transition: border-color 0.2s;
-        }
-
-        .install-box:hover { border-color: var(--border-bright); }
-        .install-box .prompt { color: var(--green); }
-        .install-box code { color: var(--text); }
-
-        .copy-btn {
-            background: none;
-            border: 1px solid var(--border);
-            color: var(--text-dim);
-            font-family: inherit;
-            font-size: 0.7rem;
-            padding: 0.2rem 0.5rem;
-            border-radius: 4px;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-        .copy-btn:hover { border-color: var(--green); color: var(--green); }
-        .copy-btn.copied { border-color: var(--green); color: var(--green); }
-
-        .hero-links {
-            display: flex;
-            justify-content: center;
-            gap: 1.5rem;
-            margin-top: 0.5rem;
-            font-size: 0.8rem;
-        }
-        .hero-links a {
-            color: var(--text-dim);
-            text-decoration: none;
-            transition: color 0.2s;
-        }
-        .hero-links a:hover { color: var(--green); }
-
-        /* screenshot */
-        .hero-screenshot {
-            max-width: var(--max-w);
-            margin: 3rem auto 0;
-            padding: 0 2rem;
-        }
-
-        .screenshot-frame {
-            position: relative;
-            border-radius: 12px;
-            overflow: hidden;
-            border: 1px solid var(--border);
-            box-shadow:
-                0 0 0 1px rgba(0,0,0,0.3),
-                0 24px 80px rgba(0,0,0,0.5),
-                0 0 120px rgba(74, 222, 128, 0.03);
-        }
-
-        .screenshot-frame img,
-        .screenshot-frame video {
-            display: block;
-            width: 100%;
-            height: auto;
-        }
-
-        .screenshot-label {
-            text-align: center;
-            font-size: 0.7rem;
-            color: var(--text-dim);
-            margin-top: 1rem;
-        }
-
-        /* ── Divider ── */
-        .section-gap { height: 5rem; }
-
-        /* ── Two-column features ── */
-        .features {
-            max-width: var(--max-w);
-            margin: 0 auto;
-            padding: 0 2rem;
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 2rem;
-        }
-
-        .feature-card {
-            background: var(--bg-raised);
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            padding: 2rem;
-        }
-
-        .feature-card h2 {
-            font-size: 1rem;
-            font-weight: 700;
-            margin-bottom: 0.25rem;
-            color: #fff;
-        }
-
-        .feature-card .subtitle {
-            font-size: 0.75rem;
-            color: var(--green);
-            margin-bottom: 1.25rem;
-        }
-
-        .feature-list {
-            list-style: none;
-        }
-
-        .feature-list li {
-            font-size: 0.8rem;
-            color: var(--text-muted);
-            line-height: 1.7;
-            padding-left: 1.2rem;
-            position: relative;
-        }
-
-        .feature-list li::before {
-            content: '›';
-            position: absolute;
-            left: 0;
-            color: var(--text-dim);
-        }
-
-        .feature-list li + li { margin-top: 0.4rem; }
-
-        /* ── Awareness section ── */
-        .awareness {
-            max-width: var(--max-w);
-            margin: 0 auto;
-            padding: 0 2rem;
-        }
-
-        .awareness-header {
-            margin-bottom: 1.5rem;
-        }
-
-        .awareness-header h2 {
-            font-size: 1rem;
-            font-weight: 700;
-            color: #fff;
-            margin-bottom: 0.3rem;
-        }
-
-        .awareness-desc {
-            font-size: 0.8rem;
-            color: var(--text-muted);
-            line-height: 1.7;
-        }
-
-        .awareness-dual {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 2rem;
-            margin-bottom: 1.5rem;
-        }
-
-        .awareness-panel {
-            background: var(--bg-raised);
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            padding: 1.5rem;
-            display: flex;
-            gap: 1.25rem;
-            align-items: flex-start;
-        }
-
-        .awareness-panel-img {
-            flex-shrink: 0;
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            overflow: hidden;
-        }
-
-        .awareness-panel-img img {
-            display: block;
-            height: auto;
-            width: auto;
-            max-height: 120px;
-            image-rendering: auto;
-        }
-
-        .awareness-panel-text h3 {
-            font-size: 0.85rem;
-            font-weight: 700;
-            color: #fff;
-            margin-bottom: 0.4rem;
-        }
-
-        .awareness-panel-text p {
-            font-size: 0.75rem;
-            color: var(--text-muted);
-            line-height: 1.7;
-        }
-
-        .state-bar {
-            display: flex;
-            justify-content: center;
-            gap: 2rem;
-            padding: 1rem 0 0;
-        }
-
-        .state-bar-item {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            font-size: 0.75rem;
-            color: var(--text-muted);
-        }
-
-        .state-dot {
-            flex-shrink: 0;
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            display: inline-block;
-        }
-
-        .state-dot.red { background: var(--red); box-shadow: 0 0 8px rgba(248,113,113,0.4); }
-        .state-dot.blue { background: var(--blue); box-shadow: 0 0 8px rgba(96,165,250,0.4); }
-        .state-dot.yellow { background: var(--yellow); box-shadow: 0 0 8px rgba(251,191,36,0.3); }
-        .state-dot.green { background: var(--green); opacity: 0.5; }
-
-        /* ── Agents table ── */
-        .agents-section {
-            max-width: var(--max-w);
-            margin: 0 auto;
-            padding: 0 2rem;
-        }
-
-        .agents-section h2 {
-            font-size: 1rem;
-            font-weight: 700;
-            color: #fff;
-            margin-bottom: 0.3rem;
-        }
-
-        .agents-section .section-desc {
-            font-size: 0.775rem;
-            color: var(--text-muted);
-            margin-bottom: 1.25rem;
-            line-height: 1.6;
-        }
-
-        .agents-table-wrap {
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            overflow: hidden;
-        }
-
-        .agents-table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 0.8rem;
-        }
-
-        .agents-table th {
-            text-align: left;
-            padding: 0.7rem 1rem;
-            color: var(--text-muted);
-            font-weight: 500;
-            font-size: 0.7rem;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            background: var(--bg-surface);
-            border-bottom: 1px solid var(--border);
-        }
-
-        .agents-table td {
-            padding: 0.6rem 1rem;
-            border-bottom: 1px solid var(--border);
-            color: var(--text-muted);
-        }
-
-        .agents-table tr:last-child td { border-bottom: none; }
-
-        .agents-table td:first-child {
-            color: var(--text);
-            font-weight: 500;
-        }
-
-        .agents-table a {
-            color: inherit;
-            text-decoration: none;
-            border-bottom: 1px solid var(--border);
-            transition: all 0.2s;
-        }
-        .agents-table a:hover { color: var(--green); border-color: var(--green); }
-
-        .check { color: var(--green); }
-        .partial { color: var(--yellow); }
-        .untested { color: var(--text-dim); font-size: 0.7rem; }
-
-        /* ── How it works ── */
-        .how-section {
-            max-width: var(--max-w);
-            margin: 0 auto;
-            padding: 0 2rem;
-        }
-
-        .how-section h2 {
-            font-size: 1rem;
-            font-weight: 700;
-            color: #fff;
-            margin-bottom: 1.25rem;
-        }
-
-        .how-grid {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 1.5rem;
-        }
-
-        .how-step {
-            background: var(--bg-raised);
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            padding: 1.5rem;
-        }
-
-        .how-step .step-num {
-            font-size: 0.7rem;
-            color: var(--green);
-            margin-bottom: 0.5rem;
-        }
-
-        .how-step h3 {
-            font-size: 0.85rem;
-            font-weight: 700;
-            color: #fff;
-            margin-bottom: 0.4rem;
-        }
-
-        .how-step p {
-            font-size: 0.75rem;
-            color: var(--text-muted);
-            line-height: 1.65;
-        }
-
-        .how-step code {
-            font-size: 0.725rem;
-            background: var(--bg);
-            padding: 0.15rem 0.35rem;
-            border-radius: 3px;
-            color: var(--text);
-        }
-
-        /* ── API teaser ── */
-        .api-section {
-            max-width: var(--max-w);
-            margin: 0 auto;
-            padding: 0 2rem;
-        }
-
-        .api-card {
-            background: var(--bg-raised);
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            padding: 2rem;
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 2rem;
-            align-items: start;
-        }
-
-        .api-card h2 {
-            font-size: 1rem;
-            font-weight: 700;
-            color: #fff;
-            margin-bottom: 0.3rem;
-        }
-
-        .api-card .subtitle {
-            font-size: 0.75rem;
-            color: var(--green);
-            margin-bottom: 1rem;
-        }
-
-        .api-card p {
-            font-size: 0.8rem;
-            color: var(--text-muted);
-            line-height: 1.7;
-        }
-
-        .api-card p + p { margin-top: 0.6rem; }
-
-        .api-doc-links {
-            display: flex;
-            gap: 0.75rem;
-            margin-top: 1.25rem;
-        }
-
-        .api-doc-links a {
-            font-size: 0.75rem;
-            color: var(--text);
-            text-decoration: none;
-            padding: 0.4rem 0.75rem;
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            transition: all 0.2s;
-        }
-        .api-doc-links a:hover { border-color: var(--green); color: var(--green); }
-
-        .code-block {
-            background: var(--bg);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 1.25rem;
-            overflow-x: auto;
-        }
-
-        .code-block pre {
-            font-size: 0.725rem;
-            line-height: 1.8;
-            color: var(--text-muted);
-        }
-
-        .code-block .comment { color: var(--text-dim); }
-        .code-block .cmd { color: var(--green); }
-        .code-block .flag { color: var(--blue); }
-        .code-block .str { color: var(--yellow); }
-
-        /* ── Footer ── */
-        .footer {
-            max-width: var(--max-w);
-            margin: 0 auto;
-            padding: 4rem 2rem 3rem;
-            text-align: center;
-        }
-
-        .footer-line {
-            border: none;
-            border-top: 1px solid var(--border);
-            margin-bottom: 2rem;
-        }
-
-        .footer p {
-            font-size: 0.75rem;
-            color: var(--text-dim);
-            line-height: 1.8;
-        }
-
-        .footer a {
-            color: var(--text-muted);
-            text-decoration: none;
-            transition: color 0.2s;
-        }
-        .footer a:hover { color: var(--green); }
-
-        /* ── Responsive ── */
-        @media (max-width: 768px) {
-            .hero { padding-top: 3rem; }
-            .hero h1 { font-size: 2.25rem; }
-            .features { grid-template-columns: 1fr; }
-            .how-grid { grid-template-columns: 1fr; }
-            .api-card { grid-template-columns: 1fr; }
-            .awareness-dual { grid-template-columns: 1fr; }
-            .state-bar { gap: 1rem; flex-wrap: wrap; }
-            .hero-screenshot { padding: 0 1rem; }
-            .state-grid { grid-template-columns: 1fr 1fr; }
-        }
-
-        @media (max-width: 480px) {
-            .hero h1 { font-size: 1.75rem; }
-            .install-box { font-size: 0.7rem; padding: 0.5rem 0.75rem; }
-            .state-grid { grid-template-columns: 1fr; }
-        }
-    </style>
-</head>
-<body>
-
-    <!-- ── Hero ── -->
-    <section class="hero" id="hero">
-        <img src="/assets/logo.png" alt="herdr" class="hero-logo">
-        <h1>herdr</h1>
-        <p class="hero-tagline">supervise multiple coding agents in one terminal.</p>
-        <div class="hero-desc">
-            <p>run Claude Code, Codex, pi, opencode, droid, amp, and plain shells side by side in your existing terminal. see which agent is blocked, done, or still working without leaving the command line.</p>
-            <p>workspaces, tabs, panes, automatic agent detection, and notifications. no electron, no web dashboard, no separate gui window.</p>
-        </div>
-        <div class="install-box">
-            <span class="prompt">$</span>
-            <code id="install-cmd">curl -fsSL https://herdr.dev/install.sh | sh</code>
-            <button class="copy-btn" id="copy-btn">copy</button>
-        </div>
-        <div class="hero-links">
-            <a href="https://github.com/ogulcancelik/herdr">github</a>
-            <a href="https://github.com/ogulcancelik/herdr/blob/master/CONFIGURATION.md">docs</a>
-            <a href="https://github.com/ogulcancelik/herdr/blob/master/SOCKET_API.md">api</a>
-        </div>
-    </section>
-
-    <!-- ── Demo ── -->
-    <div class="hero-screenshot">
-        <div class="screenshot-frame">
-            <video autoplay muted loop playsinline preload="auto" poster="/assets/hero-screenshot.png">
-                <source src="/assets/demo.mp4" type="video/mp4">
-            </video>
-        </div>
-    </div>
-
-    <div class="section-gap"></div>
-
-    <!-- ── For you / For your agents ── -->
-    <section class="features">
-        <div class="feature-card">
-            <h2>for you</h2>
-            <p class="subtitle">supervise, triage, act</p>
-            <ul class="feature-list">
-                <li>one place to see all running agents across workspaces</li>
-                <li>sidebar rolls up each workspace to its most urgent state</li>
-                <li>switch contexts instantly — click or keyboard</li>
-                <li>sound alerts and toast notifications for background events</li>
-                <li>mouse-native: click panes, drag borders, select text to copy</li>
-                <li>session persistence — close and reopen, everything restores</li>
-                <li>9 built-in themes, full color token overrides</li>
-            </ul>
-        </div>
-        <div class="feature-card">
-            <h2>for your agents</h2>
-            <p class="subtitle">orchestrate, spawn, wait</p>
-            <ul class="feature-list">
-                <li>create workspaces and split panes programmatically</li>
-                <li>spawn other agents in sibling panes</li>
-                <li>read output from any pane in the session</li>
-                <li>send text and keys into other panes</li>
-                <li>wait for output patterns or agent state changes</li>
-                <li>subscribe to real-time events over the socket</li>
-                <li>ship an agent skill or use the socket API directly</li>
-            </ul>
-        </div>
-    </section>
-
-    <div class="section-gap"></div>
-
-    <!-- ── Awareness ── -->
-    <section class="awareness">
-        <div class="awareness-header">
-            <h2>ambient awareness</h2>
-            <p class="awareness-desc">the sidebar is split into two layers. scan the workspace list for the most urgent signal, then drill into the agents causing it in the selected workspace or across all workspaces.</p>
-        </div>
-        <div class="awareness-dual">
-            <div class="awareness-panel">
-                <div class="awareness-panel-img">
-                    <img src="/assets/sidebar-workspaces.png" alt="herdr sidebar workspace list">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>herdr — tmux for agents</title>
+        <meta
+            name="description"
+            content="Persistent terminal multiplexer for coding agents. Detach and reattach, agents keep running. Built-in awareness for blocked, done, and working states. Lives inside your terminal."
+        />
+        <meta name="theme-color" content="#11111b" />
+        <link rel="canonical" href="https://herdr.dev/" />
+
+        <meta property="og:type" content="website" />
+        <meta property="og:site_name" content="herdr" />
+        <meta property="og:title" content="herdr — tmux for agents" />
+        <meta
+            property="og:description"
+            content="Persistent terminal multiplexer for coding agents. Detach, reattach, agents keep running."
+        />
+        <meta property="og:url" content="https://herdr.dev/" />
+        <meta
+            property="og:image"
+            content="https://herdr.dev/assets/og-card.png"
+        />
+        <meta property="og:image:width" content="1200" />
+        <meta property="og:image:height" content="630" />
+
+        <meta name="twitter:card" content="summary_large_image" />
+        <meta name="twitter:title" content="herdr — tmux for agents" />
+        <meta
+            name="twitter:description"
+            content="Persistent terminal multiplexer for coding agents. Detach, reattach, agents keep running."
+        />
+        <meta
+            name="twitter:image"
+            content="https://herdr.dev/assets/og-card.png"
+        />
+
+        <link rel="icon" type="image/png" href="/assets/logo.png" />
+        <link rel="apple-touch-icon" href="/assets/logo.png" />
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+        <link
+            href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap"
+            rel="stylesheet"
+        />
+        <link rel="stylesheet" href="/css/style.css" />
+    </head>
+    <body>
+        <!-- ── Hero ── -->
+        <section class="hero" id="hero">
+            <div class="hero-pasture" aria-hidden="true"></div>
+            <img src="/assets/logo.png" alt="herdr" class="hero-logo" />
+            <span class="hero-name">herdr</span>
+            <p class="hero-tagline">tmux for agents.</p>
+            <div class="hero-dots">
+                <span class="dot dot-blocked"></span>
+                <span class="dot dot-working"></span>
+                <span class="dot dot-done"></span>
+                <span class="dot dot-idle"></span>
+            </div>
+            <div class="manifesto">
+                <p>
+                    <strong
+                        >herdr is an agent multiplexer that lives in your
+                        terminal.</strong
+                    >
+                </p>
+                <p>
+                    workspaces, tabs, panes. mouse-native: click, drag, split.
+                    every agent at a glance:
+                    <span class="text-blocked">blocked</span>,
+                    <span class="text-working">working</span>,
+                    <span class="text-done">done</span>. detach and reattach,
+                    agents keep running. no gui app, no electron, no mac-only
+                    native wrapper. you see the agent's own terminal, not
+                    someone's interpretation of it.
+                </p>
+            </div>
+            <div class="install-row">
+                <div class="install-box">
+                    <span class="prompt">$</span>
+                    <code id="install-cmd"
+                        >curl -fsSL https://herdr.dev/install.sh | sh</code
+                    >
                 </div>
-                <div class="awareness-panel-text">
-                    <h3>workspaces</h3>
-                    <p>each workspace shows one aggregate dot — the most urgent state across all its agents. yellow means something is working. you scan the full list in a glance.</p>
+                <button class="copy-btn" id="copy-btn">copy</button>
+            </div>
+            <div class="hero-meta">
+                <a href="https://github.com/ogulcancelik/herdr">github</a> ·
+                <a
+                    href="https://github.com/ogulcancelik/herdr/blob/master/CONFIGURATION.md"
+                    >docs</a
+                >
+                ·
+                <a
+                    href="https://github.com/ogulcancelik/herdr/blob/master/SOCKET_API.md"
+                    >api</a
+                >
+                · linux · macos · agpl-3.0
+            </div>
+        </section>
+
+        <div class="gap-lg"></div>
+
+        <!-- ── Demo ── -->
+        <div class="demo">
+            <div class="demo-frame">
+                <video
+                    autoplay
+                    muted
+                    loop
+                    playsinline
+                    preload="auto"
+                    poster="/assets/hero-screenshot.png"
+                >
+                    <source src="/assets/demo.mp4" type="video/mp4" />
+                </video>
+            </div>
+        </div>
+
+        <div class="gap-lg"></div>
+        <hr class="section-rule" />
+        <div class="gap"></div>
+
+        <!-- ── Comparison ── -->
+        <section class="section">
+            <div class="section-heading">
+                <span class="dot dot-idle"></span>
+                <h2>how it compares</h2>
+            </div>
+            <div class="table-wrap">
+                <table class="position-table">
+                    <thead>
+                        <tr>
+                            <th></th>
+                            <th>tmux</th>
+                            <th>gui managers</th>
+                            <th class="herdr-col">herdr</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>persistent sessions</td>
+                            <td><span class="mark-yes">✓</span></td>
+                            <td><span class="mark">—</span></td>
+                            <td class="herdr-col">
+                                <span class="mark-yes">✓</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>detach / reattach</td>
+                            <td><span class="mark-yes">✓</span></td>
+                            <td><span class="mark">—</span></td>
+                            <td class="herdr-col">
+                                <span class="mark-yes">✓</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>panes, tabs, workspaces</td>
+                            <td><span class="mark-yes">✓</span></td>
+                            <td><span class="mark-yes">✓</span></td>
+                            <td class="herdr-col">
+                                <span class="mark-yes">✓</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>agent awareness</td>
+                            <td><span class="mark">—</span></td>
+                            <td><span class="mark-yes">✓</span></td>
+                            <td class="herdr-col">
+                                <span class="mark-yes">✓</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>lives in your terminal</td>
+                            <td><span class="mark-yes">✓</span></td>
+                            <td><span class="mark">—</span></td>
+                            <td class="herdr-col">
+                                <span class="mark-yes">✓</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>real terminal views</td>
+                            <td><span class="mark-yes">✓</span></td>
+                            <td><span class="mark">—</span></td>
+                            <td class="herdr-col">
+                                <span class="mark-yes">✓</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>mouse-native</td>
+                            <td><span class="mark">—</span></td>
+                            <td><span class="mark-yes">✓</span></td>
+                            <td class="herdr-col">
+                                <span class="mark-yes">✓</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>lightweight binary</td>
+                            <td><span class="mark-yes">✓</span></td>
+                            <td><span class="mark">—</span></td>
+                            <td class="herdr-col">
+                                <span class="mark-yes">✓</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>agents can orchestrate</td>
+                            <td><span class="mark">?</span></td>
+                            <td><span class="mark">?</span></td>
+                            <td class="herdr-col">
+                                <span class="mark-yes">✓</span>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <div class="gap"></div>
+        <hr class="section-rule" />
+        <div class="gap"></div>
+
+        <!-- ── Persistence ── -->
+        <section class="section">
+            <div class="section-heading">
+                <span class="dot dot-done"></span>
+                <h2>persistence</h2>
+            </div>
+            <div class="prose-block">
+                <p>
+                    start herdr on your desktop or server. run your agents,
+                    split panes, do your work. press
+                    <strong>ctrl+b q</strong> to detach. close your terminal,
+                    close your laptop; your agents keep running. open a new
+                    terminal, run <strong>herdr</strong>, you're back. same
+                    session, same panes, same agents.
+                </p>
+            </div>
+        </section>
+
+        <div class="gap"></div>
+        <hr class="section-rule" />
+        <div class="gap"></div>
+
+        <!-- ── From anywhere ── -->
+        <section class="section">
+            <div class="section-heading">
+                <span class="dot dot-done"></span>
+                <h2>from anywhere</h2>
+            </div>
+            <div class="prose-block">
+                <p>
+                    need to check on your agents from your phone? just ssh in
+                    and run herdr. any ssh client works. no app to download, no
+                    account to create.
+                </p>
+            </div>
+            <div class="detach-flow" style="margin-top: 1.5rem">
+                <div class="detach-line">
+                    <span class="prompt">$</span> <span class="cmd">ssh</span>
+                    <span class="comment">you@yourserver</span>
+                </div>
+                <div class="detach-line">
+                    <span class="prompt">$</span> <span class="cmd">herdr</span>
+                </div>
+                <div class="detach-line">
+                    <span class="dim">
+                        same session, same agents, same state.</span
+                    >
                 </div>
             </div>
-            <div class="awareness-panel">
-                <div class="awareness-panel-img">
-                    <img src="/assets/sidebar-agents.png" alt="herdr sidebar agent list">
+        </section>
+
+        <div class="gap"></div>
+        <hr class="section-rule" />
+        <div class="gap"></div>
+
+        <!-- ── Awareness ── -->
+        <section class="section">
+            <div class="section-heading">
+                <span class="dot dot-working"></span>
+                <h2>agent awareness</h2>
+            </div>
+            <div class="awareness-split">
+                <div class="awareness-panel">
+                    <div class="awareness-panel-img">
+                        <img
+                            src="/assets/sidebar-workspaces.png"
+                            alt="workspaces"
+                        />
+                    </div>
+                    <div class="awareness-panel-text">
+                        <h3>workspaces</h3>
+                        <p>
+                            each workspace rolls up to its most urgent state.
+                            scan the full list in a glance.
+                        </p>
+                    </div>
                 </div>
-                <div class="awareness-panel-text">
-                    <h3>agents</h3>
-                    <p>the bottom section shows which specific agents are running in the selected workspace, or across all workspaces when you switch the panel scope. pi is working, droid is idle.</p>
+                <div class="awareness-panel">
+                    <div class="awareness-panel-img">
+                        <img src="/assets/sidebar-agents.png" alt="agents" />
+                    </div>
+                    <div class="awareness-panel-text">
+                        <h3>agents</h3>
+                        <p>
+                            see which agents are running, blocked, or finished.
+                            no checking panes one by one.
+                        </p>
+                    </div>
                 </div>
             </div>
-        </div>
-        <div class="state-bar">
-            <div class="state-bar-item"><span class="state-dot red"></span> blocked</div>
-            <div class="state-bar-item"><span class="state-dot blue"></span> done</div>
-            <div class="state-bar-item"><span class="state-dot yellow"></span> working</div>
-            <div class="state-bar-item"><span class="state-dot green"></span> idle</div>
-        </div>
-    </section>
-
-    <div class="section-gap"></div>
-
-    <!-- ── How it works ── -->
-    <section class="how-section">
-        <h2>how it works</h2>
-        <div class="how-grid">
-            <div class="how-step">
-                <div class="step-num">01</div>
-                <h3>install and launch</h3>
-                <p>one binary, no dependencies. run <code>herdr</code> in your terminal. onboarding takes 10 seconds.</p>
+            <div class="state-bar">
+                <div class="state-bar-item">
+                    <span class="dot dot-blocked"></span> blocked
+                </div>
+                <div class="state-bar-item">
+                    <span class="dot dot-working"></span> working
+                </div>
+                <div class="state-bar-item">
+                    <span class="dot dot-done"></span> done
+                </div>
+                <div class="state-bar-item">
+                    <span class="dot dot-idle"></span> idle
+                </div>
             </div>
-            <div class="how-step">
-                <div class="step-num">02</div>
-                <h3>create workspaces</h3>
-                <p>press <code>n</code> to create a workspace. it opens as a terminal context, labels itself from git repo or folder name.</p>
+        </section>
+
+        <div class="gap"></div>
+        <hr class="section-rule" />
+        <div class="gap"></div>
+
+        <!-- ── Terminal ── -->
+        <section class="section">
+            <div class="section-heading">
+                <span class="dot dot-idle"></span>
+                <h2>lives in your terminal</h2>
             </div>
-            <div class="how-step">
-                <div class="step-num">03</div>
-                <h3>launch agents</h3>
-                <p>start your agents in panes like you normally would. herdr detects them automatically — no hooks, no config.</p>
+            <div class="terminal-block">
+                <p>
+                    not a gui window. not a web dashboard. not electron.
+                    <strong
+                        >herdr runs inside whatever terminal you already
+                        use.</strong
+                    >
+                    a single rust binary, no dependencies, nothing to configure.
+                    it even works inside tmux.
+                </p>
+                <div class="term-pills">
+                    <span class="term-pill">ghostty</span>
+                    <span class="term-pill">alacritty</span>
+                    <span class="term-pill">kitty</span>
+                    <span class="term-pill">wezterm</span>
+                    <span class="term-pill">iterm2</span>
+                    <span class="term-pill">tmux</span>
+                </div>
             </div>
-        </div>
-    </section>
+        </section>
 
-    <div class="section-gap"></div>
+        <div class="gap"></div>
+        <hr class="section-rule" />
+        <div class="gap"></div>
 
-    <!-- ── Supported agents ── -->
-    <section class="agents-section">
-        <h2>supported agents</h2>
-        <p class="section-desc">herdr detects agents by reading foreground process and terminal output patterns. zero config required.</p>
-        <div class="agents-table-wrap">
-            <table class="agents-table">
-                <thead>
-                    <tr>
-                        <th>agent</th>
-                        <th>idle / done</th>
-                        <th>working</th>
-                        <th>blocked</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td><a href="https://pi.dev">pi</a></td>
-                        <td><span class="check">✓</span></td>
-                        <td><span class="check">✓</span></td>
-                        <td><span class="partial">partial</span></td>
-                    </tr>
-                    <tr>
-                        <td><a href="https://docs.anthropic.com/en/docs/claude-code">claude code</a></td>
-                        <td><span class="check">✓</span></td>
-                        <td><span class="check">✓</span></td>
-                        <td><span class="check">✓</span></td>
-                    </tr>
-                    <tr>
-                        <td><a href="https://github.com/openai/codex">codex</a></td>
-                        <td><span class="check">✓</span></td>
-                        <td><span class="check">✓</span></td>
-                        <td><span class="check">✓</span></td>
-                    </tr>
-                    <tr>
-                        <td><a href="https://factory.ai">droid</a></td>
-                        <td><span class="check">✓</span></td>
-                        <td><span class="check">✓</span></td>
-                        <td><span class="check">✓</span></td>
-                    </tr>
-                    <tr>
-                        <td><a href="https://ampcode.com">amp</a></td>
-                        <td><span class="check">✓</span></td>
-                        <td><span class="check">✓</span></td>
-                        <td><span class="partial">partial</span></td>
-                    </tr>
-                    <tr>
-                        <td><a href="https://github.com/anomalyco/opencode">opencode</a></td>
-                        <td><span class="check">✓</span></td>
-                        <td><span class="check">✓</span></td>
-                        <td><span class="check">✓</span></td>
-                    </tr>
-                    <tr>
-                        <td><a href="https://github.com/google-gemini/gemini-cli">gemini cli</a></td>
-                        <td colspan="3"><span class="untested">detected, not fully tested</span></td>
-                    </tr>
-                    <tr>
-                        <td><a href="https://cursor.com/cli">cursor agent</a></td>
-                        <td colspan="3"><span class="untested">detected, not fully tested</span></td>
-                    </tr>
-                    <tr>
-                        <td><a href="https://github.com/cline/cline">cline</a></td>
-                        <td colspan="3"><span class="untested">detected, not fully tested</span></td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
-    </section>
+        <!-- ── Agents ── -->
+        <section class="section">
+            <div class="section-heading">
+                <span class="dot dot-blocked"></span>
+                <h2>supported agents</h2>
+            </div>
+            <div class="table-wrap">
+                <table class="agents-table">
+                    <thead>
+                        <tr>
+                            <th>agent</th>
+                            <th>idle / done</th>
+                            <th>working</th>
+                            <th>blocked</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><a href="https://pi.dev">pi</a></td>
+                            <td><span class="check">✓</span></td>
+                            <td><span class="check">✓</span></td>
+                            <td><span class="partial">partial</span></td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <a
+                                    href="https://docs.anthropic.com/en/docs/claude-code"
+                                    >claude code</a
+                                >
+                            </td>
+                            <td><span class="check">✓</span></td>
+                            <td><span class="check">✓</span></td>
+                            <td><span class="check">✓</span></td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <a href="https://github.com/openai/codex"
+                                    >codex</a
+                                >
+                            </td>
+                            <td><span class="check">✓</span></td>
+                            <td><span class="check">✓</span></td>
+                            <td><span class="check">✓</span></td>
+                        </tr>
+                        <tr>
+                            <td><a href="https://factory.ai">droid</a></td>
+                            <td><span class="check">✓</span></td>
+                            <td><span class="check">✓</span></td>
+                            <td><span class="check">✓</span></td>
+                        </tr>
+                        <tr>
+                            <td><a href="https://ampcode.com">amp</a></td>
+                            <td><span class="check">✓</span></td>
+                            <td><span class="check">✓</span></td>
+                            <td><span class="check">✓</span></td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <a href="https://github.com/anomalyco/opencode"
+                                    >opencode</a
+                                >
+                            </td>
+                            <td><span class="check">✓</span></td>
+                            <td><span class="check">✓</span></td>
+                            <td><span class="check">✓</span></td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <a
+                                    href="https://github.com/google-gemini/gemini-cli"
+                                    >gemini cli</a
+                                >
+                            </td>
+                            <td colspan="3">
+                                <span class="untested"
+                                    >detected, not fully tested</span
+                                >
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <a href="https://cursor.com/cli"
+                                    >cursor agent</a
+                                >
+                            </td>
+                            <td colspan="3">
+                                <span class="untested"
+                                    >detected, not fully tested</span
+                                >
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <a href="https://github.com/cline/cline"
+                                    >cline</a
+                                >
+                            </td>
+                            <td colspan="3">
+                                <span class="untested"
+                                    >detected, not fully tested</span
+                                >
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
 
-    <div class="section-gap"></div>
+        <div class="gap"></div>
+        <hr class="section-rule" />
+        <div class="gap"></div>
 
-    <!-- ── API ── -->
-    <section class="api-section">
-        <div class="api-card">
-            <div>
+        <!-- ── API ── -->
+        <section class="section">
+            <div class="section-heading">
+                <span class="dot dot-done"></span>
                 <h2>socket api</h2>
-                <p class="subtitle">agents can use herdr too</p>
-                <p>herdr exposes a local unix socket that agents can talk to directly. create workspaces and tabs, split panes, spawn agents, read output, and wait for state changes.</p>
-                <p>the same surface is available as CLI commands (<code>herdr workspace</code>, <code>herdr tab</code>, <code>herdr pane</code>, <code>herdr wait</code>) and as a reusable agent skill.</p>
-                <div class="api-doc-links">
-                    <a href="https://github.com/ogulcancelik/herdr/blob/master/SOCKET_API.md">socket api docs →</a>
-                    <a href="https://github.com/ogulcancelik/herdr/blob/master/SKILL.md">agent skill →</a>
-                </div>
             </div>
-            <div class="code-block">
-                <pre><span class="comment"># create a workspace with a label</span>
-<span class="cmd">herdr</span> workspace create <span class="flag">--cwd</span> <span class="str">~/project</span> <span class="flag">--label</span> <span class="str">"api server"</span>
+            <div class="api-grid">
+                <div class="api-text">
+                    <p>
+                        <strong>agents can use herdr too.</strong> the local
+                        unix socket lets agents create workspaces, split panes,
+                        spawn other agents, read output, and wait for state
+                        changes.
+                    </p>
+                    <p>
+                        available as CLI commands or as a reusable agent skill.
+                    </p>
+                    <div class="api-links">
+                        <a
+                            href="https://github.com/ogulcancelik/herdr/blob/master/SOCKET_API.md"
+                            >socket api →</a
+                        >
+                        <a
+                            href="https://github.com/ogulcancelik/herdr/blob/master/SKILL.md"
+                            >agent skill →</a
+                        >
+                    </div>
+                </div>
+                <div class="code-block">
+                    <pre><span class="comment"># create a workspace and tab</span>
+<span class="cmd">herdr</span> workspace create <span class="flag">--cwd</span> <span class="str">~/project</span> <span class="flag">--label</span> <span class="str">"api"</span>
+<span class="cmd">herdr</span> tab create <span class="flag">--label</span> <span class="str">"logs"</span>
 
-<span class="comment"># split a pane and run a command</span>
+<span class="comment"># split a pane and run</span>
 <span class="cmd">herdr</span> pane split <span class="str">1-1</span> <span class="flag">--direction</span> <span class="str">right</span>
 <span class="cmd">herdr</span> pane run <span class="str">1-2</span> <span class="str">"npm test"</span>
 
-<span class="comment"># wait for an agent to finish</span>
+<span class="comment"># wait for an agent</span>
 <span class="cmd">herdr</span> wait agent-status <span class="str">1-1</span> <span class="flag">--status</span> <span class="str">done</span>
 
-<span class="comment"># read pane output</span>
-<span class="cmd">herdr</span> pane read <span class="str">1-2</span> <span class="flag">--source</span> <span class="str">recent-unwrapped</span> <span class="flag">--lines</span> <span class="str">50</span></pre>
+<span class="comment"># read output</span>
+<span class="cmd">herdr</span> pane read <span class="str">1-2</span> <span class="flag">--source</span> <span class="str">recent</span> <span class="flag">--lines</span> <span class="str">50</span></pre>
+                </div>
             </div>
-        </div>
-    </section>
+        </section>
 
-    <div class="section-gap"></div>
+        <div class="gap-lg"></div>
 
-    <!-- ── Footer ── -->
-    <footer class="footer">
-        <hr class="footer-line">
-        <p>
-            <a href="https://github.com/ogulcancelik/herdr">github</a> ·
-            <a href="https://github.com/ogulcancelik/herdr/blob/master/CONFIGURATION.md">configuration</a> ·
-            <a href="https://github.com/ogulcancelik/herdr/blob/master/SOCKET_API.md">api</a> ·
-            <a href="https://github.com/ogulcancelik/herdr/releases">releases</a>
-        </p>
-        <p style="margin-top: 0.75rem;">linux · macos · agpl-3.0</p>
-    </footer>
+        <!-- ── Footer ── -->
+        <footer class="footer">
+            <p>
+                <a href="https://github.com/ogulcancelik/herdr">github</a> ·
+                <a
+                    href="https://github.com/ogulcancelik/herdr/blob/master/CONFIGURATION.md"
+                    >configuration</a
+                >
+                ·
+                <a
+                    href="https://github.com/ogulcancelik/herdr/blob/master/SOCKET_API.md"
+                    >api</a
+                >
+                ·
+                <a
+                    href="https://github.com/egithub.com/ogulcancelik/herdr/releases"
+                    >releases</a
+                >
+            </p>
+        </footer>
 
-    <script>
-    (function() {
-        'use strict';
+        <script>
+            (function () {
+                "use strict";
 
-        // ── Sheep ──
-        var hero = document.getElementById('hero');
-        var pasture = document.createElement('div');
-        pasture.className = 'hero-pasture';
-        pasture.setAttribute('aria-hidden', 'true');
-        hero.prepend(pasture);
+                var hero = document.getElementById("hero");
+                var pasture = hero.querySelector(".hero-pasture");
 
-        var SR = [
-            ['    ,ww','   wWWWWWWW_)',"   `WWWWWW'",'    II  II'],
-            ['    ,ww','   wWWWWWWW_)',"   `WWWWWW'",'     II II']
-        ];
-        var SL = [
-            ['  ww,','(_WWWWWWWw'," 'WWWWWW`",'  II  II'],
-            ['  ww,','(_WWWWWWWw'," 'WWWWWW`",'  II II']
-        ];
+                var SR = [
+                    ["    ,ww", "   wWWWWWWW_)", "   `WWWWWW'", "    II  II"],
+                    ["    ,ww", "   wWWWWWWW_)", "   `WWWWWW'", "     II II"],
+                ];
+                var SL = [
+                    ["  ww,", "(_WWWWWWWw", " 'WWWWWW`", "  II  II"],
+                    ["  ww,", "(_WWWWWWWw", " 'WWWWWW`", "  II II"],
+                ];
 
-        var heroW = hero.offsetWidth;
-        var heroH = hero.offsetHeight;
-        var heroRect = hero.getBoundingClientRect();
-        var mx = -9999, my = -9999;
+                var heroW = hero.offsetWidth;
+                var heroH = hero.offsetHeight;
+                var heroRect = hero.getBoundingClientRect();
+                var mx = -9999,
+                    my = -9999;
 
-        document.addEventListener('mousemove', function(e) {
-            mx = e.clientX - heroRect.left;
-            my = e.clientY - heroRect.top;
-        });
-        document.addEventListener('mouseleave', function() { mx = -9999; my = -9999; });
-
-        window.addEventListener('resize', function() {
-            heroW = hero.offsetWidth;
-            heroH = hero.offsetHeight;
-            heroRect = hero.getBoundingClientRect();
-        });
-        window.addEventListener('scroll', function() {
-            heroRect = hero.getBoundingClientRect();
-        });
-
-        var flock = [];
-        var count = window.matchMedia('(max-width: 640px)').matches ? 4 : 8;
-
-        for (var i = 0; i < count; i++) {
-            var el = document.createElement('pre');
-            el.className = 'sheep-el';
-            var opacity = 0.04 + Math.random() * 0.035;
-            var size = 10 + Math.random() * 4;
-            el.style.cssText = 'font-size:' + size + 'px;color:rgba(255,255,255,' + opacity + ')';
-            pasture.appendChild(el);
-
-            flock.push({
-                el: el,
-                x: Math.random() * heroW,
-                y: 30 + Math.random() * (heroH - 80),
-                dir: Math.random() > 0.5 ? 1 : -1,
-                speed: 0.15 + Math.random() * 0.3,
-                frame: 0,
-                ft: 0,
-                fi: 400 + Math.random() * 300,
-                svx: 0,
-                svy: 0
-            });
-        }
-
-        var last = 0;
-        function tick(ts) {
-            var dt = Math.min(ts - last, 100);
-            last = ts;
-            for (var i = 0; i < flock.length; i++) {
-                var s = flock[i];
-                s.ft += dt;
-                if (s.ft > s.fi) { s.ft = 0; s.frame ^= 1; }
-
-                // mouse scatter
-                var dx = s.x - mx, dy = s.y - my;
-                var d = Math.sqrt(dx * dx + dy * dy);
-                if (d < 120 && d > 1) {
-                    var f = (1 - d / 120) * 0.6;
-                    s.svx += (dx / d) * f;
-                    s.svy += (dy / d) * f;
-                }
-                s.x += s.svx;
-                s.y += s.svy;
-                s.svx *= 0.97;
-                s.svy *= 0.97;
-
-                s.x += s.dir * s.speed * (dt / 16);
-                if (s.dir > 0 && s.x > heroW + 100) s.x = -100;
-                if (s.dir < 0 && s.x < -100) s.x = heroW + 100;
-                if (s.y < -40) s.y = heroH + 20;
-                if (s.y > heroH + 40) s.y = -20;
-                var frames = s.dir > 0 ? SR : SL;
-                s.el.textContent = frames[s.frame].join('\n');
-                s.el.style.transform = 'translate3d(' + s.x + 'px,' + s.y + 'px,0)';
-            }
-            requestAnimationFrame(tick);
-        }
-        requestAnimationFrame(function(ts) { last = ts; tick(ts); });
-
-        // ── Copy ──
-        var copyBtn = document.getElementById('copy-btn');
-        var installCmd = document.getElementById('install-cmd');
-
-        function fallbackCopy(text) {
-            var ta = document.createElement('textarea');
-            ta.value = text;
-            ta.style.cssText = 'position:fixed;left:-9999px';
-            document.body.appendChild(ta);
-            ta.select();
-            document.execCommand('copy');
-            document.body.removeChild(ta);
-        }
-
-        function showCopied() {
-            copyBtn.textContent = 'copied!';
-            copyBtn.classList.add('copied');
-            setTimeout(function() {
-                copyBtn.textContent = 'copy';
-                copyBtn.classList.remove('copied');
-            }, 2000);
-        }
-
-        copyBtn.addEventListener('click', function() {
-            var text = installCmd.textContent;
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-                navigator.clipboard.writeText(text).then(showCopied).catch(function() {
-                    fallbackCopy(text);
-                    showCopied();
+                document.addEventListener("mousemove", function (e) {
+                    mx = e.clientX - heroRect.left;
+                    my = e.clientY - heroRect.top;
                 });
-            } else {
-                fallbackCopy(text);
-                showCopied();
-            }
-        });
-    })();
-    </script>
-</body>
+                document.addEventListener("mouseleave", function () {
+                    mx = -9999;
+                    my = -9999;
+                });
+
+                window.addEventListener("resize", function () {
+                    heroW = hero.offsetWidth;
+                    heroH = hero.offsetHeight;
+                    heroRect = hero.getBoundingClientRect();
+                });
+                window.addEventListener("scroll", function () {
+                    heroRect = hero.getBoundingClientRect();
+                });
+
+                var flock = [];
+                var count = window.matchMedia("(max-width: 640px)").matches
+                    ? 3
+                    : 5;
+
+                for (var i = 0; i < count; i++) {
+                    var el = document.createElement("pre");
+                    el.className = "sheep-el";
+                    var opacity = 0.04 + Math.random() * 0.035;
+                    var size = 9 + Math.random() * 3;
+                    el.style.cssText =
+                        "font-size:" +
+                        size +
+                        "px;color:rgba(203,166,247," +
+                        opacity +
+                        ")";
+                    pasture.appendChild(el);
+
+                    flock.push({
+                        el: el,
+                        x: Math.random() * heroW,
+                        y: 30 + Math.random() * (heroH - 80),
+                        dir: Math.random() > 0.5 ? 1 : -1,
+                        speed: 0.1 + Math.random() * 0.2,
+                        frame: 0,
+                        ft: 0,
+                        fi: 400 + Math.random() * 300,
+                        svx: 0,
+                        svy: 0,
+                    });
+                }
+
+                var last = 0;
+                function tick(ts) {
+                    var dt = Math.min(ts - last, 100);
+                    last = ts;
+                    for (var i = 0; i < flock.length; i++) {
+                        var s = flock[i];
+                        s.ft += dt;
+                        if (s.ft > s.fi) {
+                            s.ft = 0;
+                            s.frame ^= 1;
+                        }
+
+                        var dx = s.x - mx,
+                            dy = s.y - my;
+                        var d = Math.sqrt(dx * dx + dy * dy);
+                        if (d < 120 && d > 1) {
+                            var f = (1 - d / 120) * 0.4;
+                            s.svx += (dx / d) * f;
+                            s.svy += (dy / d) * f;
+                        }
+                        s.x += s.svx;
+                        s.y += s.svy;
+                        s.svx *= 0.97;
+                        s.svy *= 0.97;
+
+                        s.x += s.dir * s.speed * (dt / 16);
+                        if (s.dir > 0 && s.x > heroW + 100) s.x = -100;
+                        if (s.dir < 0 && s.x < -100) s.x = heroW + 100;
+                        if (s.y < -40) s.y = heroH + 20;
+                        if (s.y > heroH + 40) s.y = -20;
+                        var frames = s.dir > 0 ? SR : SL;
+                        s.el.textContent = frames[s.frame].join("\n");
+                        s.el.style.transform =
+                            "translate3d(" + s.x + "px," + s.y + "px,0)";
+                    }
+                    requestAnimationFrame(tick);
+                }
+                requestAnimationFrame(function (ts) {
+                    last = ts;
+                    tick(ts);
+                });
+
+                // Copy
+                var copyBtn = document.getElementById("copy-btn");
+                var installCmd = document.getElementById("install-cmd");
+
+                function fallbackCopy(text) {
+                    var ta = document.createElement("textarea");
+                    ta.value = text;
+                    ta.style.cssText = "position:fixed;left:-9999px";
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand("copy");
+                    document.body.removeChild(ta);
+                }
+
+                function showCopied() {
+                    copyBtn.textContent = "copied!";
+                    copyBtn.classList.add("copied");
+                    setTimeout(function () {
+                        copyBtn.textContent = "copy";
+                        copyBtn.classList.remove("copied");
+                    }, 2000);
+                }
+
+                copyBtn.addEventListener("click", function () {
+                    var text = installCmd.textContent;
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                        navigator.clipboard
+                            .writeText(text)
+                            .then(showCopied)
+                            .catch(function () {
+                                fallbackCopy(text);
+                                showCopied();
+                            });
+                    } else {
+                        fallbackCopy(text);
+                        showCopied();
+                    }
+                });
+            })();
+        </script>
+    </body>
 </html>
