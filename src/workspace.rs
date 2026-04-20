@@ -9,11 +9,13 @@ use ratatui::layout::Direction;
 use tokio::sync::{mpsc, Notify};
 use tracing::info;
 
-use crate::detect::{Agent, AgentState};
+#[cfg(test)]
+use crate::detect::AgentState;
 use crate::events::AppEvent;
 use crate::layout::{PaneId, TileLayout};
 use crate::pane::{PaneRuntime, PaneState};
 
+mod aggregate;
 mod git;
 
 use self::git::git_ahead_behind;
@@ -268,12 +270,6 @@ impl Tab {
         self.cwd_for_pane(self.root_pane)
     }
 
-    pub fn has_working_pane(&self) -> bool {
-        self.panes
-            .values()
-            .any(|pane| pane.state == AgentState::Working)
-    }
-
     #[cfg(test)]
     #[allow(dead_code)] // retained for focused layout-order assertions in tests
     pub fn pane_states(&self) -> Vec<(AgentState, bool)> {
@@ -285,27 +281,6 @@ impl Tab {
                     .get(id)
                     .map(|p| (p.state, p.seen))
                     .unwrap_or((AgentState::Unknown, true))
-            })
-            .collect()
-    }
-
-    pub fn pane_details(&self) -> Vec<PaneDetail> {
-        self.layout
-            .pane_ids()
-            .iter()
-            .filter_map(|id| {
-                let pane = self.panes.get(id)?;
-                let agent_label = pane.effective_agent_label()?.to_string();
-                Some(PaneDetail {
-                    pane_id: *id,
-                    tab_idx: self.number.saturating_sub(1),
-                    tab_label: self.display_name(),
-                    label: agent_label.clone(),
-                    agent_label,
-                    agent: pane.effective_known_agent(),
-                    state: pane.state,
-                    seen: pane.seen,
-                })
             })
             .collect()
     }
@@ -607,33 +582,6 @@ impl Workspace {
             .and_then(|cwd| git_ahead_behind(&cwd));
     }
 
-    pub fn aggregate_state(&self) -> (AgentState, bool) {
-        self.tabs
-            .iter()
-            .flat_map(|tab| tab.panes.values())
-            .map(|pane| (pane.state, pane.seen))
-            .max_by_key(|(state, seen)| pane_attention_priority(*state, *seen))
-            .unwrap_or((AgentState::Unknown, true))
-    }
-
-    pub fn has_working_pane(&self) -> bool {
-        self.tabs.iter().any(Tab::has_working_pane)
-    }
-
-    pub fn pane_details(&self) -> Vec<PaneDetail> {
-        let multi_tab = self.tabs.len() > 1;
-        self.tabs
-            .iter()
-            .flat_map(Tab::pane_details)
-            .map(|mut detail| {
-                if multi_tab {
-                    detail.label = format!("{}·{}", detail.tab_label, detail.agent_label);
-                }
-                detail
-            })
-            .collect()
-    }
-
     pub fn focused_runtime(&self) -> Option<&PaneRuntime> {
         self.active_tab().and_then(Tab::focused_runtime)
     }
@@ -716,29 +664,6 @@ impl Workspace {
         }
         self.close_active_tab();
         false
-    }
-}
-
-/// Detail info for a single pane, used by the agent detail panel.
-pub struct PaneDetail {
-    pub pane_id: PaneId,
-    pub tab_idx: usize,
-    pub tab_label: String,
-    pub label: String,
-    pub agent_label: String,
-    #[allow(dead_code)]
-    pub agent: Option<Agent>,
-    pub state: AgentState,
-    pub seen: bool,
-}
-
-fn pane_attention_priority(state: AgentState, seen: bool) -> u8 {
-    match (state, seen) {
-        (AgentState::Blocked, _) => 4,
-        (AgentState::Idle, false) => 3,
-        (AgentState::Working, _) => 2,
-        (AgentState::Idle, true) => 1,
-        (AgentState::Unknown, _) => 0,
     }
 }
 
