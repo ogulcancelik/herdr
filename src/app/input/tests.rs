@@ -1,11 +1,25 @@
-use super::*;
+use super::{
+    modal::{modal_action_from_buttons, open_new_tab_dialog, open_rename_active_tab, ModalAction},
+    mouse::wheel_routing,
+    navigate::{execute_navigate_action, handle_navigate_reserved_key, NavigateAction},
+    settings::{open_settings, update_settings_state},
+    *,
+};
 use std::{
     fs,
     path::Path,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crate::{config::Config, detect::Agent, workspace::Workspace};
+use crate::{
+    app::state::{
+        AgentPanelScope, AppState, ContextMenuKind, ContextMenuState, DragTarget, MenuListState,
+        Mode,
+    },
+    config::Config,
+    detect::Agent,
+    workspace::Workspace,
+};
 use crossterm::event::{KeyModifiers, MouseEvent};
 use ratatui::layout::Rect;
 

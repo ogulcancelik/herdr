@@ -54,7 +54,7 @@ fn cancel_settings(state: &mut AppState) {
     if let Some(theme_name) = state.settings.original_theme.take() {
         state.theme_name = theme_name;
     }
-    super::leave_modal(state);
+    super::modal::leave_modal(state);
 }
 
 fn apply_settings(state: &mut AppState) -> Option<SettingsAction> {
@@ -63,11 +63,11 @@ fn apply_settings(state: &mut AppState) -> Option<SettingsAction> {
             let theme_name = state.theme_name.clone();
             state.settings.original_palette = None;
             state.settings.original_theme = None;
-            super::leave_modal(state);
+            super::modal::leave_modal(state);
             Some(SettingsAction::SaveTheme(theme_name))
         }
         _ => {
-            super::leave_modal(state);
+            super::modal::leave_modal(state);
             None
         }
     }
