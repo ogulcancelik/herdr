@@ -348,7 +348,7 @@ mod tests {
         pane: &super::super::GhosttyPaneTerminal,
     ) -> crate::terminal_theme::TerminalTheme {
         let mut core = pane.core.lock().unwrap();
-        let super::super::GhosttyPaneCore {
+        let super::super::terminal::GhosttyPaneCore {
             terminal,
             render_state,
             ..
