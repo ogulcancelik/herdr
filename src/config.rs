@@ -15,7 +15,7 @@ pub use self::{
         format_key_combo, CommandKeybindConfig, CustomCommandAction, CustomCommandKeybind,
         Keybinds, LiveKeybindConfig,
     },
-    model::{AdvancedConfig, Config, KeysConfig, LoadedConfig, ToastConfig, UiConfig},
+    model::{Config, ToastConfig},
     sound::{AgentSoundSetting, SoundConfig},
     theme::{parse_color, CustomThemeColors, ThemeConfig},
 };

@@ -856,4 +856,136 @@ impl PaneRuntime {
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn focus_events_are_forwarded_when_enabled() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let (resize_tx, _resize_rx) = mpsc::channel(1);
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal
+            .mode_set(crate::ghostty::MODE_FOCUS_EVENT, true)
+            .unwrap();
+        let runtime = PaneRuntime {
+            terminal: Arc::new(PaneTerminal::new(
+                GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap(),
+            )),
+            sender: tx,
+            resize_tx,
+            current_size: Cell::new((80, 24)),
+            child_pid: Arc::new(AtomicU32::new(0)),
+            kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
+            detect_reset_notify: Arc::new(Notify::new()),
+            pending_release: Arc::new(Mutex::new(None)),
+            detect_handle: tokio::spawn(async {}).abort_handle(),
+        };
+
+        assert!(runtime.try_send_focus_event(crate::ghostty::FocusEvent::Gained));
+        assert_eq!(rx.recv().await.unwrap(), Bytes::from_static(b"\x1b[I"));
+    }
+
+    #[tokio::test]
+    async fn focus_events_are_suppressed_when_disabled() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let (resize_tx, _resize_rx) = mpsc::channel(1);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let runtime = PaneRuntime {
+            terminal: Arc::new(PaneTerminal::new(
+                GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap(),
+            )),
+            sender: tx,
+            resize_tx,
+            current_size: Cell::new((80, 24)),
+            child_pid: Arc::new(AtomicU32::new(0)),
+            kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
+            detect_reset_notify: Arc::new(Notify::new()),
+            pending_release: Arc::new(Mutex::new(None)),
+            detect_handle: tokio::spawn(async {}).abort_handle(),
+        };
+
+        assert!(!runtime.try_send_focus_event(crate::ghostty::FocusEvent::Gained));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), rx.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn transient_process_miss_keeps_current_agent_detected() {
+        let mut presence = AgentDetectionPresence::from_agent(Some(Agent::Pi));
+
+        let changed = presence.observe_process_probe(None);
+
+        assert!(!changed, "one miss should not clear the detected agent");
+        assert_eq!(presence.current_agent(), Some(Agent::Pi));
+    }
+
+    #[test]
+    fn agent_only_clears_after_confirmation_misses() {
+        let mut presence = AgentDetectionPresence::from_agent(Some(Agent::Pi));
+
+        for attempt in 1..AGENT_MISS_CONFIRMATION_ATTEMPTS {
+            let changed = presence.observe_process_probe(None);
+            assert!(
+                !changed,
+                "miss {attempt} should stay in the confirmation window"
+            );
+            assert_eq!(presence.current_agent(), Some(Agent::Pi));
+        }
+
+        let changed = presence.observe_process_probe(None);
+        assert!(changed, "last confirmation miss should clear the agent");
+        assert_eq!(presence.current_agent(), None);
+    }
+
+    #[tokio::test]
+    async fn state_changed_event_waits_for_queue_space_instead_of_dropping() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let pane_id = PaneId::from_raw(42);
+
+        tx.try_send(AppEvent::UpdateReady {
+            version: "9.9.9".into(),
+        })
+        .unwrap();
+
+        let publish =
+            publish_state_changed_event(tx.clone(), pane_id, Some(Agent::Pi), AgentState::Idle);
+        tokio::pin!(publish);
+
+        let blocked = tokio::time::timeout(std::time::Duration::from_millis(20), async {
+            (&mut publish).await;
+        })
+        .await;
+        assert!(
+            blocked.is_err(),
+            "publisher should wait for queue space instead of dropping StateChanged"
+        );
+
+        let first = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("queue should yield first event")
+            .expect("sender still alive");
+        assert!(matches!(first, AppEvent::UpdateReady { .. }));
+
+        tokio::time::timeout(std::time::Duration::from_millis(50), async {
+            (&mut publish).await;
+        })
+        .await
+        .expect("publisher should complete once queue space is available");
+
+        let second = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("queue should yield second event")
+            .expect("sender still alive");
+        assert!(matches!(
+            second,
+            AppEvent::StateChanged {
+                pane_id: delivered_pane,
+                agent: Some(Agent::Pi),
+                state: AgentState::Idle,
+            } if delivered_pane == pane_id
+        ));
+    }
+}

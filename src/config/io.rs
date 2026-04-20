@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use tracing::warn;
 
-use super::{Config, LiveKeybindConfig, LoadedConfig, CONFIG_PATH_ENV_VAR};
+use super::{model::LoadedConfig, Config, LiveKeybindConfig, CONFIG_PATH_ENV_VAR};
 
 pub fn app_dir_name() -> &'static str {
     if cfg!(debug_assertions) {
