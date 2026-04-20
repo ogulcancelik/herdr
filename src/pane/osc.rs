@@ -4,7 +4,7 @@ use tracing::info;
 
 use crate::layout::PaneId;
 
-use super::GhosttyPaneCore;
+use super::terminal::GhosttyPaneCore;
 
 #[derive(Debug, Default)]
 pub(super) struct DefaultColorOscTracker {
