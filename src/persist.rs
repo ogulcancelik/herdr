@@ -11,6 +11,3 @@ pub use self::restore::restore;
 pub use self::snapshot::{
     capture, DirectionSnapshot, LayoutSnapshot, SessionSnapshot, TabSnapshot, WorkspaceSnapshot,
 };
-
-#[cfg(test)]
-mod tests;

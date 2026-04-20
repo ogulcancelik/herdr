@@ -78,3 +78,53 @@ pub fn load() -> Option<SessionSnapshot> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::state::AgentPanelScope;
+
+    fn temp_session_path(name: &str) -> PathBuf {
+        let unique = format!(
+            "herdr-session-tests-{}-{}-{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        std::env::temp_dir().join(unique).join("session.json")
+    }
+
+    fn empty_snapshot() -> SessionSnapshot {
+        SessionSnapshot {
+            version: SNAPSHOT_VERSION,
+            workspaces: vec![],
+            active: None,
+            selected: 0,
+            agent_panel_scope: AgentPanelScope::CurrentWorkspace,
+            sidebar_width: Some(26),
+            sidebar_section_split: Some(0.5),
+        }
+    }
+
+    #[test]
+    fn clear_path_removes_existing_session_file() {
+        let path = temp_session_path("clear-existing");
+        save_to_path(&path, &empty_snapshot()).unwrap();
+
+        clear_path(&path).unwrap();
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn clear_path_ignores_missing_session_file() {
+        let path = temp_session_path("clear-missing");
+
+        clear_path(&path).unwrap();
+
+        assert!(!path.exists());
+    }
+}

@@ -287,3 +287,67 @@ fn collect_ids_inner(node: &Node, ids: &mut Vec<PaneId>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_and_restore_node_round_trip() {
+        let node = Node::Split {
+            direction: Direction::Horizontal,
+            ratio: 0.5,
+            first: Box::new(Node::Pane(PaneId::from_raw(0))),
+            second: Box::new(Node::Split {
+                direction: Direction::Vertical,
+                ratio: 0.3,
+                first: Box::new(Node::Pane(PaneId::from_raw(1))),
+                second: Box::new(Node::Pane(PaneId::from_raw(2))),
+            }),
+        };
+
+        let snap = super::super::snapshot::capture_node(&node);
+        let (restored, id_map) = restore_node_remapped(&snap);
+
+        assert_eq!(id_map.len(), 3);
+        let ids = collect_pane_ids(&restored);
+        assert_eq!(ids.len(), 3);
+        let unique: std::collections::HashSet<u32> = ids.iter().map(|id| id.raw()).collect();
+        assert_eq!(unique.len(), 3);
+    }
+
+    #[test]
+    fn prune_restored_node_collapses_missing_branch() {
+        let keep = PaneId::from_raw(11);
+        let missing = PaneId::from_raw(12);
+        let node = Node::Split {
+            direction: Direction::Horizontal,
+            ratio: 0.5,
+            first: Box::new(Node::Pane(keep)),
+            second: Box::new(Node::Pane(missing)),
+        };
+        let surviving = std::collections::HashSet::from([keep]);
+
+        let pruned = prune_restored_node(node, &surviving).expect("remaining pane should survive");
+
+        assert!(matches!(pruned, Node::Pane(id) if id == keep));
+    }
+
+    #[test]
+    fn resolve_restored_pane_prefers_surviving_saved_id_and_falls_back_to_first_remaining() {
+        let first = PaneId::from_raw(21);
+        let second = PaneId::from_raw(22);
+        let id_map = HashMap::from([(0_u32, first), (1_u32, second)]);
+        let surviving = std::collections::HashSet::from([first]);
+        let pane_ids = vec![first];
+
+        assert_eq!(
+            resolve_restored_pane(Some(0), &id_map, &surviving, &pane_ids),
+            Some(first)
+        );
+        assert_eq!(
+            resolve_restored_pane(Some(1), &id_map, &surviving, &pane_ids),
+            Some(first)
+        );
+    }
+}
