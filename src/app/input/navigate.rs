@@ -242,7 +242,7 @@ fn navigate_custom_command_for_key(
 pub(super) fn handle_navigate_reserved_key(state: &mut AppState, key: KeyEvent) -> bool {
     match key.code {
         KeyCode::Char('q') => {
-            super::request_quit_or_detach(state);
+            super::modal::request_quit_or_detach(state);
             leave_navigate_mode(state);
             true
         }
@@ -262,11 +262,11 @@ pub(super) fn handle_navigate_reserved_key(state: &mut AppState, key: KeyEvent) 
             true
         }
         KeyCode::Char('s') => {
-            super::open_settings(state);
+            super::settings::open_settings(state);
             true
         }
         KeyCode::Char('?') => {
-            super::open_keybind_help(state);
+            super::modal::open_keybind_help(state);
             true
         }
         KeyCode::Up => {
@@ -438,13 +438,13 @@ pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateActi
         }
         NavigateAction::RenameWorkspace => {
             if !state.workspaces.is_empty() {
-                super::open_rename_workspace(state, state.selected);
+                super::modal::open_rename_workspace(state, state.selected);
             }
         }
         NavigateAction::CloseWorkspace => {
             if !state.workspaces.is_empty() {
                 if state.confirm_close {
-                    super::open_confirm_close(state);
+                    super::modal::open_confirm_close(state);
                 } else {
                     state.close_selected_workspace();
                     leave_navigate_mode(state);
@@ -459,8 +459,8 @@ pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateActi
             state.next_workspace();
             leave_navigate_mode(state);
         }
-        NavigateAction::NewTab => super::open_new_tab_dialog(state),
-        NavigateAction::RenameTab => super::open_rename_active_tab(state, false),
+        NavigateAction::NewTab => super::modal::open_new_tab_dialog(state),
+        NavigateAction::RenameTab => super::modal::open_rename_active_tab(state, false),
         NavigateAction::PreviousTab => {
             state.previous_tab();
             leave_navigate_mode(state);

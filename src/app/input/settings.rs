@@ -94,9 +94,9 @@ pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Opti
                 state.settings.section = SettingsSection::Sound;
                 state.settings.list.selected = usize::from(!state.sound_enabled());
             }
-            _ => match super::modal_action_from_key(&key, super::SETTINGS_ACTIONS) {
-                Some(super::ModalAction::Apply) => return apply_settings(state),
-                Some(super::ModalAction::Close) => cancel_settings(state),
+            _ => match super::modal::modal_action_from_key(&key, super::modal::SETTINGS_ACTIONS) {
+                Some(super::modal::ModalAction::Apply) => return apply_settings(state),
+                Some(super::modal::ModalAction::Close) => cancel_settings(state),
                 _ => {}
             },
         },
@@ -117,8 +117,8 @@ pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Opti
                 state.settings.section = SettingsSection::Theme;
                 state.settings.list.selected = current_theme_index(&state.theme_name);
             }
-            _ => match super::modal_action_from_key(&key, super::SETTINGS_ACTIONS) {
-                Some(super::ModalAction::Close) => cancel_settings(state),
+            _ => match super::modal::modal_action_from_key(&key, super::modal::SETTINGS_ACTIONS) {
+                Some(super::modal::ModalAction::Close) => cancel_settings(state),
                 _ => {}
             },
         },
@@ -139,8 +139,8 @@ pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Opti
                 state.settings.section = SettingsSection::Theme;
                 state.settings.list.selected = current_theme_index(&state.theme_name);
             }
-            _ => match super::modal_action_from_key(&key, super::SETTINGS_ACTIONS) {
-                Some(super::ModalAction::Close) => cancel_settings(state),
+            _ => match super::modal::modal_action_from_key(&key, super::modal::SETTINGS_ACTIONS) {
+                Some(super::modal::ModalAction::Close) => cancel_settings(state),
                 _ => {}
             },
         },
@@ -257,16 +257,16 @@ impl AppState {
 
                 let inner = self.settings_inner_rect();
                 let (apply, close) = crate::ui::settings_button_rects(inner);
-                match super::modal_action_from_buttons(
+                match super::modal::modal_action_from_buttons(
                     mouse.column,
                     mouse.row,
                     &[
-                        (apply, super::ModalAction::Apply),
-                        (close, super::ModalAction::Close),
+                        (apply, super::modal::ModalAction::Apply),
+                        (close, super::modal::ModalAction::Close),
                     ],
                 ) {
-                    Some(super::ModalAction::Apply) => apply_settings(self),
-                    Some(super::ModalAction::Close) => {
+                    Some(super::modal::ModalAction::Apply) => apply_settings(self),
+                    Some(super::modal::ModalAction::Close) => {
                         cancel_settings(self);
                         None
                     }
