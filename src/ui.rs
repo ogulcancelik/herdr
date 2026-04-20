@@ -2,12 +2,13 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 
 mod dialogs;
 mod keybind_help;
+mod menus;
 mod onboarding;
 mod release_notes;
 mod scrollbar;
@@ -16,6 +17,10 @@ mod widgets;
 
 use self::dialogs::{render_confirm_close_overlay, render_rename_overlay};
 use self::keybind_help::render_keybind_help_overlay;
+use self::menus::{
+    render_context_menu, render_global_launcher_menu, render_navigate_overlay,
+    render_resize_overlay,
+};
 use self::onboarding::render_onboarding_overlay;
 pub(crate) use self::onboarding::{
     onboarding_notification_button_rects, onboarding_welcome_continue_rect,
@@ -1655,213 +1660,6 @@ fn dim_background(frame: &mut Frame, area: Rect) {
 }
 
 /// Floating overlay for navigate mode — appears at bottom of terminal area.
-fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
-    let key = Style::default()
-        .fg(app.palette.accent)
-        .add_modifier(Modifier::BOLD);
-    let dim = Style::default().fg(app.palette.overlay0);
-
-    let mode_style = Style::default()
-        .fg(panel_contrast_fg(&app.palette))
-        .bg(app.palette.accent)
-        .add_modifier(Modifier::BOLD);
-
-    let kb = &app.keybinds;
-    let line = Line::from(vec![
-        Span::styled(" NAVIGATE ", mode_style),
-        Span::raw(" "),
-        Span::styled("esc", key),
-        Span::styled(" back  ", dim),
-        Span::styled("↑↓", key),
-        Span::styled(" ws  ", dim),
-        Span::styled("⇥", key),
-        Span::styled(" pane  ", dim),
-        Span::styled(kb.new_tab_label.as_str(), key),
-        Span::styled(" new tab  ", dim),
-        Span::styled(kb.split_vertical_label.as_str(), key),
-        Span::styled(" split│  ", dim),
-        Span::styled(kb.split_horizontal_label.as_str(), key),
-        Span::styled(" split─  ", dim),
-        Span::styled(kb.close_pane_label.as_str(), key),
-        Span::styled(" close  ", dim),
-        Span::styled(kb.fullscreen_label.as_str(), key),
-        Span::styled(" full  ", dim),
-        Span::styled(kb.resize_mode_label.as_str(), key),
-        Span::styled(" resize  ", dim),
-        Span::styled("?", key),
-        Span::styled(" keybinds  ", dim),
-        Span::styled("s", key),
-        Span::styled(" settings  ", dim),
-        Span::styled("q", key),
-        Span::styled(" quit", dim),
-    ]);
-
-    let overlay_y = area.y + area.height.saturating_sub(1);
-    let overlay_area = Rect::new(area.x, overlay_y, area.width, 1);
-
-    frame.render_widget(Clear, overlay_area);
-    let bg = Style::default().bg(app.palette.panel_bg);
-    let buf = frame.buffer_mut();
-    for x in overlay_area.x..overlay_area.x + overlay_area.width {
-        buf[(x, overlay_y)].set_style(bg);
-    }
-    frame.render_widget(Paragraph::new(line), overlay_area);
-
-    if app.update_available.is_some() {
-        let status = Line::from(vec![Span::styled(
-            " update ready",
-            Style::default()
-                .fg(app.palette.accent)
-                .add_modifier(Modifier::BOLD),
-        )]);
-        let width = 13u16.min(overlay_area.width);
-        let status_area = Rect::new(
-            overlay_area.x + overlay_area.width.saturating_sub(width),
-            overlay_area.y,
-            width,
-            overlay_area.height,
-        );
-        frame.render_widget(Clear, status_area);
-        frame.render_widget(
-            Paragraph::new(status).alignment(Alignment::Right),
-            status_area,
-        );
-    }
-}
-
-fn render_global_launcher_menu(app: &AppState, frame: &mut Frame) {
-    let rect = app.global_menu_rect();
-    let Some(inner) = render_panel_shell(frame, rect, app.palette.accent, app.palette.panel_bg)
-    else {
-        return;
-    };
-
-    let items = app.global_menu_labels();
-    for (idx, item) in items.iter().enumerate() {
-        let y = inner.y + idx as u16;
-        if y >= inner.y + inner.height {
-            break;
-        }
-        let selected = idx == app.global_menu.highlighted;
-        let rect = Rect::new(inner.x, y, inner.width, 1);
-
-        if *item == "update ready" {
-            let line = if selected {
-                Line::from(vec![
-                    Span::styled(
-                        " update ready ",
-                        Style::default()
-                            .fg(panel_contrast_fg(&app.palette))
-                            .bg(app.palette.accent)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        "● ",
-                        Style::default()
-                            .fg(panel_contrast_fg(&app.palette))
-                            .bg(app.palette.accent)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ])
-            } else {
-                Line::from(vec![
-                    Span::styled(" update ready ", Style::default().fg(app.palette.text)),
-                    Span::styled(
-                        "● ",
-                        Style::default()
-                            .fg(app.palette.accent)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ])
-            };
-            frame.render_widget(Paragraph::new(line).alignment(Alignment::Left), rect);
-            continue;
-        }
-
-        let style = if selected {
-            Style::default()
-                .fg(panel_contrast_fg(&app.palette))
-                .bg(app.palette.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(app.palette.text)
-        };
-        frame.render_widget(
-            Paragraph::new(format!(" {item} "))
-                .style(style)
-                .alignment(Alignment::Left),
-            rect,
-        );
-    }
-}
-
-/// Floating overlay for resize mode.
-fn render_resize_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
-    let key = Style::default()
-        .fg(app.palette.accent)
-        .add_modifier(Modifier::BOLD);
-    let dim = Style::default().fg(app.palette.overlay0);
-
-    let mode_style = Style::default()
-        .fg(panel_contrast_fg(&app.palette))
-        .bg(app.palette.mauve)
-        .add_modifier(Modifier::BOLD);
-
-    let line = Line::from(vec![
-        Span::styled(" RESIZE ", mode_style),
-        Span::raw("  "),
-        Span::styled("h/l", key),
-        Span::styled(" width  ", dim),
-        Span::styled("j/k", key),
-        Span::styled(" height  ", dim),
-        Span::styled("esc", key),
-        Span::styled(" done", dim),
-    ]);
-
-    let overlay_y = area.y + area.height.saturating_sub(1);
-    let overlay_area = Rect::new(area.x, overlay_y, area.width, 1);
-
-    frame.render_widget(Clear, overlay_area);
-    let bg = Style::default().bg(app.palette.panel_bg);
-    let buf = frame.buffer_mut();
-    for x in overlay_area.x..overlay_area.x + overlay_area.width {
-        buf[(x, overlay_y)].set_style(bg);
-    }
-    frame.render_widget(Paragraph::new(line), overlay_area);
-}
-
-/// Centered popup confirmation dialog with dimmed background.
-fn render_context_menu(app: &AppState, frame: &mut Frame) {
-    let Some(menu) = &app.context_menu else {
-        return;
-    };
-
-    let p = &app.palette;
-    let Some(menu_rect) = app.context_menu_rect() else {
-        return;
-    };
-    let Some(inner) = render_panel_shell(frame, menu_rect, p.accent, p.panel_bg) else {
-        return;
-    };
-
-    let items: Vec<ListItem> = menu
-        .items()
-        .iter()
-        .map(|item| ListItem::new(Line::from(*item)))
-        .collect();
-    let list = List::new(items)
-        .style(Style::default().fg(p.text))
-        .highlight_style(
-            Style::default()
-                .bg(p.accent)
-                .fg(panel_contrast_fg(p))
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol(" ");
-    let mut state = ListState::default().with_selected(Some(menu.list.highlighted));
-    frame.render_stateful_widget(list, inner, &mut state);
-}
-
 fn render_toast_notification(
     frame: &mut Frame,
     area: Rect,
