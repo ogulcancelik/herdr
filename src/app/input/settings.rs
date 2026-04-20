@@ -280,3 +280,61 @@ impl AppState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::super::state_with_workspaces;
+    use super::*;
+
+    #[test]
+    fn settings_cancel_restores_previewed_theme_from_other_sections() {
+        let mut state = state_with_workspaces(&["test"]);
+        let original_palette = state.palette.clone();
+        let original_theme = state.theme_name.clone();
+
+        open_settings(&mut state);
+        update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+        );
+        assert_ne!(state.theme_name, original_theme);
+
+        update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
+        );
+        assert_eq!(
+            state.settings.section,
+            crate::app::state::SettingsSection::Sound
+        );
+
+        update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.theme_name, original_theme);
+        assert_eq!(state.palette.accent, original_palette.accent);
+        assert_eq!(state.palette.panel_bg, original_palette.panel_bg);
+    }
+
+    #[test]
+    fn settings_sound_toggle_returns_save_action() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_settings(&mut state);
+        state.settings.section = crate::app::state::SettingsSection::Sound;
+        state.settings.list.selected = 0;
+
+        let action = update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert_eq!(action, Some(SettingsAction::SaveSound(true)));
+        assert!(state.sound.enabled);
+        assert_eq!(state.mode, Mode::Settings);
+    }
+}

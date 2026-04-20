@@ -510,3 +510,271 @@ fn leave_navigate_mode(state: &mut AppState) {
         state.mode = Mode::Terminal;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::{Direction, Rect};
+
+    use super::super::{state_with_workspaces, unique_temp_path, wait_for_file};
+    use super::*;
+    use crate::{app::App, config::Config, input::TerminalKey, workspace::Workspace};
+
+    #[test]
+    fn custom_rename_key_enters_rename_mode() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.rename_workspace = (KeyCode::Char('g'), KeyModifiers::empty());
+        state.keybinds.rename_workspace_label = "g".into();
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::RenameWorkspace);
+        assert_eq!(state.name_input, "test");
+    }
+
+    #[test]
+    fn custom_new_workspace_key_requests_and_exits_navigate() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.new_workspace = (KeyCode::Char('g'), KeyModifiers::empty());
+        state.keybinds.new_workspace_label = "g".into();
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()),
+        );
+
+        assert!(state.request_new_workspace);
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn custom_sidebar_toggle_key_toggles_and_exits_navigate() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.toggle_sidebar = (KeyCode::Char('g'), KeyModifiers::empty());
+        state.keybinds.toggle_sidebar_label = "g".into();
+        assert!(!state.sidebar_collapsed);
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()),
+        );
+
+        assert!(state.sidebar_collapsed);
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn custom_resize_key_enters_resize_mode() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.resize_mode = (KeyCode::Char('g'), KeyModifiers::empty());
+        state.keybinds.resize_mode_label = "g".into();
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Resize);
+    }
+
+    #[test]
+    fn movement_action_stays_in_navigate_mode() {
+        let mut state = state_with_workspaces(&["a", "b"]);
+        state.selected = 0;
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.selected, 1);
+        assert_eq!(state.mode, Mode::Navigate);
+    }
+
+    #[test]
+    fn terminal_direct_focus_pane_shortcut_maps_to_navigation_action() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.focus_pane_left = Some((KeyCode::Left, KeyModifiers::ALT));
+        state.keybinds.focus_pane_left_label = Some("alt+left".into());
+
+        let action = terminal_direct_navigation_action(
+            &state,
+            &KeyEvent::new(KeyCode::Left, KeyModifiers::ALT),
+        );
+
+        assert_eq!(action, Some(NavigateAction::FocusPaneLeft));
+    }
+
+    #[tokio::test]
+    async fn custom_command_runs_from_prefix_key_in_navigate_mode() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        let output_path = unique_temp_path("custom-command-keybind");
+        let command = format!(
+            "printf '%s\\n%s\\n%s\\n' \"$HERDR_ACTIVE_WORKSPACE_ID\" \"$HERDR_ACTIVE_TAB_ID\" \"$HERDR_ACTIVE_PANE_ID\" > '{}'",
+            output_path.display()
+        );
+        app.state.keybinds.custom_commands = vec![crate::config::CustomCommandKeybind {
+            key: (KeyCode::Char('g'), KeyModifiers::empty()),
+            label: "g".into(),
+            command,
+            action: crate::config::CustomCommandAction::Shell,
+        }];
+
+        app.handle_key(TerminalKey::new(
+            app.state.prefix_code,
+            app.state.prefix_mods,
+        ))
+        .await;
+        assert_eq!(app.state.mode, Mode::Navigate);
+
+        app.handle_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()))
+            .await;
+
+        let content = wait_for_file(&output_path);
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], app.state.workspaces[0].id);
+        assert_eq!(lines[1], format!("{}:1", app.state.workspaces[0].id));
+        assert_eq!(lines[2], format!("{}-1", app.state.workspaces[0].id));
+        assert_eq!(app.state.mode, Mode::Terminal);
+
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[tokio::test]
+    async fn pane_overlay_command_opens_and_closes_after_exit() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let workspace = Workspace::new(
+            std::env::current_dir().unwrap_or_else(|_| "/".into()),
+            24,
+            80,
+            app.state.pane_scrollback_limit_bytes,
+            app.state.host_terminal_theme,
+            app.event_tx.clone(),
+            app.render_notify.clone(),
+            app.render_dirty.clone(),
+        )
+        .expect("workspace should spawn");
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        let output_path = unique_temp_path("custom-pane-command");
+        let command = format!("printf done > '{}'", output_path.display());
+        app.state.keybinds.custom_commands = vec![crate::config::CustomCommandKeybind {
+            key: (KeyCode::Char('g'), KeyModifiers::empty()),
+            label: "g".into(),
+            command,
+            action: crate::config::CustomCommandAction::Pane,
+        }];
+
+        app.handle_key(TerminalKey::new(
+            app.state.prefix_code,
+            app.state.prefix_mods,
+        ))
+        .await;
+        app.handle_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()))
+            .await;
+
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 2);
+        assert!(app.state.workspaces[0].tabs[0].zoomed);
+
+        let _ = wait_for_file(&output_path);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if app.drain_internal_events()
+                && app.state.workspaces[0].tabs[0].layout.pane_count() == 1
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
+        assert!(!app.state.workspaces[0].tabs[0].zoomed);
+        assert_eq!(app.state.mode, Mode::Terminal);
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn fullscreen_action_exits_navigate_mode() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.workspaces[0].test_split(Direction::Horizontal);
+        state.keybinds.fullscreen = (KeyCode::Char('g'), KeyModifiers::empty());
+        state.keybinds.fullscreen_label = "g".into();
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()),
+        );
+
+        assert!(state.workspaces[0].zoomed);
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn question_mark_opens_keybind_help_from_navigate() {
+        let mut state = state_with_workspaces(&["test"]);
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT),
+        );
+
+        assert_eq!(state.mode, Mode::KeybindHelp);
+    }
+
+    #[test]
+    fn new_tab_action_opens_dialog_without_creating_tab() {
+        let mut state = state_with_workspaces(&["test"]);
+
+        execute_navigate_action(&mut state, NavigateAction::NewTab);
+
+        assert_eq!(state.mode, Mode::RenameTab);
+        assert!(state.creating_new_tab);
+        assert_eq!(state.name_input, "2");
+        assert!(state.name_input_replace_on_type);
+        assert!(!state.request_new_tab);
+        assert_eq!(state.workspaces[0].tabs.len(), 1);
+    }
+
+    #[test]
+    fn persistence_mode_navigate_q_detaches_instead_of_quitting_server() {
+        let mut state = crate::app::state::AppState::test_new();
+        state.quit_detaches = true;
+
+        assert!(handle_navigate_reserved_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty())
+        ));
+        assert!(state.detach_requested);
+        assert!(!state.should_quit);
+    }
+}

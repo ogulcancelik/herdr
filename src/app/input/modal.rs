@@ -499,3 +499,241 @@ impl AppState {
         global_menu_actions(self).get(idx).copied()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::Rect;
+
+    use super::super::{capture_snapshot, state_with_workspaces};
+    use super::*;
+
+    #[test]
+    fn custom_resize_key_exits_resize_mode() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::Resize;
+        state.keybinds.resize_mode = (KeyCode::Char('g'), KeyModifiers::empty());
+        state.keybinds.resize_mode_label = "g".into();
+
+        handle_resize_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn rename_modal_keyboard_and_mouse_share_actions() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::RenameWorkspace;
+        state.name_input = "hello".into();
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+        assert!(state.name_input.is_empty());
+
+        state.name_input = "renamed".into();
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.workspaces[0].display_name(), "renamed");
+        let snapshot = capture_snapshot(&state);
+        assert_eq!(
+            snapshot.workspaces[0].custom_name.as_deref(),
+            Some("renamed")
+        );
+
+        state.view.sidebar_rect = Rect::new(0, 0, 26, 20);
+        state.view.terminal_area = Rect::new(26, 0, 80, 20);
+        state.mode = Mode::RenameWorkspace;
+        state.name_input = "mouse".into();
+        let inner = state.rename_modal_inner().unwrap();
+        let (save, _, _) = crate::ui::rename_button_rects(inner);
+        let action = modal_action_from_buttons(save.x, save.y, &[(save, ModalAction::Save)]);
+        assert_eq!(action, Some(ModalAction::Save));
+    }
+
+    #[test]
+    fn tab_rename_updates_captured_snapshot() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::RenameTab;
+        state.name_input = "logs".into();
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        let snapshot = capture_snapshot(&state);
+        assert_eq!(
+            snapshot.workspaces[0].tabs[0].custom_name.as_deref(),
+            Some("logs")
+        );
+    }
+
+    #[test]
+    fn rename_cancel_returns_to_terminal_when_workspace_is_active() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::RenameTab;
+        state.name_input = "test".into();
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+        assert!(state.name_input.is_empty());
+    }
+
+    #[test]
+    fn rename_modal_replaces_prefilled_text_on_first_type() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::RenameTab;
+        state.name_input = "2".into();
+        state.name_input_replace_on_type = true;
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::empty()),
+        );
+        assert_eq!(state.name_input, "n");
+        assert!(!state.name_input_replace_on_type);
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::empty()),
+        );
+        assert_eq!(state.name_input, "ne");
+    }
+
+    #[test]
+    fn open_rename_active_tab_can_prefill_default_new_tab_name() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.workspaces[0].test_add_tab(None);
+        state.workspaces[0].switch_tab(1);
+
+        open_rename_active_tab(&mut state, true);
+
+        assert_eq!(state.mode, Mode::RenameTab);
+        assert_eq!(state.name_input, "2");
+        assert!(state.name_input_replace_on_type);
+    }
+
+    #[test]
+    fn cancel_new_tab_dialog_leaves_workspace_unchanged() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_new_tab_dialog(&mut state);
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+        assert!(!state.creating_new_tab);
+        assert!(!state.request_new_tab);
+        assert!(state.requested_new_tab_name.is_none());
+        assert_eq!(state.workspaces[0].tabs.len(), 1);
+    }
+
+    #[test]
+    fn saving_new_tab_dialog_requests_creation_with_name() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_new_tab_dialog(&mut state);
+        state.name_input = "logs".into();
+        state.name_input_replace_on_type = false;
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+        assert!(!state.creating_new_tab);
+        assert!(state.request_new_tab);
+        assert_eq!(state.requested_new_tab_name.as_deref(), Some("logs"));
+    }
+
+    #[test]
+    fn saving_new_tab_dialog_with_default_name_keeps_tab_auto_named() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_new_tab_dialog(&mut state);
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+        assert!(!state.creating_new_tab);
+        assert!(state.request_new_tab);
+        assert!(state.requested_new_tab_name.is_none());
+    }
+
+    #[test]
+    fn closing_first_auto_tab_resets_remaining_auto_tab_and_next_prompt() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_new_tab_dialog(&mut state);
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        state.workspaces[0].test_add_tab(state.requested_new_tab_name.as_deref());
+        state.request_new_tab = false;
+        state.requested_new_tab_name = None;
+
+        state.workspaces[0].close_tab(0);
+        state.workspaces[0].switch_tab(0);
+
+        assert_eq!(state.workspaces[0].tabs[0].display_name(), "1");
+        assert!(state.workspaces[0].tabs[0].custom_name.is_none());
+
+        open_new_tab_dialog(&mut state);
+        assert_eq!(state.name_input, "2");
+    }
+
+    #[test]
+    fn renaming_auto_tab_to_its_default_number_keeps_it_auto_named() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.workspaces[0].test_add_tab(None);
+        state.workspaces[0].switch_tab(1);
+
+        open_rename_active_tab(&mut state, false);
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+        assert!(state.workspaces[0].tabs[1].custom_name.is_none());
+        assert_eq!(state.workspaces[0].tabs[1].display_name(), "2");
+    }
+
+    #[test]
+    fn confirm_close_keyboard_actions_are_direct_not_focused() {
+        let mut state = state_with_workspaces(&["a", "b"]);
+        state.mode = Mode::ConfirmClose;
+        state.selected = 1;
+
+        handle_confirm_close_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+        assert_eq!(state.mode, Mode::Navigate);
+        assert_eq!(state.workspaces.len(), 2);
+
+        state.mode = Mode::ConfirmClose;
+        handle_confirm_close_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert_eq!(state.workspaces.len(), 1);
+    }
+}

@@ -224,4 +224,101 @@ impl AppState {
 }
 
 #[cfg(test)]
+fn state_with_workspaces(names: &[&str]) -> AppState {
+    let mut state = AppState::test_new();
+    state.workspaces = names
+        .iter()
+        .map(|name| crate::workspace::Workspace::test_new(name))
+        .collect();
+    if !state.workspaces.is_empty() {
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = Mode::Navigate;
+    }
+    state
+}
+
+#[cfg(test)]
+fn app_for_mouse_test() -> App {
+    let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(
+        &crate::config::Config::default(),
+        true,
+        None,
+        None,
+        api_rx,
+        crate::api::EventHub::default(),
+    );
+    app.state.mode = Mode::Terminal;
+    app.state.update_available = None;
+    app.state.latest_release_notes_available = false;
+    app.state.view.sidebar_rect = ratatui::layout::Rect::new(0, 0, 26, 20);
+    app.state.view.terminal_area = ratatui::layout::Rect::new(26, 0, 80, 20);
+    app
+}
+
+#[cfg(test)]
+fn mouse(
+    kind: crossterm::event::MouseEventKind,
+    col: u16,
+    row: u16,
+) -> crossterm::event::MouseEvent {
+    crossterm::event::MouseEvent {
+        kind,
+        column: col,
+        row,
+        modifiers: crossterm::event::KeyModifiers::empty(),
+    }
+}
+
+#[cfg(test)]
+fn numbered_lines_bytes(count: usize) -> Vec<u8> {
+    (0..count)
+        .map(|i| format!("{i:06}\r\n"))
+        .collect::<String>()
+        .into_bytes()
+}
+
+#[cfg(test)]
+fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
+    crate::persist::capture(
+        &state.workspaces,
+        state.active,
+        state.selected,
+        state.agent_panel_scope,
+        state.sidebar_width,
+        state.sidebar_section_split,
+    )
+}
+
+#[cfg(test)]
+fn root_layout_ratio(snapshot: &crate::persist::SessionSnapshot) -> Option<f32> {
+    match &snapshot.workspaces.first()?.tabs.first()?.layout {
+        crate::persist::LayoutSnapshot::Split { ratio, .. } => Some(*ratio),
+        crate::persist::LayoutSnapshot::Pane(_) => None,
+    }
+}
+
+#[cfg(test)]
+fn unique_temp_path(name: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}", std::process::id()))
+}
+
+#[cfg(test)]
+fn wait_for_file(path: &std::path::Path) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            return content;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("timed out waiting for {}", path.display());
+}
+
+#[cfg(test)]
 mod tests;
