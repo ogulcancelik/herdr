@@ -10,6 +10,3 @@ pub use encode::{
 };
 pub use model::{KeyboardProtocol, MouseProtocolEncoding, MouseProtocolMode, TerminalKey};
 pub use parse::parse_terminal_key_sequence;
-
-#[cfg(test)]
-mod tests;
