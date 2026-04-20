@@ -38,13 +38,6 @@ pub(crate) use self::{
     },
     navigate::{handle_navigate_key, terminal_direct_navigation_action},
 };
-#[cfg(test)]
-use self::{
-    modal::{modal_action_from_buttons, open_new_tab_dialog, open_rename_active_tab},
-    mouse::wheel_routing,
-    navigate::{execute_navigate_action, handle_navigate_reserved_key, NavigateAction},
-    settings::{open_settings, update_settings_state},
-};
 use self::{
     modal::{
         modal_action_from_key, ModalAction, ONBOARDING_NOTIFICATION_ACTIONS,
@@ -52,8 +45,6 @@ use self::{
     },
     settings::SettingsAction,
 };
-#[cfg(test)]
-use super::state::{AgentPanelScope, ContextMenuKind, ContextMenuState, DragTarget, MenuListState};
 use super::state::{AppState, Mode};
 use super::App;
 
