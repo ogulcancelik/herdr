@@ -6,9 +6,6 @@ mod model;
 mod sound;
 mod theme;
 
-#[cfg(test)]
-mod tests;
-
 pub use self::{
     io::{
         config_dir, config_path, load_live_keybinds, save_onboarding_choices, upsert_section_bool,
@@ -25,9 +22,6 @@ pub use self::{
 
 pub const CONFIG_PATH_ENV_VAR: &str = "HERDR_CONFIG_PATH";
 pub const DEFAULT_SCROLLBACK_LIMIT_BYTES: usize = 10_000_000;
-
-#[cfg(test)]
-use self::{io::upsert_top_level_bool, keybinds::parse_key_combo};
 
 #[cfg(test)]
 pub(crate) fn app_dir_name() -> &'static str {

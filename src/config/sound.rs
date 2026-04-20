@@ -156,3 +156,94 @@ impl Default for AgentSoundOverrides {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::config::{config_path, Config};
+
+    #[test]
+    fn sound_table_config_parses() {
+        let toml = r#"
+[ui.sound]
+enabled = true
+path = "sounds/all.mp3"
+done_path = "sounds/done.mp3"
+request_path = "/tmp/request.mp3"
+
+[ui.sound.agents]
+droid = "off"
+claude = "on"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.ui.sound.enabled);
+        assert_eq!(config.ui.sound.path, Some(PathBuf::from("sounds/all.mp3")));
+        assert_eq!(
+            config.ui.sound.done_path,
+            Some(PathBuf::from("sounds/done.mp3"))
+        );
+        assert_eq!(
+            config.ui.sound.request_path,
+            Some(PathBuf::from("/tmp/request.mp3"))
+        );
+        assert_eq!(config.ui.sound.agents.droid, AgentSoundSetting::Off);
+        assert_eq!(config.ui.sound.agents.claude, AgentSoundSetting::On);
+        assert_eq!(config.ui.sound.agents.pi, AgentSoundSetting::Default);
+    }
+
+    #[test]
+    fn sound_path_resolution_prefers_specific_over_global() {
+        let config: Config = toml::from_str(
+            r#"
+[ui.sound]
+path = "sounds/all.mp3"
+done_path = "sounds/done.mp3"
+"#,
+        )
+        .unwrap();
+
+        let config_root = config_path().parent().unwrap().to_path_buf();
+        assert_eq!(
+            config.ui.sound.path_for(crate::sound::Sound::Done),
+            Some(config_root.join("sounds/done.mp3"))
+        );
+        assert_eq!(
+            config.ui.sound.path_for(crate::sound::Sound::Request),
+            Some(config_root.join("sounds/all.mp3"))
+        );
+    }
+
+    #[test]
+    fn missing_sound_file_produces_diagnostic() {
+        let config: Config = toml::from_str(
+            r#"
+[ui.sound]
+done_path = "sounds/missing.mp3"
+"#,
+        )
+        .unwrap();
+
+        let diagnostics = config.collect_diagnostics();
+        assert!(diagnostics.iter().any(
+            |diag| diag.contains("ui.sound.done_path") && diag.contains("using default sound")
+        ));
+    }
+
+    #[test]
+    fn non_mp3_sound_file_produces_diagnostic() {
+        let config: Config = toml::from_str(
+            r#"
+[ui.sound]
+path = "sounds/notification.wav"
+"#,
+        )
+        .unwrap();
+
+        let diagnostics = config.collect_diagnostics();
+        assert!(diagnostics.iter().any(|diag| {
+            diag.contains("ui.sound.path") && diag.contains("expected an mp3 file")
+        }));
+    }
+}

@@ -156,3 +156,61 @@ impl Default for AdvancedConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toast_config_parses() {
+        let toml = r#"
+[ui.toast]
+enabled = true
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.ui.toast.enabled);
+    }
+
+    #[test]
+    fn missing_onboarding_shows_setup() {
+        let config = Config::default();
+        assert!(config.should_show_onboarding());
+    }
+
+    #[test]
+    fn onboarding_false_skips_setup() {
+        let config: Config = toml::from_str("onboarding = false").unwrap();
+        assert!(!config.should_show_onboarding());
+    }
+
+    #[test]
+    fn advanced_defaults_include_scrollback_limit_bytes() {
+        let config = Config::default();
+        assert_eq!(
+            config.advanced.scrollback_limit_bytes,
+            DEFAULT_SCROLLBACK_LIMIT_BYTES
+        );
+    }
+
+    #[test]
+    fn advanced_config_parses() {
+        let toml = r#"
+[advanced]
+allow_nested = true
+scrollback_limit_bytes = 12345
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.advanced.allow_nested);
+        assert_eq!(config.advanced.scrollback_limit_bytes, 12345);
+    }
+
+    #[test]
+    fn advanced_legacy_scrollback_lines_alias_parses() {
+        let toml = r#"
+[advanced]
+scrollback_lines = 12345
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.advanced.scrollback_limit_bytes, 12345);
+    }
+}

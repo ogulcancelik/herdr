@@ -204,3 +204,23 @@ fn upsert_section_raw(content: &str, section: &str, key: &str, value: &str) -> S
 
     result.join("\n") + "\n"
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upsert_top_level_bool_replaces_existing_value() {
+        let content = "onboarding = true\n[keys]\nprefix = \"ctrl+b\"\n";
+        let updated = upsert_top_level_bool(content, "onboarding", false);
+        assert!(updated.contains("onboarding = false"));
+        assert!(!updated.contains("onboarding = true"));
+    }
+
+    #[test]
+    fn upsert_section_bool_adds_missing_section() {
+        let updated = upsert_section_bool("", "ui.toast", "enabled", true);
+        assert!(updated.contains("[ui.toast]"));
+        assert!(updated.contains("enabled = true"));
+    }
+}

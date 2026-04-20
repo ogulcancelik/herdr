@@ -109,3 +109,55 @@ pub fn parse_color(s: &str) -> ratatui::style::Color {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    #[test]
+    fn theme_name_parses() {
+        let toml = r#"
+[theme]
+name = "dracula"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.theme.name.as_deref(), Some("dracula"));
+    }
+
+    #[test]
+    fn parse_color_accepts_reset_aliases() {
+        use ratatui::style::Color;
+
+        for value in ["reset", "default", "none", "transparent"] {
+            assert_eq!(parse_color(value), Color::Reset, "value: {value}");
+        }
+    }
+
+    #[test]
+    fn theme_custom_overrides_parse() {
+        let toml = r##"
+[theme]
+name = "nord"
+
+[theme.custom]
+panel_bg = "#1e1e2e"
+accent = "#ff79c6"
+red = "rgb(255, 85, 85)"
+"##;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.theme.name.as_deref(), Some("nord"));
+        let custom = config.theme.custom.as_ref().unwrap();
+        assert_eq!(custom.panel_bg.as_deref(), Some("#1e1e2e"));
+        assert_eq!(custom.accent.as_deref(), Some("#ff79c6"));
+        assert_eq!(custom.red.as_deref(), Some("rgb(255, 85, 85)"));
+        assert!(custom.green.is_none());
+    }
+
+    #[test]
+    fn theme_defaults_when_missing() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.theme.name.is_none());
+        assert!(config.theme.custom.is_none());
+    }
+}
