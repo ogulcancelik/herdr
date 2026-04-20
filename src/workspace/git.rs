@@ -90,3 +90,60 @@ fn parse_git_ahead_behind_output(stdout: &str) -> Option<(usize, usize)> {
     let behind = parts.next()?.parse().ok()?;
     Some((ahead, behind))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    fn temp_test_dir(name: &str) -> PathBuf {
+        let unique = format!(
+            "herdr-workspace-tests-{}-{}-{}",
+            name,
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn git_branch_reads_head_from_standard_repo() {
+        let root = temp_test_dir("standard-repo");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        assert_eq!(git_branch(&root).as_deref(), Some("main"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn git_branch_reads_head_from_worktree_gitdir_file() {
+        let root = temp_test_dir("worktree");
+        let worktree_git_dir = root.join(".bare/worktrees/feature");
+        std::fs::create_dir_all(&worktree_git_dir).unwrap();
+        std::fs::write(root.join(".git"), "gitdir: .bare/worktrees/feature\n").unwrap();
+        std::fs::write(worktree_git_dir.join("HEAD"), "ref: refs/heads/feature\n").unwrap();
+
+        assert_eq!(git_branch(&root).as_deref(), Some("feature"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn git_branch_returns_none_for_detached_head() {
+        let root = temp_test_dir("detached-head");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "3e1b9a8d\n").unwrap();
+
+        assert_eq!(git_branch(&root), None);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

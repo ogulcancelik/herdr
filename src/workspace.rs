@@ -418,4 +418,117 @@ impl Workspace {
 }
 
 #[cfg(test)]
-mod tests;
+impl Workspace {
+    pub(crate) fn test_new(name: &str) -> Self {
+        let (events, _) = mpsc::channel(64);
+        let render_notify = Arc::new(Notify::new());
+        let render_dirty = Arc::new(AtomicBool::new(false));
+        let identity_cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
+        let (layout, root_id) = TileLayout::new();
+        let mut panes = HashMap::new();
+        panes.insert(root_id, PaneState::new());
+        let mut pane_cwds = HashMap::new();
+        pane_cwds.insert(root_id, identity_cwd.clone());
+        let tab = Tab {
+            custom_name: None,
+            number: 1,
+            root_pane: root_id,
+            layout,
+            panes,
+            pane_cwds,
+            runtimes: HashMap::new(),
+            zoomed: false,
+            events,
+            render_notify,
+            render_dirty,
+        };
+        let mut public_pane_numbers = HashMap::new();
+        public_pane_numbers.insert(tab.root_pane, 1);
+        Self {
+            id: generate_workspace_id(),
+            custom_name: Some(name.to_string()),
+            identity_cwd,
+            cached_git_ahead_behind: None,
+            public_pane_numbers,
+            next_public_pane_number: 2,
+            tabs: vec![tab],
+            active_tab: 0,
+        }
+    }
+
+    pub(crate) fn test_split(&mut self, direction: Direction) -> PaneId {
+        let tab = self.active_tab_mut().expect("workspace must have tab");
+        let new_id = tab.layout.split_focused(direction);
+        tab.panes.insert(new_id, PaneState::new());
+        let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
+        tab.pane_cwds.insert(new_id, cwd);
+        self.register_new_pane(new_id);
+        new_id
+    }
+
+    pub(crate) fn test_add_tab(&mut self, name: Option<&str>) -> usize {
+        let (events, _) = mpsc::channel(64);
+        let render_notify = Arc::new(Notify::new());
+        let render_dirty = Arc::new(AtomicBool::new(false));
+        let (layout, root_id) = TileLayout::new();
+        let mut panes = HashMap::new();
+        panes.insert(root_id, PaneState::new());
+        let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
+        let mut pane_cwds = HashMap::new();
+        pane_cwds.insert(root_id, cwd);
+        let tab = Tab {
+            custom_name: name.map(str::to_string),
+            number: self.tabs.len() + 1,
+            root_pane: root_id,
+            layout,
+            panes,
+            pane_cwds,
+            runtimes: HashMap::new(),
+            zoomed: false,
+            events,
+            render_notify,
+            render_dirty,
+        };
+        self.register_new_pane(root_id);
+        self.tabs.push(tab);
+        self.tabs.len() - 1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_identity_follows_first_tab_root_pane_cwd() {
+        let mut ws = Workspace::test_new("ignored");
+        ws.custom_name = None;
+        let root_pane = ws.tabs[0].root_pane;
+        ws.tabs[0]
+            .pane_cwds
+            .insert(root_pane, PathBuf::from("/tmp/pion"));
+
+        assert_eq!(ws.display_name(), "pion");
+        assert_eq!(ws.resolved_identity_cwd(), Some(PathBuf::from("/tmp/pion")));
+    }
+
+    #[test]
+    fn moving_tab_keeps_active_identity_and_renumbers_auto_tabs() {
+        let mut ws = Workspace::test_new("test");
+        let moved_root = ws.tabs[0].root_pane;
+        ws.test_add_tab(Some("foo"));
+        let final_auto_idx = ws.test_add_tab(None);
+        let active_root = ws.tabs[final_auto_idx].root_pane;
+        ws.switch_tab(final_auto_idx);
+
+        assert!(ws.move_tab(0, ws.tabs.len()));
+
+        let labels: Vec<_> = ws.tabs.iter().map(|tab| tab.display_name()).collect();
+        assert_eq!(labels, vec!["foo", "2", "3"]);
+        assert_eq!(ws.tabs[0].custom_name.as_deref(), Some("foo"));
+        assert!(ws.tabs[1].custom_name.is_none());
+        assert!(ws.tabs[2].custom_name.is_none());
+        assert_eq!(ws.tabs[2].root_pane, moved_root);
+        assert_eq!(ws.tabs[ws.active_tab].root_pane, active_root);
+    }
+}

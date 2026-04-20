@@ -83,3 +83,111 @@ impl Workspace {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use ratatui::layout::Direction;
+
+    use super::*;
+    use crate::detect::Agent;
+
+    #[test]
+    fn aggregate_state_all_unknown() {
+        let ws = Workspace::test_new("test");
+        let (state, seen) = ws.aggregate_state();
+        assert_eq!(state, AgentState::Unknown);
+        assert!(seen);
+    }
+
+    #[test]
+    fn aggregate_state_priority() {
+        let mut ws = Workspace::test_new("test");
+        let id2 = ws.test_split(Direction::Horizontal);
+        let root_id = ws.tabs[0]
+            .panes
+            .keys()
+            .find(|id| **id != id2)
+            .copied()
+            .unwrap();
+        ws.tabs[0].panes.get_mut(&root_id).unwrap().state = AgentState::Idle;
+        ws.tabs[0].panes.get_mut(&id2).unwrap().state = AgentState::Working;
+
+        let (state, seen) = ws.aggregate_state();
+        assert_eq!(state, AgentState::Working);
+        assert!(seen);
+    }
+
+    #[test]
+    fn aggregate_state_done_unseen_beats_working() {
+        let mut ws = Workspace::test_new("test");
+        let id2 = ws.test_split(Direction::Horizontal);
+        let root_id = ws.tabs[0]
+            .panes
+            .keys()
+            .find(|id| **id != id2)
+            .copied()
+            .unwrap();
+        let root = ws.tabs[0].panes.get_mut(&root_id).unwrap();
+        root.state = AgentState::Idle;
+        root.seen = false;
+        ws.tabs[0].panes.get_mut(&id2).unwrap().state = AgentState::Working;
+
+        let (state, seen) = ws.aggregate_state();
+        assert_eq!(state, AgentState::Idle);
+        assert!(!seen);
+    }
+
+    #[test]
+    fn pane_details_hide_plain_shells() {
+        let mut ws = Workspace::test_new("test");
+        let root_pane = ws.tabs[0].root_pane;
+        ws.tabs[0].panes.get_mut(&root_pane).unwrap().detected_agent = Some(Agent::Pi);
+        ws.test_split(Direction::Horizontal);
+
+        let details = ws.pane_details();
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].label, "pi");
+    }
+
+    #[test]
+    fn pane_details_include_tab_context_when_workspace_has_multiple_tabs() {
+        let mut ws = Workspace::test_new("test");
+        ws.tabs[0].set_custom_name("main".into());
+        let root_pane = ws.tabs[0].root_pane;
+        ws.tabs[0].panes.get_mut(&root_pane).unwrap().detected_agent = Some(Agent::Pi);
+
+        let tab_idx = ws.test_add_tab(Some("logs"));
+        let second_root_pane = ws.tabs[tab_idx].root_pane;
+        ws.tabs[tab_idx]
+            .panes
+            .get_mut(&second_root_pane)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+
+        let details = ws.pane_details();
+        assert_eq!(details.len(), 2);
+        assert!(details.iter().any(|detail| detail.label == "main·pi"));
+        assert!(details.iter().any(|detail| detail.label == "logs·claude"));
+    }
+
+    #[test]
+    fn pane_details_include_hook_reported_unknown_agents() {
+        let mut ws = Workspace::test_new("test");
+        let root_pane = ws.tabs[0].root_pane;
+        ws.tabs[0]
+            .panes
+            .get_mut(&root_pane)
+            .unwrap()
+            .set_hook_authority(
+                "custom:hermes".into(),
+                "hermes".into(),
+                AgentState::Working,
+                None,
+            );
+
+        let details = ws.pane_details();
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].agent_label, "hermes");
+        assert_eq!(details[0].agent, None);
+    }
+}
