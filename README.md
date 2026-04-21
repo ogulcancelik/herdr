@@ -11,9 +11,7 @@
 
 ---
 
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/043ec09f-4bdd-41d5-aee0-8fda6b83e267" alt="herdr demo" width="700" />
-</p>
+https://github.com/user-attachments/assets/043ec09f-4bdd-41d5-aee0-8fda6b83e267
 
 **agent multiplexer that lives in your terminal.**
 
