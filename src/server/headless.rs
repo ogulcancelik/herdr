@@ -700,9 +700,12 @@ impl HeadlessServer {
     fn handle_internal_event_with_forwarding(&mut self, ev: AppEvent) -> bool {
         match &ev {
             AppEvent::ClipboardWrite { content } => {
-                // Forward to all connected clients as Clipboard message.
-                let data = base64::engine::general_purpose::STANDARD.encode(content.as_slice());
-                self.send_to_all_clients(ServerMessage::Clipboard { data });
+                // Clipboard writes are client-local side effects. Forward them only to
+                // the foreground client instead of broadcasting to every attached client.
+                if let Some(client_id) = self.foreground_client_id {
+                    let data = base64::engine::general_purpose::STANDARD.encode(content.as_slice());
+                    self.send_to_client(client_id, ServerMessage::Clipboard { data });
+                }
                 // ClipboardWrite doesn't change visual state — no render needed.
                 false
             }
@@ -903,7 +906,8 @@ impl HeadlessServer {
     ///
     /// In the headless server, there is no stdout terminal or audio subsystem,
     /// so we:
-    /// - Forward `ClipboardWrite` as `ServerMessage::Clipboard` to all clients.
+    /// - Forward `ClipboardWrite` as `ServerMessage::Clipboard` to the
+    ///   foreground client only.
     /// - Detect when a sound would be played and forward as
     ///   `ServerMessage::Notify { kind: Sound }` to all clients.
     /// - Detect when a toast is set on AppState and forward as
@@ -1859,9 +1863,13 @@ mod tests {
         }
     }
 
-    fn read_server_frame(bytes: Vec<u8>) -> FrameData {
+    fn read_server_message(bytes: Vec<u8>) -> ServerMessage {
         let mut cursor = std::io::Cursor::new(bytes);
-        match protocol::read_message(&mut cursor, MAX_FRAME_SIZE).expect("decode server message") {
+        protocol::read_message(&mut cursor, MAX_FRAME_SIZE).expect("decode server message")
+    }
+
+    fn read_server_frame(bytes: Vec<u8>) -> FrameData {
+        match read_server_message(bytes) {
             ServerMessage::Frame(frame) => frame,
             other => panic!("expected frame, got {other:?}"),
         }
@@ -2143,6 +2151,54 @@ mod tests {
 
         assert_eq!((desktop_frame.width, desktop_frame.height), (120, 40));
         assert_eq!((phone_frame.width, phone_frame.height), (80, 24));
+    }
+
+    #[test]
+    fn clipboard_write_targets_foreground_client_only() {
+        let mut server = test_headless_server();
+        let (background_tx, background_rx) = std::sync::mpsc::channel();
+        let (foreground_tx, foreground_rx) = std::sync::mpsc::channel();
+
+        server.clients.insert(
+            1,
+            ClientConnection {
+                terminal_size: (120, 40),
+                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
+                last_activity: 1,
+                writer: Some(background_tx),
+            },
+        );
+        server.clients.insert(
+            2,
+            ClientConnection {
+                terminal_size: (80, 24),
+                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
+                last_activity: 2,
+                writer: Some(foreground_tx),
+            },
+        );
+        server.foreground_client_id = Some(2);
+        server.sync_foreground_client_state();
+
+        let changed = server.handle_internal_event_with_forwarding(AppEvent::ClipboardWrite {
+            content: b"test".to_vec(),
+        });
+
+        assert!(!changed);
+        match read_server_message(
+            foreground_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("foreground clipboard message"),
+        ) {
+            ServerMessage::Clipboard { data } => assert_eq!(data, "dGVzdA=="),
+            other => panic!("expected clipboard message, got {other:?}"),
+        }
+        assert!(
+            background_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "background client should not receive clipboard writes"
+        );
     }
 
     #[test]
