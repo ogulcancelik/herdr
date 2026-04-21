@@ -417,3 +417,67 @@ impl AppState {
         self.keybind_help.scroll = current.saturating_add(delta).clamp(0, max_scroll as i16) as u16;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    use ratatui::layout::Rect;
+
+    use super::super::{app_for_mouse_test, mouse};
+    use super::*;
+
+    #[test]
+    fn clicking_keybind_help_close_button_closes_overlay() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::KeybindHelp;
+
+        let rect = app.state.keybind_help_popup_rect();
+        let inner = Rect::new(
+            rect.x + 1,
+            rect.y + 1,
+            rect.width.saturating_sub(2),
+            rect.height.saturating_sub(2),
+        );
+        let close =
+            crate::ui::release_notes_close_button_rect(Rect::new(inner.x, inner.y, inner.width, 1));
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            close.x,
+            close.y,
+        ));
+
+        assert_eq!(app.state.mode, Mode::Navigate);
+    }
+
+    #[test]
+    fn onboarding_hover_does_not_change_selection() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::Onboarding;
+        app.state.onboarding_step = 1;
+        app.state.onboarding_list.select(1);
+
+        let inner = app.state.onboarding_modal_inner(56, 14).unwrap();
+        let content = crate::ui::modal_stack_areas(inner, 3, 0, 1, 1).content;
+        app.handle_mouse(mouse(MouseEventKind::Moved, content.x + 2, content.y));
+
+        assert_eq!(app.state.onboarding_list.selected, 1);
+    }
+
+    #[test]
+    fn onboarding_click_selects_notification_option() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::Onboarding;
+        app.state.onboarding_step = 1;
+        app.state.onboarding_list.select(0);
+
+        let inner = app.state.onboarding_modal_inner(56, 14).unwrap();
+        let content = crate::ui::modal_stack_areas(inner, 3, 0, 1, 1).content;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            content.x + 2,
+            content.y + 2,
+        ));
+
+        assert_eq!(app.state.onboarding_list.selected, 2);
+    }
+}

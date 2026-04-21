@@ -283,9 +283,9 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 
-    use super::super::state_with_workspaces;
+    use super::super::{app_for_mouse_test, mouse, state_with_workspaces};
     use super::*;
 
     #[test]
@@ -336,5 +336,17 @@ mod tests {
         assert_eq!(action, Some(SettingsAction::SaveSound(true)));
         assert!(state.sound.enabled);
         assert_eq!(state.mode, Mode::Settings);
+    }
+
+    #[test]
+    fn settings_hover_does_not_change_selection() {
+        let mut app = app_for_mouse_test();
+        open_settings(&mut app.state);
+        app.state.settings.list.select(0);
+
+        let area = app.state.settings_content_rect();
+        app.handle_mouse(mouse(MouseEventKind::Moved, area.x + 2, area.y + 2));
+
+        assert_eq!(app.state.settings.list.selected, 0);
     }
 }

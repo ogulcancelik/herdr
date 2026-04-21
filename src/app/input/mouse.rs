@@ -1085,3 +1085,174 @@ pub(super) fn wheel_routing(input_state: crate::pane::InputState) -> WheelRoutin
         WheelRouting::HostScroll
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+    use ratatui::layout::{Direction, Rect};
+
+    use super::super::{
+        app_for_mouse_test, capture_snapshot, handle_context_menu_key, mouse, root_layout_ratio,
+    };
+    use super::*;
+    use crate::{
+        app::state::{ContextMenuKind, ContextMenuState, MenuListState, Mode},
+        workspace::Workspace,
+    };
+
+    #[test]
+    fn hovering_context_menu_updates_highlight() {
+        let mut app = app_for_mouse_test();
+        app.state.context_menu = Some(ContextMenuState {
+            kind: ContextMenuKind::Workspace { ws_idx: 0 },
+            x: 2,
+            y: 2,
+            list: MenuListState::new(0),
+        });
+        app.state.mode = Mode::ContextMenu;
+
+        let menu = app.state.context_menu_rect().unwrap();
+        app.handle_mouse(mouse(MouseEventKind::Moved, menu.x + 2, menu.y + 2));
+
+        assert_eq!(app.state.context_menu.unwrap().list.highlighted, 1);
+    }
+
+    #[test]
+    fn clicking_confirm_close_accepts_workspace_close() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
+        app.state.active = Some(0);
+        app.state.selected = 1;
+        app.state.mode = Mode::ConfirmClose;
+
+        let popup = app.state.confirm_close_rect();
+        let inner = Rect::new(
+            popup.x + 1,
+            popup.y + 1,
+            popup.width.saturating_sub(2),
+            popup.height.saturating_sub(2),
+        );
+        let (confirm, _) = crate::ui::confirm_close_button_rects(inner);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            confirm.x,
+            confirm.y,
+        ));
+
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn clicking_confirm_close_accepts_after_workspace_context_menu_close() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        app.state.context_menu = Some(ContextMenuState {
+            kind: ContextMenuKind::Workspace { ws_idx: 1 },
+            x: 2,
+            y: 2,
+            list: MenuListState::new(1),
+        });
+        app.state.mode = Mode::ContextMenu;
+        handle_context_menu_key(
+            &mut app.state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert_eq!(app.state.mode, Mode::ConfirmClose);
+        assert_eq!(app.state.selected, 1);
+
+        let popup = app.state.confirm_close_rect();
+        let inner = Rect::new(
+            popup.x + 1,
+            popup.y + 1,
+            popup.width.saturating_sub(2),
+            popup.height.saturating_sub(2),
+        );
+        let (confirm, _) = crate::ui::confirm_close_button_rects(inner);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            confirm.x + 1,
+            confirm.y,
+        ));
+
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(app.state.workspaces[0].display_name(), "a");
+    }
+
+    #[test]
+    fn dragging_pane_split_updates_captured_layout_ratio() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.workspaces[0].test_split(Direction::Horizontal);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let border = app.state.view.split_borders[0].clone();
+        let before = capture_snapshot(&app.state);
+        let drag_row = border.area.y.saturating_add(1);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            border.pos,
+            drag_row,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            border.pos.saturating_add(6),
+            drag_row,
+        ));
+
+        let after = capture_snapshot(&app.state);
+        assert_ne!(root_layout_ratio(&before), root_layout_ratio(&after));
+    }
+
+    #[test]
+    fn wheel_routing_prefers_mouse_reporting() {
+        let input_state = crate::pane::InputState {
+            alternate_screen: true,
+            application_cursor: false,
+            bracketed_paste: false,
+            focus_reporting: false,
+            mouse_protocol_mode: crate::input::MouseProtocolMode::ButtonMotion,
+            mouse_protocol_encoding: crate::input::MouseProtocolEncoding::Sgr,
+            mouse_alternate_scroll: true,
+        };
+
+        assert_eq!(wheel_routing(input_state), WheelRouting::MouseReport);
+    }
+
+    #[test]
+    fn wheel_routing_uses_alternate_scroll_in_fullscreen_without_mouse_reporting() {
+        let input_state = crate::pane::InputState {
+            alternate_screen: true,
+            application_cursor: false,
+            bracketed_paste: false,
+            focus_reporting: false,
+            mouse_protocol_mode: crate::input::MouseProtocolMode::None,
+            mouse_protocol_encoding: crate::input::MouseProtocolEncoding::Default,
+            mouse_alternate_scroll: true,
+        };
+
+        assert_eq!(wheel_routing(input_state), WheelRouting::AlternateScroll);
+    }
+
+    #[test]
+    fn wheel_routing_falls_back_to_host_scrollback() {
+        let input_state = crate::pane::InputState {
+            alternate_screen: false,
+            application_cursor: false,
+            bracketed_paste: false,
+            focus_reporting: false,
+            mouse_protocol_mode: crate::input::MouseProtocolMode::None,
+            mouse_protocol_encoding: crate::input::MouseProtocolEncoding::Default,
+            mouse_alternate_scroll: true,
+        };
+
+        assert_eq!(wheel_routing(input_state), WheelRouting::HostScroll);
+    }
+}

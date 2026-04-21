@@ -319,6 +319,3 @@ fn wait_for_file(path: &std::path::Path) -> String {
     }
     panic!("timed out waiting for {}", path.display());
 }
-
-#[cfg(test)]
-mod tests;
