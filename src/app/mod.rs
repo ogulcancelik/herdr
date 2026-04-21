@@ -787,11 +787,12 @@ mod tests {
         let path = temp_config_path("startup-preview-update-available");
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
 
-        crate::release_notes::save_pending("0.5.0", "### Changed\n- One").unwrap();
+        // Use a bogus far-future version so preview=true regardless of current binary version.
+        crate::release_notes::save_pending("99.99.99", "### Changed\n- One").unwrap();
 
         let app = test_app();
 
-        assert_eq!(app.state.update_available.as_deref(), Some("0.5.0"));
+        assert_eq!(app.state.update_available.as_deref(), Some("99.99.99"));
         assert!(app.state.latest_release_notes_available);
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
