@@ -4,7 +4,11 @@
 //! 1. On the first frame, write the entire buffer (full redraw).
 //! 2. On subsequent frames, diff against the last frame and only write
 //!    the cells that changed.
-//! 3. After writing all changed cells, position the cursor.
+//! 3. Before writing any cells, hide the cursor to avoid stray cursor
+//!    artifacts on terminals that render the hardware cursor at intermediate
+//!    `CUP` positions during the frame stream.
+//! 4. After writing all changed cells, restore the final cursor visibility
+//!    and position from `frame.cursor`.
 //!
 //! Escape sequences used:
 //! - `CSI H` (CUP) — move cursor to (row, col)
@@ -192,6 +196,10 @@ fn blit_frame_to(mut writer: impl Write, frame: &FrameData, prev: Option<&FrameD
     // On first frame or size change, do a full redraw.
     let full_redraw =
         prev.is_none() || prev.is_some_and(|p| p.width != frame.width || p.height != frame.height);
+
+    // Hide cursor before any cell writes to avoid stray cursor artifacts
+    // on terminals that render the hardware cursor at intermediate CUP positions.
+    let _ = writer.write_all(b"\x1b[?25l");
 
     if full_redraw {
         // Clear the screen and write all cells.
@@ -416,6 +424,63 @@ mod tests {
         let a = make_cell("A", 2, 1, 0);
         let b = make_cell("A", 3, 1, 0);
         assert!(!cells_equal(&a, &b));
+    }
+
+    #[test]
+    fn blit_frame_hides_cursor_before_full_redraw_writes() {
+        let frame = make_frame(
+            2,
+            2,
+            vec![
+                make_cell("H", 0, 0, 0),
+                make_cell("i", 0, 0, 0),
+                make_cell("!", 0, 0, 0),
+                make_cell(" ", 0, 0, 0),
+            ],
+        );
+
+        let mut output = Vec::new();
+        blit_frame_to(&mut output, &frame, None);
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(
+            output_str.starts_with("\x1b[?25l"),
+            "should hide cursor before any cell writes during full redraw"
+        );
+    }
+
+    #[test]
+    fn blit_frame_hides_cursor_before_diff_writes() {
+        let prev = make_frame(
+            2,
+            2,
+            vec![
+                make_cell("H", 0, 0, 0),
+                make_cell("i", 0, 0, 0),
+                make_cell("!", 0, 0, 0),
+                make_cell(" ", 0, 0, 0),
+            ],
+        );
+
+        let curr = make_frame(
+            2,
+            2,
+            vec![
+                make_cell("X", 0, 0, 0), // Changed
+                make_cell("i", 0, 0, 0), // Same
+                make_cell("!", 0, 0, 0), // Same
+                make_cell(" ", 0, 0, 0), // Same
+            ],
+        );
+
+        let mut output = Vec::new();
+        blit_frame_to(&mut output, &curr, Some(&prev));
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(
+            output_str.starts_with("\x1b[?25l"),
+            "should hide cursor before any cell writes during diff"
+        );
     }
 
     #[test]
