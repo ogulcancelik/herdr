@@ -447,11 +447,12 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use crossterm::event::{MouseButton, MouseEventKind};
     use ratatui::layout::Rect;
 
-    use super::super::{app_for_mouse_test, capture_snapshot, mouse};
-    use super::*;
+    use super::super::{app_for_mouse_test, capture_snapshot, mouse, unique_temp_path};
     use crate::{
         app::state::{AgentPanelScope, DragTarget, Mode},
         detect::Agent,
@@ -1095,16 +1096,47 @@ mod tests {
         assert_eq!(app.state.workspaces[0].active_tab, 2);
     }
 
+    fn temp_git_repo(branch: &str) -> std::path::PathBuf {
+        let repo = unique_temp_path("sidebar-drop-slot-repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::write(
+            repo.join(".git/HEAD"),
+            format!("ref: refs/heads/{branch}\n"),
+        )
+        .unwrap();
+        repo
+    }
+
     #[test]
     fn top_drop_slot_is_distinct_from_gap_below_first_workspace() {
         let mut app = app_for_mouse_test();
-        app.state.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
+        let first_repo = temp_git_repo("main");
+        let second_repo = temp_git_repo("main");
+
+        let mut first = Workspace::test_new("a");
+        let first_root = first.tabs[0].root_pane;
+        first.identity_cwd = first_repo.clone();
+        first.tabs[0]
+            .pane_cwds
+            .insert(first_root, first_repo.clone());
+
+        let mut second = Workspace::test_new("b");
+        let second_root = second.tabs[0].root_pane;
+        second.identity_cwd = second_repo.clone();
+        second.tabs[0]
+            .pane_cwds
+            .insert(second_root, second_repo.clone());
+
+        app.state.workspaces = vec![first, second];
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
 
         assert_eq!(app.state.workspace_drop_index_at_row(0), Some(0));
         assert_eq!(app.state.workspace_drop_index_at_row(1), Some(0));
         assert_eq!(app.state.workspace_drop_index_at_row(2), Some(0));
         assert_eq!(app.state.workspace_drop_index_at_row(3), Some(1));
+
+        let _ = fs::remove_dir_all(first_repo);
+        let _ = fs::remove_dir_all(second_repo);
     }
 
     #[test]
