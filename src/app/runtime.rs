@@ -227,6 +227,23 @@ impl App {
     }
 
     pub(crate) fn next_loop_deadline(&self, now: Instant, needs_render: bool) -> Option<Instant> {
+        self.next_loop_deadline_with_resize_poll(now, needs_render, true)
+    }
+
+    pub(crate) fn next_headless_loop_deadline(
+        &self,
+        now: Instant,
+        needs_render: bool,
+    ) -> Option<Instant> {
+        self.next_loop_deadline_with_resize_poll(now, needs_render, false)
+    }
+
+    fn next_loop_deadline_with_resize_poll(
+        &self,
+        now: Instant,
+        needs_render: bool,
+        include_resize_poll: bool,
+    ) -> Option<Instant> {
         let render_deadline = if needs_render {
             self.last_render_at
                 .map(|last_render_at| last_render_at + MIN_RENDER_INTERVAL)
@@ -236,7 +253,7 @@ impl App {
         };
 
         [
-            Some(self.next_resize_poll),
+            include_resize_poll.then_some(self.next_resize_poll),
             self.config_diagnostic_deadline,
             self.toast_deadline,
             self.next_animation_tick,

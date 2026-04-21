@@ -1148,6 +1148,35 @@ mod tests {
     }
 
     #[test]
+    fn headless_next_loop_deadline_ignores_resize_poll() {
+        let mut app = test_app();
+        let now = Instant::now();
+        app.next_resize_poll = now + Duration::from_millis(100);
+        app.session_save_deadline = Some(now + Duration::from_secs(2));
+        app.next_auto_update_check = Some(now + Duration::from_secs(6));
+
+        assert_eq!(
+            app.next_headless_loop_deadline(now, false),
+            app.session_save_deadline
+        );
+    }
+
+    #[test]
+    fn headless_next_loop_deadline_returns_none_when_resize_poll_is_only_deadline() {
+        let mut app = test_app();
+        let now = Instant::now();
+        app.next_resize_poll = now - Duration::from_millis(1);
+        app.config_diagnostic_deadline = None;
+        app.toast_deadline = None;
+        app.next_animation_tick = None;
+        app.next_auto_update_check = None;
+        app.session_save_deadline = None;
+        app.state.workspaces.clear();
+
+        assert_eq!(app.next_headless_loop_deadline(now, false), None);
+    }
+
+    #[test]
     fn due_session_save_deadline_is_cleared() {
         let mut app = test_app();
         app.session_save_deadline = Some(Instant::now() - Duration::from_secs(1));

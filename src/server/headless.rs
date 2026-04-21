@@ -477,7 +477,7 @@ impl HeadlessServer {
             }
 
             // 8. Wait for next event.
-            let next_deadline = self.app.next_loop_deadline(now, needs_render);
+            let next_deadline = self.app.next_headless_loop_deadline(now, needs_render);
             let event = {
                 tokio::select! {
                     maybe_api = self.app.api_rx.recv() => match maybe_api {

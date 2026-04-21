@@ -237,6 +237,15 @@ impl GhosttyPaneTerminal {
     }
 
     pub fn maybe_restore_host_terminal_theme(&self, pane_id: PaneId, shell_pid: u32) -> bool {
+        {
+            let Ok(core) = self.core.lock() else {
+                return false;
+            };
+            if !should_probe_host_terminal_theme_restore(&core) {
+                return false;
+            }
+        }
+
         let foreground_job = crate::detect::foreground_job(shell_pid);
         let Ok(mut core) = self.core.lock() else {
             return false;
@@ -883,6 +892,18 @@ fn recent_text_from_rows(rows: &[String], lines: usize) -> String {
     }
 }
 
+fn should_probe_host_terminal_theme_restore(core: &GhosttyPaneCore) -> bool {
+    if core.transient_default_color_owner_pgid.is_none() || core.host_terminal_theme.is_empty() {
+        return false;
+    }
+
+    !core
+        .terminal
+        .active_screen()
+        .map(|screen| screen == crate::ghostty::ActiveScreen::Alternate)
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -893,6 +914,83 @@ mod tests {
         for i in 0..count {
             terminal.write(format!("{i:06}\r\n").as_bytes());
         }
+    }
+
+    #[test]
+    fn host_terminal_theme_restore_probe_skips_when_no_transient_override() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let core = pane.core.lock().unwrap();
+
+        assert!(!should_probe_host_terminal_theme_restore(&core));
+    }
+
+    #[test]
+    fn host_terminal_theme_restore_probe_skips_when_host_theme_unknown() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        {
+            let mut core = pane.core.lock().unwrap();
+            core.transient_default_color_owner_pgid = Some(42);
+        }
+        let core = pane.core.lock().unwrap();
+
+        assert!(!should_probe_host_terminal_theme_restore(&core));
+    }
+
+    #[test]
+    fn host_terminal_theme_restore_probe_skips_on_alternate_screen() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.write(b"\x1b[?1049h");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        {
+            let mut core = pane.core.lock().unwrap();
+            core.transient_default_color_owner_pgid = Some(42);
+            core.host_terminal_theme = crate::terminal_theme::TerminalTheme {
+                foreground: Some(crate::terminal_theme::RgbColor {
+                    r: 0xaa,
+                    g: 0xbb,
+                    b: 0xcc,
+                }),
+                background: Some(crate::terminal_theme::RgbColor {
+                    r: 0x11,
+                    g: 0x22,
+                    b: 0x33,
+                }),
+            };
+        }
+        let core = pane.core.lock().unwrap();
+
+        assert!(!should_probe_host_terminal_theme_restore(&core));
+    }
+
+    #[test]
+    fn host_terminal_theme_restore_probe_runs_when_restore_is_pending() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        {
+            let mut core = pane.core.lock().unwrap();
+            core.transient_default_color_owner_pgid = Some(42);
+            core.host_terminal_theme = crate::terminal_theme::TerminalTheme {
+                foreground: Some(crate::terminal_theme::RgbColor {
+                    r: 0xaa,
+                    g: 0xbb,
+                    b: 0xcc,
+                }),
+                background: Some(crate::terminal_theme::RgbColor {
+                    r: 0x11,
+                    g: 0x22,
+                    b: 0x33,
+                }),
+            };
+        }
+        let core = pane.core.lock().unwrap();
+
+        assert!(should_probe_host_terminal_theme_restore(&core));
     }
 
     #[test]
