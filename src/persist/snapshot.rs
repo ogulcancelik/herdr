@@ -286,7 +286,7 @@ mod tests {
 
     use super::*;
     use crate::app::{state::AgentPanelScope, AppState, Mode};
-    use crate::layout::{NavDirection, Node, PaneId};
+    use crate::layout::NavDirection;
     use crate::workspace::Workspace;
 
     fn session_fixture(name: &str) -> &'static str {

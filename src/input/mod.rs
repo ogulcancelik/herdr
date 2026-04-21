@@ -2,8 +2,6 @@ mod encode;
 mod model;
 mod parse;
 
-#[cfg(test)]
-pub use encode::encode_key;
 #[allow(unused_imports)]
 pub use encode::{
     encode_cursor_key, encode_mouse_button, encode_mouse_scroll, encode_terminal_key,

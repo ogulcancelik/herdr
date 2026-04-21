@@ -516,7 +516,7 @@ mod tests {
     use std::time::Duration;
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use ratatui::layout::{Direction, Rect};
+    use ratatui::layout::Direction;
 
     use super::super::{state_with_workspaces, unique_temp_path, wait_for_file};
     use super::*;
