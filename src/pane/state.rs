@@ -1,6 +1,7 @@
 use crate::detect::{Agent, AgentState};
 
 const CLAUDE_WORKING_HOLD: std::time::Duration = std::time::Duration::from_millis(1200);
+const HERMES_WORKING_HOLD: std::time::Duration = std::time::Duration::from_millis(700);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookAuthority {
@@ -166,22 +167,25 @@ pub(crate) fn stabilize_agent_state(
     previous: AgentState,
     raw: AgentState,
     now: std::time::Instant,
-    last_claude_working_at: &mut Option<std::time::Instant>,
+    last_working_at: &mut Option<std::time::Instant>,
 ) -> AgentState {
-    if agent != Some(Agent::Claude) {
+    let hold = match agent {
+        Some(Agent::Claude) => Some(CLAUDE_WORKING_HOLD),
+        Some(Agent::Hermes) => Some(HERMES_WORKING_HOLD),
+        _ => None,
+    };
+    let Some(hold) = hold else {
         return raw;
-    }
+    };
 
     match raw {
         AgentState::Working => {
-            *last_claude_working_at = Some(now);
+            *last_working_at = Some(now);
             AgentState::Working
         }
         AgentState::Blocked => AgentState::Blocked,
         AgentState::Idle if previous == AgentState::Working => {
-            if last_claude_working_at
-                .is_some_and(|last_working| now.duration_since(last_working) < CLAUDE_WORKING_HOLD)
-            {
+            if last_working_at.is_some_and(|last_working| now.duration_since(last_working) < hold) {
                 AgentState::Working
             } else {
                 AgentState::Idle
@@ -235,6 +239,45 @@ mod tests {
     }
 
     #[test]
+    fn hermes_working_is_sticky_for_short_gap() {
+        let now = std::time::Instant::now();
+        let mut last_working = None;
+
+        let working = stabilize_agent_state(
+            Some(Agent::Hermes),
+            AgentState::Idle,
+            AgentState::Working,
+            now,
+            &mut last_working,
+        );
+        assert_eq!(working, AgentState::Working);
+
+        let still_working = stabilize_agent_state(
+            Some(Agent::Hermes),
+            AgentState::Working,
+            AgentState::Idle,
+            now + std::time::Duration::from_millis(250),
+            &mut last_working,
+        );
+        assert_eq!(still_working, AgentState::Working);
+    }
+
+    #[test]
+    fn hermes_transitions_to_idle_after_hold_expires() {
+        let now = std::time::Instant::now();
+        let mut last_working = Some(now);
+
+        let state = stabilize_agent_state(
+            Some(Agent::Hermes),
+            AgentState::Working,
+            AgentState::Idle,
+            now + HERMES_WORKING_HOLD + std::time::Duration::from_millis(1),
+            &mut last_working,
+        );
+        assert_eq!(state, AgentState::Idle);
+    }
+
+    #[test]
     fn non_claude_states_are_unchanged() {
         let now = std::time::Instant::now();
         let mut last_working = None;
@@ -262,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn hook_authority_can_override_with_unknown_agent_label() {
+    fn hook_authority_can_override_with_hermes_label() {
         let mut pane = PaneState::new();
         pane.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         pane.set_hook_authority(
@@ -274,7 +317,7 @@ mod tests {
 
         assert_eq!(pane.detected_agent, Some(Agent::Pi));
         assert_eq!(pane.effective_agent_label(), Some("hermes"));
-        assert_eq!(pane.effective_known_agent(), None);
+        assert_eq!(pane.effective_known_agent(), Some(Agent::Hermes));
         assert_eq!(pane.state, AgentState::Working);
     }
 

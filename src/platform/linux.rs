@@ -219,10 +219,6 @@ mod tests {
     use super::*;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-
     fn env_lock() -> MutexGuard<'static, ()> {
         static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         ENV_LOCK
@@ -269,11 +265,9 @@ mod tests {
 
     #[test]
     fn clipboard_commands_prefer_wayland_when_available() {
-        let _guard = env_lock().lock().unwrap();
-        unsafe {
-            std::env::set_var("WAYLAND_DISPLAY", "wayland-0");
-            std::env::remove_var("DISPLAY");
-        }
+        let _lock = env_lock();
+        let _wayland = EnvVarGuard::set("WAYLAND_DISPLAY", "wayland-0");
+        let _display = EnvVarGuard::remove("DISPLAY");
         let commands = clipboard_commands();
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].program, "wl-copy");
@@ -281,11 +275,9 @@ mod tests {
 
     #[test]
     fn clipboard_commands_include_x11_fallbacks() {
-        let _guard = env_lock().lock().unwrap();
-        unsafe {
-            std::env::remove_var("WAYLAND_DISPLAY");
-            std::env::set_var("DISPLAY", ":0");
-        }
+        let _lock = env_lock();
+        let _wayland = EnvVarGuard::remove("WAYLAND_DISPLAY");
+        let _display = EnvVarGuard::set("DISPLAY", ":0");
         let commands = clipboard_commands();
         assert_eq!(commands.len(), 2);
         assert_eq!(commands[0].program, "xclip");

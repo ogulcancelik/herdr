@@ -501,6 +501,7 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::detect::{Agent, AgentState};
 
     #[test]
     fn workspace_identity_follows_first_tab_root_pane_cwd() {
