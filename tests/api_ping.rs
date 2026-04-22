@@ -973,7 +973,7 @@ fn pane_report_agent_updates_effective_state() {
 
 #[cfg(not(target_os = "macos"))]
 #[test]
-fn pane_report_agent_accepts_unknown_agent_labels() {
+fn pane_report_agent_accepts_hermes_label() {
     let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
