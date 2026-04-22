@@ -9,7 +9,7 @@ if you are teaching an agent that is already running inside herdr, start with [`
 there are three practical ways to integrate with herdr:
 
 - **agent skill** — [`SKILL.md`](./SKILL.md). best when an agent inside herdr just needs to learn the workflow quickly.
-- **cli wrappers** — `herdr workspace ...`, `herdr tab ...`, `herdr pane ...`, `herdr wait ...`. best for shell scripts and simple orchestration.
+- **cli wrappers** — `herdr server stop`, `herdr workspace ...`, `herdr tab ...`, `herdr pane ...`, `herdr wait ...`. best for shell scripts and simple orchestration.
 - **raw socket api** — best when you want direct request/response control or long-lived event subscriptions.
 
 these layers are intentionally stacked on top of the same control surface.
@@ -177,6 +177,7 @@ for backward compatibility, requests also accept the older positional forms like
 | method | purpose | success result type |
 |---|---|---|
 | `ping` | health check / version | `pong` |
+| `server.stop` | gracefully stop the running background server | `ok` |
 | `workspace.list` | list workspaces | `workspace_list` |
 | `workspace.get` | inspect one workspace | `workspace_info` |
 | `workspace.create` | create a workspace | `workspace_info` |
@@ -202,6 +203,22 @@ for backward compatibility, requests also accept the older positional forms like
 | `pane.close` | close a pane | `ok` |
 | `pane.wait_for_output` | one-shot blocking wait for text | `output_matched` |
 | `events.subscribe` | start a long-lived subscription stream | `subscription_started` ack |
+
+### `server.stop`
+
+request:
+
+```json
+{
+  "id": "req_stop",
+  "method": "server.stop",
+  "params": {}
+}
+```
+
+returns `ok` and asks the running background server to shut down cleanly.
+
+this is the explicit server-level shutdown path for persistence mode. normal in-app quit actions detach the current client instead of sending this request.
 
 ## workspace methods
 

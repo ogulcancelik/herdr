@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## [0.5.0] - 2026-04-21
+
+### Breaking Changes Please Read
+- herdr now defaults to a persistent server/client session model. running `herdr` starts or reattaches to a background session server instead of launching the old single-process UI.
+- quitting the UI in default mode now detaches the current client and leaves the shared session running. use `herdr server stop` to stop the background server explicitly.
+- the old monolithic behavior is still available as an escape hatch with `herdr --no-session`.
+
+### Added
+- Persistent sessions are now the default product behavior. You can detach and reattach without stopping pane processes.
+- Added the thin client and headless server as first-class product components, including auto-detect launch, explicit `herdr client`, and `herdr server stop`.
+- Sessions now restore cleanly after full restart, preserving workspaces, tabs, panes, and running process state.
+- Multi-client attach is now supported. Multiple clients can connect to the same shared session.
+
+### Changed
+- In persistence mode, in-app quit actions now detach the current client by default instead of shutting down the whole background server.
+- The current persistence model is a shared session view across attached clients. It is not yet full tmux-style per-client independent navigation.
+- Restored sessions now land in terminal mode, while fresh sessions still start in navigate mode.
+
 ## [0.4.11] - 2026-04-16
 
 ### Breaking Changes Please Read

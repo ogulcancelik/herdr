@@ -2,15 +2,19 @@
 //!
 //! - `state.rs` — AppState, Mode, and pure data structs
 //! - `actions.rs` — state mutations (testable without PTYs/async)
-//! - `api.rs` — API request handling and response building
 //! - `input.rs` — key/mouse → action translation
-//! - `runtime_commands.rs` — custom command launching and overlay restoration
 
-mod actions;
+pub(crate) mod actions;
 mod api;
+mod api_helpers;
+mod config_io;
+mod creation;
+mod ids;
 mod input;
-mod runtime_commands;
+mod runtime;
+mod session;
 pub mod state;
+mod theme_sync;
 
 use std::collections::{HashMap, HashSet};
 use std::future::pending;
@@ -20,7 +24,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const MIN_RENDER_INTERVAL: Duration = Duration::from_millis(16);
-const ANIMATION_INTERVAL: Duration = Duration::from_millis(16);
+pub(crate) const ANIMATION_INTERVAL: Duration = Duration::from_millis(16);
+pub(crate) const HEADLESS_ANIMATION_INTERVAL: Duration = Duration::from_millis(128);
+pub(crate) const HEADLESS_ANIMATION_TICK_STEP: u32 = 8;
 const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const GIT_REMOTE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
@@ -31,44 +37,49 @@ use crossterm::terminal;
 use ratatui::layout::Rect;
 use ratatui::DefaultTerminal;
 use tokio::sync::{mpsc, Notify};
-use tracing::{error, info};
+use tracing::info;
 
 use crate::config::Config;
 use crate::events::AppEvent;
-use crate::workspace::Workspace;
-
-#[cfg(test)]
-use self::api::api_request_changes_ui;
 
 pub use state::{AppState, Mode, ToastKind, ViewState};
 
 /// Full application: AppState + runtime concerns (event channels, async I/O).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct OverlayPaneState {
+    ws_idx: usize,
+    tab_idx: usize,
+    previous_focus: crate::layout::PaneId,
+    previous_zoomed: bool,
+}
+
 pub struct App {
     pub state: AppState,
     pub event_tx: mpsc::Sender<AppEvent>,
-    event_rx: mpsc::Receiver<AppEvent>,
-    api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
-    event_hub: crate::api::EventHub,
-    last_focus: Option<(usize, crate::layout::PaneId)>,
-    no_session: bool,
-    input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
-    last_terminal_size: Option<(u16, u16)>,
-    config_diagnostic_deadline: Option<Instant>,
-    toast_deadline: Option<Instant>,
-    last_git_remote_status_refresh: Instant,
-    last_sidebar_divider_click: Option<Instant>,
-    next_resize_poll: Instant,
-    next_animation_tick: Option<Instant>,
-    next_auto_update_check: Option<Instant>,
-    session_save_deadline: Option<Instant>,
-    last_render_at: Option<Instant>,
-    suppressed_repeat_keys: HashSet<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
-    render_notify: Arc<Notify>,
-    render_dirty: Arc<AtomicBool>,
-    overlay_panes: HashMap<crate::layout::PaneId, runtime_commands::OverlayPaneState>,
+    pub(crate) event_rx: mpsc::Receiver<AppEvent>,
+    pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
+    pub(crate) event_hub: crate::api::EventHub,
+    pub(crate) last_focus: Option<(usize, crate::layout::PaneId)>,
+    pub(crate) no_session: bool,
+    pub(crate) input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
+    pub(crate) last_terminal_size: Option<(u16, u16)>,
+    pub(crate) config_diagnostic_deadline: Option<Instant>,
+    pub(crate) toast_deadline: Option<Instant>,
+    pub(crate) last_git_remote_status_refresh: Instant,
+    pub(crate) last_sidebar_divider_click: Option<Instant>,
+    pub(crate) next_resize_poll: Instant,
+    pub(crate) next_animation_tick: Option<Instant>,
+    pub(crate) next_auto_update_check: Option<Instant>,
+    pub(crate) session_save_deadline: Option<Instant>,
+    pub(crate) last_render_at: Option<Instant>,
+    pub(crate) suppressed_repeat_keys:
+        HashSet<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
+    pub render_notify: Arc<Notify>,
+    pub render_dirty: Arc<AtomicBool>,
+    pub(crate) overlay_panes: HashMap<crate::layout::PaneId, OverlayPaneState>,
 }
 
-enum LoopEvent {
+pub(crate) enum LoopEvent {
     Timer,
     Internal(AppEvent),
     Api(crate::api::ApiRequestMessage),
@@ -97,6 +108,10 @@ fn repeat_key_identity(
     key: &crate::input::TerminalKey,
 ) -> (crossterm::event::KeyCode, crossterm::event::KeyModifiers) {
     (key.code, key.modifiers)
+}
+
+fn auto_updates_enabled(no_session: bool) -> bool {
+    !no_session && !cfg!(debug_assertions)
 }
 
 /// Resolve the palette from config: base theme + optional custom overrides.
@@ -228,9 +243,12 @@ impl App {
             selected,
             mode,
             should_quit: false,
+            quit_detaches: !no_session,
+            detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,
             request_reload_keybinds: false,
+            request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
             request_complete_onboarding: false,
@@ -307,9 +325,10 @@ impl App {
             ws.refresh_git_ahead_behind();
         }
 
-        // Background auto-update (skipped in --no-session / test mode)
-        // Check once at startup, then periodically from the main loop.
-        if !no_session {
+        // Background auto-update is disabled in monolithic no-session mode
+        // and in debug/test builds so local development never mutates the
+        // running binary out from under spawned test processes.
+        if auto_updates_enabled(no_session) {
             let update_tx = event_tx.clone();
             std::thread::spawn(move || crate::update::auto_update(update_tx));
         }
@@ -334,7 +353,7 @@ impl App {
             last_sidebar_divider_click: None,
             next_resize_poll: Instant::now() + RESIZE_POLL_INTERVAL,
             next_animation_tick: None,
-            next_auto_update_check: (!no_session)
+            next_auto_update_check: auto_updates_enabled(no_session)
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
             session_save_deadline: None,
             last_render_at: None,
@@ -349,42 +368,6 @@ impl App {
             render_dirty,
             overlay_panes: HashMap::new(),
         }
-    }
-
-    fn schedule_session_save(&mut self) {
-        if !self.no_session {
-            self.session_save_deadline = Some(Instant::now() + SESSION_SAVE_DEBOUNCE);
-        }
-    }
-
-    fn sync_session_save_schedule(&mut self) {
-        if self.state.session_dirty {
-            self.state.session_dirty = false;
-            self.schedule_session_save();
-        }
-    }
-
-    fn save_session_now(&mut self) {
-        if self.no_session {
-            self.session_save_deadline = None;
-            return;
-        }
-
-        if self.state.workspaces.is_empty() {
-            crate::persist::clear();
-        } else {
-            let snap = crate::persist::capture(
-                &self.state.workspaces,
-                self.state.active,
-                self.state.selected,
-                self.state.agent_panel_scope,
-                self.state.sidebar_width,
-                self.state.sidebar_section_split,
-            );
-            crate::persist::save(&snap);
-        }
-
-        self.session_save_deadline = None;
     }
 
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
@@ -510,453 +493,6 @@ impl App {
         Ok(())
     }
 
-    fn drain_api_requests(&mut self) -> bool {
-        let mut changed = false;
-        while let Ok(msg) = self.api_rx.try_recv() {
-            changed |= self.handle_api_request_message(msg);
-        }
-        changed
-    }
-
-    async fn handle_raw_input_batch(&mut self, first: crate::raw_input::RawInputEvent) -> bool {
-        let mut changed = self.handle_raw_input_event(first).await;
-
-        while let Some(rx) = self.input_rx.as_mut() {
-            match rx.try_recv() {
-                Ok(event) => changed |= self.handle_raw_input_event(event).await,
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    self.input_rx = None;
-                    break;
-                }
-            }
-        }
-
-        changed
-    }
-
-    async fn handle_raw_input_event(&mut self, event: crate::raw_input::RawInputEvent) -> bool {
-        match event {
-            crate::raw_input::RawInputEvent::Key(key) => {
-                let key_id = repeat_key_identity(&key);
-                match key.kind {
-                    crossterm::event::KeyEventKind::Press => {
-                        if self.state.mode == Mode::Terminal {
-                            self.suppressed_repeat_keys.remove(&key_id);
-                        } else {
-                            self.suppressed_repeat_keys.insert(key_id);
-                        }
-                        self.handle_key(key).await;
-                        true
-                    }
-                    crossterm::event::KeyEventKind::Repeat => {
-                        if self.state.mode == Mode::Terminal
-                            && !self.suppressed_repeat_keys.contains(&key_id)
-                        {
-                            self.handle_key(key).await;
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                    crossterm::event::KeyEventKind::Release => {
-                        self.suppressed_repeat_keys.remove(&key_id);
-                        false
-                    }
-                }
-            }
-            crate::raw_input::RawInputEvent::Paste(text) => {
-                self.handle_paste(text).await;
-                true
-            }
-            crate::raw_input::RawInputEvent::Mouse(mouse) => {
-                self.handle_mouse(mouse);
-                true
-            }
-            crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
-                let next_theme = self.state.host_terminal_theme.with_color(kind, color);
-                if next_theme == self.state.host_terminal_theme {
-                    return false;
-                }
-                self.state.host_terminal_theme = next_theme;
-                self.apply_host_terminal_theme_to_panes();
-                true
-            }
-            crate::raw_input::RawInputEvent::Unsupported => false,
-        }
-    }
-
-    fn query_host_terminal_theme(&self) {
-        use std::io::Write;
-
-        let _ = std::io::stdout()
-            .write_all(crate::terminal_theme::HOST_COLOR_QUERY_SEQUENCE.as_bytes());
-        let _ = std::io::stdout().flush();
-    }
-
-    fn apply_host_terminal_theme_to_panes(&self) {
-        if self.state.host_terminal_theme.is_empty() {
-            return;
-        }
-
-        for workspace in &self.state.workspaces {
-            for tab in &workspace.tabs {
-                for runtime in tab.runtimes.values() {
-                    runtime.apply_host_terminal_theme(self.state.host_terminal_theme);
-                }
-            }
-        }
-
-        self.render_dirty.store(true, Ordering::Release);
-        self.render_notify.notify_one();
-    }
-
-    fn handle_resize_poll(&mut self) -> bool {
-        let Ok(size) = terminal::size() else {
-            return false;
-        };
-        if self.last_terminal_size != Some(size) {
-            self.last_terminal_size = Some(size);
-            return true;
-        }
-        false
-    }
-
-    fn handle_scheduled_tasks(&mut self, now: Instant) -> bool {
-        let mut changed = false;
-
-        self.sync_animation_timer(now);
-
-        if now >= self.next_resize_poll {
-            changed |= self.handle_resize_poll();
-            self.next_resize_poll = now + RESIZE_POLL_INTERVAL;
-        }
-
-        if self
-            .config_diagnostic_deadline
-            .is_some_and(|deadline| now >= deadline)
-        {
-            self.config_diagnostic_deadline = None;
-            self.state.config_diagnostic = None;
-            changed = true;
-        }
-
-        if self.toast_deadline.is_some_and(|deadline| now >= deadline) {
-            self.toast_deadline = None;
-            self.state.toast = None;
-            changed = true;
-        }
-
-        if self
-            .next_animation_tick
-            .is_some_and(|deadline| now >= deadline)
-        {
-            self.state.spinner_tick = self.state.spinner_tick.wrapping_add(1);
-            self.next_animation_tick = Some(now + ANIMATION_INTERVAL);
-            changed = true;
-        }
-
-        if self
-            .git_refresh_deadline()
-            .is_some_and(|deadline| now >= deadline)
-        {
-            for ws in &mut self.state.workspaces {
-                ws.refresh_git_ahead_behind();
-            }
-            self.last_git_remote_status_refresh = now;
-            changed = true;
-        }
-
-        if self
-            .next_auto_update_check
-            .is_some_and(|deadline| now >= deadline)
-        {
-            self.run_auto_update_check();
-        }
-
-        if self
-            .session_save_deadline
-            .is_some_and(|deadline| now >= deadline)
-        {
-            self.save_session_now();
-        }
-
-        self.sync_animation_timer(now);
-        changed
-    }
-
-    fn sync_animation_timer(&mut self, now: Instant) {
-        if self.agent_panel_has_animation() {
-            self.next_animation_tick
-                .get_or_insert(now + ANIMATION_INTERVAL);
-        } else {
-            self.next_animation_tick = None;
-        }
-    }
-
-    fn agent_panel_has_animation(&self) -> bool {
-        match self.state.agent_panel_scope {
-            crate::app::state::AgentPanelScope::CurrentWorkspace => self
-                .state
-                .active
-                .and_then(|idx| self.state.workspaces.get(idx))
-                .is_some_and(Workspace::has_working_pane),
-            crate::app::state::AgentPanelScope::AllWorkspaces => self
-                .state
-                .workspaces
-                .iter()
-                .any(Workspace::has_working_pane),
-        }
-    }
-
-    fn can_render_now(&self, now: Instant) -> bool {
-        match self.last_render_at {
-            Some(last_render_at) => now.duration_since(last_render_at) >= MIN_RENDER_INTERVAL,
-            None => true,
-        }
-    }
-
-    fn run_auto_update_check(&mut self) {
-        self.next_auto_update_check = self
-            .state
-            .update_available
-            .is_none()
-            .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL);
-
-        if self.state.update_available.is_some() {
-            return;
-        }
-
-        let update_tx = self.event_tx.clone();
-        std::thread::spawn(move || crate::update::auto_update(update_tx));
-    }
-
-    fn git_refresh_deadline(&self) -> Option<Instant> {
-        (!self.state.workspaces.is_empty())
-            .then_some(self.last_git_remote_status_refresh + GIT_REMOTE_STATUS_REFRESH_INTERVAL)
-    }
-
-    fn next_loop_deadline(&self, now: Instant, needs_render: bool) -> Option<Instant> {
-        let render_deadline = if needs_render {
-            self.last_render_at
-                .map(|last_render_at| last_render_at + MIN_RENDER_INTERVAL)
-                .filter(|deadline| *deadline > now)
-        } else {
-            None
-        };
-
-        [
-            Some(self.next_resize_poll),
-            self.config_diagnostic_deadline,
-            self.toast_deadline,
-            self.next_animation_tick,
-            self.git_refresh_deadline(),
-            self.next_auto_update_check,
-            self.session_save_deadline,
-            render_deadline,
-        ]
-        .into_iter()
-        .flatten()
-        .min()
-    }
-
-    fn drain_internal_events(&mut self) -> bool {
-        let mut had_event = false;
-        while let Ok(ev) = self.event_rx.try_recv() {
-            had_event = true;
-            self.handle_internal_event(ev);
-        }
-        had_event
-    }
-
-    fn handle_internal_event(&mut self, ev: AppEvent) {
-        if let AppEvent::ClipboardWrite { content } = ev {
-            crate::selection::write_osc52_bytes(&content);
-            return;
-        }
-
-        let overlay_state = if let AppEvent::PaneDied { pane_id } = &ev {
-            self.overlay_panes.remove(pane_id)
-        } else {
-            None
-        };
-
-        if let AppEvent::PaneDied { pane_id } = &ev {
-            if let Some((ws_idx, _)) = self.find_pane(*pane_id) {
-                if let Some(public_pane_id) = self.public_pane_id(ws_idx, *pane_id) {
-                    self.emit_event(crate::api::schema::EventEnvelope {
-                        event: crate::api::schema::EventKind::PaneExited,
-                        data: crate::api::schema::EventData::PaneExited {
-                            pane_id: public_pane_id,
-                            workspace_id: self.public_workspace_id(ws_idx),
-                        },
-                    });
-                }
-            }
-        }
-
-        let released_agent = if let AppEvent::HookAgentReleased {
-            pane_id,
-            known_agent,
-            ..
-        } = &ev
-        {
-            known_agent.map(|agent| (*pane_id, agent))
-        } else {
-            None
-        };
-
-        let previous_toast = self.state.toast.clone();
-        let pane_updates = self.state.handle_app_event(ev);
-        for update in &pane_updates {
-            self.emit_pane_state_update(update);
-        }
-        if let Some((pane_id, agent)) = released_agent {
-            if pane_updates.iter().any(|update| update.pane_id == pane_id) {
-                if let Some((ws_idx, _)) = self.find_pane(pane_id) {
-                    if let Some(runtime) = self.state.workspaces[ws_idx].runtimes.get(&pane_id) {
-                        runtime.begin_graceful_release(agent);
-                    }
-                }
-            }
-        }
-        if let Some(overlay) = overlay_state {
-            self.restore_overlay_after_exit(overlay);
-        }
-        self.sync_toast_deadline(previous_toast);
-    }
-
-    fn emit_pane_state_update(&self, update: &crate::app::actions::PaneStateUpdate) {
-        let Some(pane_id) = self.public_pane_id(update.ws_idx, update.pane_id) else {
-            return;
-        };
-        let workspace_id = self.public_workspace_id(update.ws_idx);
-
-        if update.previous_agent_label != update.agent_label {
-            self.emit_event(crate::api::schema::EventEnvelope {
-                event: crate::api::schema::EventKind::PaneAgentDetected,
-                data: crate::api::schema::EventData::PaneAgentDetected {
-                    pane_id: pane_id.clone(),
-                    workspace_id: workspace_id.clone(),
-                    agent: update.agent_label.clone(),
-                },
-            });
-        }
-
-        if update.previous_state != update.state {
-            let agent_status = self
-                .state
-                .workspaces
-                .get(update.ws_idx)
-                .and_then(|ws| ws.pane_state(update.pane_id))
-                .map(|pane| pane_agent_status(pane.state, pane.seen))
-                .unwrap_or_else(|| pane_agent_status(update.state, true));
-            self.emit_event(crate::api::schema::EventEnvelope {
-                event: crate::api::schema::EventKind::PaneAgentStatusChanged,
-                data: crate::api::schema::EventData::PaneAgentStatusChanged {
-                    pane_id,
-                    workspace_id,
-                    agent_status,
-                },
-            });
-        }
-    }
-
-    fn sync_toast_deadline(
-        &mut self,
-        previous_toast: Option<crate::app::state::ToastNotification>,
-    ) {
-        if self.state.toast != previous_toast {
-            self.toast_deadline = self.state.toast.as_ref().map(|toast| {
-                let duration = match toast.kind {
-                    ToastKind::NeedsAttention => Duration::from_secs(8),
-                    ToastKind::Finished => Duration::from_secs(5),
-                    ToastKind::UpdateInstalled => Duration::from_secs(3),
-                };
-                Instant::now() + duration
-            });
-        }
-    }
-
-    fn emit_event(&self, event: crate::api::schema::EventEnvelope) {
-        self.event_hub.push(event);
-    }
-
-    fn sync_focus_events(&mut self) {
-        let current_focus = self.state.active.and_then(|idx| {
-            self.state
-                .workspaces
-                .get(idx)
-                .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
-        });
-        if current_focus == self.last_focus {
-            return;
-        }
-
-        if let Some((ws_idx, pane_id)) = self.last_focus {
-            self.send_pane_focus_event(ws_idx, pane_id, crate::ghostty::FocusEvent::Lost);
-        }
-        if let Some((ws_idx, pane_id)) = current_focus {
-            self.send_pane_focus_event(ws_idx, pane_id, crate::ghostty::FocusEvent::Gained);
-            self.emit_event(crate::api::schema::EventEnvelope {
-                event: crate::api::schema::EventKind::WorkspaceFocused,
-                data: crate::api::schema::EventData::WorkspaceFocused {
-                    workspace_id: self.public_workspace_id(ws_idx),
-                },
-            });
-            if let Some(tab_id) =
-                self.public_tab_id(ws_idx, self.state.workspaces[ws_idx].active_tab)
-            {
-                self.emit_event(crate::api::schema::EventEnvelope {
-                    event: crate::api::schema::EventKind::TabFocused,
-                    data: crate::api::schema::EventData::TabFocused {
-                        tab_id,
-                        workspace_id: self.public_workspace_id(ws_idx),
-                    },
-                });
-            }
-            if let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) {
-                self.emit_event(crate::api::schema::EventEnvelope {
-                    event: crate::api::schema::EventKind::PaneFocused,
-                    data: crate::api::schema::EventData::PaneFocused {
-                        pane_id: public_pane_id,
-                        workspace_id: self.public_workspace_id(ws_idx),
-                    },
-                });
-            }
-        }
-
-        self.last_focus = current_focus;
-    }
-
-    fn send_pane_focus_event(
-        &self,
-        ws_idx: usize,
-        pane_id: crate::layout::PaneId,
-        event: crate::ghostty::FocusEvent,
-    ) {
-        let Some(runtime) = self
-            .state
-            .workspaces
-            .get(ws_idx)
-            .and_then(|ws| ws.runtime(pane_id))
-        else {
-            return;
-        };
-        runtime.try_send_focus_event(event);
-    }
-
-    fn find_pane(
-        &self,
-        pane_id: crate::layout::PaneId,
-    ) -> Option<(usize, &crate::pane::PaneState)> {
-        self.state
-            .workspaces
-            .iter()
-            .enumerate()
-            .find_map(|(ws_idx, ws)| ws.pane_state(pane_id).map(|pane| (ws_idx, pane)))
-    }
-
     pub(crate) fn dismiss_release_notes(&mut self) {
         let preview = self
             .state
@@ -1018,29 +554,7 @@ impl App {
         }
     }
 
-    fn update_config_file<F>(&mut self, error_context: &str, update: F)
-    where
-        F: FnOnce(&str) -> String,
-    {
-        let path = crate::config::config_path();
-        if let Some(parent) = path.parent() {
-            if let Err(err) = std::fs::create_dir_all(parent) {
-                self.state.config_diagnostic =
-                    Some(format!("failed to save {error_context}: {err}"));
-                self.config_diagnostic_deadline = Some(Instant::now() + Duration::from_secs(5));
-                return;
-            }
-        }
-
-        let content = std::fs::read_to_string(&path).unwrap_or_default();
-        let new_content = update(&content);
-        if let Err(err) = std::fs::write(&path, new_content) {
-            self.state.config_diagnostic = Some(format!("failed to save {error_context}: {err}"));
-            self.config_diagnostic_deadline = Some(Instant::now() + Duration::from_secs(5));
-        }
-    }
-
-    fn reload_keybinds(&mut self) {
+    pub(crate) fn reload_keybinds(&mut self) {
         let previous_toast = self.state.toast.clone();
         match crate::config::load_live_keybinds() {
             Ok(live) => {
@@ -1067,216 +581,145 @@ impl App {
         }
         self.sync_toast_deadline(previous_toast);
     }
+}
 
-    fn save_theme(&mut self, name: &str) {
-        self.update_config_file("theme", |content| {
-            crate::config::upsert_section_value(content, "theme", "name", &format!("\"{name}\""))
-        });
+// ---------------------------------------------------------------------------
+// Input routing for headless server mode
+// ---------------------------------------------------------------------------
+
+impl App {
+    /// Routes raw input bytes from a client through the existing input pipeline.
+    ///
+    /// The input bytes are parsed into `RawInputEvent`s and then processed.
+    /// In terminal mode, keys are routed through the same semantic
+    /// key-handling path as monolithic herdr so they are re-encoded for the
+    /// focused pane's negotiated keyboard protocol instead of passing host
+    /// terminal escape sequences through unchanged.
+    #[cfg(test)]
+    pub(crate) fn route_client_input(&mut self, data: Vec<u8>) {
+        let events = crate::raw_input::parse_raw_input_bytes_sync(&data);
+        self.route_client_events(events, true);
     }
 
-    fn save_sound(&mut self, enabled: bool) {
-        self.update_config_file("sound setting", |content| {
-            crate::config::upsert_section_bool(content, "ui.sound", "enabled", enabled)
-        });
-    }
-
-    fn save_toast(&mut self, enabled: bool) {
-        self.update_config_file("toast setting", |content| {
-            crate::config::upsert_section_bool(content, "ui.toast", "enabled", enabled)
-        });
-    }
-
-    fn seed_cwd_from_workspace(&self, ws_idx: usize) -> Option<std::path::PathBuf> {
-        self.state.workspaces.get(ws_idx)?.resolved_identity_cwd()
-    }
-
-    fn workspace_creation_source(&self) -> Option<usize> {
-        if self.state.mode == Mode::Navigate
-            && self.state.workspaces.get(self.state.selected).is_some()
-        {
-            return Some(self.state.selected);
-        }
-
-        self.state.active.or_else(|| {
-            self.state
-                .workspaces
-                .get(self.state.selected)
-                .map(|_| self.state.selected)
-        })
-    }
-
-    /// Create a workspace with a real PTY (needs event_tx).
-    fn create_workspace(&mut self) {
-        let initial_cwd = self
-            .workspace_creation_source()
-            .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx))
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| std::path::PathBuf::from("/"));
-        if let Err(e) = self.create_workspace_with_options(initial_cwd, true) {
-            error!(err = %e, "failed to create workspace");
-            self.state.mode = Mode::Navigate;
-        }
-    }
-
-    fn create_tab(&mut self) {
-        let custom_name = self.state.requested_new_tab_name.take();
-        let initial_cwd = self
-            .state
-            .active
-            .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx))
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| std::path::PathBuf::from("/"));
-        match self.create_tab_with_options(initial_cwd, true) {
-            Ok(tab_idx) => {
-                if let Some(name) = custom_name {
-                    if let Some(ws) = self
-                        .state
-                        .active
-                        .and_then(|ws_idx| self.state.workspaces.get_mut(ws_idx))
-                    {
-                        if let Some(tab) = ws.tabs.get_mut(tab_idx) {
-                            tab.set_custom_name(name);
+    pub(crate) fn route_client_events(
+        &mut self,
+        events: Vec<crate::raw_input::RawInputEvent>,
+        apply_host_terminal_theme: bool,
+    ) {
+        for event in events {
+            match event {
+                crate::raw_input::RawInputEvent::Key(key) => {
+                    let key_id = repeat_key_identity(&key);
+                    match key.kind {
+                        crossterm::event::KeyEventKind::Press => {
+                            if self.state.mode == Mode::Terminal {
+                                self.suppressed_repeat_keys.remove(&key_id);
+                                self.handle_terminal_key_headless(key);
+                            } else {
+                                self.suppressed_repeat_keys.insert(key_id);
+                                self.handle_non_terminal_key(key);
+                            }
                         }
-                        self.schedule_session_save();
+                        crossterm::event::KeyEventKind::Repeat => {
+                            if self.state.mode == Mode::Terminal
+                                && !self.suppressed_repeat_keys.contains(&key_id)
+                            {
+                                self.handle_terminal_key_headless(key);
+                            }
+                            // Repeats in non-terminal modes are ignored
+                            // (same as monolithic behavior).
+                        }
+                        crossterm::event::KeyEventKind::Release => {
+                            self.suppressed_repeat_keys.remove(&key_id);
+                        }
                     }
                 }
+                crate::raw_input::RawInputEvent::Mouse(mouse) => {
+                    self.handle_mouse_event_headless(mouse);
+                }
+                crate::raw_input::RawInputEvent::Paste(text) => {
+                    if self.state.mode == Mode::Terminal {
+                        if let Some(ws_idx) = self.state.active {
+                            if let Some(ws) = self.state.workspaces.get(ws_idx) {
+                                if let Some(focused) = ws.focused_pane_id() {
+                                    if let Some(runtime) = ws.runtimes.get(&focused) {
+                                        let _ = runtime.try_send_bytes(bytes::Bytes::from(
+                                            if runtime
+                                                .input_state()
+                                                .map(|s| s.bracketed_paste)
+                                                .unwrap_or(false)
+                                            {
+                                                format!("\x1b[200~{text}\x1b[201~")
+                                            } else {
+                                                text
+                                            },
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
+                    if apply_host_terminal_theme {
+                        self.update_host_terminal_theme(kind, color);
+                    }
+                }
+                crate::raw_input::RawInputEvent::Unsupported => {}
             }
-            Err(e) => {
-                error!(err = %e, "failed to create tab");
+        }
+    }
+
+    /// Handles a key event in non-terminal mode for the headless server.
+    ///
+    /// Uses the standalone handler functions that work on `&mut AppState`
+    /// since the server doesn't have the async context of the monolithic App.
+    fn handle_non_terminal_key(&mut self, key: crate::input::TerminalKey) {
+        let key_event = key.as_key_event();
+        match self.state.mode {
+            Mode::Navigate => {
+                input::handle_navigate_key(&mut self.state, key_event);
+            }
+            Mode::RenameWorkspace | Mode::RenameTab => {
+                input::handle_rename_key(&mut self.state, key_event);
+            }
+            Mode::Resize => {
+                input::handle_resize_key(&mut self.state, key_event);
+            }
+            Mode::ConfirmClose => {
+                input::handle_confirm_close_key(&mut self.state, key_event);
+            }
+            Mode::ContextMenu => {
+                input::handle_context_menu_key(&mut self.state, key_event);
+            }
+            Mode::KeybindHelp => {
+                input::handle_keybind_help_key(&mut self.state, key_event);
+            }
+            Mode::GlobalMenu => {
+                input::handle_global_menu_key(&mut self.state, key_event);
+            }
+            Mode::Onboarding => {
+                self.handle_onboarding_key(key_event);
+            }
+            Mode::ReleaseNotes => {
+                self.handle_release_notes_key(key_event);
+            }
+            Mode::Settings => {
+                self.handle_settings_key(key_event);
+            }
+            Mode::Terminal => {
+                // Should not be called in terminal mode.
             }
         }
     }
 
-    fn create_tab_with_options(
-        &mut self,
-        initial_cwd: std::path::PathBuf,
-        focus: bool,
-    ) -> std::io::Result<usize> {
-        let Some(ws_idx) = self.state.active else {
-            return self.create_workspace_with_options(initial_cwd, focus);
-        };
-        let (rows, cols) = self.state.estimate_pane_size();
-        let ws = &mut self.state.workspaces[ws_idx];
-        let idx = ws.create_tab(
-            rows,
-            cols,
-            initial_cwd,
-            self.state.pane_scrollback_limit_bytes,
-            self.state.host_terminal_theme,
-        )?;
-        if focus {
-            ws.switch_tab(idx);
-            self.state.mode = Mode::Terminal;
-        }
-        self.schedule_session_save();
-        Ok(idx)
-    }
-
-    fn create_workspace_with_options(
-        &mut self,
-        initial_cwd: std::path::PathBuf,
-        focus: bool,
-    ) -> std::io::Result<usize> {
-        let (rows, cols) = self.state.estimate_pane_size();
-        let mut ws = Workspace::new(
-            initial_cwd,
-            rows,
-            cols,
-            self.state.pane_scrollback_limit_bytes,
-            self.state.host_terminal_theme,
-            self.event_tx.clone(),
-            self.render_notify.clone(),
-            self.render_dirty.clone(),
-        )?;
-        ws.refresh_git_ahead_behind();
-        self.state.workspaces.push(ws);
-        let idx = self.state.workspaces.len() - 1;
-        if focus || self.state.active.is_none() {
-            self.state.switch_workspace(idx);
-            self.state.mode = Mode::Terminal;
-        }
-        self.schedule_session_save();
-        Ok(idx)
-    }
-}
-
-fn tab_attention_priority(state: crate::detect::AgentState, seen: bool) -> u8 {
-    match (state, seen) {
-        (crate::detect::AgentState::Blocked, _) => 4,
-        (crate::detect::AgentState::Idle, false) => 3,
-        (crate::detect::AgentState::Working, _) => 2,
-        (crate::detect::AgentState::Idle, true) => 1,
-        (crate::detect::AgentState::Unknown, _) => 0,
-    }
-}
-
-fn parse_api_key(key: &str) -> Option<crossterm::event::KeyEvent> {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-    let normalized = key.trim();
-    match normalized {
-        "Enter" | "enter" => Some(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())),
-        "Tab" | "tab" => Some(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty())),
-        "Esc" | "esc" => Some(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())),
-        "Backspace" | "backspace" => Some(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty())),
-        "Up" | "up" => Some(KeyEvent::new(KeyCode::Up, KeyModifiers::empty())),
-        "Down" | "down" => Some(KeyEvent::new(KeyCode::Down, KeyModifiers::empty())),
-        "Left" | "left" => Some(KeyEvent::new(KeyCode::Left, KeyModifiers::empty())),
-        "Right" | "right" => Some(KeyEvent::new(KeyCode::Right, KeyModifiers::empty())),
-        "C-c" | "c-c" | "ctrl+c" => Some(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-        _ if normalized.len() == 1 => normalized
-            .chars()
-            .next()
-            .map(|ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty())),
-        _ => None,
-    }
-}
-
-fn encode_api_text(runtime: &crate::pane::PaneRuntime, text: &str) -> Vec<u8> {
-    let bracketed = runtime
-        .input_state()
-        .map(|state| state.bracketed_paste)
-        .unwrap_or(false);
-    if bracketed {
-        format!("\x1b[200~{text}\x1b[201~").into_bytes()
-    } else {
-        text.as_bytes().to_vec()
-    }
-}
-
-fn encode_api_keys(
-    runtime: &crate::pane::PaneRuntime,
-    keys: &[String],
-) -> Result<Vec<Vec<u8>>, String> {
-    let mut encoded_keys = Vec::with_capacity(keys.len());
-    for key in keys {
-        let Some(key_event) = parse_api_key(key) else {
-            return Err(key.clone());
-        };
-        encoded_keys.push(runtime.encode_terminal_key(key_event.into()));
-    }
-    Ok(encoded_keys)
-}
-
-fn detect_state_from_api(state: crate::api::schema::PaneAgentState) -> crate::detect::AgentState {
-    match state {
-        crate::api::schema::PaneAgentState::Idle => crate::detect::AgentState::Idle,
-        crate::api::schema::PaneAgentState::Working => crate::detect::AgentState::Working,
-        crate::api::schema::PaneAgentState::Blocked => crate::detect::AgentState::Blocked,
-        crate::api::schema::PaneAgentState::Unknown => crate::detect::AgentState::Unknown,
-    }
-}
-
-fn pane_agent_status(
-    state: crate::detect::AgentState,
-    seen: bool,
-) -> crate::api::schema::AgentStatus {
-    match (state, seen) {
-        (crate::detect::AgentState::Idle, false) => crate::api::schema::AgentStatus::Done,
-        (crate::detect::AgentState::Idle, true) => crate::api::schema::AgentStatus::Idle,
-        (crate::detect::AgentState::Working, _) => crate::api::schema::AgentStatus::Working,
-        (crate::detect::AgentState::Blocked, _) => crate::api::schema::AgentStatus::Blocked,
-        (crate::detect::AgentState::Unknown, _) => crate::api::schema::AgentStatus::Unknown,
+    /// Handles a mouse event for the headless server.
+    ///
+    /// Delegates to the same mouse handling logic used in the monolithic
+    /// mode (hit-testing against the rendered UI), which works because
+    /// the server's AppState maintains view geometry from virtual rendering.
+    fn handle_mouse_event_headless(&mut self, mouse: crossterm::event::MouseEvent) {
+        self.handle_mouse(mouse);
     }
 }
 
@@ -1285,6 +728,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::detect::{Agent, AgentState};
+    use crate::pane::PaneRuntime;
     use crate::workspace::Workspace;
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
     use std::sync::{Mutex, OnceLock};
@@ -1343,11 +787,12 @@ mod tests {
         let path = temp_config_path("startup-preview-update-available");
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
 
-        crate::release_notes::save_pending("0.5.0", "### Changed\n- One").unwrap();
+        // Use a bogus far-future version so preview=true regardless of current binary version.
+        crate::release_notes::save_pending("99.99.99", "### Changed\n- One").unwrap();
 
         let app = test_app();
 
-        assert_eq!(app.state.update_available.as_deref(), Some("0.5.0"));
+        assert_eq!(app.state.update_available.as_deref(), Some("99.99.99"));
         assert!(app.state.latest_release_notes_available);
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
@@ -1541,8 +986,8 @@ mod tests {
             ),
         };
 
-        assert!(!api_request_changes_ui(&read_only));
-        assert!(api_request_changes_ui(&mutating));
+        assert!(!crate::api::request_changes_ui(&read_only));
+        assert!(crate::api::request_changes_ui(&mutating));
     }
 
     #[test]
@@ -1611,6 +1056,22 @@ mod tests {
 
         assert_eq!(ws_idx, 1);
         assert_eq!(seed_cwd, std::path::PathBuf::from("/tmp/pion"));
+    }
+
+    #[test]
+    fn server_stop_request_sets_should_quit_flag() {
+        let mut app = test_app();
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_server_stop".into(),
+            method: crate::api::schema::Method::ServerStop(
+                crate::api::schema::EmptyParams::default(),
+            ),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["result"]["type"], "ok");
+        assert!(app.state.should_quit);
     }
 
     #[test]
@@ -1690,6 +1151,35 @@ mod tests {
     }
 
     #[test]
+    fn headless_next_loop_deadline_ignores_resize_poll() {
+        let mut app = test_app();
+        let now = Instant::now();
+        app.next_resize_poll = now + Duration::from_millis(100);
+        app.session_save_deadline = Some(now + Duration::from_secs(2));
+        app.next_auto_update_check = Some(now + Duration::from_secs(6));
+
+        assert_eq!(
+            app.next_headless_loop_deadline(now, false),
+            app.session_save_deadline
+        );
+    }
+
+    #[test]
+    fn headless_next_loop_deadline_returns_none_when_resize_poll_is_only_deadline() {
+        let mut app = test_app();
+        let now = Instant::now();
+        app.next_resize_poll = now - Duration::from_millis(1);
+        app.config_diagnostic_deadline = None;
+        app.toast_deadline = None;
+        app.next_animation_tick = None;
+        app.next_auto_update_check = None;
+        app.session_save_deadline = None;
+        app.state.workspaces.clear();
+
+        assert_eq!(app.next_headless_loop_deadline(now, false), None);
+    }
+
+    #[test]
     fn due_session_save_deadline_is_cleared() {
         let mut app = test_app();
         app.session_save_deadline = Some(Instant::now() - Duration::from_secs(1));
@@ -1756,6 +1246,232 @@ mod tests {
             app.state.workspaces[0].pane_state(pane_id).unwrap().state,
             AgentState::Idle,
             "Working→Idle should still apply after temporary queue pressure"
+        );
+    }
+
+    #[test]
+    fn route_client_input_dispatches_navigate_mode_keybinds() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        // Start in navigate mode.
+        app.state.mode = Mode::Navigate;
+
+        // Send Ctrl+B then Esc (prefix → leave navigate mode).
+        // Ctrl+B is 0x02 in raw terminal input.
+        // After entering navigate mode and pressing Esc, we should leave navigate mode.
+        let esc_bytes = vec![0x1b]; // Esc
+        app.route_client_input(esc_bytes);
+        // Esc in navigate mode should leave navigate mode.
+        assert_eq!(
+            app.state.mode,
+            Mode::Terminal,
+            "Esc should leave navigate mode and return to Terminal mode"
+        );
+    }
+
+    #[test]
+    fn route_client_input_q_detaches_in_persistence_mode() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.quit_detaches = true;
+
+        // Start in navigate mode.
+        app.state.mode = Mode::Navigate;
+        assert!(!app.state.detach_requested);
+
+        let q_bytes = b"q".to_vec();
+        app.route_client_input(q_bytes);
+
+        assert!(
+            app.state.detach_requested,
+            "q should detach in persistence mode"
+        );
+        assert_eq!(
+            app.state.mode,
+            Mode::Terminal,
+            "q should leave navigate mode"
+        );
+    }
+
+    #[test]
+    fn route_client_input_prefix_then_q_detaches_in_persistence_mode() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.quit_detaches = true;
+
+        // Start in terminal mode (default after workspace creation).
+        app.state.mode = Mode::Terminal;
+        assert!(!app.state.detach_requested);
+
+        // Send Ctrl+B (prefix key, raw byte 0x02).
+        let prefix_bytes = vec![0x02];
+        app.route_client_input(prefix_bytes);
+
+        assert_eq!(
+            app.state.mode,
+            Mode::Navigate,
+            "prefix key should enter navigate mode"
+        );
+        assert!(
+            !app.state.detach_requested,
+            "prefix key should not set detach flag"
+        );
+
+        let q_bytes = b"q".to_vec();
+        app.route_client_input(q_bytes);
+
+        assert!(
+            app.state.detach_requested,
+            "q should detach in persistence mode"
+        );
+        assert_eq!(
+            app.state.mode,
+            Mode::Terminal,
+            "q should leave navigate mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn route_client_input_reencodes_terminal_keys_for_focused_pane_protocol() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut rx) = PaneRuntime::test_with_channel(80, 24);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        // Ghostty/kitty-style Ctrl-C should be normalized back to the pane's
+        // negotiated encoding instead of being forwarded verbatim.
+        app.route_client_input(b"\x1b[99;5u".to_vec());
+
+        assert_eq!(rx.recv().await.unwrap(), bytes::Bytes::from(vec![3]));
+    }
+
+    #[tokio::test]
+    async fn route_client_input_splits_multi_event_payloads_before_forwarding() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut rx) = PaneRuntime::test_with_channel(80, 24);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        app.route_client_input(b"ab".to_vec());
+
+        assert_eq!(rx.recv().await.unwrap(), bytes::Bytes::from_static(b"a"));
+        assert_eq!(rx.recv().await.unwrap(), bytes::Bytes::from_static(b"b"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn route_client_input_handles_mouse_events() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        // Send a mouse scroll-up event via SGR encoding.
+        let mouse_bytes = b"\x1b[<64;10;5M".to_vec();
+        // This should not panic even though mouse handling is simplified
+        // in headless mode.
+        app.route_client_input(mouse_bytes);
+        // No assertions on specific behavior — just no panic.
+    }
+
+    #[test]
+    fn route_client_input_advances_onboarding_modal() {
+        let mut app = test_app();
+        app.state.mode = Mode::Onboarding;
+        app.state.onboarding_step = 0;
+
+        app.route_client_input(b"\r".to_vec());
+
+        assert_eq!(app.state.onboarding_step, 1);
+        assert_eq!(app.state.mode, Mode::Onboarding);
+    }
+
+    #[test]
+    fn route_client_input_closes_release_notes_modal() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::ReleaseNotes;
+        app.state.release_notes = Some(release_notes_state());
+
+        app.route_client_input(b"\x1b".to_vec());
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app.state.release_notes.is_none());
+    }
+
+    #[test]
+    fn route_client_input_closes_settings_modal() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Settings;
+        app.state.settings.original_theme = Some(app.state.theme_name.clone());
+        app.state.settings.original_palette = Some(app.state.palette.clone());
+
+        app.route_client_input(b"\x1b".to_vec());
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn route_client_input_updates_host_terminal_theme_from_osc_response() {
+        let mut app = test_app();
+
+        app.route_client_input(b"\x1b]11;#123456\x07".to_vec());
+
+        assert_eq!(
+            app.state.host_terminal_theme.background,
+            Some(crate::terminal_theme::RgbColor {
+                r: 0x12,
+                g: 0x34,
+                b: 0x56,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_raw_input_bytes_with_ranges_tracks_offsets() {
+        // Verify that the range-aware parser correctly tracks byte offsets
+        // for events within a multi-event input buffer.
+        let input = b"\x1b[Aa".to_vec(); // Up arrow + 'a'
+        let events = crate::raw_input::parse_raw_input_bytes_with_ranges(&input);
+
+        assert_eq!(events.len(), 2, "should parse Up arrow and 'a'");
+        // Up arrow: \x1b[A = 3 bytes starting at offset 0
+        assert_eq!(events[0].start, 0);
+        assert_eq!(events[0].len, 3);
+        // 'a': 1 byte starting at offset 3
+        assert_eq!(events[1].start, 3);
+        assert_eq!(events[1].len, 1);
+
+        // Verify the raw bytes for each event are correct.
+        assert_eq!(
+            &input[events[0].start..events[0].start + events[0].len],
+            b"\x1b[A"
+        );
+        assert_eq!(
+            &input[events[1].start..events[1].start + events[1].len],
+            b"a"
         );
     }
 }

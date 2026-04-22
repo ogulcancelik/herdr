@@ -217,9 +217,16 @@ fn process_session_id(pid: u32) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn clipboard_commands_prefer_wayland_when_available() {
+        let _guard = env_lock().lock().unwrap();
         unsafe {
             std::env::set_var("WAYLAND_DISPLAY", "wayland-0");
             std::env::remove_var("DISPLAY");
@@ -231,6 +238,7 @@ mod tests {
 
     #[test]
     fn clipboard_commands_include_x11_fallbacks() {
+        let _guard = env_lock().lock().unwrap();
         unsafe {
             std::env::remove_var("WAYLAND_DISPLAY");
             std::env::set_var("DISPLAY", ":0");

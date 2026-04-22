@@ -1,14 +1,14 @@
 # herdr task runner
 
-# Run unit tests
+# Run tests
 test:
-    cargo test
+    cargo nextest run
     python3 -m unittest scripts.test_changelog scripts.test_vendor_libghostty_vt
 
 # Run PR CI checks
 ci:
     cargo fmt --check
-    cargo test
+    cargo nextest run
 
 # Check formatting + run unit tests + maintenance script tests
 check: ci

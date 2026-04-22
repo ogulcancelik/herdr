@@ -586,9 +586,17 @@ pub struct AppState {
     pub selected: usize,
     pub mode: Mode,
     pub should_quit: bool,
+    /// In persistence mode, client quit actions detach instead of stopping the server.
+    pub quit_detaches: bool,
+    /// Set when the current client should detach from the persistent session.
+    /// The server's event loop checks this and handles client detach.
+    pub detach_requested: bool,
     pub request_new_workspace: bool,
     pub request_new_tab: bool,
     pub request_reload_keybinds: bool,
+    /// Set when UI interaction requested a clipboard write that must be
+    /// handled by the outer App/event loop instead of directly from AppState.
+    pub request_clipboard_write: Option<Vec<u8>>,
     pub creating_new_tab: bool,
     pub requested_new_tab_name: Option<String>,
     pub request_complete_onboarding: bool,
@@ -657,6 +665,10 @@ impl AppState {
         self.sound.enabled
     }
 
+    pub fn is_prefix(&self, key: &crossterm::event::KeyEvent) -> bool {
+        key_matches(key, self.prefix_code, self.prefix_mods)
+    }
+
     pub fn estimate_pane_size(&self) -> (u16, u16) {
         if let Some(info) = self.view.pane_infos.first() {
             (info.rect.height, info.rect.width)
@@ -666,7 +678,6 @@ impl AppState {
     }
 }
 
-#[cfg(test)]
 pub fn key_matches(
     key: &crossterm::event::KeyEvent,
     expected_code: KeyCode,
@@ -700,9 +711,12 @@ impl AppState {
             selected: 0,
             mode: Mode::Navigate,
             should_quit: false,
+            quit_detaches: false,
+            detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,
             request_reload_keybinds: false,
+            request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
             request_complete_onboarding: false,
@@ -759,8 +773,10 @@ impl AppState {
                 new_workspace_label: "n".into(),
                 rename_workspace: (KeyCode::Char('n'), KeyModifiers::SHIFT),
                 rename_workspace_label: "shift+n".into(),
-                close_workspace: (KeyCode::Char('d'), KeyModifiers::empty()),
-                close_workspace_label: "d".into(),
+                close_workspace: (KeyCode::Char('d'), KeyModifiers::SHIFT),
+                close_workspace_label: "shift+d".into(),
+                detach: None,
+                detach_label: None,
                 previous_workspace: None,
                 previous_workspace_label: None,
                 next_workspace: None,

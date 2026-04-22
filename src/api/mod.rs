@@ -2,7 +2,6 @@ pub mod schema;
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,6 +26,25 @@ const CONNECTION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const APP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const INITIAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub(crate) fn request_changes_ui(request: &Request) -> bool {
+    matches!(
+        &request.method,
+        Method::WorkspaceCreate(_)
+            | Method::WorkspaceFocus(_)
+            | Method::WorkspaceRename(_)
+            | Method::WorkspaceClose(_)
+            | Method::TabCreate(_)
+            | Method::TabFocus(_)
+            | Method::TabRename(_)
+            | Method::TabClose(_)
+            | Method::PaneSplit(_)
+            | Method::PaneReportAgent(_)
+            | Method::PaneClearAgentAuthority(_)
+            | Method::PaneReleaseAgent(_)
+            | Method::PaneClose(_)
+    )
+}
 
 pub struct ApiRequestMessage {
     pub request: Request,
@@ -78,16 +96,6 @@ impl EventHub {
 pub fn socket_path() -> PathBuf {
     if let Ok(path) = std::env::var(SOCKET_PATH_ENV_VAR) {
         return PathBuf::from(path);
-    }
-
-    let socket_name = if crate::config::app_dir_name() == "herdr" {
-        "herdr.sock"
-    } else {
-        "herdr-dev.sock"
-    };
-
-    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-        return PathBuf::from(dir).join(socket_name);
     }
 
     crate::config::config_dir().join("herdr.sock")
@@ -156,47 +164,16 @@ pub fn start_server(
 }
 
 fn prepare_socket_path(path: &Path) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    if !path.exists() {
-        return Ok(());
-    }
-
-    match UnixStream::connect(path) {
-        Ok(_) => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AddrInUse,
-                format!(
-                    "herdr is already running (socket busy at {})",
-                    path.display()
-                ),
-            ));
-        }
-        Err(err)
-            if matches!(
-                err.kind(),
-                std::io::ErrorKind::ConnectionRefused
-                    | std::io::ErrorKind::NotFound
-                    | std::io::ErrorKind::TimedOut
-            ) => {}
-        Err(err) => return Err(err),
-    }
-
-    if let Err(err) = fs::remove_file(path) {
-        if err.kind() != std::io::ErrorKind::NotFound {
-            return Err(err);
-        }
-    }
-
-    Ok(())
+    crate::ipc::prepare_socket_path(path, |path| {
+        format!(
+            "herdr is already running (socket busy at {})",
+            path.display()
+        )
+    })
 }
 
 fn restrict_socket_permissions(path: &Path) -> std::io::Result<()> {
-    let mut permissions = fs::metadata(path)?.permissions();
-    permissions.set_mode(SOCKET_PERMISSION_MODE);
-    fs::set_permissions(path, permissions)
+    crate::ipc::restrict_socket_permissions(path, SOCKET_PERMISSION_MODE)
 }
 
 fn handle_connection(
@@ -947,6 +924,13 @@ fn error_response_json(id: String, code: &str, message: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn unique_test_path(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -965,10 +949,29 @@ mod tests {
 
     #[test]
     fn socket_path_prefers_explicit_env_override() {
+        let _guard = env_lock().lock().unwrap();
         let unique = format!("/tmp/herdr-test-{}.sock", std::process::id());
         std::env::set_var(SOCKET_PATH_ENV_VAR, &unique);
         assert_eq!(socket_path(), PathBuf::from(&unique));
         std::env::remove_var(SOCKET_PATH_ENV_VAR);
+    }
+
+    #[test]
+    fn socket_path_defaults_to_config_dir_even_when_xdg_runtime_dir_is_set() {
+        let _guard = env_lock().lock().unwrap();
+        let config_home = unique_test_path("socket-default-config-home");
+        let runtime_dir = unique_test_path("socket-default-runtime");
+        std::env::remove_var(SOCKET_PATH_ENV_VAR);
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
+
+        let expected = config_home
+            .join(crate::config::app_dir_name())
+            .join("herdr.sock");
+        assert_eq!(socket_path(), expected);
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_RUNTIME_DIR");
     }
 
     #[test]

@@ -38,8 +38,8 @@ After the change is integrated, remove the task worktree and delete the task bra
 ## Testing
 
 ```bash
-just test               # cargo tests + maintenance script tests
-just check              # formatting check + cargo tests + maintenance script tests
+just test               # cargo nextest + maintenance script tests
+just check              # formatting check + cargo nextest + maintenance script tests
 ```
 
 Default flow: run `just check` before committing.

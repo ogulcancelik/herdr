@@ -62,6 +62,8 @@ Run the PR checks and make sure they pass.
 just ci
 ```
 
+`just ci` runs `cargo fmt --check` and `cargo nextest run`.
+
 Do not open a PR that bypasses failing tests, formatting, or build errors.
 
 ## PR scope

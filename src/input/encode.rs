@@ -442,3 +442,366 @@ fn encode_f_key(n: u8) -> Vec<u8> {
         _ => vec![],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::*;
+    use crate::input::parse_terminal_key_sequence;
+
+    fn assert_terminal_key_eq(
+        actual: TerminalKey,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        kind: crossterm::event::KeyEventKind,
+        shifted_codepoint: Option<u32>,
+    ) {
+        assert_eq!(actual.code, code);
+        assert_eq!(actual.modifiers, modifiers);
+        assert_eq!(actual.kind, kind);
+        assert_eq!(actual.shifted_codepoint, shifted_codepoint);
+    }
+
+    #[test]
+    fn legacy_enter() {
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+        assert_eq!(encode_key(key, KeyboardProtocol::Legacy), vec![b'\r']);
+    }
+
+    #[test]
+    fn legacy_ctrl_c() {
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(encode_key(key, KeyboardProtocol::Legacy), vec![3]);
+    }
+
+    #[test]
+    fn legacy_shift_enter_is_just_cr() {
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        assert_eq!(encode_key(key, KeyboardProtocol::Legacy), vec![b'\r']);
+    }
+
+    #[test]
+    fn legacy_alt_up() {
+        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::ALT);
+        assert_eq!(encode_key(key, KeyboardProtocol::Legacy), b"\x1b[1;3A");
+    }
+
+    #[test]
+    fn legacy_shift_right() {
+        let key = KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT);
+        assert_eq!(encode_key(key, KeyboardProtocol::Legacy), b"\x1b[1;2C");
+    }
+
+    #[test]
+    fn legacy_ctrl_left() {
+        let key = KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL);
+        assert_eq!(encode_key(key, KeyboardProtocol::Legacy), b"\x1b[1;5D");
+    }
+
+    #[test]
+    fn legacy_ctrl_shift_end() {
+        let key = KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        assert_eq!(encode_key(key, KeyboardProtocol::Legacy), b"\x1b[1;6F");
+    }
+
+    #[test]
+    fn legacy_alt_delete() {
+        let key = KeyEvent::new(KeyCode::Delete, KeyModifiers::ALT);
+        assert_eq!(encode_key(key, KeyboardProtocol::Legacy), b"\x1b[3;3~");
+    }
+
+    #[test]
+    fn legacy_shift_f5() {
+        let key = KeyEvent::new(KeyCode::F(5), KeyModifiers::SHIFT);
+        assert_eq!(encode_key(key, KeyboardProtocol::Legacy), b"\x1b[15;2~");
+    }
+
+    #[test]
+    fn legacy_alt_char_still_esc_prefix() {
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT);
+        assert_eq!(encode_key(key, KeyboardProtocol::Legacy), b"\x1ba");
+    }
+
+    #[test]
+    fn application_cursor_keys_use_ss3_sequences() {
+        assert_eq!(encode_cursor_key(KeyCode::Up, true), b"\x1bOA");
+        assert_eq!(encode_cursor_key(KeyCode::Down, true), b"\x1bOB");
+    }
+
+    #[test]
+    fn normal_cursor_keys_use_csi_sequences() {
+        assert_eq!(encode_cursor_key(KeyCode::Up, false), b"\x1b[A");
+        assert_eq!(encode_cursor_key(KeyCode::Down, false), b"\x1b[B");
+    }
+
+    #[test]
+    fn sgr_mouse_scroll_encodes_wheel_button_and_coordinates() {
+        let encoded = encode_mouse_scroll(
+            crossterm::event::MouseEventKind::ScrollDown,
+            4,
+            6,
+            KeyModifiers::SHIFT,
+            MouseProtocolEncoding::Sgr,
+        )
+        .expect("mouse scroll should encode");
+
+        assert_eq!(encoded, b"\x1b[<69;5;7M");
+    }
+
+    #[test]
+    fn sgr_mouse_release_keeps_button_code() {
+        let encoded = encode_mouse_button(
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            11,
+            9,
+            KeyModifiers::empty(),
+            MouseProtocolEncoding::Sgr,
+        )
+        .expect("mouse release should encode");
+
+        assert_eq!(encoded, b"\x1b[<0;12;10m");
+    }
+
+    #[test]
+    fn kitty_shift_enter() {
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        assert_eq!(
+            encode_key(key, KeyboardProtocol::Kitty { flags: 1 }),
+            b"\x1b[13;2u"
+        );
+    }
+
+    #[test]
+    fn kitty_ctrl_shift_a() {
+        let key = KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(
+            encode_key(key, KeyboardProtocol::Kitty { flags: 1 }),
+            b"\x1b[97;6u"
+        );
+    }
+
+    #[test]
+    fn kitty_shift_uppercase_letter_sends_text() {
+        let key = KeyEvent::new(KeyCode::Char('L'), KeyModifiers::SHIFT);
+        assert_eq!(encode_key(key, KeyboardProtocol::Kitty { flags: 1 }), b"L");
+    }
+
+    #[test]
+    fn kitty_shift_uppercase_letter_ignores_alternate_key_reporting_for_text() {
+        let key = KeyEvent::new(KeyCode::Char('L'), KeyModifiers::SHIFT);
+        assert_eq!(encode_key(key, KeyboardProtocol::Kitty { flags: 7 }), b"L");
+    }
+
+    #[test]
+    fn kitty_shift_lowercase_letter_sends_uppercase_text() {
+        let key = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::SHIFT);
+        assert_eq!(encode_key(key, KeyboardProtocol::Kitty { flags: 1 }), b"L");
+    }
+
+    #[test]
+    fn kitty_alt_shift_uppercase_letter_uses_base_codepoint() {
+        let key = KeyEvent::new(KeyCode::Char('L'), KeyModifiers::ALT | KeyModifiers::SHIFT);
+        assert_eq!(
+            encode_key(key, KeyboardProtocol::Kitty { flags: 1 }),
+            b"\x1b[108;4u"
+        );
+    }
+
+    #[test]
+    fn kitty_ctrl_shift_uppercase_letter_uses_base_codepoint() {
+        let key = KeyEvent::new(
+            KeyCode::Char('L'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(
+            encode_key(key, KeyboardProtocol::Kitty { flags: 1 }),
+            b"\x1b[108;6u"
+        );
+    }
+
+    #[test]
+    fn legacy_shift_uppercase_letter_stays_uppercase() {
+        let key = KeyEvent::new(KeyCode::Char('L'), KeyModifiers::SHIFT);
+        assert_eq!(encode_key(key, KeyboardProtocol::Legacy), b"L");
+    }
+
+    #[test]
+    fn kitty_alt_enter() {
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
+        assert_eq!(
+            encode_key(key, KeyboardProtocol::Kitty { flags: 1 }),
+            b"\x1b[13;3u"
+        );
+    }
+
+    #[test]
+    fn kitty_plain_ctrl_c_uses_csi_u() {
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(
+            encode_key(key, KeyboardProtocol::Kitty { flags: 1 }),
+            b"\x1b[99;5u"
+        );
+    }
+
+    #[test]
+    fn kitty_plain_ctrl_c_includes_press_event_when_requested() {
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(
+            encode_key(key, KeyboardProtocol::Kitty { flags: 3 }),
+            b"\x1b[99;5:1u"
+        );
+    }
+
+    #[test]
+    fn kitty_unmodified_uses_legacy() {
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty());
+        assert_eq!(encode_key(key, KeyboardProtocol::Kitty { flags: 1 }), b"a");
+    }
+
+    #[test]
+    fn kitty_shift_tab() {
+        let key = KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT);
+        assert_eq!(
+            encode_key(key, KeyboardProtocol::Kitty { flags: 1 }),
+            b"\x1b[9;2u"
+        );
+    }
+
+    #[test]
+    fn kitty_ctrl_shift_enter() {
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        assert_eq!(
+            encode_key(key, KeyboardProtocol::Kitty { flags: 1 }),
+            b"\x1b[13;6u"
+        );
+    }
+
+    #[test]
+    fn kitty_repeat_event_type_is_encoded_when_requested() {
+        let key = KeyEvent::new_with_kind(
+            KeyCode::Enter,
+            KeyModifiers::SHIFT,
+            crossterm::event::KeyEventKind::Repeat,
+        );
+        assert_eq!(
+            encode_key(key, KeyboardProtocol::Kitty { flags: 3 }),
+            b"\x1b[13;2:2u"
+        );
+    }
+
+    #[test]
+    fn kitty_shift_letter_release_does_not_emit_text() {
+        let key = KeyEvent::new_with_kind(
+            KeyCode::Char('L'),
+            KeyModifiers::SHIFT,
+            crossterm::event::KeyEventKind::Release,
+        );
+        assert_eq!(encode_key(key, KeyboardProtocol::Kitty { flags: 7 }), b"");
+    }
+
+    #[test]
+    fn kitty_shifted_symbol_sends_text() {
+        let key = TerminalKey::new(KeyCode::Char('1'), KeyModifiers::SHIFT)
+            .with_shifted_codepoint('!' as u32);
+        assert_eq!(
+            encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 7 }),
+            b"!"
+        );
+    }
+
+    #[test]
+    fn legacy_modified_special_roundtrip_matrix() {
+        let cases = [
+            KeyEvent::new(KeyCode::Up, KeyModifiers::ALT),
+            KeyEvent::new(KeyCode::Down, KeyModifiers::ALT),
+            KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::ALT),
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Insert, KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::ALT),
+        ];
+
+        for key in cases {
+            let encoded = encode_key(key, KeyboardProtocol::Legacy);
+            let parsed =
+                parse_terminal_key_sequence(std::str::from_utf8(&encoded).unwrap()).unwrap();
+            assert_terminal_key_eq(parsed, key.code, key.modifiers, key.kind, None);
+        }
+    }
+
+    #[test]
+    fn kitty_shifted_symbol_prefers_text_over_roundtrip_key_identity() {
+        let key = TerminalKey::new(KeyCode::Char('1'), KeyModifiers::SHIFT)
+            .with_shifted_codepoint('!' as u32);
+        let encoded = encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 7 });
+        assert_eq!(encoded, b"!");
+    }
+
+    #[test]
+    fn legacy_basic_special_roundtrip_matrix() {
+        let cases = [
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()),
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+            KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+            KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
+            KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
+            KeyEvent::new(KeyCode::Home, KeyModifiers::empty()),
+            KeyEvent::new(KeyCode::End, KeyModifiers::empty()),
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::empty()),
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::empty()),
+            KeyEvent::new(KeyCode::Insert, KeyModifiers::empty()),
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::empty()),
+        ];
+
+        for key in cases {
+            let encoded = encode_key(key, KeyboardProtocol::Legacy);
+            let parsed =
+                parse_terminal_key_sequence(std::str::from_utf8(&encoded).unwrap()).unwrap();
+            assert_terminal_key_eq(parsed, key.code, key.modifiers, key.kind, None);
+        }
+    }
+
+    #[test]
+    fn kitty_shifted_symbol_pair_matrix_is_encoded_as_text() {
+        let cases = [('1', '!'), ('/', '?'), ('[', '{')];
+
+        for (base, shifted) in cases {
+            let key = TerminalKey::new(KeyCode::Char(base), KeyModifiers::SHIFT)
+                .with_shifted_codepoint(shifted as u32);
+            let encoded = encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 7 });
+            assert_eq!(encoded, shifted.to_string().into_bytes(), "base={base}");
+        }
+    }
+
+    #[test]
+    fn chinese_char_encodes_as_utf8() {
+        let key = TerminalKey::new(KeyCode::Char('中'), KeyModifiers::empty());
+        let encoded = encode_terminal_key(key, KeyboardProtocol::Legacy);
+        assert_eq!(encoded, "中".as_bytes());
+    }
+
+    #[test]
+    fn chinese_char_with_kitty_protocol_encodes_as_utf8() {
+        let key = TerminalKey::new(KeyCode::Char('文'), KeyModifiers::empty());
+        let encoded = encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 7 });
+        assert_eq!(encoded, "文".as_bytes());
+    }
+
+    #[test]
+    fn chinese_char_with_modifiers_falls_back_to_kitty_encoding() {
+        let key = TerminalKey::new(KeyCode::Char('测'), KeyModifiers::ALT);
+        let encoded = encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 7 });
+        assert!(!encoded.is_empty());
+        assert_ne!(encoded, "测".as_bytes());
+    }
+}

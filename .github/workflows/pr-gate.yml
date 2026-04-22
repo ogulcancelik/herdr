@@ -17,7 +17,10 @@ jobs:
         with:
           script: |
             const prAuthor = context.payload.pull_request.user.login;
+            const reopener = context.payload.sender?.login ?? null;
+            const action = context.payload.action;
             const defaultBranch = context.payload.repository.default_branch;
+            const maintainerPermissions = ['admin', 'maintain', 'write'];
 
             if (prAuthor.endsWith('[bot]') || prAuthor === 'dependabot[bot]') {
               console.log(`Skipping bot: ${prAuthor}`);
@@ -68,10 +71,18 @@ jobs:
               });
             }
 
-            const permission = await getPermission(prAuthor);
-            if (['admin', 'maintain', 'write'].includes(permission)) {
-              console.log(`${prAuthor} is a collaborator with ${permission} access`);
+            const authorPermission = await getPermission(prAuthor);
+            if (maintainerPermissions.includes(authorPermission)) {
+              console.log(`${prAuthor} is a collaborator with ${authorPermission} access`);
               return;
+            }
+
+            if (action === 'reopened') {
+              const reopenerPermission = reopener ? await getPermission(reopener) : null;
+              if (maintainerPermissions.includes(reopenerPermission)) {
+                console.log(`${reopener} reopened this PR with ${reopenerPermission} access; leaving it open`);
+                return;
+              }
             }
 
             const approvedContent = await getTextFile('.github/APPROVED_CONTRIBUTORS');

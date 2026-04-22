@@ -15,7 +15,7 @@ fn is_background_completion_transition(prev_state: AgentState, new_state: AgentS
         && matches!(prev_state, AgentState::Working | AgentState::Blocked)
 }
 
-fn notification_sound_for_state_change(
+pub fn notification_sound_for_state_change(
     is_active_tab: bool,
     prev_state: AgentState,
     new_state: AgentState,
@@ -89,7 +89,7 @@ pub struct PaneStateUpdate {
 // ---------------------------------------------------------------------------
 
 impl AppState {
-    fn pane_is_in_active_tab(&self, ws_idx: usize, pane_id: PaneId) -> bool {
+    pub(crate) fn pane_is_in_active_tab(&self, ws_idx: usize, pane_id: PaneId) -> bool {
         let Some(active_ws_idx) = self.active else {
             return false;
         };
@@ -445,8 +445,8 @@ impl AppState {
 
         if let Some(text) = text {
             if !text.is_empty() {
-                crate::selection::write_osc52(&text);
-                info!(len = text.len(), "copied selection to clipboard");
+                self.request_clipboard_write = Some(text.into_bytes());
+                info!("copied selection to clipboard");
             }
         }
 
@@ -472,7 +472,7 @@ impl AppState {
                 self.toast = Some(ToastNotification {
                     kind: ToastKind::UpdateInstalled,
                     title: format!("v{version} available"),
-                    context: "run `herdr update`".to_string(),
+                    context: "detach, then run `herdr update`".to_string(),
                 });
                 Vec::new()
             }
@@ -660,6 +660,22 @@ mod tests {
             state.mode = Mode::Terminal;
         }
         state
+    }
+
+    #[test]
+    fn update_ready_sets_explicit_upgrade_toast() {
+        let mut state = AppState::test_new();
+
+        let updates = state.handle_app_event(crate::events::AppEvent::UpdateReady {
+            version: "0.5.0".into(),
+        });
+
+        assert!(updates.is_empty());
+        assert_eq!(state.update_available.as_deref(), Some("0.5.0"));
+        assert!(state.latest_release_notes_available);
+        let toast = state.toast.as_ref().expect("update toast");
+        assert_eq!(toast.title, "v0.5.0 available");
+        assert_eq!(toast.context, "detach, then run `herdr update`");
     }
 
     #[test]
@@ -1038,7 +1054,7 @@ mod tests {
         let toast = state.toast.as_ref().expect("update toast");
         assert_eq!(toast.kind, ToastKind::UpdateInstalled);
         assert_eq!(toast.title, "v0.5.0 available");
-        assert_eq!(toast.context, "run `herdr update`");
+        assert_eq!(toast.context, "detach, then run `herdr update`");
     }
 
     #[test]

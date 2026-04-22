@@ -1,3 +1,5 @@
+mod support;
+
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -7,6 +9,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use support::{
+    cleanup_test_base, register_runtime_dir, register_spawned_herdr_pid,
+    unregister_spawned_herdr_pid,
+};
 
 fn unique_test_dir() -> PathBuf {
     let nanos = SystemTime::now()
@@ -21,24 +27,31 @@ struct SpawnedHerdr {
     child: Box<dyn Child + Send + Sync>,
 }
 
-fn cleanup_spawned_herdr(mut spawned: SpawnedHerdr, base: PathBuf) {
-    let pid = spawned.child.process_id();
-    let _ = spawned.child.kill();
+impl Drop for SpawnedHerdr {
+    fn drop(&mut self) {
+        let pid = self.child.process_id();
+        let _ = self.child.kill();
 
-    if let Some(pid) = pid {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            let mut status = 0;
-            let result = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
-            if result == pid as libc::pid_t || result == -1 {
-                break;
+        if let Some(pid) = pid {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                let mut status = 0;
+                let result =
+                    unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+                if result == pid as libc::pid_t || result == -1 {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
             }
-            thread::sleep(Duration::from_millis(20));
+
+            unregister_spawned_herdr_pid(Some(pid));
         }
     }
+}
 
+fn cleanup_spawned_herdr(spawned: SpawnedHerdr, base: PathBuf) {
     drop(spawned);
-    let _ = fs::remove_dir_all(base);
+    cleanup_test_base(&base);
 }
 
 fn test_lock() -> MutexGuard<'static, ()> {
@@ -71,6 +84,7 @@ fn spawn_herdr_with_path(
 ) -> SpawnedHerdr {
     fs::create_dir_all(config_home.join("herdr")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
+    register_runtime_dir(runtime_dir);
     fs::write(
         config_home.join("herdr/config.toml"),
         "onboarding = false\n",
@@ -87,10 +101,11 @@ fn spawn_herdr_with_path(
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
-    cmd.arg("--no-session");
+    cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", socket_path);
+    cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
     cmd.env("SHELL", "/bin/sh");
     cmd.env_remove("HERDR_ENV");
     if let Some(path) = path_override {
@@ -98,6 +113,7 @@ fn spawn_herdr_with_path(
     }
 
     let child = pair.slave.spawn_command(cmd).unwrap();
+    register_spawned_herdr_pid(child.process_id());
 
     SpawnedHerdr {
         _master: pair.master,

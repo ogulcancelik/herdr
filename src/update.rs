@@ -9,7 +9,11 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
+use std::io::{self, BufRead, BufReader, IsTerminal, Write};
+use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -18,6 +22,9 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const FAKE_UPDATE_VERSION_ENV: &str = "HERDR_FAKE_UPDATE_VERSION";
 const FAKE_UPDATE_NOTES_VERSION_ENV: &str = "HERDR_FAKE_UPDATE_NOTES_VERSION";
 const DEFAULT_FAKE_UPDATE_NOTES_VERSION: &str = "0.3.0";
+const SERVER_STOP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+const SERVER_SHUTDOWN_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
+const SERVER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn fake_release_notes_body(version: &str) -> String {
     let notes_version = env::var(FAKE_UPDATE_NOTES_VERSION_ENV)
@@ -213,11 +220,174 @@ fn download_and_install(release: &ReleaseInfo) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// Upgrade flow helpers
+// ---------------------------------------------------------------------------
+
+fn running_inside_herdr_env(herdr_env: Option<&str>) -> bool {
+    herdr_env == Some(crate::HERDR_ENV_VALUE)
+}
+
+fn running_inside_herdr() -> bool {
+    running_inside_herdr_env(env::var(crate::HERDR_ENV_VAR).ok().as_deref())
+}
+
+fn api_server_is_running_at(socket_path: &Path) -> bool {
+    if !socket_path.exists() {
+        return false;
+    }
+
+    UnixStream::connect(socket_path).is_ok()
+}
+
+fn api_server_is_running() -> bool {
+    api_server_is_running_at(&crate::api::socket_path())
+}
+
+fn stop_server_via_api_at(socket_path: &Path, timeout: Duration) -> Result<(), String> {
+    use crate::api::schema::{EmptyParams, Method, Request};
+
+    let request = Request {
+        id: "update:server:stop".into(),
+        method: Method::ServerStop(EmptyParams::default()),
+    };
+
+    let mut stream = UnixStream::connect(socket_path)
+        .map_err(|e| format!("failed to connect to running server: {e}"))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|e| format!("failed to set server stop write timeout: {e}"))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|e| format!("failed to set server stop read timeout: {e}"))?;
+    stream
+        .write_all(
+            serde_json::to_string(&request)
+                .map_err(|e| e.to_string())?
+                .as_bytes(),
+        )
+        .map_err(|e| format!("failed to send server stop request: {e}"))?;
+    stream
+        .write_all(b"\n")
+        .map_err(|e| format!("failed to finish server stop request: {e}"))?;
+    stream
+        .flush()
+        .map_err(|e| format!("failed to flush server stop request: {e}"))?;
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    let read = reader
+        .read_line(&mut line)
+        .map_err(|e| format!("failed to read server stop response: {e}"))?;
+    if read == 0 || line.trim().is_empty() {
+        return Err("empty server stop response".into());
+    }
+    let response: serde_json::Value =
+        serde_json::from_str(&line).map_err(|e| format!("invalid server response: {e}"))?;
+    if let Some(error) = response.get("error") {
+        return Err(format!("server stop failed: {error}"));
+    }
+
+    Ok(())
+}
+
+fn stop_server_via_api() -> Result<(), String> {
+    stop_server_via_api_at(&crate::api::socket_path(), SERVER_STOP_RESPONSE_TIMEOUT)
+}
+
+fn server_shutdown_confirmed_at(socket_path: &Path) -> Result<bool, String> {
+    if !socket_path.exists() {
+        return Ok(true);
+    }
+
+    match UnixStream::connect(socket_path) {
+        Ok(_) => Ok(false),
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::ConnectionRefused
+                    | io::ErrorKind::NotFound
+                    | io::ErrorKind::TimedOut
+            ) =>
+        {
+            Ok(true)
+        }
+        Err(err) => Err(format!(
+            "failed to confirm whether the old server stopped on {}: {err}",
+            socket_path.display()
+        )),
+    }
+}
+
+fn wait_for_server_shutdown_at(socket_path: &Path, timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if server_shutdown_confirmed_at(socket_path)? {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "shutdown was requested, but the old server is still responding on {} after {} seconds",
+                socket_path.display(),
+                timeout.as_secs()
+            ));
+        }
+        std::thread::sleep(SERVER_SHUTDOWN_POLL_INTERVAL);
+    }
+}
+
+fn wait_for_server_shutdown(timeout: Duration) -> Result<(), String> {
+    wait_for_server_shutdown_at(&crate::api::socket_path(), timeout)
+}
+
+fn parse_stop_server_response(input: &str) -> Option<bool> {
+    let trimmed = input.trim().to_ascii_lowercase();
+    match trimmed.as_str() {
+        "" | "y" | "yes" => Some(true),
+        "n" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+fn prompt_to_stop_running_server() -> Result<bool, String> {
+    if !io::stdin().is_terminal() {
+        eprintln!(
+            "a herdr server is still running on the old version. rerun `herdr update` interactively or stop it later with `herdr server stop`."
+        );
+        return Ok(false);
+    }
+
+    loop {
+        eprint!("a herdr server is still running on the old version. stop it now to apply the update? [Y/n] ");
+        io::stderr()
+            .flush()
+            .map_err(|e| format!("failed to flush prompt: {e}"))?;
+
+        let mut input = String::new();
+        let read = io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| format!("failed to read prompt response: {e}"))?;
+        if read == 0 {
+            return Ok(false);
+        }
+
+        if let Some(answer) = parse_stop_server_response(&input) {
+            return Ok(answer);
+        }
+
+        eprintln!("please answer y or n");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 /// Manual self-update command (`herdr update`).
 pub fn self_update() -> Result<Version, String> {
+    if running_inside_herdr() {
+        return Err("run `herdr update` outside herdr after detaching from the session".into());
+    }
+
     eprintln!("checking for updates...");
 
     let current = Version::current();
@@ -238,6 +408,28 @@ pub fn self_update() -> Result<Version, String> {
     }
     download_and_install(&release)?;
     eprintln!("updated to v{}", release.version);
+
+    if api_server_is_running() {
+        if prompt_to_stop_running_server()? {
+            match stop_server_via_api() {
+                Ok(()) => match wait_for_server_shutdown(SERVER_SHUTDOWN_CONFIRM_TIMEOUT) {
+                    Ok(()) => eprintln!("stopped the running herdr server. run herdr again."),
+                    Err(err) => eprintln!(
+                        "update installed, but {err}\ntry `herdr server stop` from another shell, then run `herdr` again."
+                    ),
+                },
+                Err(err) => eprintln!(
+                    "update installed, but failed to stop the running server: {err}\ntry `herdr server stop` from another shell, then run `herdr` again."
+                ),
+            }
+        } else {
+            eprintln!(
+                "update installed, but the old server is still running. restart it later to use the new version."
+            );
+        }
+    } else {
+        eprintln!("update installed. run herdr again.");
+    }
 
     Ok(release.version)
 }
@@ -283,7 +475,7 @@ pub fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
     }
 
     tracing::info!(
-        "auto-update check: v{} available, waiting for manual install",
+        "auto-update check: v{} available, waiting for explicit install",
         release.version
     );
 
@@ -324,6 +516,42 @@ fn platform_target() -> (&'static str, &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::net::UnixListener;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use std::thread;
+
+    fn unique_test_socket_path(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::path::PathBuf::from(format!(
+            "/tmp/hu-{name}-{}-{nanos}.sock",
+            std::process::id()
+        ))
+    }
+
+    fn spawn_accept_loop(path: &Path) -> (Arc<AtomicBool>, thread::JoinHandle<()>) {
+        let listener = UnixListener::bind(path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let running_thread = Arc::clone(&running);
+        let handle = thread::spawn(move || {
+            while running_thread.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((_stream, _)) => {}
+                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (running, handle)
+    }
 
     #[test]
     fn parse_version_basic() {
@@ -375,6 +603,105 @@ mod tests {
         assert!(body.contains(FAKE_UPDATE_VERSION_ENV));
 
         std::env::remove_var(FAKE_UPDATE_NOTES_VERSION_ENV);
+    }
+
+    #[test]
+    fn running_inside_herdr_env_requires_marker() {
+        assert!(running_inside_herdr_env(Some(crate::HERDR_ENV_VALUE)));
+        assert!(!running_inside_herdr_env(None));
+        assert!(!running_inside_herdr_env(Some("0")));
+    }
+
+    #[test]
+    fn parse_stop_server_response_defaults_yes_for_blank() {
+        assert_eq!(parse_stop_server_response(""), Some(true));
+        assert_eq!(parse_stop_server_response("\n"), Some(true));
+        assert_eq!(parse_stop_server_response("y"), Some(true));
+        assert_eq!(parse_stop_server_response("yes"), Some(true));
+        assert_eq!(parse_stop_server_response("n"), Some(false));
+        assert_eq!(parse_stop_server_response("no"), Some(false));
+        assert_eq!(parse_stop_server_response("later"), None);
+    }
+
+    #[test]
+    fn stop_server_via_api_accepts_success_response() {
+        let socket_path = unique_test_socket_path("stop-ok");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            assert!(
+                request.contains("server.stop")
+                    || request.contains("ServerStop")
+                    || request.contains("server_stop")
+                    || request.contains("ServerStop")
+            );
+            stream
+                .write_all(b"{\"id\":\"update:server:stop\",\"result\":{}}\n")
+                .unwrap();
+            stream.flush().unwrap();
+        });
+
+        let result = stop_server_via_api_at(&socket_path, Duration::from_millis(200));
+        let _ = handle.join();
+        let _ = fs::remove_file(&socket_path);
+        assert!(
+            result.is_ok(),
+            "expected stop request to succeed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn stop_server_via_api_times_out_when_server_never_replies() {
+        let socket_path = unique_test_socket_path("stop-timeout");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let handle = thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(200));
+        });
+
+        let err = stop_server_via_api_at(&socket_path, Duration::from_millis(50)).unwrap_err();
+        let _ = handle.join();
+        let _ = fs::remove_file(&socket_path);
+        assert!(
+            err.contains("failed to read server stop response")
+                || err.contains("empty server stop response"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn wait_for_server_shutdown_succeeds_once_socket_stops_accepting() {
+        let socket_path = unique_test_socket_path("shutdown-ok");
+        let (running, handle) = spawn_accept_loop(&socket_path);
+        let running_for_stop = Arc::clone(&running);
+        let stopper = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(60));
+            running_for_stop.store(false, Ordering::Relaxed);
+        });
+
+        let result = wait_for_server_shutdown_at(&socket_path, Duration::from_millis(500));
+        running.store(false, Ordering::Relaxed);
+        let _ = stopper.join();
+        let _ = handle.join();
+        let _ = fs::remove_file(&socket_path);
+        assert!(result.is_ok(), "expected shutdown confirmation: {result:?}");
+    }
+
+    #[test]
+    fn wait_for_server_shutdown_times_out_while_socket_keeps_responding() {
+        let socket_path = unique_test_socket_path("shutdown-timeout");
+        let (running, handle) = spawn_accept_loop(&socket_path);
+
+        let err =
+            wait_for_server_shutdown_at(&socket_path, Duration::from_millis(120)).unwrap_err();
+        running.store(false, Ordering::Relaxed);
+        let _ = handle.join();
+        let _ = fs::remove_file(&socket_path);
+        assert!(err.contains("still responding"), "unexpected error: {err}");
     }
 
     #[test]

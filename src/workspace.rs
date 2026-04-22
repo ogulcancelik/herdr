@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -9,10 +9,21 @@ use ratatui::layout::Direction;
 use tokio::sync::{mpsc, Notify};
 use tracing::info;
 
-use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
-use crate::layout::{PaneId, TileLayout};
+use crate::layout::PaneId;
+#[cfg(test)]
+use crate::layout::TileLayout;
 use crate::pane::{PaneRuntime, PaneState};
+
+mod aggregate;
+mod git;
+mod tab;
+
+use self::git::git_ahead_behind;
+pub use self::{
+    git::{derive_label_from_cwd, git_branch},
+    tab::Tab,
+};
 
 static NEXT_WORKSPACE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -25,287 +36,6 @@ pub(crate) fn generate_workspace_id() -> String {
     format!("w{micros:x}{counter:x}")
 }
 
-pub struct Tab {
-    pub custom_name: Option<String>,
-    pub number: usize,
-    /// Identity source for this tab's pane tree.
-    pub root_pane: PaneId,
-    pub layout: TileLayout,
-    /// Pane state — always present, testable without PTYs.
-    pub panes: HashMap<PaneId, PaneState>,
-    /// Best-effort cwd cache per pane. Live runtime cwd wins when available.
-    pub pane_cwds: HashMap<PaneId, PathBuf>,
-    /// Pane runtimes — only present in production (empty in tests).
-    pub runtimes: HashMap<PaneId, PaneRuntime>,
-    pub zoomed: bool,
-    pub events: mpsc::Sender<AppEvent>,
-    pub(crate) render_notify: Arc<Notify>,
-    pub(crate) render_dirty: Arc<AtomicBool>,
-}
-
-impl Drop for Tab {
-    fn drop(&mut self) {
-        let runtimes = std::mem::take(&mut self.runtimes);
-        for (pane_id, runtime) in runtimes {
-            runtime.shutdown(pane_id);
-        }
-    }
-}
-
-impl Tab {
-    pub fn new(
-        number: usize,
-        initial_cwd: PathBuf,
-        rows: u16,
-        cols: u16,
-        scrollback_limit_bytes: usize,
-        host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        events: mpsc::Sender<AppEvent>,
-        render_notify: Arc<Notify>,
-        render_dirty: Arc<AtomicBool>,
-    ) -> std::io::Result<Self> {
-        let (layout, root_id) = TileLayout::new();
-        let runtime = PaneRuntime::spawn(
-            root_id,
-            rows,
-            cols,
-            initial_cwd.clone(),
-            scrollback_limit_bytes,
-            host_terminal_theme,
-            events.clone(),
-            render_notify.clone(),
-            render_dirty.clone(),
-        )?;
-
-        let mut panes = HashMap::new();
-        panes.insert(root_id, PaneState::new());
-        let mut pane_cwds = HashMap::new();
-        pane_cwds.insert(root_id, initial_cwd);
-        let mut runtimes = HashMap::new();
-        runtimes.insert(root_id, runtime);
-
-        Ok(Self {
-            custom_name: None,
-            number,
-            root_pane: root_id,
-            layout,
-            panes,
-            pane_cwds,
-            runtimes,
-            zoomed: false,
-            events,
-            render_notify,
-            render_dirty,
-        })
-    }
-
-    pub fn display_name(&self) -> String {
-        self.custom_name
-            .clone()
-            .unwrap_or_else(|| self.number.to_string())
-    }
-
-    pub fn is_auto_named(&self) -> bool {
-        self.custom_name.is_none()
-    }
-
-    pub fn set_custom_name(&mut self, name: String) {
-        self.custom_name = Some(name);
-    }
-
-    pub fn split_focused(
-        &mut self,
-        direction: Direction,
-        rows: u16,
-        cols: u16,
-        cwd: Option<PathBuf>,
-        scrollback_limit_bytes: usize,
-        host_terminal_theme: crate::terminal_theme::TerminalTheme,
-    ) -> std::io::Result<PaneId> {
-        self.split_focused_with_runtime(
-            direction,
-            rows,
-            cols,
-            cwd,
-            scrollback_limit_bytes,
-            host_terminal_theme,
-            None,
-        )
-    }
-
-    pub fn split_focused_command(
-        &mut self,
-        direction: Direction,
-        rows: u16,
-        cols: u16,
-        cwd: Option<PathBuf>,
-        command: &str,
-        extra_env: &[(String, String)],
-        scrollback_limit_bytes: usize,
-        host_terminal_theme: crate::terminal_theme::TerminalTheme,
-    ) -> std::io::Result<PaneId> {
-        self.split_focused_with_runtime(
-            direction,
-            rows,
-            cols,
-            cwd,
-            scrollback_limit_bytes,
-            host_terminal_theme,
-            Some((command, extra_env)),
-        )
-    }
-
-    fn split_focused_with_runtime(
-        &mut self,
-        direction: Direction,
-        rows: u16,
-        cols: u16,
-        cwd: Option<PathBuf>,
-        scrollback_limit_bytes: usize,
-        host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        command: Option<(&str, &[(String, String)])>,
-    ) -> std::io::Result<PaneId> {
-        let new_id = self.layout.split_focused(direction);
-        let actual_cwd =
-            cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
-        let runtime = if let Some((command, extra_env)) = command {
-            PaneRuntime::spawn_shell_command(
-                new_id,
-                rows,
-                cols,
-                actual_cwd.clone(),
-                command,
-                extra_env,
-                scrollback_limit_bytes,
-                host_terminal_theme,
-                self.events.clone(),
-                self.render_notify.clone(),
-                self.render_dirty.clone(),
-            )?
-        } else {
-            PaneRuntime::spawn(
-                new_id,
-                rows,
-                cols,
-                actual_cwd.clone(),
-                scrollback_limit_bytes,
-                host_terminal_theme,
-                self.events.clone(),
-                self.render_notify.clone(),
-                self.render_dirty.clone(),
-            )?
-        };
-        self.panes.insert(new_id, PaneState::new());
-        self.pane_cwds.insert(new_id, actual_cwd);
-        self.runtimes.insert(new_id, runtime);
-        self.zoomed = false;
-        Ok(new_id)
-    }
-
-    pub fn close_focused(&mut self) -> Option<(PaneId, Option<PaneRuntime>)> {
-        let pane_id = self.layout.focused();
-        self.detach_pane(pane_id)
-    }
-
-    pub fn close_pane(&mut self, pane_id: PaneId) -> Option<(PaneId, Option<PaneRuntime>)> {
-        self.detach_pane(pane_id)
-    }
-
-    pub fn remove_pane(&mut self, pane_id: PaneId) -> Option<(PaneId, Option<PaneRuntime>)> {
-        self.detach_pane(pane_id)
-    }
-
-    fn detach_pane(&mut self, pane_id: PaneId) -> Option<(PaneId, Option<PaneRuntime>)> {
-        if self.layout.pane_count() <= 1 {
-            return None;
-        }
-
-        let next_root = self.promoted_root_if_needed(pane_id);
-
-        if self.layout.focused() == pane_id {
-            self.layout.close_focused();
-        } else {
-            let prev_focus = self.layout.focused();
-            self.layout.focus_pane(pane_id);
-            self.layout.close_focused();
-            self.layout.focus_pane(prev_focus);
-        }
-
-        self.panes.remove(&pane_id);
-        self.pane_cwds.remove(&pane_id);
-        let runtime = self.runtimes.remove(&pane_id);
-        self.zoomed = false;
-        if let Some(next_root) = next_root {
-            self.root_pane = next_root;
-        }
-        Some((pane_id, runtime))
-    }
-
-    fn promoted_root_if_needed(&self, closing: PaneId) -> Option<PaneId> {
-        if self.root_pane != closing {
-            return None;
-        }
-        self.layout.pane_ids().into_iter().find(|id| *id != closing)
-    }
-
-    pub fn focused_runtime(&self) -> Option<&PaneRuntime> {
-        self.runtimes.get(&self.layout.focused())
-    }
-
-    pub fn cwd_for_pane(&self, pane_id: PaneId) -> Option<PathBuf> {
-        self.runtimes
-            .get(&pane_id)
-            .and_then(|rt| rt.cwd())
-            .or_else(|| self.pane_cwds.get(&pane_id).cloned())
-    }
-
-    pub fn root_cwd(&self) -> Option<PathBuf> {
-        self.cwd_for_pane(self.root_pane)
-    }
-
-    pub fn has_working_pane(&self) -> bool {
-        self.panes
-            .values()
-            .any(|pane| pane.state == AgentState::Working)
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)] // retained for focused layout-order assertions in tests
-    pub fn pane_states(&self) -> Vec<(AgentState, bool)> {
-        self.layout
-            .pane_ids()
-            .iter()
-            .map(|id| {
-                self.panes
-                    .get(id)
-                    .map(|p| (p.state, p.seen))
-                    .unwrap_or((AgentState::Unknown, true))
-            })
-            .collect()
-    }
-
-    pub fn pane_details(&self) -> Vec<PaneDetail> {
-        self.layout
-            .pane_ids()
-            .iter()
-            .filter_map(|id| {
-                let pane = self.panes.get(id)?;
-                let agent_label = pane.effective_agent_label()?.to_string();
-                Some(PaneDetail {
-                    pane_id: *id,
-                    tab_idx: self.number.saturating_sub(1),
-                    tab_label: self.display_name(),
-                    label: agent_label.clone(),
-                    agent_label,
-                    agent: pane.effective_known_agent(),
-                    state: pane.state,
-                    seen: pane.seen,
-                })
-            })
-            .collect()
-    }
-}
-
 /// A named workspace containing tabs.
 pub struct Workspace {
     /// Stable public workspace identity, independent of display order.
@@ -314,6 +44,8 @@ pub struct Workspace {
     pub custom_name: Option<String>,
     /// Fallback workspace identity source for tests, old snapshots, or missing runtimes.
     pub identity_cwd: PathBuf,
+    /// Cached current git branch for the workspace repo.
+    pub(crate) cached_git_branch: Option<String>,
     /// Cached ahead/behind counts for the workspace repo's current branch upstream.
     pub(crate) cached_git_ahead_behind: Option<(usize, usize)>,
     /// Stable-ish public pane numbers within this workspace.
@@ -368,7 +100,8 @@ impl Workspace {
         Ok(Self {
             id: generate_workspace_id(),
             custom_name: None,
-            identity_cwd: initial_cwd,
+            identity_cwd: initial_cwd.clone(),
+            cached_git_branch: git_branch(&initial_cwd),
             cached_git_ahead_behind: None,
             public_pane_numbers,
             next_public_pane_number: 2,
@@ -588,8 +321,7 @@ impl Workspace {
     }
 
     pub fn branch(&self) -> Option<String> {
-        self.resolved_identity_cwd()
-            .and_then(|cwd| git_branch(&cwd))
+        self.cached_git_branch.clone()
     }
 
     pub fn git_ahead_behind(&self) -> Option<(usize, usize)> {
@@ -597,36 +329,9 @@ impl Workspace {
     }
 
     pub fn refresh_git_ahead_behind(&mut self) {
-        self.cached_git_ahead_behind = self
-            .resolved_identity_cwd()
-            .and_then(|cwd| git_ahead_behind(&cwd));
-    }
-
-    pub fn aggregate_state(&self) -> (AgentState, bool) {
-        self.tabs
-            .iter()
-            .flat_map(|tab| tab.panes.values())
-            .map(|pane| (pane.state, pane.seen))
-            .max_by_key(|(state, seen)| pane_attention_priority(*state, *seen))
-            .unwrap_or((AgentState::Unknown, true))
-    }
-
-    pub fn has_working_pane(&self) -> bool {
-        self.tabs.iter().any(Tab::has_working_pane)
-    }
-
-    pub fn pane_details(&self) -> Vec<PaneDetail> {
-        let multi_tab = self.tabs.len() > 1;
-        self.tabs
-            .iter()
-            .flat_map(Tab::pane_details)
-            .map(|mut detail| {
-                if multi_tab {
-                    detail.label = format!("{}·{}", detail.tab_label, detail.agent_label);
-                }
-                detail
-            })
-            .collect()
+        let cwd = self.resolved_identity_cwd();
+        self.cached_git_branch = cwd.as_deref().and_then(git_branch);
+        self.cached_git_ahead_behind = cwd.as_deref().and_then(git_ahead_behind);
     }
 
     pub fn focused_runtime(&self) -> Option<&PaneRuntime> {
@@ -714,123 +419,9 @@ impl Workspace {
     }
 }
 
-/// Detail info for a single pane, used by the agent detail panel.
-pub struct PaneDetail {
-    pub pane_id: PaneId,
-    pub tab_idx: usize,
-    pub tab_label: String,
-    pub label: String,
-    pub agent_label: String,
-    #[allow(dead_code)]
-    pub agent: Option<Agent>,
-    pub state: AgentState,
-    pub seen: bool,
-}
-
-fn pane_attention_priority(state: AgentState, seen: bool) -> u8 {
-    match (state, seen) {
-        (AgentState::Blocked, _) => 4,
-        (AgentState::Idle, false) => 3,
-        (AgentState::Working, _) => 2,
-        (AgentState::Idle, true) => 1,
-        (AgentState::Unknown, _) => 0,
-    }
-}
-
-pub fn derive_label_from_cwd(cwd: &Path) -> String {
-    if let Some(repo_root) = git_repo_root(cwd) {
-        if let Some(name) = repo_root.file_name().and_then(|n| n.to_str()) {
-            return name.to_string();
-        }
-    }
-
-    if let Ok(home) = std::env::var("HOME") {
-        let home = Path::new(&home);
-        if cwd == home {
-            return "~".to_string();
-        }
-    }
-
-    cwd.file_name()
-        .and_then(|n| n.to_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| cwd.display().to_string())
-}
-
-pub fn git_branch(cwd: &Path) -> Option<String> {
-    let repo_root = git_repo_root(cwd)?;
-    let git_dir = git_dir_for_repo_root(&repo_root)?;
-    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
-    parse_git_head_branch(&head)
-}
-
-fn git_dir_for_repo_root(repo_root: &Path) -> Option<PathBuf> {
-    let git_path = repo_root.join(".git");
-    if git_path.is_dir() {
-        return Some(git_path);
-    }
-
-    let gitdir = std::fs::read_to_string(&git_path).ok()?;
-    let relative = gitdir.trim().strip_prefix("gitdir:")?.trim();
-    let resolved = Path::new(relative);
-    Some(if resolved.is_absolute() {
-        resolved.to_path_buf()
-    } else {
-        repo_root.join(resolved)
-    })
-}
-
-fn parse_git_head_branch(head: &str) -> Option<String> {
-    let branch = head.trim().strip_prefix("ref: refs/heads/")?;
-    (!branch.is_empty()).then(|| branch.to_string())
-}
-
-fn git_repo_root(start: &Path) -> Option<PathBuf> {
-    let mut current = if start.is_dir() {
-        start.to_path_buf()
-    } else {
-        start.parent()?.to_path_buf()
-    };
-
-    loop {
-        if current.join(".git").exists() {
-            return Some(current);
-        }
-        if !current.pop() {
-            return None;
-        }
-    }
-}
-
-fn git_ahead_behind(cwd: &Path) -> Option<(usize, usize)> {
-    git_repo_root(cwd)?;
-
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    parse_git_ahead_behind_output(&stdout)
-}
-
-fn parse_git_ahead_behind_output(stdout: &str) -> Option<(usize, usize)> {
-    let mut parts = stdout.split_whitespace();
-    let ahead = parts.next()?.parse().ok()?;
-    let behind = parts.next()?.parse().ok()?;
-    Some((ahead, behind))
-}
-
 #[cfg(test)]
 impl Workspace {
-    pub fn test_new(name: &str) -> Self {
+    pub(crate) fn test_new(name: &str) -> Self {
         let (events, _) = mpsc::channel(64);
         let render_notify = Arc::new(Notify::new());
         let render_dirty = Arc::new(AtomicBool::new(false));
@@ -858,7 +449,8 @@ impl Workspace {
         Self {
             id: generate_workspace_id(),
             custom_name: Some(name.to_string()),
-            identity_cwd,
+            identity_cwd: identity_cwd.clone(),
+            cached_git_branch: git_branch(&identity_cwd),
             cached_git_ahead_behind: None,
             public_pane_numbers,
             next_public_pane_number: 2,
@@ -867,7 +459,7 @@ impl Workspace {
         }
     }
 
-    pub fn test_split(&mut self, direction: Direction) -> PaneId {
+    pub(crate) fn test_split(&mut self, direction: Direction) -> PaneId {
         let tab = self.active_tab_mut().expect("workspace must have tab");
         let new_id = tab.layout.split_focused(direction);
         tab.panes.insert(new_id, PaneState::new());
@@ -877,7 +469,7 @@ impl Workspace {
         new_id
     }
 
-    pub fn test_add_tab(&mut self, name: Option<&str>) -> usize {
+    pub(crate) fn test_add_tab(&mut self, name: Option<&str>) -> usize {
         let (events, _) = mpsc::channel(64);
         let render_notify = Arc::new(Notify::new());
         let render_dirty = Arc::new(AtomicBool::new(false));
@@ -909,68 +501,6 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::detect::{Agent, AgentState};
-
-    fn temp_test_dir(name: &str) -> PathBuf {
-        let unique = format!(
-            "herdr-workspace-tests-{}-{}-{}",
-            name,
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        let path = std::env::temp_dir().join(unique);
-        std::fs::create_dir_all(&path).unwrap();
-        path
-    }
-
-    #[test]
-    fn aggregate_state_all_unknown() {
-        let ws = Workspace::test_new("test");
-        let (state, seen) = ws.aggregate_state();
-        assert_eq!(state, AgentState::Unknown);
-        assert!(seen);
-    }
-
-    #[test]
-    fn aggregate_state_priority() {
-        let mut ws = Workspace::test_new("test");
-        let id2 = ws.test_split(Direction::Horizontal);
-        let root_id = ws.tabs[0]
-            .panes
-            .keys()
-            .find(|id| **id != id2)
-            .copied()
-            .unwrap();
-        ws.tabs[0].panes.get_mut(&root_id).unwrap().state = AgentState::Idle;
-        ws.tabs[0].panes.get_mut(&id2).unwrap().state = AgentState::Working;
-
-        let (state, seen) = ws.aggregate_state();
-        assert_eq!(state, AgentState::Working);
-        assert!(seen);
-    }
-
-    #[test]
-    fn aggregate_state_done_unseen_beats_working() {
-        let mut ws = Workspace::test_new("test");
-        let id2 = ws.test_split(Direction::Horizontal);
-        let root_id = ws.tabs[0]
-            .panes
-            .keys()
-            .find(|id| **id != id2)
-            .copied()
-            .unwrap();
-        let root = ws.tabs[0].panes.get_mut(&root_id).unwrap();
-        root.state = AgentState::Idle;
-        root.seen = false;
-        ws.tabs[0].panes.get_mut(&id2).unwrap().state = AgentState::Working;
-
-        let (state, seen) = ws.aggregate_state();
-        assert_eq!(state, AgentState::Idle);
-        assert!(!seen);
-    }
 
     #[test]
     fn workspace_identity_follows_first_tab_root_pane_cwd() {
@@ -983,53 +513,6 @@ mod tests {
 
         assert_eq!(ws.display_name(), "pion");
         assert_eq!(ws.resolved_identity_cwd(), Some(PathBuf::from("/tmp/pion")));
-    }
-
-    #[test]
-    fn git_branch_reads_head_from_standard_repo() {
-        let root = temp_test_dir("standard-repo");
-        std::fs::create_dir_all(root.join(".git")).unwrap();
-        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
-
-        assert_eq!(git_branch(&root).as_deref(), Some("main"));
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn git_branch_reads_head_from_worktree_gitdir_file() {
-        let root = temp_test_dir("worktree");
-        let worktree_git_dir = root.join(".bare/worktrees/feature");
-        std::fs::create_dir_all(&worktree_git_dir).unwrap();
-        std::fs::write(root.join(".git"), "gitdir: .bare/worktrees/feature\n").unwrap();
-        std::fs::write(worktree_git_dir.join("HEAD"), "ref: refs/heads/feature\n").unwrap();
-
-        assert_eq!(git_branch(&root).as_deref(), Some("feature"));
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn git_branch_returns_none_for_detached_head() {
-        let root = temp_test_dir("detached-head");
-        std::fs::create_dir_all(root.join(".git")).unwrap();
-        std::fs::write(root.join(".git/HEAD"), "3e1b9a8d\n").unwrap();
-
-        assert_eq!(git_branch(&root), None);
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn pane_details_hide_plain_shells() {
-        let mut ws = Workspace::test_new("test");
-        let root_pane = ws.tabs[0].root_pane;
-        ws.tabs[0].panes.get_mut(&root_pane).unwrap().detected_agent = Some(Agent::Pi);
-        ws.test_split(Direction::Horizontal);
-
-        let details = ws.pane_details();
-        assert_eq!(details.len(), 1);
-        assert_eq!(details[0].label, "pi");
     }
 
     #[test]
@@ -1050,47 +533,5 @@ mod tests {
         assert!(ws.tabs[2].custom_name.is_none());
         assert_eq!(ws.tabs[2].root_pane, moved_root);
         assert_eq!(ws.tabs[ws.active_tab].root_pane, active_root);
-    }
-
-    #[test]
-    fn pane_details_include_tab_context_when_workspace_has_multiple_tabs() {
-        let mut ws = Workspace::test_new("test");
-        ws.tabs[0].set_custom_name("main".into());
-        let root_pane = ws.tabs[0].root_pane;
-        ws.tabs[0].panes.get_mut(&root_pane).unwrap().detected_agent = Some(Agent::Pi);
-
-        let tab_idx = ws.test_add_tab(Some("logs"));
-        let second_root_pane = ws.tabs[tab_idx].root_pane;
-        ws.tabs[tab_idx]
-            .panes
-            .get_mut(&second_root_pane)
-            .unwrap()
-            .detected_agent = Some(Agent::Claude);
-
-        let details = ws.pane_details();
-        assert_eq!(details.len(), 2);
-        assert!(details.iter().any(|detail| detail.label == "main·pi"));
-        assert!(details.iter().any(|detail| detail.label == "logs·claude"));
-    }
-
-    #[test]
-    fn pane_details_include_hook_reported_unknown_agents() {
-        let mut ws = Workspace::test_new("test");
-        let root_pane = ws.tabs[0].root_pane;
-        ws.tabs[0]
-            .panes
-            .get_mut(&root_pane)
-            .unwrap()
-            .set_hook_authority(
-                "custom:hermes".into(),
-                "hermes".into(),
-                AgentState::Working,
-                None,
-            );
-
-        let details = ws.pane_details();
-        assert_eq!(details.len(), 1);
-        assert_eq!(details[0].agent_label, "hermes");
-        assert_eq!(details[0].agent, None);
     }
 }

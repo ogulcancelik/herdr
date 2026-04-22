@@ -1,6 +1,6 @@
 [package]
 name = "herdr"
-version = "0.4.11"
+version = "0.5.0"
 edition = "2021"
 build = "build.rs"
 description = "terminal workspace manager for AI coding agents"
@@ -13,8 +13,10 @@ include = ["src/**/*", "assets/sounds/*", "README.md", "LICENSE", "Cargo.toml"]
 
 [dependencies]
 base64 = "0.22.1"
+bincode = { version = "2", features = ["serde"] }
 bytes = "1"
 crossterm = "0.29"
+ctrlc = "3"
 libc = "0.2"
 portable-pty = "0.9"
 ratatui = "0.30"

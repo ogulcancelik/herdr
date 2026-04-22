@@ -357,10 +357,6 @@ fn detect_kimi(content: &str) -> AgentState {
 fn detect_droid(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
-    if is_droid_mission_control(content, &lower) {
-        return AgentState::Idle;
-    }
-
     // Blocked: EXECUTE approval prompt with selection UI chrome
     // Primary (AND): structural keyword + chrome text = certain
     let has_execute = content.contains("EXECUTE");
@@ -388,20 +384,6 @@ fn detect_droid(content: &str) -> AgentState {
     }
 
     AgentState::Idle
-}
-
-fn is_droid_mission_control(content: &str, lower_content: &str) -> bool {
-    let has_header = lower_content.contains("mission control");
-    let has_active_feature = lower_content.contains("active feature");
-    let has_feature_summary = lower_content.contains("features ");
-    let has_mission_metrics = lower_content.contains("time ")
-        && lower_content.contains("input ")
-        && lower_content.contains("output ");
-
-    content.contains("⛬")
-        && has_header
-        && has_active_feature
-        && (has_feature_summary || has_mission_metrics)
 }
 
 /// Amp (Sourcegraph) detection.
@@ -772,19 +754,36 @@ pub fn foreground_job(child_pid: u32) -> Option<crate::platform::ForegroundJob> 
 fn normalized_process_name(process: &crate::platform::ForegroundProcess) -> String {
     let effective = process.argv0.as_deref().unwrap_or(&process.name);
     let lower_effective = effective.to_lowercase();
-    let lower_cmdline = process
-        .cmdline
-        .as_deref()
-        .unwrap_or_default()
-        .to_lowercase();
 
-    if lower_effective == "node"
-        && (lower_cmdline.contains("/codex") || lower_cmdline.contains("@openai/codex"))
-    {
-        return "codex".to_string();
+    if is_generic_runtime_or_shell(&lower_effective) {
+        if let Some(wrapped_agent) =
+            wrapped_agent_name_from_cmdline(process.cmdline.as_deref().unwrap_or_default())
+        {
+            return wrapped_agent;
+        }
     }
 
     effective.to_string()
+}
+
+fn wrapped_agent_name_from_cmdline(cmdline: &str) -> Option<String> {
+    for token in cmdline.split_whitespace() {
+        let trimmed = token.trim_matches(|c| matches!(c, '"' | '\''));
+        if trimmed.is_empty() || trimmed.starts_with('-') {
+            continue;
+        }
+
+        let basename = std::path::Path::new(trimmed)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(trimmed);
+        let Some(agent) = parse_agent_label(basename) else {
+            continue;
+        };
+        return Some(agent_label(agent).to_string());
+    }
+
+    None
 }
 
 fn process_priority(process: &crate::platform::ForegroundProcess, normalized_name: &str) -> u8 {
@@ -888,6 +887,29 @@ mod tests {
             identify_agent_in_job(&job),
             Some((Agent::Codex, "codex".to_string()))
         );
+    }
+
+    #[test]
+    fn identify_agent_in_job_detects_shell_wrapped_pi() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 123,
+            processes: vec![crate::platform::ForegroundProcess {
+                pid: 1,
+                name: "sh".to_string(),
+                argv0: None,
+                cmdline: Some("/bin/sh /tmp/test-bin/pi".to_string()),
+            }],
+        };
+
+        assert_eq!(
+            identify_agent_in_job(&job),
+            Some((Agent::Pi, "pi".to_string()))
+        );
+    }
+
+    #[test]
+    fn wrapped_agent_name_from_cmdline_ignores_plain_shell_flags() {
+        assert_eq!(wrapped_agent_name_from_cmdline("bash -lc"), None);
     }
 
     // ---- Workspace state rollup ----
@@ -1303,24 +1325,6 @@ mod tests {
         let screen =
             "⛬  Doing well, thanks!\n\nAuto (Off)\n╭──────────╮\n│ >        │\n╰──────────╯";
         assert_eq!(detect_droid(screen), AgentState::Idle);
-    }
-
-    #[test]
-    fn droid_mission_control_is_idle_even_with_stop_chrome() {
-        let screen = concat!(
-            "⛬ Mission Control  ~/Projects/herdr-worktrees/persistence  TIME 22h 40m · Input 12.6M · Cached 129.7M · Output 471.5K\n",
-            "●  RUNNING\n",
-            "Active Feature  fix-scrutiny-misc-followups\n",
-            "Features  25/28\n",
-            "(Press ESC to stop)\n",
-        );
-        assert_eq!(detect_droid(screen), AgentState::Idle);
-    }
-
-    #[test]
-    fn droid_leaves_mission_control_and_returns_to_working() {
-        let screen = ">  how u doin\n\n⠴ Thinking...  (Press ESC to stop)\n\nAuto (Off)";
-        assert_eq!(detect_droid(screen), AgentState::Working);
     }
 
     #[test]

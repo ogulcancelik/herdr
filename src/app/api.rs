@@ -1,131 +1,230 @@
-//! API request handling and response building for [`App`].
+use std::time::{Duration, Instant};
 
 use super::{
-    detect_state_from_api, encode_api_keys, encode_api_text, pane_agent_status,
-    tab_attention_priority, App, Mode,
+    api_helpers::{
+        detect_state_from_api, encode_api_keys, encode_api_text, normalize_reported_agent_label,
+        pane_agent_status,
+    },
+    App, Mode, OverlayPaneState, ToastKind,
 };
-
-fn normalize_reported_agent_label(agent: &str) -> Option<String> {
-    let trimmed = agent.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Some(agent) = crate::detect::parse_agent_label(trimmed) {
-        return Some(crate::detect::agent_label(agent).to_string());
-    }
-    Some(trimmed.to_string())
-}
-
-pub(super) fn api_request_changes_ui(request: &crate::api::schema::Request) -> bool {
-    use crate::api::schema::Method;
-
-    matches!(
-        &request.method,
-        Method::WorkspaceCreate(_)
-            | Method::WorkspaceFocus(_)
-            | Method::WorkspaceRename(_)
-            | Method::WorkspaceClose(_)
-            | Method::TabCreate(_)
-            | Method::TabFocus(_)
-            | Method::TabRename(_)
-            | Method::TabClose(_)
-            | Method::PaneSplit(_)
-            | Method::PaneReportAgent(_)
-            | Method::PaneClearAgentAuthority(_)
-            | Method::PaneReleaseAgent(_)
-            | Method::PaneClose(_)
-    )
-}
+use crate::events::AppEvent;
 
 impl App {
-    pub(super) fn handle_api_request_message(
+    pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
+        if let AppEvent::ClipboardWrite { content } = ev {
+            crate::selection::write_osc52_bytes(&content);
+            return;
+        }
+
+        let overlay_state = if let AppEvent::PaneDied { pane_id } = &ev {
+            self.overlay_panes.remove(pane_id)
+        } else {
+            None
+        };
+
+        if let AppEvent::PaneDied { pane_id } = &ev {
+            if let Some((ws_idx, _)) = self.find_pane(*pane_id) {
+                if let Some(public_pane_id) = self.public_pane_id(ws_idx, *pane_id) {
+                    self.emit_event(crate::api::schema::EventEnvelope {
+                        event: crate::api::schema::EventKind::PaneExited,
+                        data: crate::api::schema::EventData::PaneExited {
+                            pane_id: public_pane_id,
+                            workspace_id: self.public_workspace_id(ws_idx),
+                        },
+                    });
+                }
+            }
+        }
+
+        let released_agent = if let AppEvent::HookAgentReleased {
+            pane_id,
+            known_agent,
+            ..
+        } = &ev
+        {
+            known_agent.map(|agent| (*pane_id, agent))
+        } else {
+            None
+        };
+
+        let previous_toast = self.state.toast.clone();
+        let pane_updates = self.state.handle_app_event(ev);
+        for update in &pane_updates {
+            self.emit_pane_state_update(update);
+        }
+        if let Some((pane_id, agent)) = released_agent {
+            if pane_updates.iter().any(|update| update.pane_id == pane_id) {
+                if let Some((ws_idx, _)) = self.find_pane(pane_id) {
+                    if let Some(runtime) = self.state.workspaces[ws_idx].runtimes.get(&pane_id) {
+                        runtime.begin_graceful_release(agent);
+                    }
+                }
+            }
+        }
+        if let Some(overlay) = overlay_state {
+            self.restore_overlay_after_exit(overlay);
+        }
+        self.sync_toast_deadline(previous_toast);
+    }
+
+    fn restore_overlay_after_exit(&mut self, overlay: OverlayPaneState) {
+        let Some(ws) = self.state.workspaces.get_mut(overlay.ws_idx) else {
+            return;
+        };
+        if overlay.tab_idx >= ws.tabs.len() {
+            return;
+        }
+
+        ws.active_tab = overlay.tab_idx;
+        let tab = &mut ws.tabs[overlay.tab_idx];
+        if tab.panes.contains_key(&overlay.previous_focus) {
+            tab.layout.focus_pane(overlay.previous_focus);
+        }
+        tab.zoomed = overlay.previous_zoomed;
+
+        if self.state.active == Some(overlay.ws_idx) {
+            self.state.mode = Mode::Terminal;
+        }
+    }
+
+    fn emit_pane_state_update(&self, update: &crate::app::actions::PaneStateUpdate) {
+        let Some(pane_id) = self.public_pane_id(update.ws_idx, update.pane_id) else {
+            return;
+        };
+        let workspace_id = self.public_workspace_id(update.ws_idx);
+
+        if update.previous_agent_label != update.agent_label {
+            self.emit_event(crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::PaneAgentDetected,
+                data: crate::api::schema::EventData::PaneAgentDetected {
+                    pane_id: pane_id.clone(),
+                    workspace_id: workspace_id.clone(),
+                    agent: update.agent_label.clone(),
+                },
+            });
+        }
+
+        if update.previous_state != update.state {
+            let agent_status = self
+                .state
+                .workspaces
+                .get(update.ws_idx)
+                .and_then(|ws| ws.pane_state(update.pane_id))
+                .map(|pane| pane_agent_status(pane.state, pane.seen))
+                .unwrap_or_else(|| pane_agent_status(update.state, true));
+            self.emit_event(crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::PaneAgentStatusChanged,
+                data: crate::api::schema::EventData::PaneAgentStatusChanged {
+                    pane_id,
+                    workspace_id,
+                    agent_status,
+                },
+            });
+        }
+    }
+
+    pub(super) fn sync_toast_deadline(
         &mut self,
-        msg: crate::api::ApiRequestMessage,
-    ) -> bool {
-        let changed = api_request_changes_ui(&msg.request);
-        let response = self.handle_api_request(msg.request);
-        let _ = msg.respond_to.send(response);
-        changed
+        previous_toast: Option<crate::app::state::ToastNotification>,
+    ) {
+        if self.state.toast != previous_toast {
+            self.toast_deadline = self.state.toast.as_ref().map(|toast| {
+                let duration = match toast.kind {
+                    ToastKind::NeedsAttention => Duration::from_secs(8),
+                    ToastKind::Finished => Duration::from_secs(5),
+                    ToastKind::UpdateInstalled => Duration::from_secs(3),
+                };
+                Instant::now() + duration
+            });
+        }
     }
 
-    pub(super) fn public_workspace_id(&self, ws_idx: usize) -> String {
-        self.state.workspaces[ws_idx].id.clone()
+    pub(super) fn emit_event(&self, event: crate::api::schema::EventEnvelope) {
+        self.event_hub.push(event);
     }
 
-    pub(super) fn public_tab_id(&self, ws_idx: usize, tab_idx: usize) -> Option<String> {
-        let ws = self.state.workspaces.get(ws_idx)?;
-        ws.tabs.get(tab_idx)?;
-        Some(format!("{}:{}", ws.id, tab_idx + 1))
+    pub(crate) fn sync_focus_events(&mut self) {
+        let current_focus = self.state.active.and_then(|idx| {
+            self.state
+                .workspaces
+                .get(idx)
+                .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
+        });
+        if current_focus == self.last_focus {
+            return;
+        }
+
+        if let Some((ws_idx, pane_id)) = self.last_focus {
+            self.send_pane_focus_event(ws_idx, pane_id, crate::ghostty::FocusEvent::Lost);
+        }
+        if let Some((ws_idx, pane_id)) = current_focus {
+            self.send_pane_focus_event(ws_idx, pane_id, crate::ghostty::FocusEvent::Gained);
+            self.emit_event(crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::WorkspaceFocused,
+                data: crate::api::schema::EventData::WorkspaceFocused {
+                    workspace_id: self.public_workspace_id(ws_idx),
+                },
+            });
+            if let Some(tab_id) =
+                self.public_tab_id(ws_idx, self.state.workspaces[ws_idx].active_tab)
+            {
+                self.emit_event(crate::api::schema::EventEnvelope {
+                    event: crate::api::schema::EventKind::TabFocused,
+                    data: crate::api::schema::EventData::TabFocused {
+                        tab_id,
+                        workspace_id: self.public_workspace_id(ws_idx),
+                    },
+                });
+            }
+            if let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) {
+                self.emit_event(crate::api::schema::EventEnvelope {
+                    event: crate::api::schema::EventKind::PaneFocused,
+                    data: crate::api::schema::EventData::PaneFocused {
+                        pane_id: public_pane_id,
+                        workspace_id: self.public_workspace_id(ws_idx),
+                    },
+                });
+            }
+        }
+
+        self.last_focus = current_focus;
     }
 
-    pub(super) fn public_pane_id(
+    fn send_pane_focus_event(
         &self,
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
-    ) -> Option<String> {
-        let ws = self.state.workspaces.get(ws_idx)?;
-        let pane_number = ws.public_pane_number(pane_id)?;
-        Some(format!("{}-{pane_number}", ws.id))
-    }
-
-    pub(super) fn parse_workspace_id(&self, id: &str) -> Option<usize> {
-        self.state
+        event: crate::ghostty::FocusEvent,
+    ) {
+        let Some(runtime) = self
+            .state
             .workspaces
-            .iter()
-            .position(|workspace| workspace.id == id)
-            .or_else(|| id.strip_prefix("w_")?.parse::<usize>().ok()?.checked_sub(1))
-            .or_else(|| id.parse::<usize>().ok()?.checked_sub(1))
+            .get(ws_idx)
+            .and_then(|ws| ws.runtime(pane_id))
+        else {
+            return;
+        };
+        runtime.try_send_focus_event(event);
     }
 
-    pub(super) fn parse_tab_id(&self, id: &str) -> Option<(usize, usize)> {
-        if let Some(rest) = id.strip_prefix("t_") {
-            let (ws_raw, tab_raw) = rest.rsplit_once('_')?;
-            let ws_idx = self.parse_workspace_id(ws_raw)?;
-            let tab_idx = tab_raw.parse::<usize>().ok()?.checked_sub(1)?;
-            self.state.workspaces.get(ws_idx)?.tabs.get(tab_idx)?;
-            return Some((ws_idx, tab_idx));
-        }
-
-        let (ws_raw, tab_raw) = id.rsplit_once(':')?;
-        let ws_idx = self.parse_workspace_id(ws_raw)?;
-        let tab_idx = tab_raw.parse::<usize>().ok()?.checked_sub(1)?;
-        self.state.workspaces.get(ws_idx)?.tabs.get(tab_idx)?;
-        Some((ws_idx, tab_idx))
-    }
-
-    pub(super) fn parse_pane_id(&self, id: &str) -> Option<(usize, crate::layout::PaneId)> {
-        if let Some(rest) = id.strip_prefix("p_") {
-            if let Some((ws_raw, pane_raw)) = rest.rsplit_once('_') {
-                let ws_idx = self.parse_workspace_id(ws_raw)?;
-                let pane_id = crate::layout::PaneId::from_raw(pane_raw.parse::<u32>().ok()?);
-                return Some((ws_idx, pane_id));
-            }
-
-            let pane_id = crate::layout::PaneId::from_raw(rest.parse::<u32>().ok()?);
-            return self.find_pane(pane_id).map(|(ws_idx, _)| (ws_idx, pane_id));
-        }
-
-        let (ws_raw, pane_number_raw) = id.rsplit_once('-')?;
-        let ws_idx = self.parse_workspace_id(ws_raw)?;
-        let pane_number = pane_number_raw.parse::<usize>().ok()?;
-        let ws = self.state.workspaces.get(ws_idx)?;
-        let pane_id = ws
-            .public_pane_numbers
-            .iter()
-            .find_map(|(pane_id, number)| (*number == pane_number).then_some(*pane_id))?;
-        Some((ws_idx, pane_id))
-    }
-
-    pub(super) fn handle_api_request(&mut self, request: crate::api::schema::Request) -> String {
+    pub(crate) fn handle_api_request(&mut self, request: crate::api::schema::Request) -> String {
         self.drain_internal_events();
         use bytes::Bytes;
 
         use crate::api::schema::{
-            ErrorBody, ErrorResponse, Method, PaneListParams, PaneReadResult, ReadSource,
+            ErrorBody, ErrorResponse, IntegrationInstallResult, IntegrationTarget,
+            IntegrationUninstallResult, Method, PaneListParams, PaneReadResult, ReadSource,
             ResponseResult, SuccessResponse, TabListParams,
         };
 
         let response = match request.method {
+            Method::ServerStop(_) => {
+                self.state.should_quit = true;
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::Ok {},
+                }
+            }
             Method::WorkspaceList(_) => SuccessResponse {
                 id: request.id,
                 result: ResponseResult::WorkspaceList {
@@ -1065,6 +1164,265 @@ impl App {
                     result: ResponseResult::Ok {},
                 }
             }
+            Method::IntegrationInstall(params) => {
+                let target = params.target;
+                let messages = match target {
+                    IntegrationTarget::Pi => {
+                        let path = crate::integration::install_pi().map_err(|err| {
+                            serde_json::to_string(&ErrorResponse {
+                                id: request.id.clone(),
+                                error: ErrorBody {
+                                    code: "integration_install_failed".into(),
+                                    message: err.to_string(),
+                                },
+                            })
+                            .unwrap()
+                        });
+                        match path {
+                            Ok(path) => {
+                                vec![format!("installed pi integration to {}", path.display())]
+                            }
+                            Err(response) => return response,
+                        }
+                    }
+                    IntegrationTarget::Claude => {
+                        let installed = crate::integration::install_claude().map_err(|err| {
+                            serde_json::to_string(&ErrorResponse {
+                                id: request.id.clone(),
+                                error: ErrorBody {
+                                    code: "integration_install_failed".into(),
+                                    message: err.to_string(),
+                                },
+                            })
+                            .unwrap()
+                        });
+                        match installed {
+                            Ok(installed) => vec![
+                                format!(
+                                    "installed claude integration hook to {}",
+                                    installed.hook_path.display()
+                                ),
+                                format!(
+                                    "ensured claude settings at {}",
+                                    installed.settings_path.display()
+                                ),
+                            ],
+                            Err(response) => return response,
+                        }
+                    }
+                    IntegrationTarget::Codex => {
+                        let installed = crate::integration::install_codex().map_err(|err| {
+                            serde_json::to_string(&ErrorResponse {
+                                id: request.id.clone(),
+                                error: ErrorBody {
+                                    code: "integration_install_failed".into(),
+                                    message: err.to_string(),
+                                },
+                            })
+                            .unwrap()
+                        });
+                        match installed {
+                            Ok(installed) => vec![
+                                format!(
+                                    "installed codex integration hook to {}",
+                                    installed.hook_path.display()
+                                ),
+                                format!(
+                                    "ensured codex hooks at {}",
+                                    installed.hooks_path.display()
+                                ),
+                                format!(
+                                    "ensured codex config at {}",
+                                    installed.config_path.display()
+                                ),
+                            ],
+                            Err(response) => return response,
+                        }
+                    }
+                    IntegrationTarget::Opencode => {
+                        let installed = crate::integration::install_opencode().map_err(|err| {
+                            serde_json::to_string(&ErrorResponse {
+                                id: request.id.clone(),
+                                error: ErrorBody {
+                                    code: "integration_install_failed".into(),
+                                    message: err.to_string(),
+                                },
+                            })
+                            .unwrap()
+                        });
+                        match installed {
+                            Ok(installed) => vec![format!(
+                                "installed opencode integration plugin to {}",
+                                installed.plugin_path.display()
+                            )],
+                            Err(response) => return response,
+                        }
+                    }
+                };
+
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::IntegrationInstall {
+                        target,
+                        details: IntegrationInstallResult { messages },
+                    },
+                }
+            }
+            Method::IntegrationUninstall(params) => {
+                let target = params.target;
+                let messages = match target {
+                    IntegrationTarget::Pi => {
+                        let result = crate::integration::uninstall_pi().map_err(|err| {
+                            serde_json::to_string(&ErrorResponse {
+                                id: request.id.clone(),
+                                error: ErrorBody {
+                                    code: "integration_uninstall_failed".into(),
+                                    message: err.to_string(),
+                                },
+                            })
+                            .unwrap()
+                        });
+                        match result {
+                            Ok(result) => {
+                                if result.removed_extension {
+                                    vec![format!(
+                                        "removed pi integration extension at {}",
+                                        result.extension_path.display()
+                                    )]
+                                } else {
+                                    vec![format!(
+                                        "no pi integration extension found at {}",
+                                        result.extension_path.display()
+                                    )]
+                                }
+                            }
+                            Err(response) => return response,
+                        }
+                    }
+                    IntegrationTarget::Claude => {
+                        let result = crate::integration::uninstall_claude().map_err(|err| {
+                            serde_json::to_string(&ErrorResponse {
+                                id: request.id.clone(),
+                                error: ErrorBody {
+                                    code: "integration_uninstall_failed".into(),
+                                    message: err.to_string(),
+                                },
+                            })
+                            .unwrap()
+                        });
+                        match result {
+                            Ok(result) => {
+                                let mut messages = Vec::new();
+                                if result.removed_hook_file {
+                                    messages.push(format!(
+                                        "removed claude hook at {}",
+                                        result.hook_path.display()
+                                    ));
+                                } else {
+                                    messages.push(format!(
+                                        "no claude hook found at {}",
+                                        result.hook_path.display()
+                                    ));
+                                }
+                                if result.updated_settings {
+                                    messages.push(format!(
+                                        "removed herdr claude hook entries from {}",
+                                        result.settings_path.display()
+                                    ));
+                                } else {
+                                    messages.push(format!(
+                                        "no herdr claude hook entries found in {}",
+                                        result.settings_path.display()
+                                    ));
+                                }
+                                messages
+                            }
+                            Err(response) => return response,
+                        }
+                    }
+                    IntegrationTarget::Codex => {
+                        let result = crate::integration::uninstall_codex().map_err(|err| {
+                            serde_json::to_string(&ErrorResponse {
+                                id: request.id.clone(),
+                                error: ErrorBody {
+                                    code: "integration_uninstall_failed".into(),
+                                    message: err.to_string(),
+                                },
+                            })
+                            .unwrap()
+                        });
+                        match result {
+                            Ok(result) => {
+                                let mut messages = Vec::new();
+                                if result.removed_hook_file {
+                                    messages.push(format!(
+                                        "removed codex hook at {}",
+                                        result.hook_path.display()
+                                    ));
+                                } else {
+                                    messages.push(format!(
+                                        "no codex hook found at {}",
+                                        result.hook_path.display()
+                                    ));
+                                }
+                                if result.updated_hooks {
+                                    messages.push(format!(
+                                        "removed herdr codex hook entries from {}",
+                                        result.hooks_path.display()
+                                    ));
+                                } else {
+                                    messages.push(format!(
+                                        "no herdr codex hook entries found in {}",
+                                        result.hooks_path.display()
+                                    ));
+                                }
+                                messages.push(format!(
+                                    "left codex config unchanged at {}",
+                                    result.config_path.display()
+                                ));
+                                messages
+                            }
+                            Err(response) => return response,
+                        }
+                    }
+                    IntegrationTarget::Opencode => {
+                        let result = crate::integration::uninstall_opencode().map_err(|err| {
+                            serde_json::to_string(&ErrorResponse {
+                                id: request.id.clone(),
+                                error: ErrorBody {
+                                    code: "integration_uninstall_failed".into(),
+                                    message: err.to_string(),
+                                },
+                            })
+                            .unwrap()
+                        });
+                        match result {
+                            Ok(result) => {
+                                if result.removed_plugin {
+                                    vec![format!(
+                                        "removed opencode integration plugin at {}",
+                                        result.plugin_path.display()
+                                    )]
+                                } else {
+                                    vec![format!(
+                                        "no opencode integration plugin found at {}",
+                                        result.plugin_path.display()
+                                    )]
+                                }
+                            }
+                            Err(response) => return response,
+                        }
+                    }
+                };
+
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::IntegrationUninstall {
+                        target,
+                        details: IntegrationUninstallResult { messages },
+                    },
+                }
+            }
             _ => {
                 return serde_json::to_string(&ErrorResponse {
                     id: request.id,
@@ -1078,164 +1436,5 @@ impl App {
         };
 
         serde_json::to_string(&response).unwrap()
-    }
-
-    pub(super) fn collect_panes_for_workspace(
-        &self,
-        workspace_id: Option<&str>,
-    ) -> Result<Vec<crate::api::schema::PaneInfo>, (String, String)> {
-        if let Some(workspace_id) = workspace_id {
-            let Some(ws_idx) = self.parse_workspace_id(workspace_id) else {
-                return Err((
-                    "workspace_not_found".into(),
-                    format!("workspace {workspace_id} not found"),
-                ));
-            };
-            let Some(ws) = self.state.workspaces.get(ws_idx) else {
-                return Err((
-                    "workspace_not_found".into(),
-                    format!("workspace {workspace_id} not found"),
-                ));
-            };
-            Ok(ws
-                .tabs
-                .iter()
-                .flat_map(|tab| tab.layout.pane_ids().into_iter())
-                .filter_map(|pane_id| self.pane_info(ws_idx, pane_id))
-                .collect())
-        } else {
-            Ok(self
-                .state
-                .workspaces
-                .iter()
-                .enumerate()
-                .flat_map(|(ws_idx, ws)| {
-                    ws.tabs
-                        .iter()
-                        .flat_map(|tab| tab.layout.pane_ids().into_iter())
-                        .filter_map(move |pane_id| self.pane_info(ws_idx, pane_id))
-                })
-                .collect())
-        }
-    }
-
-    pub(super) fn tab_info(
-        &self,
-        ws_idx: usize,
-        tab_idx: usize,
-    ) -> Option<crate::api::schema::TabInfo> {
-        let ws = self.state.workspaces.get(ws_idx)?;
-        let tab = ws.tabs.get(tab_idx)?;
-        let (agg_state, seen) = tab
-            .panes
-            .values()
-            .map(|pane| (pane.state, pane.seen))
-            .max_by_key(|(state, seen)| tab_attention_priority(*state, *seen))
-            .unwrap_or((crate::detect::AgentState::Unknown, true));
-        Some(crate::api::schema::TabInfo {
-            tab_id: self.public_tab_id(ws_idx, tab_idx)?,
-            workspace_id: self.public_workspace_id(ws_idx),
-            number: tab_idx + 1,
-            label: tab.display_name(),
-            focused: self.state.active == Some(ws_idx) && ws.active_tab == tab_idx,
-            pane_count: tab.panes.len(),
-            agent_status: pane_agent_status(agg_state, seen),
-        })
-    }
-
-    pub(super) fn workspace_created_result(
-        &self,
-        ws_idx: usize,
-    ) -> Option<crate::api::schema::ResponseResult> {
-        Some(crate::api::schema::ResponseResult::WorkspaceCreated {
-            workspace: self.workspace_info(ws_idx),
-            tab: self.tab_info(ws_idx, 0)?,
-            root_pane: self.root_pane_info(ws_idx, 0)?,
-        })
-    }
-
-    pub(super) fn tab_created_result(
-        &self,
-        ws_idx: usize,
-        tab_idx: usize,
-    ) -> Option<crate::api::schema::ResponseResult> {
-        Some(crate::api::schema::ResponseResult::TabCreated {
-            tab: self.tab_info(ws_idx, tab_idx)?,
-            root_pane: self.root_pane_info(ws_idx, tab_idx)?,
-        })
-    }
-
-    pub(super) fn root_pane_info(
-        &self,
-        ws_idx: usize,
-        tab_idx: usize,
-    ) -> Option<crate::api::schema::PaneInfo> {
-        let ws = self.state.workspaces.get(ws_idx)?;
-        let tab = ws.tabs.get(tab_idx)?;
-        self.pane_info(ws_idx, tab.root_pane)
-    }
-
-    pub(super) fn pane_info(
-        &self,
-        ws_idx: usize,
-        pane_id: crate::layout::PaneId,
-    ) -> Option<crate::api::schema::PaneInfo> {
-        let ws = self.state.workspaces.get(ws_idx)?;
-        let pane = ws.pane_state(pane_id)?;
-        let runtime = ws.runtime(pane_id);
-        let tab_idx = ws.find_tab_index_for_pane(pane_id)?;
-        let focused = self.state.active == Some(ws_idx)
-            && ws.active_tab == tab_idx
-            && ws
-                .focused_pane_id()
-                .is_some_and(|focused| focused == pane_id);
-        Some(crate::api::schema::PaneInfo {
-            pane_id: self.public_pane_id(ws_idx, pane_id)?,
-            workspace_id: self.public_workspace_id(ws_idx),
-            tab_id: self.public_tab_id(ws_idx, tab_idx)?,
-            focused,
-            cwd: runtime
-                .and_then(|rt| rt.cwd())
-                .map(|cwd| cwd.display().to_string()),
-            agent: pane.effective_agent_label().map(str::to_string),
-            agent_status: pane_agent_status(pane.state, pane.seen),
-            revision: 0,
-        })
-    }
-
-    pub(super) fn lookup_runtime(
-        &self,
-        ws_idx: usize,
-        pane_id: crate::layout::PaneId,
-    ) -> Option<(&crate::pane::PaneRuntime, String)> {
-        let ws = self.state.workspaces.get(ws_idx)?;
-        let runtime = ws.runtime(pane_id)?;
-        Some((runtime, self.public_workspace_id(ws_idx)))
-    }
-
-    pub(super) fn lookup_runtime_sender(
-        &self,
-        ws_idx: usize,
-        pane_id: crate::layout::PaneId,
-    ) -> Option<&crate::pane::PaneRuntime> {
-        let ws = self.state.workspaces.get(ws_idx)?;
-        ws.runtime(pane_id)
-    }
-
-    pub(super) fn workspace_info(&self, index: usize) -> crate::api::schema::WorkspaceInfo {
-        let ws = &self.state.workspaces[index];
-        let (agg_state, seen) = ws.aggregate_state();
-        crate::api::schema::WorkspaceInfo {
-            workspace_id: self.public_workspace_id(index),
-            number: index + 1,
-            label: ws.display_name(),
-            focused: self.state.active == Some(index),
-            pane_count: ws.public_pane_numbers.len(),
-            tab_count: ws.tabs.len(),
-            active_tab_id: self
-                .public_tab_id(index, ws.active_tab)
-                .unwrap_or_else(|| format!("{}:{}", ws.id, ws.active_tab + 1)),
-            agent_status: pane_agent_status(agg_state, seen),
-        }
     }
 }

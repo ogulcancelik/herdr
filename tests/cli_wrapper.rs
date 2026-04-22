@@ -1,5 +1,7 @@
 #![cfg(not(target_os = "macos"))]
 
+mod support;
+
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -9,6 +11,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use support::{
+    cleanup_test_base, register_runtime_dir, register_spawned_herdr_pid,
+    unregister_spawned_herdr_pid,
+};
 
 fn unique_test_dir() -> PathBuf {
     let nanos = SystemTime::now()
@@ -23,24 +29,31 @@ struct SpawnedHerdr {
     child: Box<dyn Child + Send + Sync>,
 }
 
-fn cleanup_spawned_herdr(mut spawned: SpawnedHerdr, base: PathBuf) {
-    let pid = spawned.child.process_id();
-    let _ = spawned.child.kill();
+impl Drop for SpawnedHerdr {
+    fn drop(&mut self) {
+        let pid = self.child.process_id();
+        let _ = self.child.kill();
 
-    if let Some(pid) = pid {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            let mut status = 0;
-            let result = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
-            if result == pid as libc::pid_t || result == -1 {
-                break;
+        if let Some(pid) = pid {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                let mut status = 0;
+                let result =
+                    unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+                if result == pid as libc::pid_t || result == -1 {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
             }
-            thread::sleep(Duration::from_millis(20));
+
+            unregister_spawned_herdr_pid(Some(pid));
         }
     }
+}
 
+fn cleanup_spawned_herdr(spawned: SpawnedHerdr, base: PathBuf) {
     drop(spawned);
-    let _ = fs::remove_dir_all(base);
+    cleanup_test_base(&base);
 }
 
 fn wait_for_socket(path: &Path, timeout: Duration) {
@@ -66,6 +79,7 @@ fn spawn_herdr_with_path(
 ) -> SpawnedHerdr {
     fs::create_dir_all(config_home.join("herdr")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
+    register_runtime_dir(runtime_dir);
     fs::write(
         config_home.join("herdr/config.toml"),
         "onboarding = false\n",
@@ -82,10 +96,11 @@ fn spawn_herdr_with_path(
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
-    cmd.arg("--no-session");
+    cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", socket_path);
+    cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
     cmd.env("SHELL", "/bin/sh");
     cmd.env_remove("HERDR_ENV");
     if let Some(path) = path_override {
@@ -93,6 +108,7 @@ fn spawn_herdr_with_path(
     }
 
     let child = pair.slave.spawn_command(cmd).unwrap();
+    register_spawned_herdr_pid(child.process_id());
     SpawnedHerdr {
         _master: pair.master,
         child,
@@ -104,6 +120,28 @@ fn run_cli(socket_path: &Path, args: &[&str]) -> std::process::Output {
     command.args(args);
     command.env("HERDR_SOCKET_PATH", socket_path);
     command.output().unwrap()
+}
+
+fn run_cli_json(socket_path: &Path, args: &[&str]) -> serde_json::Value {
+    let output = run_cli(socket_path, args);
+    assert!(
+        output.status.success(),
+        "command failed: herdr {}\nstatus: {:?}\nstderr: {}\nstdout: {}",
+        args.join(" "),
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
+        panic!(
+            "failed to parse JSON response for `herdr {}`: {}\nstdout: {}\nstderr: {}",
+            args.join(" "),
+            err,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
 }
 
 fn process_exists(pid: u32) -> bool {
@@ -124,6 +162,118 @@ fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
         thread::sleep(Duration::from_millis(25));
     }
     !process_exists(pid)
+}
+
+fn wait_for_pid_file(pid_file: &Path, timeout: Duration) -> Result<u32, String> {
+    const STABLE_PID_CONTENT_WINDOW: Duration = Duration::from_millis(250);
+
+    let deadline = Instant::now() + timeout;
+    let mut last_contents = String::new();
+    let mut stable_candidate: Option<(String, u32, Instant)> = None;
+
+    while Instant::now() < deadline {
+        if let Ok(contents) = fs::read_to_string(pid_file) {
+            let trimmed = contents.trim().to_string();
+            last_contents = contents;
+
+            if let Ok(pid) = trimmed.parse::<u32>() {
+                match &stable_candidate {
+                    Some((candidate_text, candidate_pid, stable_since))
+                        if candidate_text == &trimmed && *candidate_pid == pid =>
+                    {
+                        if stable_since.elapsed() >= STABLE_PID_CONTENT_WINDOW {
+                            return Ok(pid);
+                        }
+                    }
+                    _ => {
+                        stable_candidate = Some((trimmed, pid, Instant::now()));
+                    }
+                }
+            } else {
+                stable_candidate = None;
+            }
+        }
+
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    Err(format!(
+        "pid file {} did not contain stable parseable pid before timeout; last contents={:?}",
+        pid_file.display(),
+        last_contents
+    ))
+}
+
+#[test]
+fn wait_for_pid_file_retries_until_pid_is_written() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let pid_file = base.join("delayed.pid");
+    fs::write(&pid_file, "").unwrap();
+
+    let writer = thread::spawn({
+        let pid_file = pid_file.clone();
+        move || {
+            thread::sleep(Duration::from_millis(100));
+            fs::write(pid_file, "424242\n").unwrap();
+        }
+    });
+
+    let pid = wait_for_pid_file(&pid_file, Duration::from_secs(2)).unwrap();
+    assert_eq!(pid, 424242);
+
+    writer.join().unwrap();
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn wait_for_pid_file_errors_when_file_never_contains_pid() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let pid_file = base.join("empty.pid");
+    fs::write(&pid_file, "").unwrap();
+
+    let err = wait_for_pid_file(&pid_file, Duration::from_millis(150)).unwrap_err();
+    assert!(
+        err.contains("did not contain stable parseable pid"),
+        "unexpected error: {err}"
+    );
+
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn wait_for_pid_file_rejects_partial_write_race_until_stable_contents() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let pid_file = base.join("partial-race.pid");
+    fs::write(&pid_file, "").unwrap();
+
+    let writer = thread::spawn({
+        let pid_file = pid_file.clone();
+        move || {
+            thread::sleep(Duration::from_millis(40));
+            fs::write(&pid_file, "12").unwrap();
+            thread::sleep(Duration::from_millis(40));
+            fs::write(&pid_file, "123").unwrap();
+            thread::sleep(Duration::from_millis(40));
+            fs::write(&pid_file, "1234").unwrap();
+            thread::sleep(Duration::from_millis(200));
+            fs::write(&pid_file, "424242\n").unwrap();
+        }
+    });
+
+    let start = Instant::now();
+    let pid = wait_for_pid_file(&pid_file, Duration::from_secs(2)).unwrap();
+    assert_eq!(pid, 424242);
+    assert!(
+        start.elapsed() >= Duration::from_millis(300),
+        "helper should wait for stable complete contents, elapsed={:?}",
+        start.elapsed()
+    );
+
+    writer.join().unwrap();
+    cleanup_test_base(&base);
 }
 
 fn send_request(socket_path: &Path, json: &str) -> serde_json::Value {
@@ -205,7 +355,106 @@ fn pane_run_sends_one_send_input_request_with_enter_key() {
         second_line
     );
 
-    fs::remove_dir_all(base).unwrap();
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn integration_commands_honor_socket_override_when_server_is_missing() {
+    let base = unique_test_dir();
+    let home_dir = base.join("home");
+    let extensions_dir = home_dir.join(".pi/agent/extensions");
+    fs::create_dir_all(&extensions_dir).unwrap();
+
+    let runtime_dir = base.join("runtime");
+    fs::create_dir_all(&runtime_dir).unwrap();
+    register_runtime_dir(&runtime_dir);
+    let missing_socket = runtime_dir.join("missing.sock");
+
+    let expected_extension = extensions_dir.join("herdr-agent-state.ts");
+    assert!(
+        !expected_extension.exists(),
+        "test setup should start without extension file"
+    );
+
+    let workspace_list = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .args(["workspace", "list"])
+        .env("HERDR_SOCKET_PATH", &missing_socket)
+        .env("HOME", &home_dir)
+        .output()
+        .unwrap();
+    assert_eq!(workspace_list.status.code(), Some(1));
+
+    let integration_install = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .args(["integration", "install", "pi"])
+        .env("HERDR_SOCKET_PATH", &missing_socket)
+        .env("HOME", &home_dir)
+        .output()
+        .unwrap();
+    assert_eq!(integration_install.status.code(), Some(1));
+    assert!(
+        !expected_extension.exists(),
+        "integration install should not run local install logic when socket is missing"
+    );
+
+    let integration_uninstall = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .args(["integration", "uninstall", "pi"])
+        .env("HERDR_SOCKET_PATH", &missing_socket)
+        .env("HOME", &home_dir)
+        .output()
+        .unwrap();
+    assert_eq!(integration_uninstall.status.code(), Some(1));
+    assert!(
+        !expected_extension.exists(),
+        "integration uninstall should also be socket-backed when socket is missing"
+    );
+
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn server_stop_command_shuts_down_running_server() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let mut herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    wait_for_socket(&client_socket, Duration::from_secs(5));
+
+    let stopped = run_cli(&socket_path, &["server", "stop"]);
+    assert!(
+        stopped.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    assert!(
+        stopped.stdout.is_empty(),
+        "server stop should not print stdout: {}",
+        String::from_utf8_lossy(&stopped.stdout)
+    );
+
+    let pid = herdr.child.process_id();
+    let exit_status = herdr.child.wait().unwrap();
+    unregister_spawned_herdr_pid(pid);
+    assert!(exit_status.success(), "server stop should exit cleanly");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline && (socket_path.exists() || client_socket.exists()) {
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    assert!(
+        !socket_path.exists() || UnixStream::connect(&socket_path).is_err(),
+        "api socket should be removed or stale after server stop"
+    );
+    assert!(
+        !client_socket.exists() || UnixStream::connect(&client_socket).is_err(),
+        "client socket should be removed or stale after server stop"
+    );
+
+    cleanup_spawned_herdr(herdr, base);
 }
 
 #[test]
@@ -636,11 +885,9 @@ fn closing_pane_terminates_processes_inside_it() {
     }
     assert!(pid_file.exists(), "pid file was not created");
 
-    let pid: u32 = fs::read_to_string(&pid_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let pid = wait_for_pid_file(&pid_file, Duration::from_secs(3)).unwrap_or_else(|err| {
+        panic!("failed to read pane child pid: {err}");
+    });
     assert!(process_exists(pid), "child process was not running");
 
     let closed = run_cli(&socket_path, &["pane", "close", pane_id]);
@@ -691,11 +938,9 @@ fn closing_workspace_terminates_processes_inside_it() {
     }
     assert!(pid_file.exists(), "pid file was not created");
 
-    let pid: u32 = fs::read_to_string(&pid_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let pid = wait_for_pid_file(&pid_file, Duration::from_secs(3)).unwrap_or_else(|err| {
+        panic!("failed to read pane child pid: {err}");
+    });
     assert!(process_exists(pid), "child process was not running");
 
     let closed = run_cli(&socket_path, &["workspace", "close", "1"]);
@@ -722,42 +967,37 @@ fn workspace_ids_are_stable_and_pane_numbers_stay_compact() {
     let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
     wait_for_socket(&socket_path, Duration::from_secs(5));
 
-    let ws1 = run_cli(
+    let ws1_json = run_cli_json(
         &socket_path,
         &["workspace", "create", "--cwd", base.to_str().unwrap()],
     );
-    assert!(ws1.status.success());
-    let ws1_json: serde_json::Value = serde_json::from_slice(&ws1.stdout).unwrap();
     let ws1_id = ws1_json["result"]["workspace"]["workspace_id"]
         .as_str()
         .unwrap()
         .to_string();
 
-    let split_12 = run_cli(
+    let split_12_json = run_cli_json(
         &socket_path,
         &["pane", "split", "1-1", "--direction", "right", "--no-focus"],
     );
-    let split_12_json: serde_json::Value = serde_json::from_slice(&split_12.stdout).unwrap();
     assert_eq!(
         split_12_json["result"]["pane"]["pane_id"],
         format!("{ws1_id}-2")
     );
 
-    let split_13 = run_cli(
+    let split_13_json = run_cli_json(
         &socket_path,
         &["pane", "split", "1-1", "--direction", "down", "--no-focus"],
     );
-    let split_13_json: serde_json::Value = serde_json::from_slice(&split_13.stdout).unwrap();
     assert_eq!(
         split_13_json["result"]["pane"]["pane_id"],
         format!("{ws1_id}-3")
     );
 
-    let ws2 = run_cli(
+    let ws2_json = run_cli_json(
         &socket_path,
         &["workspace", "create", "--cwd", "/tmp", "--no-focus"],
     );
-    let ws2_json: serde_json::Value = serde_json::from_slice(&ws2.stdout).unwrap();
     let ws2_id = ws2_json["result"]["workspace"]["workspace_id"]
         .as_str()
         .unwrap()
@@ -765,22 +1005,25 @@ fn workspace_ids_are_stable_and_pane_numbers_stay_compact() {
     assert_ne!(ws2_id, ws1_id);
 
     let ws2_focus = run_cli(&socket_path, &["workspace", "focus", &ws2_id]);
-    assert!(ws2_focus.status.success());
-    let ws2_split = run_cli(
+    assert!(
+        ws2_focus.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&ws2_focus.stderr)
+    );
+
+    let ws2_split_json = run_cli_json(
         &socket_path,
         &["pane", "split", "2-1", "--direction", "right", "--no-focus"],
     );
-    let ws2_split_json: serde_json::Value = serde_json::from_slice(&ws2_split.stdout).unwrap();
     assert_eq!(
         ws2_split_json["result"]["pane"]["pane_id"],
         format!("{ws2_id}-2")
     );
 
-    let ws3 = run_cli(
+    let ws3_json = run_cli_json(
         &socket_path,
         &["workspace", "create", "--cwd", "/", "--no-focus"],
     );
-    let ws3_json: serde_json::Value = serde_json::from_slice(&ws3.stdout).unwrap();
     let ws3_id = ws3_json["result"]["workspace"]["workspace_id"]
         .as_str()
         .unwrap()
@@ -789,10 +1032,13 @@ fn workspace_ids_are_stable_and_pane_numbers_stay_compact() {
     assert_ne!(ws3_id, ws2_id);
 
     let close_ws2 = run_cli(&socket_path, &["workspace", "close", &ws2_id]);
-    assert!(close_ws2.status.success());
+    assert!(
+        close_ws2.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&close_ws2.stderr)
+    );
 
-    let workspaces = run_cli(&socket_path, &["workspace", "list"]);
-    let workspaces_json: serde_json::Value = serde_json::from_slice(&workspaces.stdout).unwrap();
+    let workspaces_json = run_cli_json(&socket_path, &["workspace", "list"]);
     let ids: Vec<String> = workspaces_json["result"]["workspaces"]
         .as_array()
         .unwrap()
@@ -801,11 +1047,10 @@ fn workspace_ids_are_stable_and_pane_numbers_stay_compact() {
         .collect();
     assert_eq!(ids, vec![ws1_id.clone(), ws3_id.clone()]);
 
-    let new_ws = run_cli(
+    let new_ws_json = run_cli_json(
         &socket_path,
         &["workspace", "create", "--cwd", "/var/tmp", "--no-focus"],
     );
-    let new_ws_json: serde_json::Value = serde_json::from_slice(&new_ws.stdout).unwrap();
     let new_ws_id = new_ws_json["result"]["workspace"]["workspace_id"]
         .as_str()
         .unwrap()
@@ -814,17 +1059,20 @@ fn workspace_ids_are_stable_and_pane_numbers_stay_compact() {
     assert_ne!(new_ws_id, ws2_id);
     assert_ne!(new_ws_id, ws3_id);
 
-    let ws3_panes = run_cli(&socket_path, &["pane", "list", "--workspace", &ws3_id]);
-    let ws3_panes_json: serde_json::Value = serde_json::from_slice(&ws3_panes.stdout).unwrap();
+    let ws3_panes_json = run_cli_json(&socket_path, &["pane", "list", "--workspace", &ws3_id]);
     assert_eq!(
         ws3_panes_json["result"]["panes"][0]["pane_id"],
         format!("{ws3_id}-1")
     );
 
     let close_middle = run_cli(&socket_path, &["pane", "close", &format!("{ws1_id}-2")]);
-    assert!(close_middle.status.success());
-    let ws1_panes = run_cli(&socket_path, &["pane", "list", "--workspace", &ws1_id]);
-    let ws1_panes_json: serde_json::Value = serde_json::from_slice(&ws1_panes.stdout).unwrap();
+    assert!(
+        close_middle.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&close_middle.stderr)
+    );
+
+    let ws1_panes_json = run_cli_json(&socket_path, &["pane", "list", "--workspace", &ws1_id]);
     let pane_ids: Vec<String> = ws1_panes_json["result"]["panes"]
         .as_array()
         .unwrap()

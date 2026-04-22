@@ -1,57 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-pub fn normalize_app_key_binding(
-    code: KeyCode,
-    modifiers: KeyModifiers,
-    shifted_codepoint: Option<u32>,
-) -> (KeyCode, KeyModifiers) {
-    let KeyCode::Char(raw_char) = code else {
-        return (code, modifiers);
-    };
-
-    let shifted_char = shifted_codepoint
-        .and_then(char::from_u32)
-        .or_else(|| modifiers.contains(KeyModifiers::SHIFT).then_some(raw_char))
-        .and_then(shifted_printable_char);
-
-    let normalized_char = shifted_char.unwrap_or(raw_char);
-    let mut normalized_modifiers = modifiers;
-    if shifted_char.is_some() {
-        normalized_modifiers.remove(KeyModifiers::SHIFT);
-    }
-
-    (KeyCode::Char(normalized_char), normalized_modifiers)
-}
-
-fn shifted_printable_char(ch: char) -> Option<char> {
-    match ch {
-        'a'..='z' => Some(ch.to_ascii_uppercase()),
-        'A'..='Z' => Some(ch),
-        '`' | '~' => Some('~'),
-        '1' | '!' => Some('!'),
-        '2' | '@' => Some('@'),
-        '3' | '#' => Some('#'),
-        '4' | '$' => Some('$'),
-        '5' | '%' => Some('%'),
-        '6' | '^' => Some('^'),
-        '7' | '&' => Some('&'),
-        '8' | '*' => Some('*'),
-        '9' | '(' => Some('('),
-        '0' | ')' => Some(')'),
-        '-' | '_' => Some('_'),
-        '=' | '+' => Some('+'),
-        '[' | '{' => Some('{'),
-        ']' | '}' => Some('}'),
-        '\\' | '|' => Some('|'),
-        ';' | ':' => Some(':'),
-        '\'' | '"' => Some('"'),
-        ',' | '<' => Some('<'),
-        '.' | '>' => Some('>'),
-        '/' | '?' => Some('?'),
-        _ => None,
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalKey {
     pub code: KeyCode,
@@ -128,4 +76,25 @@ pub enum MouseProtocolEncoding {
     Default,
     Utf8,
     Sgr,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_from_zero_flags_is_legacy() {
+        assert_eq!(
+            KeyboardProtocol::from_kitty_flags(0),
+            KeyboardProtocol::Legacy
+        );
+    }
+
+    #[test]
+    fn protocol_from_nonzero_flags_is_kitty() {
+        assert_eq!(
+            KeyboardProtocol::from_kitty_flags(7),
+            KeyboardProtocol::Kitty { flags: 7 }
+        );
+    }
 }

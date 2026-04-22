@@ -2,6 +2,113 @@ use std::io::Read;
 
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
+/// Parse raw terminal input bytes into a list of `RawInputEvent`s.
+///
+/// This is used by the headless server to route client input through the
+/// same parsing pipeline that the monolithic binary uses for stdin.
+/// Incomplete sequences at the end of the buffer are flushed as best-effort
+/// (same logic as the live input reader).
+#[allow(dead_code)]
+pub fn parse_raw_input_bytes(data: &[u8]) -> Vec<RawInputEvent> {
+    // Delegate to the sync version which actually works.
+    parse_raw_input_bytes_sync(data)
+}
+
+/// A raw input event paired with the byte range it consumed from the original buffer.
+#[cfg(test)]
+#[derive(Debug)]
+pub struct RawInputEventWithRange {
+    /// The parsed event.
+    pub event: RawInputEvent,
+    /// Byte offset where this event starts in the original buffer.
+    pub start: usize,
+    /// Number of bytes this event consumed from the original buffer.
+    /// For events generated from flushed incomplete bytes, `len` may be 0
+    /// (synthetic events that don't map to original bytes).
+    pub len: usize,
+}
+
+/// Parse raw terminal input bytes into a list of `RawInputEventWithRange`s (synchronous version).
+///
+/// Unlike `parse_raw_input_bytes_sync`, this preserves the byte offset for each
+/// event, allowing callers to write only the specific bytes for each event
+/// instead of the entire input buffer.
+#[cfg(test)]
+pub fn parse_raw_input_bytes_with_ranges(data: &[u8]) -> Vec<RawInputEventWithRange> {
+    let mut buffer = data.to_vec();
+    let mut events = Vec::new();
+    let mut offset = 0usize;
+
+    loop {
+        let Some((event, consumed)) = extract_one_event(&buffer) else {
+            break;
+        };
+        buffer.drain(..consumed);
+        events.push(RawInputEventWithRange {
+            event,
+            start: offset,
+            len: consumed,
+        });
+        offset += consumed;
+    }
+
+    // Flush remaining incomplete bytes.
+    if !buffer.is_empty() {
+        if buffer.as_slice() == [ESC] {
+            events.push(RawInputEventWithRange {
+                event: RawInputEvent::Key(TerminalKey::new(
+                    crossterm::event::KeyCode::Esc,
+                    KeyModifiers::empty(),
+                )),
+                start: offset,
+                len: 1,
+            });
+        } else if let Ok(text) = std::str::from_utf8(&buffer) {
+            if let Some(key) = parse_terminal_key_sequence(text) {
+                events.push(RawInputEventWithRange {
+                    event: RawInputEvent::Key(key),
+                    start: offset,
+                    len: buffer.len(),
+                });
+            }
+        }
+    }
+
+    events
+}
+
+/// Parse raw terminal input bytes into a list of `RawInputEvent`s (synchronous version).
+///
+/// Unlike `parse_raw_input_bytes`, this directly extracts events without
+/// going through a channel, making it suitable for synchronous use.
+pub fn parse_raw_input_bytes_sync(data: &[u8]) -> Vec<RawInputEvent> {
+    let mut buffer = data.to_vec();
+    let mut events = Vec::new();
+
+    loop {
+        let Some((event, consumed)) = extract_one_event(&buffer) else {
+            break;
+        };
+        buffer.drain(..consumed);
+        events.push(event);
+    }
+
+    if !buffer.is_empty() {
+        if buffer.as_slice() == [ESC] {
+            events.push(RawInputEvent::Key(TerminalKey::new(
+                crossterm::event::KeyCode::Esc,
+                KeyModifiers::empty(),
+            )));
+        } else if let Ok(text) = std::str::from_utf8(&buffer) {
+            if let Some(key) = parse_terminal_key_sequence(text) {
+                events.push(RawInputEvent::Key(key));
+            }
+        }
+    }
+
+    events
+}
+
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use tokio::sync::mpsc;
@@ -54,30 +161,56 @@ pub fn spawn_input_reader() -> mpsc::Receiver<RawInputEvent> {
 }
 
 fn drain_buffer(buffer: &mut Vec<u8>, tx: &mpsc::Sender<RawInputEvent>) {
-    loop {
-        let Some((event, consumed)) = extract_one_event(buffer) else {
-            break;
+    for bytes in drain_complete_input_bytes(buffer) {
+        let Some((event, _consumed)) = extract_one_event(&bytes) else {
+            continue;
         };
-        tracing::debug!(
-            raw_bytes = ?&buffer[..consumed],
-            event = ?event,
-            "raw input event parsed"
-        );
-        buffer.drain(..consumed);
+        tracing::debug!(raw_bytes = ?bytes, event = ?event, "raw input event parsed");
         let _ = tx.blocking_send(event);
     }
 }
 
+pub(crate) fn drain_complete_input_bytes(buffer: &mut Vec<u8>) -> Vec<Vec<u8>> {
+    let mut chunks = Vec::new();
+
+    loop {
+        let Some((_event, consumed)) = extract_one_event(buffer) else {
+            break;
+        };
+        chunks.push(buffer[..consumed].to_vec());
+        buffer.drain(..consumed);
+    }
+
+    chunks
+}
+
 fn flush_incomplete_buffer(buffer: &mut Vec<u8>, tx: &mpsc::Sender<RawInputEvent>) {
+    if let Some(bytes) = flush_incomplete_input_bytes(buffer) {
+        if bytes.as_slice() == [ESC] {
+            let _ = tx.blocking_send(RawInputEvent::Key(TerminalKey::new(
+                crossterm::event::KeyCode::Esc,
+                KeyModifiers::empty(),
+            )));
+            return;
+        }
+
+        let Some((event, _consumed)) = extract_one_event(&bytes) else {
+            return;
+        };
+        let _ = tx.blocking_send(event);
+    }
+}
+
+pub(crate) fn flush_incomplete_input_bytes(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
     if buffer.is_empty() {
-        return;
+        return None;
     }
 
     if buffer.starts_with(BRACKETED_PASTE_START)
         && find_subsequence(buffer, BRACKETED_PASTE_END).is_none()
     {
         tracing::trace!(len = buffer.len(), "waiting for bracketed paste terminator");
-        return;
+        return None;
     }
 
     if buffer.as_slice() == [ESC] {
@@ -85,24 +218,18 @@ fn flush_incomplete_buffer(buffer: &mut Vec<u8>, tx: &mpsc::Sender<RawInputEvent
             bytes = ?buffer,
             "flushing lone escape after input timeout; if this follows an alt chord or focus switch it may reach the pane as plain esc"
         );
-        let _ = tx.blocking_send(RawInputEvent::Key(TerminalKey::new(
-            crossterm::event::KeyCode::Esc,
-            KeyModifiers::empty(),
-        )));
-        buffer.clear();
-        return;
+        return Some(std::mem::take(buffer));
     }
 
     if let Ok(text) = std::str::from_utf8(buffer) {
-        if let Some(key) = parse_terminal_key_sequence(text) {
-            let _ = tx.blocking_send(RawInputEvent::Key(key));
-            buffer.clear();
-            return;
+        if parse_terminal_key_sequence(text).is_some() {
+            return Some(std::mem::take(buffer));
         }
     }
 
     tracing::debug!(bytes = ?buffer, "dropping incomplete raw input buffer after timeout");
     buffer.clear();
+    None
 }
 
 #[cfg(unix)]
@@ -789,5 +916,79 @@ mod tests {
             KeyCode::Char('é'),
             KeyModifiers::empty(),
         );
+    }
+
+    #[test]
+    fn parse_with_ranges_tracks_byte_offsets() {
+        use super::parse_raw_input_bytes_with_ranges;
+
+        // Input: Up arrow (3 bytes) + 'a' (1 byte) + Down arrow (3 bytes)
+        let input = b"\x1b[Aa\x1b[B".to_vec();
+        let ranges = parse_raw_input_bytes_with_ranges(&input);
+
+        assert_eq!(ranges.len(), 3, "should parse three events");
+
+        // Up arrow: \x1b[A at offset 0, length 3
+        assert_eq!(ranges[0].start, 0);
+        assert_eq!(ranges[0].len, 3);
+        assert!(matches!(
+            &ranges[0].event,
+            RawInputEvent::Key(k) if k.code == KeyCode::Up
+        ));
+
+        // 'a' at offset 3, length 1
+        assert_eq!(ranges[1].start, 3);
+        assert_eq!(ranges[1].len, 1);
+        assert!(matches!(
+            &ranges[1].event,
+            RawInputEvent::Key(k) if k.code == KeyCode::Char('a')
+        ));
+
+        // Down arrow: \x1b[B at offset 4, length 3
+        assert_eq!(ranges[2].start, 4);
+        assert_eq!(ranges[2].len, 3);
+        assert!(matches!(
+            &ranges[2].event,
+            RawInputEvent::Key(k) if k.code == KeyCode::Down
+        ));
+
+        // Verify the raw bytes for each event slice correctly.
+        assert_eq!(
+            &input[ranges[0].start..ranges[0].start + ranges[0].len],
+            b"\x1b[A"
+        );
+        assert_eq!(
+            &input[ranges[1].start..ranges[1].start + ranges[1].len],
+            b"a"
+        );
+        assert_eq!(
+            &input[ranges[2].start..ranges[2].start + ranges[2].len],
+            b"\x1b[B"
+        );
+    }
+
+    #[test]
+    fn parse_with_ranges_handles_single_event() {
+        use super::parse_raw_input_bytes_with_ranges;
+
+        let input = b"a".to_vec();
+        let ranges = parse_raw_input_bytes_with_ranges(&input);
+
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].start, 0);
+        assert_eq!(ranges[0].len, 1);
+    }
+
+    #[test]
+    fn parse_with_ranges_handles_mouse_event() {
+        use super::parse_raw_input_bytes_with_ranges;
+
+        let input = b"\x1b[<0;20;10M".to_vec();
+        let ranges = parse_raw_input_bytes_with_ranges(&input);
+
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].start, 0);
+        assert_eq!(ranges[0].len, input.len());
+        assert!(matches!(&ranges[0].event, RawInputEvent::Mouse(_)));
     }
 }

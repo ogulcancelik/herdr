@@ -1,10 +1,10 @@
 {
-  "version": "0.4.11",
-  "notes": "### Breaking Changes Please Read\n- The update flow changes in `0.4.11`. Herdr no longer installs updates silently in the background. Starting with this release, herdr only checks for updates and shows them in the UI. To install a new release, quit herdr and then run `herdr update` manually in your shell.\n- This prepares the upcoming `0.5.0` persistence release. Herdr is moving from the old single-binary update model toward a persistent server/client session model, so your workspace can keep running while clients attach, detach, and reconnect.\n- The reason for this change is upgrade safety. Herdr needs to stop the old running process cleanly before the new client/server model takes over, so manual update avoids mixed-version states during the transition.\n\n### Added\n- Hook-reported agent state can now use custom agent labels, so integrations are no longer limited to herdr\u2019s built-in agent names. Custom labels now flow through pane/workspace UI and the socket API anywhere agent names are shown.",
+  "version": "0.5.0",
+  "notes": "### Breaking Changes Please Read\n- herdr now defaults to a persistent server/client session model. running `herdr` starts or reattaches to a background session server instead of launching the old single-process UI.\n- quitting the UI in default mode now detaches the current client and leaves the shared session running. use `herdr server stop` to stop the background server explicitly.\n- the old monolithic behavior is still available as an escape hatch with `herdr --no-session`.\n\n### Added\n- Persistent sessions are now the default product behavior. You can detach and reattach without stopping pane processes.\n- Added the thin client and headless server as first-class product components, including auto-detect launch, explicit `herdr client`, and `herdr server stop`.\n- Sessions now restore cleanly after full restart, preserving workspaces, tabs, panes, and running process state.\n- Multi-client attach is now supported. Multiple clients can connect to the same shared session.\n\n### Changed\n- In persistence mode, in-app quit actions now detach the current client by default instead of shutting down the whole background server.\n- The current persistence model is a shared session view across attached clients. It is not yet full tmux-style per-client independent navigation.\n- Restored sessions now land in terminal mode, while fresh sessions still start in navigate mode.",
   "assets": {
-    "linux-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.11/herdr-linux-x86_64",
-    "linux-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.11/herdr-linux-aarch64",
-    "macos-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.11/herdr-macos-x86_64",
-    "macos-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.11/herdr-macos-aarch64"
+    "linux-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.5.0/herdr-linux-x86_64",
+    "linux-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.5.0/herdr-linux-aarch64",
+    "macos-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.5.0/herdr-macos-x86_64",
+    "macos-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.5.0/herdr-macos-aarch64"
   }
 }

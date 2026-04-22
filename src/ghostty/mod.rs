@@ -1121,10 +1121,17 @@ impl<'a> RowCellIter<'a> {
     }
 
     pub fn graphemes(&self) -> Result<Vec<u32>, Error> {
+        let mut out = Vec::new();
+        self.graphemes_into(&mut out)?;
+        Ok(out)
+    }
+
+    pub fn graphemes_into(&self, out: &mut Vec<u32>) -> Result<(), Error> {
         let len = self.grapheme_len()? as usize;
-        let mut out = vec![0u32; len];
+        out.clear();
+        out.resize(len, 0);
         if len == 0 {
-            return Ok(out);
+            return Ok(());
         }
         // SAFETY: out buffer is allocated for the grapheme count returned by the API.
         unsafe {
@@ -1135,7 +1142,7 @@ impl<'a> RowCellIter<'a> {
             )
             .into_result()?;
         }
-        Ok(out)
+        Ok(())
     }
 }
 
