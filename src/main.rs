@@ -39,6 +39,7 @@ mod release_notes;
 mod selection;
 mod server;
 mod sound;
+mod terminal_notify;
 mod terminal_theme;
 mod ui;
 mod update;
@@ -110,9 +111,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"
 
-# Optional visual toast notifications for background workspace events
+# Background notification popup delivery
 [ui.toast]
-# enabled = false
+# off = disable pop-up notifications
+# herdr = show top-right in-app toasts
+# terminal = ask the outer terminal to show a desktop notification
+# delivery = "off"
 
 # Play sounds when agents change state in background workspaces
 [ui.sound]

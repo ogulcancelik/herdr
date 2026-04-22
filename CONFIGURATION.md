@@ -27,7 +27,7 @@ onboarding = true
 notes:
 - missing `onboarding` currently behaves like `true`
 - set `onboarding = true` to force the setup screen again for testing
-- after onboarding, herdr writes `onboarding = false` plus the chosen sound/toast settings
+- continuing from onboarding writes `onboarding = false` and opens the normal settings UI
 
 ## keybindings
 
@@ -191,22 +191,33 @@ accent = "cyan"
 
 ```toml
 [ui.toast]
-enabled = false
+delivery = "off"
 ```
 
 ### options
 
 | option | default | description |
 |--------|---------|-------------|
-| `ui.toast.enabled` | `false` | show top-right visual toasts for background agent events |
+| `ui.toast.delivery` | `off` | where background popup notifications should appear |
 
-current v1 behavior:
+available values:
+- `off` — disable popup notifications
+- `herdr` — show top-right in-app toasts
+- `terminal` — ask the outer terminal to show a desktop notification
+
+compatibility note:
+- older configs may still use `ui.toast.enabled = true|false`
+- herdr still reads that legacy key for compatibility
+- if you save toast settings from inside herdr, it rewrites the setting to `ui.toast.delivery`
+
+current behavior:
 - informational only
-- one toast at a time
-- top-right placement
+- one notification event at a time
 - shown for background agent events like `needs attention` and `finished`
 - suppression is tab-aware: the active tab stays quiet, but background tabs in the same workspace can still notify
-- no keyboard action or temporary key semantics
+- `terminal` delivery is best-effort and depends on terminal support
+- currently targets terminals such as Ghostty, Kitty, iTerm2, and WezTerm
+- inside tmux, herdr wraps notification escapes with tmux passthrough
 
 ## sound
 

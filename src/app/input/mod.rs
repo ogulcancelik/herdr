@@ -37,11 +37,11 @@ pub(crate) use self::{
         handle_keybind_help_key, handle_rename_key, handle_resize_key,
     },
     navigate::{handle_navigate_key, terminal_direct_navigation_action},
+    settings::open_settings,
 };
 use self::{
     modal::{
-        modal_action_from_key, ModalAction, ONBOARDING_NOTIFICATION_ACTIONS,
-        ONBOARDING_WELCOME_ACTIONS, RELEASE_NOTES_ACTIONS,
+        modal_action_from_key, ModalAction, ONBOARDING_WELCOME_ACTIONS, RELEASE_NOTES_ACTIONS,
     },
     settings::SettingsAction,
 };
@@ -89,32 +89,11 @@ impl App {
     }
 
     pub(crate) fn handle_onboarding_key(&mut self, key: KeyEvent) {
-        match self.state.onboarding_step {
-            0 => match key.code {
-                KeyCode::Right | KeyCode::Char('l') => {
-                    self.state.onboarding_step = 1;
-                }
-                _ => match modal_action_from_key(&key, ONBOARDING_WELCOME_ACTIONS) {
-                    Some(ModalAction::Continue) => self.state.onboarding_step = 1,
-                    _ => {}
-                },
-            },
-            _ => match key.code {
-                KeyCode::Up | KeyCode::Char('k') => self.state.onboarding_list.move_prev(),
-                KeyCode::Down | KeyCode::Char('j') => self.state.onboarding_list.move_next(4),
-                KeyCode::Left | KeyCode::Char('h') => {
-                    self.state.onboarding_step = 0;
-                }
-                KeyCode::Char(c) if ('1'..='4').contains(&c) => {
-                    self.state
-                        .onboarding_list
-                        .select((c as usize) - ('1' as usize));
-                }
-                _ => match modal_action_from_key(&key, ONBOARDING_NOTIFICATION_ACTIONS) {
-                    Some(ModalAction::Back) => self.state.onboarding_step = 0,
-                    Some(ModalAction::Save) => self.complete_onboarding(),
-                    _ => {}
-                },
+        match key.code {
+            KeyCode::Right | KeyCode::Char('l') => self.open_settings_from_onboarding(),
+            _ => match modal_action_from_key(&key, ONBOARDING_WELCOME_ACTIONS) {
+                Some(ModalAction::Continue) => self.open_settings_from_onboarding(),
+                _ => {}
             },
         }
     }
@@ -170,7 +149,7 @@ impl App {
             match action {
                 SettingsAction::SaveTheme(name) => self.save_theme(&name),
                 SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
-                SettingsAction::SaveToast(enabled) => self.save_toast(enabled),
+                SettingsAction::SaveToastDelivery(delivery) => self.save_toast_delivery(delivery),
             }
         }
 

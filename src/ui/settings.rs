@@ -8,15 +8,18 @@ use ratatui::{
 
 use super::widgets::{
     action_button_row_rects, centered_popup_rect, modal_stack_areas, panel_contrast_fg,
-    render_action_button, render_panel_shell, ActionButtonSpec,
+    render_action_button, render_modal_choice_list, render_panel_shell, ActionButtonSpec,
 };
-use crate::app::{state::Palette, AppState};
+use crate::{
+    app::{state::Palette, AppState},
+    config::ToastDelivery,
+};
 
 pub(super) fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     use crate::app::state::SettingsSection;
 
     let p = &app.palette;
-    let Some(popup) = centered_popup_rect(area, 56, 20) else {
+    let Some(popup) = centered_popup_rect(area, 76, 22) else {
         return;
     };
 
@@ -87,14 +90,20 @@ pub(super) fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: R
             );
         }
         SettingsSection::Toast => {
-            render_settings_toggle(
+            render_modal_choice_list(
                 frame,
                 content_area,
-                p,
-                "visual toasts",
-                "show top-right notifications for background events",
-                app.toast_config.enabled,
+                "notification popups",
+                "choose where background popup notifications should appear",
+                &[
+                    ("off", ToastDelivery::Off),
+                    ("inside herdr", ToastDelivery::Herdr),
+                    ("via terminal", ToastDelivery::Terminal),
+                ],
+                app.toast_delivery(),
                 app.settings.list.selected,
+                p,
+                2,
             );
         }
     }
@@ -195,44 +204,15 @@ fn render_settings_toggle(
     current_value: bool,
     selected_idx: usize,
 ) {
-    let [desc_area, _, list_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(2),
-    ])
-    .areas::<3>(area);
-
-    let max_desc_len = (desc_area.width as usize).saturating_sub(2);
-    let desc_text = if description.len() > max_desc_len {
-        format!(" {}…", &description[..max_desc_len.saturating_sub(2)])
-    } else {
-        format!(" {description}")
-    };
-    frame.render_widget(
-        Paragraph::new(Span::styled(desc_text, Style::default().fg(p.overlay1))),
-        desc_area,
+    render_modal_choice_list(
+        frame,
+        area,
+        title,
+        description,
+        &[("on", true), ("off", false)],
+        current_value,
+        selected_idx,
+        p,
+        1,
     );
-
-    let items: Vec<ListItem> = ["on", "off"]
-        .into_iter()
-        .map(|label| {
-            let is_active = (label == "on") == current_value;
-            let marker = if is_active { " ✓" } else { "" };
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{title}: {label}"), Style::default().fg(p.subtext0)),
-                Span::styled(marker, Style::default().fg(p.green)),
-            ]))
-        })
-        .collect();
-
-    let list = List::new(items)
-        .highlight_style(
-            Style::default()
-                .bg(p.surface0)
-                .fg(p.text)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol(" ▸ ");
-    let mut state = ListState::default().with_selected(Some(selected_idx.min(1)));
-    frame.render_stateful_widget(list, list_area, &mut state);
 }

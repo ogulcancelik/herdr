@@ -25,6 +25,12 @@ impl App {
         }
     }
 
+    pub(super) fn mark_onboarding_complete(&mut self) {
+        self.update_config_file("onboarding setting", |content| {
+            crate::config::upsert_top_level_bool(content, "onboarding", false)
+        });
+    }
+
     pub(super) fn save_theme(&mut self, name: &str) {
         self.update_config_file("theme", |content| {
             crate::config::upsert_section_value(content, "theme", "name", &format!("\"{name}\""))
@@ -37,9 +43,16 @@ impl App {
         });
     }
 
-    pub(super) fn save_toast(&mut self, enabled: bool) {
+    pub(super) fn save_toast_delivery(&mut self, delivery: crate::config::ToastDelivery) {
+        let value = match delivery {
+            crate::config::ToastDelivery::Off => "\"off\"",
+            crate::config::ToastDelivery::Herdr => "\"herdr\"",
+            crate::config::ToastDelivery::Terminal => "\"terminal\"",
+        };
         self.update_config_file("toast setting", |content| {
-            crate::config::upsert_section_bool(content, "ui.toast", "enabled", enabled)
+            let content =
+                crate::config::upsert_section_value(content, "ui.toast", "delivery", value);
+            crate::config::remove_section_key(&content, "ui.toast", "enabled")
         });
     }
 }

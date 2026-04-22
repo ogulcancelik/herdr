@@ -24,10 +24,8 @@ use self::menus::{
     render_context_menu, render_global_launcher_menu, render_navigate_overlay,
     render_resize_overlay,
 };
+pub(crate) use self::onboarding::onboarding_welcome_continue_rect;
 use self::onboarding::render_onboarding_overlay;
-pub(crate) use self::onboarding::{
-    onboarding_notification_button_rects, onboarding_welcome_continue_rect,
-};
 use self::panes::{compute_pane_infos, render_panes};
 use self::release_notes::render_release_notes_overlay;
 pub(crate) use self::release_notes::{

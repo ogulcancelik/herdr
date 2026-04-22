@@ -1,16 +1,19 @@
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
-use crate::app::{
-    state::{AppState, SettingsSection, THEME_NAMES},
-    App, Mode,
+use crate::{
+    app::{
+        state::{AppState, SettingsSection, THEME_NAMES},
+        App, Mode,
+    },
+    config::ToastDelivery,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum SettingsAction {
     SaveTheme(String),
     SaveSound(bool),
-    SaveToast(bool),
+    SaveToastDelivery(ToastDelivery),
 }
 
 impl App {
@@ -19,7 +22,7 @@ impl App {
             match action {
                 SettingsAction::SaveTheme(name) => self.save_theme(&name),
                 SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
-                SettingsAction::SaveToast(enabled) => self.save_toast(enabled),
+                SettingsAction::SaveToastDelivery(delivery) => self.save_toast_delivery(delivery),
             }
         }
     }
@@ -35,6 +38,22 @@ fn current_theme_index(theme_name: &str) -> usize {
         .iter()
         .position(|name| normalize_theme_name(name) == normalized)
         .unwrap_or(0)
+}
+
+fn toast_delivery_index(delivery: ToastDelivery) -> usize {
+    match delivery {
+        ToastDelivery::Off => 0,
+        ToastDelivery::Herdr => 1,
+        ToastDelivery::Terminal => 2,
+    }
+}
+
+fn toast_delivery_for_index(idx: usize) -> ToastDelivery {
+    match idx {
+        0 => ToastDelivery::Off,
+        1 => ToastDelivery::Herdr,
+        _ => ToastDelivery::Terminal,
+    }
 }
 
 fn preview_selected_theme(state: &mut AppState) {
@@ -111,7 +130,7 @@ pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Opti
             }
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
                 state.settings.section = SettingsSection::Toast;
-                state.settings.list.selected = usize::from(!state.toast_config.enabled);
+                state.settings.list.selected = toast_delivery_index(state.toast_delivery());
             }
             KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
                 state.settings.section = SettingsSection::Theme;
@@ -123,13 +142,13 @@ pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Opti
             },
         },
         SettingsSection::Toast => match key.code {
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
-                state.settings.list.selected = 1 - state.settings.list.selected.min(1);
-            }
+            KeyCode::Up | KeyCode::Char('k') => state.settings.list.move_prev(),
+            KeyCode::Down | KeyCode::Char('j') => state.settings.list.move_next(3),
             KeyCode::Enter | KeyCode::Char(' ') => {
-                let enabled = state.settings.list.selected == 0;
-                state.toast_config.enabled = enabled;
-                return Some(SettingsAction::SaveToast(enabled));
+                let delivery = toast_delivery_for_index(state.settings.list.selected);
+                state.toast_config.delivery = delivery;
+                state.toast = None;
+                return Some(SettingsAction::SaveToastDelivery(delivery));
             }
             KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
                 state.settings.section = SettingsSection::Sound;
@@ -149,7 +168,7 @@ pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Opti
     None
 }
 
-pub(super) fn open_settings(state: &mut AppState) {
+pub(crate) fn open_settings(state: &mut AppState) {
     state.settings.original_palette = Some(state.palette.clone());
     state.settings.original_theme = Some(state.theme_name.clone());
     state.settings.section = SettingsSection::Theme;
@@ -159,7 +178,7 @@ pub(super) fn open_settings(state: &mut AppState) {
 
 impl AppState {
     fn settings_popup_rect(&self) -> Rect {
-        crate::ui::centered_popup_rect(self.screen_rect(), 56, 20).unwrap_or_default()
+        crate::ui::centered_popup_rect(self.screen_rect(), 76, 22).unwrap_or_default()
     }
 
     fn settings_inner_rect(&self) -> Rect {
@@ -212,10 +231,18 @@ impl AppState {
                 let idx = scroll + (row - area.y) as usize;
                 (idx < THEME_NAMES.len()).then_some(idx)
             }
-            SettingsSection::Sound | SettingsSection::Toast => {
-                let list_y = area.y + 2;
+            SettingsSection::Sound => {
+                let list_y = area.y + 3;
                 if row >= list_y && row < list_y + 2 {
                     Some((row - list_y) as usize)
+                } else {
+                    None
+                }
+            }
+            SettingsSection::Toast => {
+                let list_y = area.y + 3;
+                if row >= list_y && row < list_y + 6 {
+                    Some(((row - list_y) / 2) as usize)
                 } else {
                     None
                 }
@@ -231,7 +258,7 @@ impl AppState {
                     self.settings.list.select(match section {
                         SettingsSection::Theme => current_theme_index(&self.theme_name),
                         SettingsSection::Sound => usize::from(!self.sound_enabled()),
-                        SettingsSection::Toast => usize::from(!self.toast_config.enabled),
+                        SettingsSection::Toast => toast_delivery_index(self.toast_delivery()),
                     });
                     return None;
                 }
@@ -248,9 +275,10 @@ impl AppState {
                             Some(SettingsAction::SaveSound(enabled))
                         }
                         SettingsSection::Toast => {
-                            let enabled = idx == 0;
-                            self.toast_config.enabled = enabled;
-                            Some(SettingsAction::SaveToast(enabled))
+                            let delivery = toast_delivery_for_index(idx);
+                            self.toast_config.delivery = delivery;
+                            self.toast = None;
+                            Some(SettingsAction::SaveToastDelivery(delivery))
                         }
                     };
                 }

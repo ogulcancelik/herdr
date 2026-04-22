@@ -47,6 +47,11 @@ impl App {
             None
         };
 
+        let update_ready_version = if let AppEvent::UpdateReady { version } = &ev {
+            Some(version.clone())
+        } else {
+            None
+        };
         let previous_toast = self.state.toast.clone();
         let pane_updates = self.state.handle_app_event(ev);
         for update in &pane_updates {
@@ -64,6 +69,58 @@ impl App {
         if let Some(overlay) = overlay_state {
             self.restore_overlay_after_exit(overlay);
         }
+
+        if matches!(
+            self.state.toast_config.delivery,
+            crate::config::ToastDelivery::Terminal
+        ) {
+            if let Some(version) = update_ready_version {
+                let _ = crate::terminal_notify::show_notification(
+                    &format!("v{version} available"),
+                    Some("detach, then run `herdr update`"),
+                );
+            } else {
+                for update in &pane_updates {
+                    let is_active_tab = self
+                        .state
+                        .pane_is_in_active_tab(update.ws_idx, update.pane_id);
+                    let Some(kind) = crate::app::actions::notification_toast_for_state_change(
+                        is_active_tab,
+                        update.previous_state,
+                        update.state,
+                    ) else {
+                        continue;
+                    };
+                    let Some(ws) = self.state.workspaces.get(update.ws_idx) else {
+                        continue;
+                    };
+                    let Some(pane) = ws
+                        .tabs
+                        .iter()
+                        .find_map(|tab| tab.panes.get(&update.pane_id))
+                    else {
+                        continue;
+                    };
+                    let Some(agent_label) = pane.effective_agent_label() else {
+                        continue;
+                    };
+                    let event_text = match kind {
+                        ToastKind::NeedsAttention => "needs attention",
+                        ToastKind::Finished => "finished",
+                        ToastKind::UpdateInstalled => "updated",
+                    };
+                    let _ = crate::terminal_notify::show_notification(
+                        &format!("{} {}", agent_label, event_text),
+                        Some(&crate::app::actions::notification_context(
+                            ws,
+                            update.ws_idx,
+                            update.pane_id,
+                        )),
+                    );
+                }
+            }
+        }
+
         self.sync_toast_deadline(previous_toast);
     }
 

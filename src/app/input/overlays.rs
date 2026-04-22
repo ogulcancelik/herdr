@@ -272,51 +272,17 @@ impl AppState {
             return;
         }
 
-        match self.onboarding_step {
-            0 => {
-                let Some(inner) = self.onboarding_modal_inner(64, 16) else {
-                    return;
-                };
-                let actions = crate::ui::modal_stack_areas(inner, 2, 0, 1, 1)
-                    .actions
-                    .unwrap_or_default();
-                let button = crate::ui::onboarding_welcome_continue_rect(actions);
-                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-                    && modal_action_from_buttons(
-                        mouse.column,
-                        mouse.row,
-                        &[(button, ModalAction::Continue)],
-                    ) == Some(ModalAction::Continue)
-                {
-                    self.onboarding_step = 1;
-                }
-            }
-            _ => {
-                let Some(inner) = self.onboarding_modal_inner(56, 14) else {
-                    return;
-                };
-                let stack = crate::ui::modal_stack_areas(inner, 3, 0, 1, 1);
-                if mouse.row >= stack.content.y && mouse.row < stack.content.y + 4 {
-                    self.onboarding_list
-                        .select((mouse.row - stack.content.y) as usize);
-                    return;
-                }
-
-                let (back, save) = crate::ui::onboarding_notification_button_rects(
-                    stack.actions.unwrap_or_default(),
-                );
-                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                    match modal_action_from_buttons(
-                        mouse.column,
-                        mouse.row,
-                        &[(back, ModalAction::Back), (save, ModalAction::Save)],
-                    ) {
-                        Some(ModalAction::Back) => self.onboarding_step = 0,
-                        Some(ModalAction::Save) => self.request_complete_onboarding = true,
-                        _ => {}
-                    }
-                }
-            }
+        let Some(inner) = self.onboarding_modal_inner(64, 16) else {
+            return;
+        };
+        let actions = crate::ui::modal_stack_areas(inner, 2, 0, 1, 1)
+            .actions
+            .unwrap_or_default();
+        let button = crate::ui::onboarding_welcome_continue_rect(actions);
+        if modal_action_from_buttons(mouse.column, mouse.row, &[(button, ModalAction::Continue)])
+            == Some(ModalAction::Continue)
+        {
+            self.request_complete_onboarding = true;
         }
     }
 
@@ -453,31 +419,30 @@ mod tests {
     fn onboarding_hover_does_not_change_selection() {
         let mut app = app_for_mouse_test();
         app.state.mode = Mode::Onboarding;
-        app.state.onboarding_step = 1;
-        app.state.onboarding_list.select(1);
 
-        let inner = app.state.onboarding_modal_inner(56, 14).unwrap();
-        let content = crate::ui::modal_stack_areas(inner, 3, 0, 1, 1).content;
+        let inner = app.state.onboarding_modal_inner(64, 16).unwrap();
+        let content = crate::ui::modal_stack_areas(inner, 2, 0, 1, 1).content;
         app.handle_mouse(mouse(MouseEventKind::Moved, content.x + 2, content.y));
 
-        assert_eq!(app.state.onboarding_list.selected, 1);
+        assert!(!app.state.request_complete_onboarding);
     }
 
     #[test]
-    fn onboarding_click_selects_notification_option() {
+    fn onboarding_click_continue_requests_completion() {
         let mut app = app_for_mouse_test();
         app.state.mode = Mode::Onboarding;
-        app.state.onboarding_step = 1;
-        app.state.onboarding_list.select(0);
 
-        let inner = app.state.onboarding_modal_inner(56, 14).unwrap();
-        let content = crate::ui::modal_stack_areas(inner, 3, 0, 1, 1).content;
+        let inner = app.state.onboarding_modal_inner(64, 16).unwrap();
+        let actions = crate::ui::modal_stack_areas(inner, 2, 0, 1, 1)
+            .actions
+            .unwrap();
+        let continue_rect = crate::ui::onboarding_welcome_continue_rect(actions);
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            content.x + 2,
-            content.y + 2,
+            continue_rect.x,
+            continue_rect.y,
         ));
 
-        assert_eq!(app.state.onboarding_list.selected, 2);
+        assert!(app.state.request_complete_onboarding);
     }
 }

@@ -9,7 +9,6 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ModalAction {
     Continue,
-    Back,
     Save,
     Clear,
     Cancel,
@@ -210,17 +209,6 @@ pub(super) const ONBOARDING_WELCOME_ACTIONS: &[ModalActionSpec<ModalAction>] = &
     action: ModalAction::Continue,
     bindings: &[ModalKeyBinding::Enter],
 }];
-
-pub(super) const ONBOARDING_NOTIFICATION_ACTIONS: &[ModalActionSpec<ModalAction>] = &[
-    ModalActionSpec {
-        action: ModalAction::Back,
-        bindings: &[ModalKeyBinding::Esc],
-    },
-    ModalActionSpec {
-        action: ModalAction::Save,
-        bindings: &[ModalKeyBinding::Enter],
-    },
-];
 
 pub(super) const RELEASE_NOTES_ACTIONS: &[ModalActionSpec<ModalAction>] = &[ModalActionSpec {
     action: ModalAction::Close,

@@ -255,6 +255,7 @@ pub fn run_client() -> io::Result<()> {
 
     let loaded_config = crate::config::Config::load();
     let sound_config = loaded_config.config.ui.sound;
+    let toast_config = loaded_config.config.ui.toast;
 
     let socket_path = client_socket_path();
     info!(path = %socket_path.display(), "connecting to server");
@@ -309,8 +310,9 @@ pub fn run_client() -> io::Result<()> {
         quit_flag.store(true, Ordering::Release);
     });
 
-    let result =
-        rt.block_on(async { run_client_loop(stream, cols, rows, should_quit, sound_config).await });
+    let result = rt.block_on(async {
+        run_client_loop(stream, cols, rows, should_quit, sound_config, toast_config).await
+    });
 
     // Restore the terminal before printing any final status message.
     drop(_guard);
@@ -350,6 +352,7 @@ async fn run_client_loop(
     rows: u16,
     should_quit: Arc<AtomicBool>,
     sound_config: crate::config::SoundConfig,
+    toast_config: crate::config::ToastConfig,
 ) -> Result<(), ClientError> {
     let mut state = ClientState {
         last_frame: None,
@@ -425,7 +428,7 @@ async fn run_client_loop(
                     return Err(ClientError::ServerShutdown { reason });
                 }
                 ServerMessage::Notify { kind, message } => {
-                    handle_notify(kind, &message, &sound_config);
+                    handle_notify(kind, &message, &sound_config, &toast_config);
                 }
                 ServerMessage::Clipboard { data } => {
                     forward_clipboard(&data);
@@ -523,7 +526,12 @@ fn write_to_server(stream: &mut UnixStream, msg: &ClientMessage) -> io::Result<(
 // Notifications
 // ---------------------------------------------------------------------------
 
-fn handle_notify(kind: NotifyKind, message: &str, sound_config: &crate::config::SoundConfig) {
+fn handle_notify(
+    kind: NotifyKind,
+    message: &str,
+    sound_config: &crate::config::SoundConfig,
+    toast_config: &crate::config::ToastConfig,
+) {
     match kind {
         NotifyKind::Sound => {
             let Some(sound) = sound_from_notify_message(message) else {
@@ -539,6 +547,15 @@ fn handle_notify(kind: NotifyKind, message: &str, sound_config: &crate::config::
         }
         NotifyKind::Toast => {
             debug!(message = message, "received toast notification from server");
+            if matches!(
+                toast_config.delivery,
+                crate::config::ToastDelivery::Terminal
+            ) {
+                let (title, body) = crate::terminal_notify::split_message(message);
+                if let Err(err) = crate::terminal_notify::show_notification(title, body) {
+                    warn!(err = %err, "failed to emit terminal notification");
+                }
+            }
         }
     }
 }

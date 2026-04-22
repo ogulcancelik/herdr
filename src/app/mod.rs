@@ -254,8 +254,6 @@ impl App {
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
-            onboarding_step: 0,
-            onboarding_list: state::SelectionListState::new(1),
             release_notes: startup_release_notes.map(|notes| state::ReleaseNotesState {
                 version: notes.version,
                 body: notes.body,
@@ -401,7 +399,7 @@ impl App {
 
             if self.state.request_complete_onboarding {
                 self.state.request_complete_onboarding = false;
-                self.complete_onboarding();
+                self.open_settings_from_onboarding();
                 needs_render = true;
             }
 
@@ -528,30 +526,9 @@ impl App {
         }
     }
 
-    pub(crate) fn complete_onboarding(&mut self) {
-        let (sound_enabled, toast_enabled) = match self.state.onboarding_list.selected {
-            0 => (false, false),
-            1 => (false, true),
-            2 => (true, false),
-            _ => (true, true),
-        };
-
-        match crate::config::save_onboarding_choices(sound_enabled, toast_enabled) {
-            Ok(()) => {
-                self.state.sound.enabled = sound_enabled;
-                self.state.toast_config.enabled = toast_enabled;
-                self.state.mode = if self.state.active.is_some() {
-                    Mode::Terminal
-                } else {
-                    Mode::Navigate
-                };
-            }
-            Err(err) => {
-                self.state.config_diagnostic =
-                    Some(format!("failed to save onboarding config: {err}"));
-                self.config_diagnostic_deadline = Some(Instant::now() + Duration::from_secs(8));
-            }
-        }
+    pub(crate) fn open_settings_from_onboarding(&mut self) {
+        self.mark_onboarding_complete();
+        crate::app::input::open_settings(&mut self.state);
     }
 
     pub(crate) fn reload_keybinds(&mut self) {
@@ -1395,12 +1372,10 @@ mod tests {
     fn route_client_input_advances_onboarding_modal() {
         let mut app = test_app();
         app.state.mode = Mode::Onboarding;
-        app.state.onboarding_step = 0;
 
         app.route_client_input(b"\r".to_vec());
 
-        assert_eq!(app.state.onboarding_step, 1);
-        assert_eq!(app.state.mode, Mode::Onboarding);
+        assert_eq!(app.state.mode, Mode::Settings);
     }
 
     #[test]

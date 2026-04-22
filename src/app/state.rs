@@ -1,4 +1,4 @@
-use crate::config::{Keybinds, SoundConfig, ToastConfig};
+use crate::config::{Keybinds, SoundConfig, ToastConfig, ToastDelivery};
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Direction, Rect};
 use ratatui::style::Color;
@@ -602,8 +602,6 @@ pub struct AppState {
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
-    pub onboarding_step: usize,
-    pub onboarding_list: SelectionListState,
     pub release_notes: Option<ReleaseNotesState>,
     pub keybind_help: KeybindHelpState,
     pub workspace_scroll: usize,
@@ -665,6 +663,10 @@ impl AppState {
         self.sound.enabled
     }
 
+    pub fn toast_delivery(&self) -> ToastDelivery {
+        self.toast_config.delivery
+    }
+
     pub fn is_prefix(&self, key: &crossterm::event::KeyEvent) -> bool {
         key_matches(key, self.prefix_code, self.prefix_mods)
     }
@@ -722,8 +724,6 @@ impl AppState {
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
-            onboarding_step: 0,
-            onboarding_list: SelectionListState::new(1),
             release_notes: None,
             keybind_help: KeybindHelpState { scroll: 0 },
             workspace_scroll: 0,

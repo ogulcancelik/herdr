@@ -70,19 +70,6 @@ pub(super) fn resolve_config_relative_path(path: &Path) -> PathBuf {
         .join(path)
 }
 
-pub fn save_onboarding_choices(sound_enabled: bool, toast_enabled: bool) -> std::io::Result<()> {
-    let path = config_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let content = std::fs::read_to_string(&path).unwrap_or_default();
-    let content = upsert_top_level_bool(&content, "onboarding", false);
-    let content = upsert_section_bool(&content, "ui.sound", "enabled", sound_enabled);
-    let content = upsert_section_bool(&content, "ui.toast", "enabled", toast_enabled);
-    std::fs::write(path, content)
-}
-
 pub fn config_path() -> PathBuf {
     if let Ok(path) = std::env::var(CONFIG_PATH_ENV_VAR) {
         return PathBuf::from(path);
@@ -109,7 +96,7 @@ pub fn load_live_keybinds() -> Result<LiveKeybindConfig, Vec<String>> {
     config.live_keybinds()
 }
 
-pub(super) fn upsert_top_level_bool(content: &str, key: &str, value: bool) -> String {
+pub(crate) fn upsert_top_level_bool(content: &str, key: &str, value: bool) -> String {
     let replacement = format!("{key} = {value}");
     let mut lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();
     let mut in_section = false;
@@ -143,6 +130,38 @@ pub fn upsert_section_value(content: &str, section: &str, key: &str, value: &str
 
 pub fn upsert_section_bool(content: &str, section: &str, key: &str, value: bool) -> String {
     upsert_section_raw(content, section, key, &value.to_string())
+}
+
+pub fn remove_section_key(content: &str, section: &str, key: &str) -> String {
+    let header = format!("[{section}]");
+    let lines: Vec<&str> = content.lines().collect();
+    let mut result = Vec::new();
+    let mut i = 0;
+    let mut in_section = false;
+
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim();
+
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_section = trimmed == header;
+            result.push(line.to_string());
+            i += 1;
+            continue;
+        }
+
+        if in_section
+            && (trimmed.starts_with(&format!("{key} ")) || trimmed.starts_with(&format!("{key}=")))
+        {
+            i += 1;
+            continue;
+        }
+
+        result.push(line.to_string());
+        i += 1;
+    }
+
+    result.join("\n") + "\n"
 }
 
 fn upsert_section_raw(content: &str, section: &str, key: &str, value: &str) -> String {
@@ -222,5 +241,15 @@ mod tests {
         let updated = upsert_section_bool("", "ui.toast", "enabled", true);
         assert!(updated.contains("[ui.toast]"));
         assert!(updated.contains("enabled = true"));
+    }
+
+    #[test]
+    fn remove_section_key_removes_matching_key_from_section() {
+        let content =
+            "[ui.toast]\nenabled = true\ndelivery = \"herdr\"\n[ui.sound]\nenabled = true\n";
+        let updated = remove_section_key(content, "ui.toast", "enabled");
+        assert!(!updated.contains("[ui.toast]\nenabled = true"));
+        assert!(updated.contains("delivery = \"herdr\""));
+        assert!(updated.contains("[ui.sound]\nenabled = true"));
     }
 }

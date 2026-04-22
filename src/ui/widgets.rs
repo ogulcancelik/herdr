@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
@@ -60,14 +60,10 @@ pub(super) fn render_modal_shell(
 }
 
 pub(super) fn render_modal_header(frame: &mut Frame, area: Rect, title: &str, p: &Palette) {
-    let line = Line::from(vec![
-        Span::styled(
-            title,
-            Style::default().fg(p.text).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled("⬆", Style::default().fg(p.accent)),
-    ]);
+    let line = Line::from(vec![Span::styled(
+        title,
+        Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+    )]);
     frame.render_widget(Paragraph::new(line), area);
 }
 
@@ -178,6 +174,79 @@ pub(super) fn render_action_button(
             .alignment(Alignment::Center),
         rect,
     );
+}
+
+pub(crate) fn render_modal_description(frame: &mut Frame, area: Rect, text: &str, style: Style) {
+    frame.render_widget(
+        Paragraph::new(format!(" {text}"))
+            .style(style)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+pub(crate) fn modal_choice_rows(area: Rect, count: usize, row_height: u16) -> Vec<Rect> {
+    let mut rows = Vec::with_capacity(count);
+    let mut y = area.y;
+    for _ in 0..count {
+        if y >= area.y + area.height {
+            break;
+        }
+        let remaining = area.y + area.height - y;
+        let height = row_height.min(remaining);
+        rows.push(Rect::new(area.x, y, area.width, height));
+        y = y.saturating_add(row_height);
+    }
+    rows
+}
+
+pub(crate) fn render_modal_choice_list<T>(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    description: &str,
+    options: &[(&str, T)],
+    current_value: T,
+    selected_idx: usize,
+    p: &Palette,
+    row_height: u16,
+) where
+    T: Copy + PartialEq,
+{
+    let [desc_area, _, list_area] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Min(2),
+    ])
+    .areas::<3>(area);
+
+    render_modal_description(
+        frame,
+        desc_area,
+        description,
+        Style::default().fg(p.overlay1),
+    );
+
+    let rows = modal_choice_rows(list_area, options.len(), row_height);
+    for (idx, ((label, value), row)) in options.iter().zip(rows.iter()).enumerate() {
+        let is_active = *value == current_value;
+        let is_selected = idx == selected_idx;
+        let marker = if is_active { " ✓" } else { "" };
+        let style = if is_selected {
+            Style::default()
+                .bg(p.surface0)
+                .fg(p.text)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.subtext0)
+        };
+        frame.render_widget(
+            Paragraph::new(format!(" {title}: {label}{marker}"))
+                .style(style)
+                .wrap(Wrap { trim: false }),
+            *row,
+        );
+    }
 }
 
 pub(super) fn centered_button_row(

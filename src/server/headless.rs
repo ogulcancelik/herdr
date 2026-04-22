@@ -454,7 +454,7 @@ impl HeadlessServer {
             // Handle deferred requests.
             if self.app.state.request_complete_onboarding {
                 self.app.state.request_complete_onboarding = false;
-                self.app.complete_onboarding();
+                self.app.open_settings_from_onboarding();
                 needs_render = true;
             }
 
@@ -799,15 +799,67 @@ impl HeadlessServer {
                     }
                 }
 
-                // Forward any new toast as a notification.
-                if self.app.state.toast.is_some() && self.app.state.toast != toast_before {
-                    if let Some(toast) = &self.app.state.toast {
-                        let msg = format!("{}: {}", toast.title, toast.context);
-                        self.send_to_all_clients(ServerMessage::Notify {
-                            kind: protocol::NotifyKind::Toast,
-                            message: msg,
-                        });
-                    }
+                let toast_msg =
+                    if self.app.state.toast.is_some() && self.app.state.toast != toast_before {
+                        self.app
+                            .state
+                            .toast
+                            .as_ref()
+                            .map(|toast| format!("{}: {}", toast.title, toast.context))
+                    } else if matches!(
+                        self.app.state.toast_config.delivery,
+                        crate::config::ToastDelivery::Terminal
+                    ) {
+                        self.app
+                            .state
+                            .workspaces
+                            .iter()
+                            .enumerate()
+                            .find_map(|(ws_idx, ws)| {
+                                ws.tabs.iter().find_map(|tab| {
+                                    tab.panes.get(&pane_id_val).and_then(|pane| {
+                                        pane.effective_agent_label().and_then(|agent_label| {
+                                        crate::app::actions::notification_toast_for_state_change(
+                                            is_active_tab,
+                                            prev_state,
+                                            state_val,
+                                        )
+                                        .map(|kind| {
+                                            let event_text = match kind {
+                                                crate::app::state::ToastKind::NeedsAttention => {
+                                                    "needs attention"
+                                                }
+                                                crate::app::state::ToastKind::Finished => {
+                                                    "finished"
+                                                }
+                                                crate::app::state::ToastKind::UpdateInstalled => {
+                                                    "updated"
+                                                }
+                                            };
+                                            format!(
+                                                "{} {}: {}",
+                                                agent_label,
+                                                event_text,
+                                                crate::app::actions::notification_context(
+                                                    ws,
+                                                    ws_idx,
+                                                    pane_id_val,
+                                                )
+                                            )
+                                        })
+                                    })
+                                    })
+                                })
+                            })
+                    } else {
+                        None
+                    };
+
+                if let Some(msg) = toast_msg {
+                    self.send_to_all_clients(ServerMessage::Notify {
+                        kind: protocol::NotifyKind::Toast,
+                        message: msg,
+                    });
                 }
 
                 true
@@ -880,33 +932,100 @@ impl HeadlessServer {
                     }
                 }
 
-                // Forward any new toast as a notification.
-                if self.app.state.toast.is_some() && self.app.state.toast != toast_before {
-                    if let Some(toast) = &self.app.state.toast {
-                        let msg = format!("{}: {}", toast.title, toast.context);
-                        self.send_to_all_clients(ServerMessage::Notify {
-                            kind: protocol::NotifyKind::Toast,
-                            message: msg,
-                        });
-                    }
+                let toast_msg =
+                    if self.app.state.toast.is_some() && self.app.state.toast != toast_before {
+                        self.app
+                            .state
+                            .toast
+                            .as_ref()
+                            .map(|toast| format!("{}: {}", toast.title, toast.context))
+                    } else if matches!(
+                        self.app.state.toast_config.delivery,
+                        crate::config::ToastDelivery::Terminal
+                    ) {
+                        self.app
+                            .state
+                            .workspaces
+                            .iter()
+                            .enumerate()
+                            .find_map(|(ws_idx, ws)| {
+                                ws.tabs.iter().find_map(|tab| {
+                                    tab.panes.get(&pane_id_val).and_then(|pane| {
+                                        pane.effective_agent_label().and_then(|agent_label| {
+                                        crate::app::actions::notification_toast_for_state_change(
+                                            is_active_tab,
+                                            prev_hook_state,
+                                            hook_state_val,
+                                        )
+                                        .map(|kind| {
+                                            let event_text = match kind {
+                                                crate::app::state::ToastKind::NeedsAttention => {
+                                                    "needs attention"
+                                                }
+                                                crate::app::state::ToastKind::Finished => {
+                                                    "finished"
+                                                }
+                                                crate::app::state::ToastKind::UpdateInstalled => {
+                                                    "updated"
+                                                }
+                                            };
+                                            format!(
+                                                "{} {}: {}",
+                                                agent_label,
+                                                event_text,
+                                                crate::app::actions::notification_context(
+                                                    ws,
+                                                    ws_idx,
+                                                    pane_id_val,
+                                                )
+                                            )
+                                        })
+                                    })
+                                    })
+                                })
+                            })
+                    } else {
+                        None
+                    };
+
+                if let Some(msg) = toast_msg {
+                    self.send_to_all_clients(ServerMessage::Notify {
+                        kind: protocol::NotifyKind::Toast,
+                        message: msg,
+                    });
                 }
 
                 true
             }
-            AppEvent::UpdateReady { version: _ } => {
+            AppEvent::UpdateReady { version } => {
                 let toast_before = self.app.state.toast.clone();
+                let version = version.clone();
 
                 self.app.handle_internal_event(ev);
 
-                // Forward the update toast notification.
-                if self.app.state.toast.is_some() && self.app.state.toast != toast_before {
-                    if let Some(toast) = &self.app.state.toast {
-                        let msg = format!("{}: {}", toast.title, toast.context);
-                        self.send_to_all_clients(ServerMessage::Notify {
-                            kind: protocol::NotifyKind::Toast,
-                            message: msg,
-                        });
-                    }
+                let toast_msg =
+                    if self.app.state.toast.is_some() && self.app.state.toast != toast_before {
+                        self.app
+                            .state
+                            .toast
+                            .as_ref()
+                            .map(|toast| format!("{}: {}", toast.title, toast.context))
+                    } else if matches!(
+                        self.app.state.toast_config.delivery,
+                        crate::config::ToastDelivery::Terminal
+                    ) {
+                        Some(format!(
+                            "v{version} available: detach, then run `herdr update`"
+                        ))
+                    } else {
+                        None
+                    };
+
+                if let Some(msg) = toast_msg {
+                    self.send_to_all_clients(ServerMessage::Notify {
+                        kind: protocol::NotifyKind::Toast,
+                        message: msg,
+                    });
                 }
 
                 true
@@ -1209,7 +1328,7 @@ impl HeadlessServer {
 
         // Forward any new toast as a notification to clients.
         let toast_after = self.app.state.toast.clone();
-        if toast_after.is_some() && toast_after != toast_before {
+        let forwarded_toast_from_state = if toast_after.is_some() && toast_after != toast_before {
             if let Some(toast) = &toast_after {
                 let msg_text = format!("{}: {}", toast.title, toast.context);
                 debug!(msg = %msg_text, "forwarding toast notification from API request");
@@ -1217,8 +1336,13 @@ impl HeadlessServer {
                     kind: protocol::NotifyKind::Toast,
                     message: msg_text,
                 });
+                true
+            } else {
+                false
             }
-        }
+        } else {
+            false
+        };
 
         // Forward sound notifications for any pane state changes that occurred
         // during the API request. Compare before/after pane states (including
@@ -1277,6 +1401,41 @@ impl HeadlessServer {
                     hook_changed,
                     "pane state changed during API request, checking sound notification"
                 );
+
+                if !forwarded_toast_from_state
+                    && matches!(
+                        self.app.state.toast_config.delivery,
+                        crate::config::ToastDelivery::Terminal
+                    )
+                {
+                    if let Some(kind) = crate::app::actions::notification_toast_for_state_change(
+                        is_active_tab,
+                        prev_state,
+                        new_state,
+                    ) {
+                        if let Some(agent_label) = pane_after.effective_agent_label() {
+                            let event_text = match kind {
+                                crate::app::state::ToastKind::NeedsAttention => "needs attention",
+                                crate::app::state::ToastKind::Finished => "finished",
+                                crate::app::state::ToastKind::UpdateInstalled => "updated",
+                            };
+                            let msg_text = format!(
+                                "{} {}: {}",
+                                agent_label,
+                                event_text,
+                                crate::app::actions::notification_context(
+                                    &self.app.state.workspaces[*ws_idx],
+                                    *ws_idx,
+                                    *pane_id,
+                                )
+                            );
+                            self.send_to_all_clients(ServerMessage::Notify {
+                                kind: protocol::NotifyKind::Toast,
+                                message: msg_text,
+                            });
+                        }
+                    }
+                }
 
                 // Check agent-specific sound setting but NOT sound.enabled,
                 // because the server sets enabled=false to prevent local playback.
