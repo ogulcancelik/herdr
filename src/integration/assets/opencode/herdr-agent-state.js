@@ -65,6 +65,7 @@ export const HerdrAgentStatePlugin = async () => {
 
       switch (type) {
         case "permission.asked":
+        case "question.asked":
           await reportState("blocked");
           break;
         case "permission.replied": {
@@ -76,6 +77,12 @@ export const HerdrAgentStatePlugin = async () => {
           }
           break;
         }
+        case "question.replied":
+          await reportState("working");
+          break;
+        case "question.rejected":
+          await reportState("idle");
+          break;
         case "session.status": {
           const status =
             typeof properties.status === "string"
