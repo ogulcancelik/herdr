@@ -176,6 +176,9 @@ current plugin mapping:
 - `permission.asked` → `blocked`
 - `permission.replied: once|always` → `working`
 - `permission.replied: reject` → `idle`
+- `question.asked` → `blocked`
+- `question.replied` → `working`
+- `question.rejected` → `idle`
 - `session.status: busy|retry` → `working`
 - `session.status: idle` → `idle`
 - `session.idle` → `idle`
