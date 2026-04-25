@@ -12,6 +12,7 @@ use std::io;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
@@ -85,8 +86,9 @@ fn is_server_listening_at(socket_path: &Path) -> bool {
 /// The server process is fully detached:
 /// - Runs in its own session (setsid) so it survives the client exiting
 /// - Stdin/stdout/stderr are redirected to /dev/null
-/// - Inherits all relevant environment variables
-///   (`HERDR_SOCKET_PATH`, `HERDR_CLIENT_SOCKET_PATH`, `XDG_CONFIG_HOME`, etc.)
+/// - Inherits relevant environment variables (`XDG_CONFIG_HOME`, `HERDR_SESSION`,
+///   socket overrides, etc.), except inherited socket overrides are cleared when
+///   this CLI invocation explicitly selected a session.
 ///
 /// Returns the PID of the spawned server process.
 pub fn spawn_server_daemon() -> io::Result<u32> {
@@ -99,7 +101,21 @@ pub fn spawn_server_daemon() -> io::Result<u32> {
 
     info!(exe = %exe.display(), "spawning server daemon");
 
-    let child = Command::new(&exe)
+    let mut command = build_server_daemon_command(exe);
+
+    let child = command.spawn().map_err(|err: io::Error| {
+        io::Error::new(err.kind(), format!("failed to spawn herdr server: {err}"))
+    })?;
+
+    let pid = child.id();
+    info!(pid, "server daemon spawned");
+
+    Ok(pid)
+}
+
+fn build_server_daemon_command(exe: PathBuf) -> Command {
+    let mut command = Command::new(&exe);
+    command
         .arg("server")
         // Create a new process group so the server survives the parent's exit
         // and doesn't receive SIGHUP when the client's terminal closes.
@@ -107,16 +123,15 @@ pub fn spawn_server_daemon() -> io::Result<u32> {
         // Redirect stdio to /dev/null
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|err: io::Error| {
-            io::Error::new(err.kind(), format!("failed to spawn herdr server: {err}"))
-        })?;
+        .stderr(std::process::Stdio::null());
 
-    let pid = child.id();
-    info!(pid, "server daemon spawned");
+    if crate::session::explicit_session_requested() {
+        command
+            .env_remove(crate::api::SOCKET_PATH_ENV_VAR)
+            .env_remove("HERDR_CLIENT_SOCKET_PATH");
+    }
 
-    Ok(pid)
+    command
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +202,14 @@ pub fn auto_detect_launch() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
     use std::os::unix::net::UnixListener;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn unique_test_dir(name: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -202,6 +224,35 @@ mod tests {
         let dir = unique_test_dir("nonexistent");
         let path = dir.join("s.sock");
         assert!(!is_server_listening_at(&path));
+    }
+
+    #[test]
+    fn server_daemon_command_clears_socket_overrides_for_explicit_session() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, "/tmp/inherited.sock");
+        std::env::set_var("HERDR_CLIENT_SOCKET_PATH", "/tmp/inherited-client.sock");
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        crate::session::clear_explicit_session_for_test();
+        let args = vec![
+            "herdr".to_string(),
+            "--session".to_string(),
+            "work".to_string(),
+        ];
+        crate::session::configure_from_args(&args).unwrap();
+
+        let command = build_server_daemon_command(PathBuf::from("/tmp/herdr-test"));
+        let envs: Vec<_> = command.get_envs().collect();
+
+        assert!(envs.iter().any(|(key, value)| {
+            *key == OsStr::new(crate::api::SOCKET_PATH_ENV_VAR) && value.is_none()
+        }));
+        assert!(envs.iter().any(|(key, value)| {
+            *key == OsStr::new("HERDR_CLIENT_SOCKET_PATH") && value.is_none()
+        }));
+        std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+        std::env::remove_var("HERDR_CLIENT_SOCKET_PATH");
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        crate::session::clear_explicit_session_for_test();
     }
 
     #[test]

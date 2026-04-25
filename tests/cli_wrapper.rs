@@ -132,14 +132,27 @@ fn spawn_named_server(
 }
 
 fn run_named_cli(config_home: &Path, runtime_dir: &Path, args: &[&str]) -> std::process::Output {
+    run_named_cli_with_socket_override(config_home, runtime_dir, args, None)
+}
+
+fn run_named_cli_with_socket_override(
+    config_home: &Path,
+    runtime_dir: &Path,
+    args: &[&str],
+    socket_override: Option<&Path>,
+) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
     command
         .args(args)
         .env("XDG_CONFIG_HOME", config_home)
         .env("XDG_RUNTIME_DIR", runtime_dir)
-        .env_remove("HERDR_SOCKET_PATH")
         .env_remove("HERDR_CLIENT_SOCKET_PATH")
         .env_remove("HERDR_ENV");
+    if let Some(socket_override) = socket_override {
+        command.env("HERDR_SOCKET_PATH", socket_override);
+    } else {
+        command.env_remove("HERDR_SOCKET_PATH");
+    }
     command.output().unwrap()
 }
 
@@ -669,16 +682,89 @@ fn named_sessions_use_separate_servers_and_workspace_state() {
     assert_eq!(alpha_labels, vec!["alpha-ws"]);
     assert_eq!(beta_labels, vec!["beta-ws"]);
 
-    let _ = run_named_cli(
+    let beta_via_explicit_session = run_named_cli_with_socket_override(
         &config_home,
         &runtime_dir,
-        &["--session", "alpha", "server", "stop"],
+        &["--session", "beta", "workspace", "list"],
+        Some(&named_session_socket(&config_home, "alpha")),
     );
-    let _ = run_named_cli(
+    assert!(
+        beta_via_explicit_session.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&beta_via_explicit_session.stderr)
+    );
+    let beta_via_explicit_session: serde_json::Value =
+        serde_json::from_slice(&beta_via_explicit_session.stdout).unwrap();
+    let labels_via_explicit: Vec<_> = beta_via_explicit_session["result"]["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workspace| workspace["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(labels_via_explicit, vec!["beta-ws"]);
+
+    let sessions = run_named_cli_json(&config_home, &runtime_dir, &["session", "list"]);
+    let sessions = sessions["sessions"].as_array().unwrap();
+    let default_session = sessions
+        .iter()
+        .find(|session| session["name"] == "default")
+        .unwrap();
+    let alpha_session = sessions
+        .iter()
+        .find(|session| session["name"] == "alpha")
+        .unwrap();
+    let beta_session = sessions
+        .iter()
+        .find(|session| session["name"] == "beta")
+        .unwrap();
+    assert_eq!(default_session["default"], true);
+    assert_eq!(default_session["running"], false);
+    assert_eq!(alpha_session["running"], true);
+    assert_eq!(beta_session["running"], true);
+    assert!(alpha_session["socket_path"]
+        .as_str()
+        .unwrap()
+        .ends_with("/sessions/alpha/herdr.sock"));
+    assert!(beta_session["session_dir"]
+        .as_str()
+        .unwrap()
+        .ends_with("/sessions/beta"));
+
+    let delete_running = run_named_cli(&config_home, &runtime_dir, &["session", "delete", "alpha"]);
+    assert_eq!(delete_running.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&delete_running.stderr).contains("stop it before deleting"),
+        "stderr: {}",
+        String::from_utf8_lossy(&delete_running.stderr)
+    );
+
+    let delete_default = run_named_cli(
         &config_home,
         &runtime_dir,
-        &["--session", "beta", "server", "stop"],
+        &["session", "delete", "default"],
     );
+    assert_eq!(delete_default.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&delete_default.stderr).contains("default session"),
+        "stderr: {}",
+        String::from_utf8_lossy(&delete_default.stderr)
+    );
+
+    let stopped_alpha =
+        run_named_cli_json(&config_home, &runtime_dir, &["session", "stop", "alpha"]);
+    assert_eq!(stopped_alpha["stopped"], true);
+    assert_eq!(stopped_alpha["session"]["running"], false);
+
+    let deleted_alpha =
+        run_named_cli_json(&config_home, &runtime_dir, &["session", "delete", "alpha"]);
+    assert_eq!(deleted_alpha["deleted"], true);
+    assert!(!config_home
+        .join(app_dir_name())
+        .join("sessions")
+        .join("alpha")
+        .exists());
+
+    let _ = run_named_cli(&config_home, &runtime_dir, &["session", "stop", "beta"]);
     drop(alpha);
     drop(beta);
     cleanup_test_base(&base);

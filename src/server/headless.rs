@@ -152,12 +152,16 @@ fn toast_message_from_state_change(
 /// Returns the path for the client protocol socket.
 ///
 /// Contract-aligned override behavior:
-/// 1. If `HERDR_SOCKET_PATH` is set, derive the client socket path from it by
+/// 1. If CLI `--session <name>` is active, use that session's client socket.
+/// 2. If `HERDR_SOCKET_PATH` is set, derive the client socket path from it by
 ///    inserting `-client` before `.sock` (e.g. `herdr.sock` -> `herdr-client.sock`).
 ///    This keeps JSON API and client socket overrides consistent.
-/// 2. Otherwise, honor `HERDR_CLIENT_SOCKET_PATH` (legacy/testing fallback).
-/// 3. Otherwise, use the active session data directory.
+/// 3. Otherwise, honor `HERDR_CLIENT_SOCKET_PATH` (legacy/testing fallback).
+/// 4. Otherwise, use the active session data directory.
 pub fn client_socket_path() -> PathBuf {
+    if crate::session::explicit_session_requested() {
+        return crate::session::client_socket_path_for(crate::session::active_name().as_deref());
+    }
     client_socket_path_from_overrides(
         std::env::var(api::SOCKET_PATH_ENV_VAR).ok().as_deref(),
         std::env::var(CLIENT_SOCKET_PATH_ENV_VAR).ok().as_deref(),
@@ -176,7 +180,7 @@ fn client_socket_path_from_overrides(
         return PathBuf::from(client_socket_override);
     }
 
-    crate::session::data_dir().join("herdr-client.sock")
+    crate::session::client_socket_path_for(crate::session::active_name().as_deref())
 }
 
 fn derive_client_socket_from_api_socket(api_socket_path: &Path) -> PathBuf {
@@ -2179,6 +2183,7 @@ mod tests {
     #[test]
     fn client_socket_path_defaults_to_config_dir() {
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        crate::session::clear_explicit_session_for_test();
         let path = client_socket_path_from_overrides(None, None);
         assert_eq!(path, config::config_dir().join("herdr-client.sock"));
     }

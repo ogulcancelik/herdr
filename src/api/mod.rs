@@ -95,11 +95,7 @@ impl EventHub {
 }
 
 pub fn socket_path() -> PathBuf {
-    if let Ok(path) = std::env::var(SOCKET_PATH_ENV_VAR) {
-        return PathBuf::from(path);
-    }
-
-    crate::session::data_dir().join("herdr.sock")
+    crate::session::active_api_socket_path()
 }
 
 pub struct ServerHandle {
@@ -1064,6 +1060,8 @@ mod tests {
     fn socket_path_prefers_explicit_env_override() {
         let _guard = env_lock().lock().unwrap();
         let unique = format!("/tmp/herdr-test-{}.sock", std::process::id());
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        crate::session::clear_explicit_session_for_test();
         std::env::set_var(SOCKET_PATH_ENV_VAR, &unique);
         assert_eq!(socket_path(), PathBuf::from(&unique));
         std::env::remove_var(SOCKET_PATH_ENV_VAR);
@@ -1076,6 +1074,7 @@ mod tests {
         let runtime_dir = unique_test_path("socket-default-runtime");
         std::env::remove_var(SOCKET_PATH_ENV_VAR);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        crate::session::clear_explicit_session_for_test();
         std::env::set_var("XDG_CONFIG_HOME", &config_home);
         std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
 
@@ -1093,6 +1092,7 @@ mod tests {
         let _guard = env_lock().lock().unwrap();
         let config_home = unique_test_path("socket-named-config-home");
         std::env::remove_var(SOCKET_PATH_ENV_VAR);
+        crate::session::clear_explicit_session_for_test();
         std::env::set_var(crate::session::SESSION_ENV_VAR, "work");
         std::env::set_var("XDG_CONFIG_HOME", &config_home);
 

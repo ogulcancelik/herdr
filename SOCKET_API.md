@@ -23,15 +23,21 @@ important difference: `pane.run` and `wait agent-status` are **cli conveniences*
 - request/response: send one json request per line, read one json response per line
 - subscriptions: send `events.subscribe`, receive an ack, then keep the same connection open and continue reading pushed events
 
+named sessions are runtime/socket namespaces, not replacements for herdr workspaces. each named session has its own server sockets and persistent runtime state while config remains global.
+
 socket path resolution order:
 
-1. `HERDR_SOCKET_PATH`
-2. named session path, when `HERDR_SESSION` or `herdr --session <name>` is active:
+1. explicit `herdr --session <name>`:
    `$XDG_CONFIG_HOME/herdr/sessions/<name>/herdr.sock` or `$HOME/.config/herdr/sessions/<name>/herdr.sock`
-3. default session path:
+2. `HERDR_SOCKET_PATH`
+3. `HERDR_SESSION=<name>`:
+   `$XDG_CONFIG_HOME/herdr/sessions/<name>/herdr.sock` or `$HOME/.config/herdr/sessions/<name>/herdr.sock`
+4. default session path:
    `$XDG_CONFIG_HOME/herdr/herdr.sock` or `$HOME/.config/herdr/herdr.sock`
 
-session names may contain ASCII letters, numbers, `.`, `_`, and `-`.
+this means `HERDR_SOCKET_PATH` remains an exact low-level socket override, but an explicit cli `--session <name>` still wins when a command runs inside a pane that inherited `HERDR_SOCKET_PATH`.
+
+session names may contain ASCII letters, numbers, `.`, `_`, and `-`. `default` is reserved for the default session. use `herdr session list`, `herdr session stop <name>`, and `herdr session delete <name>` to inspect and manage session namespaces. `session delete` refuses running sessions and does not delete the default session.
 
 ## request and response envelopes
 

@@ -37,6 +37,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "pane" => run_pane_command(&args[2..])?,
         "wait" => run_wait_command(&args[2..])?,
         "integration" => run_integration_command(&args[2..])?,
+        "session" => run_session_command(&args[2..])?,
         _ => return Ok(CommandOutcome::NotCli),
     };
 
@@ -330,6 +331,23 @@ fn run_integration_command(args: &[String]) -> std::io::Result<i32> {
     }
 }
 
+fn run_session_command(args: &[String]) -> std::io::Result<i32> {
+    let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
+        print_session_help();
+        return Ok(2);
+    };
+
+    match subcommand {
+        "list" => session_list(&args[1..]),
+        "stop" => session_stop(&args[1..]),
+        "delete" => session_delete(&args[1..]),
+        _ => {
+            print_session_help();
+            Ok(2)
+        }
+    }
+}
+
 fn server_stop(args: &[String]) -> std::io::Result<i32> {
     if !args.is_empty() {
         eprintln!("usage: herdr server stop");
@@ -349,6 +367,76 @@ fn server_reload_config(args: &[String]) -> std::io::Result<i32> {
         id: "cli:server:reload-config".into(),
         method: Method::ServerReloadConfig(EmptyParams::default()),
     })?)
+}
+
+fn session_list(args: &[String]) -> std::io::Result<i32> {
+    if !args.is_empty() {
+        eprintln!("usage: herdr session list");
+        return Ok(2);
+    }
+
+    let sessions = crate::session::list_sessions()?;
+    _print_json(&serde_json::json!({
+        "sessions": sessions,
+    }));
+    Ok(0)
+}
+
+fn session_stop(args: &[String]) -> std::io::Result<i32> {
+    let Some(name) = args.first() else {
+        eprintln!("usage: herdr session stop <name>");
+        return Ok(2);
+    };
+    if args.len() != 1 {
+        eprintln!("usage: herdr session stop <name>");
+        return Ok(2);
+    }
+
+    let target = match crate::session::parse_target_name(name) {
+        Ok(target) => target,
+        Err(message) => {
+            print_session_error("invalid_session_name", &message);
+            return Ok(1);
+        }
+    };
+    match crate::session::stop_session(target.as_deref()) {
+        Ok(session) => {
+            _print_json(&serde_json::json!({
+                "stopped": true,
+                "session": session,
+            }));
+            Ok(0)
+        }
+        Err(message) => {
+            print_session_error("session_stop_failed", &message);
+            Ok(1)
+        }
+    }
+}
+
+fn session_delete(args: &[String]) -> std::io::Result<i32> {
+    let Some(name) = args.first() else {
+        eprintln!("usage: herdr session delete <name>");
+        return Ok(2);
+    };
+    if args.len() != 1 {
+        eprintln!("usage: herdr session delete <name>");
+        return Ok(2);
+    }
+
+    match crate::session::delete_session(name) {
+        Ok(session) => {
+            _print_json(&serde_json::json!({
+                "deleted": true,
+                "session": session,
+            }));
+            Ok(0)
+        }
+        Err(message) => {
+            print_session_error("session_delete_failed", &message);
+            Ok(1)
+        }
+    }
 }
 
 fn workspace_list(args: &[String]) -> std::io::Result<i32> {
@@ -1225,6 +1313,19 @@ fn parse_u64_flag(flag: &str, value: &str) -> std::io::Result<u64> {
         .map_err(|_| std::io::Error::other(format!("invalid value for {flag}: {value}")))
 }
 
+fn print_session_error(code: &str, message: &str) {
+    eprintln!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({
+            "error": {
+                "code": code,
+                "message": message,
+            }
+        }))
+        .unwrap()
+    );
+}
+
 fn print_server_help() {
     eprintln!("herdr server commands:");
     eprintln!("  herdr server                run as headless server");
@@ -1291,6 +1392,14 @@ fn print_integration_help() {
     eprintln!("  herdr integration uninstall claude");
     eprintln!("  herdr integration uninstall codex");
     eprintln!("  herdr integration uninstall opencode");
+}
+
+fn print_session_help() {
+    eprintln!("herdr session commands:");
+    eprintln!("  herdr session list");
+    eprintln!("  herdr session stop <name>");
+    eprintln!("  herdr session delete <name>");
+    eprintln!("  use 'default' as <name> to target the default session for stop");
 }
 
 fn _print_json<T: Serialize>(value: &T) {

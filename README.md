@@ -41,14 +41,16 @@ herdr update
 herdr
 ```
 
-by default herdr launches or attaches to a background session server. `ctrl+b q` detaches the client. agents keep running. use `herdr server stop` to stop the server. use `--no-session` for the old single-process mode.
+by default herdr launches or attaches to one background session server. `ctrl+b q` detaches the client. agents keep running. use `herdr server stop` to stop the default server. use `--no-session` for the old single-process mode.
 
-named sessions let you keep separate persistent herdr servers:
+named sessions are runtime/socket namespaces for separate persistent herdr servers. they do not replace workspaces; each named session has its own panes, tabs, workspaces, sockets, and session state while sharing the same global config file.
 
 ```bash
 herdr --session work
 herdr --session side-project
-herdr --session work server stop
+herdr session list
+herdr session stop work
+herdr session delete side-project
 ```
 
 1. press `n` to create a workspace
