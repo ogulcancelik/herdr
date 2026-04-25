@@ -255,7 +255,6 @@ pub fn run_client() -> io::Result<()> {
 
     let loaded_config = crate::config::Config::load();
     let sound_config = loaded_config.config.ui.sound;
-    let toast_config = loaded_config.config.ui.toast;
 
     let socket_path = client_socket_path();
     crate::logging::startup("client");
@@ -311,9 +310,8 @@ pub fn run_client() -> io::Result<()> {
         quit_flag.store(true, Ordering::Release);
     });
 
-    let result = rt.block_on(async {
-        run_client_loop(stream, cols, rows, should_quit, sound_config, toast_config).await
-    });
+    let result =
+        rt.block_on(async { run_client_loop(stream, cols, rows, should_quit, sound_config).await });
 
     // Restore the terminal before printing any final status message.
     drop(_guard);
@@ -353,7 +351,6 @@ async fn run_client_loop(
     rows: u16,
     should_quit: Arc<AtomicBool>,
     sound_config: crate::config::SoundConfig,
-    toast_config: crate::config::ToastConfig,
 ) -> Result<(), ClientError> {
     let mut state = ClientState {
         last_frame: None,
@@ -429,7 +426,7 @@ async fn run_client_loop(
                     return Err(ClientError::ServerShutdown { reason });
                 }
                 ServerMessage::Notify { kind, message } => {
-                    handle_notify(kind, &message, &sound_config, &toast_config);
+                    handle_notify(kind, &message, &sound_config);
                 }
                 ServerMessage::Clipboard { data } => {
                     forward_clipboard(&data);
@@ -527,11 +524,20 @@ fn write_to_server(stream: &mut UnixStream, msg: &ClientMessage) -> io::Result<(
 // Notifications
 // ---------------------------------------------------------------------------
 
-fn handle_notify(
+fn handle_notify(kind: NotifyKind, message: &str, sound_config: &crate::config::SoundConfig) {
+    handle_notify_with_terminal_notifier(
+        kind,
+        message,
+        sound_config,
+        crate::terminal_notify::show_notification,
+    );
+}
+
+fn handle_notify_with_terminal_notifier(
     kind: NotifyKind,
     message: &str,
     sound_config: &crate::config::SoundConfig,
-    toast_config: &crate::config::ToastConfig,
+    mut show_terminal_notification: impl FnMut(&str, Option<&str>) -> io::Result<bool>,
 ) {
     match kind {
         NotifyKind::Sound => {
@@ -548,14 +554,9 @@ fn handle_notify(
         }
         NotifyKind::Toast => {
             debug!(message = message, "received toast notification from server");
-            if matches!(
-                toast_config.delivery,
-                crate::config::ToastDelivery::Terminal
-            ) {
-                let (title, body) = crate::terminal_notify::split_message(message);
-                if let Err(err) = crate::terminal_notify::show_notification(title, body) {
-                    warn!(err = %err, "failed to emit terminal notification");
-                }
+            let (title, body) = crate::terminal_notify::split_message(message);
+            if let Err(err) = show_terminal_notification(title, body) {
+                warn!(err = %err, "failed to emit terminal notification");
             }
         }
     }
@@ -743,6 +744,27 @@ mod tests {
     #[test]
     fn sound_from_notify_message_rejects_unknown_payloads() {
         assert_eq!(sound_from_notify_message("toast"), None);
+    }
+
+    #[test]
+    fn toast_notify_from_server_is_emitted_even_when_attach_config_was_off() {
+        let sound_config = crate::config::SoundConfig::default();
+        let mut emitted = None;
+
+        handle_notify_with_terminal_notifier(
+            NotifyKind::Toast,
+            "pi finished: workspace 1",
+            &sound_config,
+            |title, body| {
+                emitted = Some((title.to_string(), body.map(str::to_string)));
+                Ok(true)
+            },
+        );
+
+        assert_eq!(
+            emitted,
+            Some(("pi finished".to_string(), Some("workspace 1".to_string())))
+        );
     }
 
     #[test]
