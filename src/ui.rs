@@ -492,11 +492,11 @@ mod tests {
     }
 
     #[test]
-    fn pane_scrollbar_rect_overlays_rightmost_inner_column() {
+    fn pane_scrollbar_rect_uses_reserved_rightmost_column() {
         let info = PaneInfo {
             id: crate::layout::PaneId::from_raw(1),
             rect: Rect::new(0, 0, 12, 8),
-            inner_rect: Rect::new(1, 1, 10, 6),
+            inner_rect: Rect::new(1, 1, 9, 6),
             scrollbar_rect: Some(Rect::new(10, 1, 1, 6)),
             is_focused: true,
         };
@@ -505,7 +505,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compute_view_keeps_terminal_width_when_pane_scrollbar_is_visible() {
+    async fn compute_view_reserves_terminal_column_when_pane_scrollbar_is_visible() {
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("test");
         let pane_id = ws.tabs[0].root_pane;
@@ -526,11 +526,11 @@ mod tests {
         compute_view(&mut app, Rect::new(0, 0, 40, 12));
 
         let info = app.view.pane_infos.first().expect("pane info");
-        assert_eq!(info.inner_rect.width, app.view.terminal_area.width);
+        assert_eq!(info.inner_rect.width + 1, app.view.terminal_area.width);
         assert_eq!(
             info.scrollbar_rect,
             Some(Rect::new(
-                info.inner_rect.x + info.inner_rect.width.saturating_sub(1),
+                info.inner_rect.x + info.inner_rect.width,
                 info.inner_rect.y,
                 1,
                 info.inner_rect.height,

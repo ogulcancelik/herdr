@@ -26,13 +26,14 @@ pub(super) fn compute_pane_infos(app: &AppState, area: Rect, resize_panes: bool)
 
     if ws.zoomed {
         let focused_id = ws.layout.focused();
-        let inner_rect = area;
+        let mut inner_rect = area;
         let mut scrollbar_rect = None;
         if let Some(rt) = ws.runtimes.get(&focused_id) {
             if rt
                 .scroll_metrics()
-                .is_some_and(|metrics| should_show_scrollbar(metrics) && area.width > 0)
+                .is_some_and(|metrics| should_show_scrollbar(metrics) && area.width > 1)
             {
+                inner_rect.width = inner_rect.width.saturating_sub(1);
                 scrollbar_rect = Some(Rect::new(
                     area.x + area.width.saturating_sub(1),
                     area.y,
@@ -70,13 +71,14 @@ pub(super) fn compute_pane_infos(app: &AppState, area: Rect, resize_panes: bool)
             area
         };
 
-        let inner_rect = pane_inner;
+        let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
         if let Some(rt) = ws.runtimes.get(&info.id) {
             if rt
                 .scroll_metrics()
-                .is_some_and(|metrics| should_show_scrollbar(metrics) && pane_inner.width > 0)
+                .is_some_and(|metrics| should_show_scrollbar(metrics) && pane_inner.width > 1)
             {
+                inner_rect.width = inner_rect.width.saturating_sub(1);
                 scrollbar_rect = Some(Rect::new(
                     pane_inner.x + pane_inner.width.saturating_sub(1),
                     pane_inner.y,
@@ -210,6 +212,39 @@ fn render_selection_highlight(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pane::PaneRuntime;
+    use crate::workspace::Workspace;
+
+    #[tokio::test]
+    async fn pane_scrollbar_reserves_last_column_from_terminal_area() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("test");
+        let root_pane = workspace.tabs[0].root_pane;
+        workspace.tabs[0].runtimes.insert(
+            root_pane,
+            PaneRuntime::test_with_scrollback_bytes(
+                40,
+                8,
+                1024,
+                b"one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n",
+            ),
+        );
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+
+        let area = Rect::new(10, 3, 40, 8);
+        let infos = compute_pane_infos(&app, area, false);
+        let info = &infos[0];
+
+        assert_eq!(info.rect, area);
+        assert_eq!(info.scrollbar_rect, Some(Rect::new(49, 3, 1, 8)));
+        assert_eq!(info.inner_rect, Rect::new(10, 3, 39, 8));
     }
 }
 
