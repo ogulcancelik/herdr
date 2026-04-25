@@ -6,6 +6,13 @@ herdr reads config from:
 ~/.config/herdr/config.toml
 ```
 
+Named sessions share this config file. Session runtime state is separate:
+
+```text
+~/.config/herdr/session.json
+~/.config/herdr/sessions/<name>/session.json
+```
+
 print the full default config with:
 
 ```bash

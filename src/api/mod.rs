@@ -99,7 +99,7 @@ pub fn socket_path() -> PathBuf {
         return PathBuf::from(path);
     }
 
-    crate::config::config_dir().join("herdr.sock")
+    crate::session::data_dir().join("herdr.sock")
 }
 
 pub struct ServerHandle {
@@ -1075,6 +1075,7 @@ mod tests {
         let config_home = unique_test_path("socket-default-config-home");
         let runtime_dir = unique_test_path("socket-default-runtime");
         std::env::remove_var(SOCKET_PATH_ENV_VAR);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
         std::env::set_var("XDG_CONFIG_HOME", &config_home);
         std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
 
@@ -1085,6 +1086,25 @@ mod tests {
 
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var("XDG_RUNTIME_DIR");
+    }
+
+    #[test]
+    fn socket_path_uses_named_session_dir() {
+        let _guard = env_lock().lock().unwrap();
+        let config_home = unique_test_path("socket-named-config-home");
+        std::env::remove_var(SOCKET_PATH_ENV_VAR);
+        std::env::set_var(crate::session::SESSION_ENV_VAR, "work");
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+
+        let expected = config_home
+            .join(crate::config::app_dir_name())
+            .join("sessions")
+            .join("work")
+            .join("herdr.sock");
+        assert_eq!(socket_path(), expected);
+
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        std::env::remove_var("XDG_CONFIG_HOME");
     }
 
     #[test]

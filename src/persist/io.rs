@@ -5,7 +5,7 @@ use tracing::warn;
 use super::snapshot::{parse_snapshot, snapshot_file_version, SessionSnapshot, SNAPSHOT_VERSION};
 
 fn session_path() -> PathBuf {
-    crate::config::config_dir().join("session.json")
+    crate::session::data_dir().join("session.json")
 }
 
 pub(super) fn save_to_path(path: &Path, snapshot: &SessionSnapshot) -> std::io::Result<()> {

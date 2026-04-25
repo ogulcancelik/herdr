@@ -29,6 +29,19 @@ struct SpawnedHerdr {
     child: Box<dyn Child + Send + Sync>,
 }
 
+struct SpawnedServerProcess {
+    child: std::process::Child,
+}
+
+impl Drop for SpawnedServerProcess {
+    fn drop(&mut self) {
+        let pid = self.child.id();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        unregister_spawned_herdr_pid(Some(pid));
+    }
+}
+
 impl Drop for SpawnedHerdr {
     fn drop(&mut self) {
         let pid = self.child.process_id();
@@ -69,6 +82,78 @@ fn wait_for_socket(path: &Path, timeout: Duration) {
 
 fn spawn_herdr(config_home: &Path, runtime_dir: &Path, socket_path: &Path) -> SpawnedHerdr {
     spawn_herdr_with_path(config_home, runtime_dir, socket_path, None)
+}
+
+fn app_dir_name() -> &'static str {
+    if cfg!(debug_assertions) {
+        "herdr-dev"
+    } else {
+        "herdr"
+    }
+}
+
+fn named_session_socket(config_home: &Path, session: &str) -> PathBuf {
+    config_home
+        .join(app_dir_name())
+        .join("sessions")
+        .join(session)
+        .join("herdr.sock")
+}
+
+fn spawn_named_server(
+    config_home: &Path,
+    runtime_dir: &Path,
+    session: &str,
+) -> SpawnedServerProcess {
+    fs::create_dir_all(config_home.join(app_dir_name())).unwrap();
+    fs::create_dir_all(runtime_dir).unwrap();
+    register_runtime_dir(runtime_dir);
+    fs::write(
+        config_home.join(app_dir_name()).join("config.toml"),
+        "onboarding = false\n",
+    )
+    .unwrap();
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
+    command
+        .args(["--session", session, "server"])
+        .env("XDG_CONFIG_HOME", config_home)
+        .env("XDG_RUNTIME_DIR", runtime_dir)
+        .env_remove("HERDR_SOCKET_PATH")
+        .env_remove("HERDR_CLIENT_SOCKET_PATH")
+        .env_remove("HERDR_ENV")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    let child = command.spawn().unwrap();
+    register_spawned_herdr_pid(Some(child.id()));
+    SpawnedServerProcess { child }
+}
+
+fn run_named_cli(config_home: &Path, runtime_dir: &Path, args: &[&str]) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
+    command
+        .args(args)
+        .env("XDG_CONFIG_HOME", config_home)
+        .env("XDG_RUNTIME_DIR", runtime_dir)
+        .env_remove("HERDR_SOCKET_PATH")
+        .env_remove("HERDR_CLIENT_SOCKET_PATH")
+        .env_remove("HERDR_ENV");
+    command.output().unwrap()
+}
+
+fn run_named_cli_json(config_home: &Path, runtime_dir: &Path, args: &[&str]) -> serde_json::Value {
+    let output = run_named_cli(config_home, runtime_dir, args);
+    assert!(
+        output.status.success(),
+        "command failed: herdr {}\nstatus: {:?}\nstderr: {}\nstdout: {}",
+        args.join(" "),
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
 }
 
 fn spawn_herdr_with_path(
@@ -472,6 +557,7 @@ fn help_commands_exit_successfully() {
         &["tab", "-h"],
         &["pane", "-h"],
         &["wait", "-h"],
+        &["session", "-h"],
         &["integration", "-h"],
     ];
 
@@ -509,6 +595,93 @@ fn removed_show_changelog_flag_fails_before_nested_guard() {
         !stderr.contains("nested herdr"),
         "unknown flag should be rejected before nested guard: {stderr}"
     );
+}
+
+#[test]
+fn named_sessions_use_separate_servers_and_workspace_state() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+
+    let alpha = spawn_named_server(&config_home, &runtime_dir, "alpha");
+    let beta = spawn_named_server(&config_home, &runtime_dir, "beta");
+
+    wait_for_socket(
+        &named_session_socket(&config_home, "alpha"),
+        Duration::from_secs(5),
+    );
+    wait_for_socket(
+        &named_session_socket(&config_home, "beta"),
+        Duration::from_secs(5),
+    );
+
+    run_named_cli_json(
+        &config_home,
+        &runtime_dir,
+        &[
+            "--session",
+            "alpha",
+            "workspace",
+            "create",
+            "--label",
+            "alpha-ws",
+            "--no-focus",
+        ],
+    );
+    run_named_cli_json(
+        &config_home,
+        &runtime_dir,
+        &[
+            "--session",
+            "beta",
+            "workspace",
+            "create",
+            "--label",
+            "beta-ws",
+            "--no-focus",
+        ],
+    );
+
+    let alpha_list = run_named_cli_json(
+        &config_home,
+        &runtime_dir,
+        &["--session", "alpha", "workspace", "list"],
+    );
+    let beta_list = run_named_cli_json(
+        &config_home,
+        &runtime_dir,
+        &["--session", "beta", "workspace", "list"],
+    );
+
+    let alpha_labels: Vec<_> = alpha_list["result"]["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workspace| workspace["label"].as_str().unwrap())
+        .collect();
+    let beta_labels: Vec<_> = beta_list["result"]["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workspace| workspace["label"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(alpha_labels, vec!["alpha-ws"]);
+    assert_eq!(beta_labels, vec!["beta-ws"]);
+
+    let _ = run_named_cli(
+        &config_home,
+        &runtime_dir,
+        &["--session", "alpha", "server", "stop"],
+    );
+    let _ = run_named_cli(
+        &config_home,
+        &runtime_dir,
+        &["--session", "beta", "server", "stop"],
+    );
+    drop(alpha);
+    drop(beta);
+    cleanup_test_base(&base);
 }
 
 #[test]

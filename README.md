@@ -43,6 +43,14 @@ herdr
 
 by default herdr launches or attaches to a background session server. `ctrl+b q` detaches the client. agents keep running. use `herdr server stop` to stop the server. use `--no-session` for the old single-process mode.
 
+named sessions let you keep separate persistent herdr servers:
+
+```bash
+herdr --session work
+herdr --session side-project
+herdr --session work server stop
+```
+
 1. press `n` to create a workspace
 2. run an agent in the root pane
 3. press `ctrl+b` to enter navigate mode

@@ -38,6 +38,7 @@ mod raw_input;
 mod release_notes;
 mod selection;
 mod server;
+mod session;
 mod sound;
 mod terminal_notify;
 mod terminal_theme;
@@ -160,7 +161,15 @@ fn random_nested_message() -> &'static str {
 }
 
 fn main() -> io::Result<()> {
-    let args: Vec<String> = std::env::args().collect();
+    let raw_args: Vec<String> = std::env::args().collect();
+    let args = match session::configure_from_args(&raw_args) {
+        Ok(args) => args,
+        Err(err) => {
+            eprintln!("error: {err}");
+            eprintln!("run 'herdr --help' for usage");
+            std::process::exit(2);
+        }
+    };
 
     if let cli::CommandOutcome::Handled(code) = cli::maybe_run(&args)? {
         std::process::exit(code);
@@ -189,7 +198,17 @@ fn main() -> io::Result<()> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("herdr — terminal workspace manager for AI coding agents");
         println!();
-        println!("Usage: herdr [options] [command]");
+        println!("Usage: herdr [options]");
+        println!("       herdr --session <name> [options]");
+        println!("       herdr update");
+        println!("       herdr server stop");
+        println!("       herdr server reload-config");
+        println!("       herdr workspace <subcommand> ...");
+        println!("       herdr tab <subcommand> ...");
+        println!("       herdr pane <subcommand> ...");
+        println!("       herdr wait <subcommand> ...");
+        println!("       herdr session <subcommand> ...");
+        println!("       herdr integration <subcommand> ...");
         println!();
         println!("Common commands:");
         println!(
@@ -230,6 +249,10 @@ fn main() -> io::Result<()> {
         );
         println!(
             "  {:<32} {}",
+            "herdr session <subcommand>", "Manage named persistent sessions"
+        );
+        println!(
+            "  {:<32} {}",
             "herdr integration <subcommand>", "Manage built-in agent integrations"
         );
         println!();
@@ -242,6 +265,7 @@ fn main() -> io::Result<()> {
         println!();
         println!("Options:");
         println!("  --no-session        Run monolithically (no server/client, escape hatch)");
+        println!("  --session <name>    Use or create a named persistent session");
         println!("  --default-config    Print default configuration and exit");
         println!("  --version, -V       Print version and exit");
         println!("  --help, -h          Show this help");
@@ -266,6 +290,7 @@ fn main() -> io::Result<()> {
     // Reject unknown flags
     let known_flags = [
         "--no-session",
+        "--session",
         "--version",
         "-V",
         "--default-config",
@@ -287,6 +312,7 @@ fn main() -> io::Result<()> {
                 "workspace",
                 "pane",
                 "wait",
+                "session",
                 "integration",
             ]
             .contains(&arg.as_str())

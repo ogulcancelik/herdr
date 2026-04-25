@@ -156,7 +156,7 @@ fn toast_message_from_state_change(
 ///    inserting `-client` before `.sock` (e.g. `herdr.sock` -> `herdr-client.sock`).
 ///    This keeps JSON API and client socket overrides consistent.
 /// 2. Otherwise, honor `HERDR_CLIENT_SOCKET_PATH` (legacy/testing fallback).
-/// 3. Otherwise, use the app config directory.
+/// 3. Otherwise, use the active session data directory.
 pub fn client_socket_path() -> PathBuf {
     client_socket_path_from_overrides(
         std::env::var(api::SOCKET_PATH_ENV_VAR).ok().as_deref(),
@@ -176,7 +176,7 @@ fn client_socket_path_from_overrides(
         return PathBuf::from(client_socket_override);
     }
 
-    config::config_dir().join("herdr-client.sock")
+    crate::session::data_dir().join("herdr-client.sock")
 }
 
 fn derive_client_socket_from_api_socket(api_socket_path: &Path) -> PathBuf {
@@ -2178,6 +2178,7 @@ mod tests {
 
     #[test]
     fn client_socket_path_defaults_to_config_dir() {
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
         let path = client_socket_path_from_overrides(None, None);
         assert_eq!(path, config::config_dir().join("herdr-client.sock"));
     }

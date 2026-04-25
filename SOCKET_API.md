@@ -26,10 +26,12 @@ important difference: `pane.run` and `wait agent-status` are **cli conveniences*
 socket path resolution order:
 
 1. `HERDR_SOCKET_PATH`
-2. `$XDG_RUNTIME_DIR/herdr.sock`
-3. `$XDG_CONFIG_HOME/herdr/herdr.sock`
-4. `$HOME/.config/herdr/herdr.sock`
-5. `/tmp/herdr.sock`
+2. named session path, when `HERDR_SESSION` or `herdr --session <name>` is active:
+   `$XDG_CONFIG_HOME/herdr/sessions/<name>/herdr.sock` or `$HOME/.config/herdr/sessions/<name>/herdr.sock`
+3. default session path:
+   `$XDG_CONFIG_HOME/herdr/herdr.sock` or `$HOME/.config/herdr/herdr.sock`
+
+session names may contain ASCII letters, numbers, `.`, `_`, and `-`.
 
 ## request and response envelopes
 
