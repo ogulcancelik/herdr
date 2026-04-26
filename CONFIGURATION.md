@@ -97,6 +97,7 @@ focus_pane_right = "alt+l"
 | `fullscreen` | `f` | toggle focused pane fullscreen |
 | `resize_mode` | `r` | enter or leave resize mode |
 | `toggle_sidebar` | `b` | collapse or expand the sidebar |
+| `session_picker` | `ctrl+s` | open the session picker (may need `stty -ixon`) |
 
 ## theme
 

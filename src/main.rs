@@ -98,6 +98,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # fullscreen = "f"
 # resize_mode = "r"
 # toggle_sidebar = "b"
+# session_picker = "ctrl+s"  # may need `stty -ixon` in some terminals
 
 [ui]
 # Sidebar width (auto-scaled based on workspace names, this sets the default)
