@@ -6,7 +6,7 @@ use crate::detect::Agent;
 
 use super::io::resolve_config_relative_path;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct SoundConfig {
     pub enabled: bool,
@@ -22,7 +22,7 @@ pub struct SoundConfig {
     pub agents: AgentSoundOverrides,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct AgentSoundOverrides {
     pub pi: AgentSoundSetting,

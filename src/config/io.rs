@@ -33,6 +33,7 @@ impl Config {
                         return LoadedConfig {
                             config,
                             diagnostics,
+                            invalid_sections: Vec::new(),
                         };
                     }
                     Err(err) => {
@@ -40,6 +41,7 @@ impl Config {
                         return LoadedConfig {
                             config: Self::default(),
                             diagnostics: vec![format!("config parse error: {err}; using defaults")],
+                            invalid_sections: Vec::new(),
                         };
                     }
                 },
@@ -48,6 +50,7 @@ impl Config {
                     return LoadedConfig {
                         config: Self::default(),
                         diagnostics: vec![format!("config read error: {err}; using defaults")],
+                        invalid_sections: Vec::new(),
                     };
                 }
             }
@@ -55,6 +58,7 @@ impl Config {
         LoadedConfig {
             config: Self::default(),
             diagnostics: Vec::new(),
+            invalid_sections: Vec::new(),
         }
     }
 }
@@ -97,17 +101,102 @@ pub fn load_live_config() -> Result<LoadedConfig, Vec<String>> {
         return Ok(LoadedConfig {
             config: Config::default(),
             diagnostics: Vec::new(),
+            invalid_sections: Vec::new(),
         });
     }
 
     let content = std::fs::read_to_string(&path)
         .map_err(|err| vec![format!("config read error: {err}; keeping current config")])?;
-    let config = toml::from_str::<Config>(&content)
+    load_live_config_from_str(&content)
+}
+
+fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>> {
+    let value = content
+        .parse::<toml::Value>()
         .map_err(|err| vec![format!("config parse error: {err}; keeping current config")])?;
+    let table = value.as_table().ok_or_else(|| {
+        vec![
+            "config parse error: top-level config must be a table; keeping current config"
+                .to_string(),
+        ]
+    })?;
+
+    let mut config = Config::default();
+    let mut diagnostics = Vec::new();
+    let mut invalid_sections = Vec::new();
+
+    if let Some(value) = table.get("onboarding") {
+        match value.clone().try_into::<Option<bool>>() {
+            Ok(onboarding) => config.onboarding = onboarding,
+            Err(err) => diagnostics.push(format!(
+                "invalid onboarding setting: {err}; keeping current onboarding state"
+            )),
+        }
+    }
+
+    load_live_section(
+        table,
+        "theme",
+        "theme config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.theme = section,
+    );
+    load_live_section(
+        table,
+        "keys",
+        "keybinding config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.keys = section,
+    );
+    load_live_section(
+        table,
+        "ui",
+        "ui config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.ui = section,
+    );
+    load_live_section(
+        table,
+        "advanced",
+        "advanced config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.advanced = section,
+    );
+
     Ok(LoadedConfig {
         config,
-        diagnostics: Vec::new(),
+        diagnostics,
+        invalid_sections,
     })
+}
+
+fn load_live_section<T>(
+    table: &toml::map::Map<String, toml::Value>,
+    section: &'static str,
+    label: &str,
+    diagnostics: &mut Vec<String>,
+    invalid_sections: &mut Vec<String>,
+    apply: impl FnOnce(T),
+) where
+    T: serde::de::DeserializeOwned,
+{
+    let Some(value) = table.get(section) else {
+        return;
+    };
+
+    match value.clone().try_into::<T>() {
+        Ok(section_config) => apply(section_config),
+        Err(err) => {
+            diagnostics.push(format!(
+                "invalid {label}: {err}; keeping current {section} settings"
+            ));
+            invalid_sections.push(section.to_string());
+        }
+    }
 }
 
 pub(crate) fn upsert_top_level_bool(content: &str, key: &str, value: bool) -> String {

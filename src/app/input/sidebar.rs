@@ -242,6 +242,7 @@ impl AppState {
         let width = divider_col.saturating_sub(sidebar.x).saturating_add(1);
         self.sidebar_width =
             width.clamp(crate::ui::MIN_SIDEBAR_WIDTH, crate::ui::MAX_SIDEBAR_WIDTH);
+        self.sidebar_width_source = crate::app::state::SidebarWidthSource::Manual;
         self.mark_session_dirty();
     }
 

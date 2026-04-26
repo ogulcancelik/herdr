@@ -43,6 +43,8 @@ struct ClientState {
     last_frame: Option<FrameData>,
     /// The terminal size we reported to the server in our last Hello/Resize.
     reported_size: (u16, u16),
+    /// Client-local sound playback config, refreshed on server request.
+    sound_config: crate::config::SoundConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -355,6 +357,7 @@ async fn run_client_loop(
     let mut state = ClientState {
         last_frame: None,
         reported_size: (cols, rows),
+        sound_config,
     };
 
     // Channel for events from the stdin, resize, and server reader threads.
@@ -426,11 +429,14 @@ async fn run_client_loop(
                     return Err(ClientError::ServerShutdown { reason });
                 }
                 ServerMessage::Notify { kind, message } => {
-                    handle_notify(kind, &message, &sound_config);
+                    handle_notify(kind, &message, &state.sound_config);
                 }
                 ServerMessage::Clipboard { data } => {
                     forward_clipboard(&data);
                     let _ = io::stdout().flush();
+                }
+                ServerMessage::ReloadSoundConfig => {
+                    reload_local_sound_config(&mut state.sound_config);
                 }
                 ServerMessage::Welcome { .. } => {
                     debug!("received unexpected Welcome in main loop");
@@ -523,6 +529,21 @@ fn write_to_server(stream: &mut UnixStream, msg: &ClientMessage) -> io::Result<(
 // ---------------------------------------------------------------------------
 // Notifications
 // ---------------------------------------------------------------------------
+
+fn reload_local_sound_config(sound_config: &mut crate::config::SoundConfig) {
+    match crate::config::load_live_config() {
+        Ok(loaded) => {
+            for diagnostic in loaded.config.ui.sound.diagnostics() {
+                warn!(diagnostic = %diagnostic, "local sound config diagnostic");
+            }
+            *sound_config = loaded.config.ui.sound;
+            debug!("reloaded local sound config");
+        }
+        Err(diagnostics) => {
+            warn!(diagnostics = ?diagnostics, "failed to reload local sound config; keeping current sound config");
+        }
+    }
+}
 
 fn handle_notify(kind: NotifyKind, message: &str, sound_config: &crate::config::SoundConfig) {
     handle_notify_with_terminal_notifier(

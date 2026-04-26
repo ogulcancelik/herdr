@@ -116,6 +116,13 @@ fn auto_updates_enabled(no_session: bool) -> bool {
 
 /// Resolve the palette from config: base theme + optional custom overrides.
 fn resolve_palette(config: &crate::config::Config) -> state::Palette {
+    resolve_palette_with_legacy_accent(config, true)
+}
+
+fn resolve_palette_with_legacy_accent(
+    config: &crate::config::Config,
+    use_legacy_ui_accent: bool,
+) -> state::Palette {
     // Start with the named theme (default: catppuccin)
     let base_name = config.theme.name.as_deref().unwrap_or("catppuccin");
     let mut palette = state::Palette::from_name(base_name).unwrap_or_else(|| {
@@ -132,7 +139,8 @@ fn resolve_palette(config: &crate::config::Config) -> state::Palette {
     }
 
     // Legacy: if ui.accent is set and no theme.custom.accent, use it for compat
-    if config.ui.accent != "cyan"
+    if use_legacy_ui_accent
+        && config.ui.accent != "cyan"
         && config
             .theme
             .custom
@@ -161,59 +169,78 @@ impl App {
         let render_dirty = Arc::new(AtomicBool::new(false));
 
         // Try to restore previous session
-        let (workspaces, active, selected, agent_panel_scope, sidebar_width, sidebar_section_split) =
-            if no_session {
+        let (
+            workspaces,
+            active,
+            selected,
+            agent_panel_scope,
+            sidebar_width,
+            sidebar_width_source,
+            sidebar_section_split,
+        ) = if no_session {
+            (
+                Vec::new(),
+                None,
+                0,
+                state::AgentPanelScope::CurrentWorkspace,
+                config.ui.sidebar_width,
+                state::SidebarWidthSource::ConfigDefault,
+                0.5_f32,
+            )
+        } else if let Some(snap) = crate::persist::load() {
+            let ws = crate::persist::restore(
+                &snap,
+                24,
+                80,
+                config.advanced.scrollback_limit_bytes,
+                event_tx.clone(),
+                render_notify.clone(),
+                render_dirty.clone(),
+            );
+            if ws.is_empty() {
+                crate::logging::session_restored(0, "empty");
                 (
                     Vec::new(),
                     None,
                     0,
-                    state::AgentPanelScope::CurrentWorkspace,
-                    config.ui.sidebar_width,
-                    0.5_f32,
+                    snap.agent_panel_scope,
+                    snap.sidebar_width.unwrap_or(config.ui.sidebar_width),
+                    if snap.sidebar_width.is_some() {
+                        state::SidebarWidthSource::Persisted
+                    } else {
+                        state::SidebarWidthSource::ConfigDefault
+                    },
+                    snap.sidebar_section_split.unwrap_or(0.5),
                 )
-            } else if let Some(snap) = crate::persist::load() {
-                let ws = crate::persist::restore(
-                    &snap,
-                    24,
-                    80,
-                    config.advanced.scrollback_limit_bytes,
-                    event_tx.clone(),
-                    render_notify.clone(),
-                    render_dirty.clone(),
-                );
-                if ws.is_empty() {
-                    crate::logging::session_restored(0, "empty");
-                    (
-                        Vec::new(),
-                        None,
-                        0,
-                        snap.agent_panel_scope,
-                        snap.sidebar_width.unwrap_or(config.ui.sidebar_width),
-                        snap.sidebar_section_split.unwrap_or(0.5),
-                    )
-                } else {
-                    crate::logging::session_restored(ws.len(), "ok");
-                    let active = snap.active.filter(|&i| i < ws.len());
-                    let selected = snap.selected.min(ws.len().saturating_sub(1));
-                    (
-                        ws,
-                        active,
-                        selected,
-                        snap.agent_panel_scope,
-                        snap.sidebar_width.unwrap_or(config.ui.sidebar_width),
-                        snap.sidebar_section_split.unwrap_or(0.5),
-                    )
-                }
             } else {
+                crate::logging::session_restored(ws.len(), "ok");
+                let active = snap.active.filter(|&i| i < ws.len());
+                let selected = snap.selected.min(ws.len().saturating_sub(1));
                 (
-                    Vec::new(),
-                    None,
-                    0,
-                    state::AgentPanelScope::CurrentWorkspace,
-                    config.ui.sidebar_width,
-                    0.5_f32,
+                    ws,
+                    active,
+                    selected,
+                    snap.agent_panel_scope,
+                    snap.sidebar_width.unwrap_or(config.ui.sidebar_width),
+                    if snap.sidebar_width.is_some() {
+                        state::SidebarWidthSource::Persisted
+                    } else {
+                        state::SidebarWidthSource::ConfigDefault
+                    },
+                    snap.sidebar_section_split.unwrap_or(0.5),
                 )
-            };
+            }
+        } else {
+            (
+                Vec::new(),
+                None,
+                0,
+                state::AgentPanelScope::CurrentWorkspace,
+                config.ui.sidebar_width,
+                state::SidebarWidthSource::ConfigDefault,
+                0.5_f32,
+            )
+        };
 
         info!(
             pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes,
@@ -248,6 +275,7 @@ impl App {
             request_new_workspace: false,
             request_new_tab: false,
             request_reload_config: false,
+            request_client_sound_config_reload: false,
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
@@ -291,6 +319,7 @@ impl App {
             prefix_mods,
             default_sidebar_width: config.ui.sidebar_width,
             sidebar_width,
+            sidebar_width_source,
             sidebar_width_auto: false,
             sidebar_collapsed: false,
             sidebar_section_split,
@@ -542,7 +571,12 @@ impl App {
     ) -> crate::config::ConfigReloadReport {
         let previous_toast = self.state.toast.clone();
         let report = match crate::config::load_live_config() {
-            Ok(loaded) => self.apply_live_config(&loaded.config, notify_success),
+            Ok(loaded) => self.apply_live_config(
+                &loaded.config,
+                &loaded.diagnostics,
+                &loaded.invalid_sections,
+                notify_success,
+            ),
             Err(diagnostics) => {
                 self.state.toast = None;
                 self.state.config_diagnostic =
@@ -561,43 +595,59 @@ impl App {
     fn apply_live_config(
         &mut self,
         config: &crate::config::Config,
+        load_diagnostics: &[String],
+        invalid_sections: &[String],
         notify_success: bool,
     ) -> crate::config::ConfigReloadReport {
-        let mut diagnostics = Vec::new();
+        let mut diagnostics = load_diagnostics.to_vec();
+        let invalid_section =
+            |section: &str| invalid_sections.iter().any(|invalid| invalid == section);
 
-        match config.live_keybinds() {
-            Ok(live) => {
-                self.state.prefix_code = live.prefix.0;
-                self.state.prefix_mods = live.prefix.1;
-                self.state.keybinds = live.keybinds;
-            }
-            Err(keybind_diagnostics) => {
-                let mut message = keybind_diagnostics.join("; ");
-                if !message.contains("keeping current keybinds") {
-                    message.push_str("; keeping current keybinds");
+        if !invalid_section("keys") {
+            match config.live_keybinds() {
+                Ok(live) => {
+                    self.state.prefix_code = live.prefix.0;
+                    self.state.prefix_mods = live.prefix.1;
+                    self.state.keybinds = live.keybinds;
                 }
-                diagnostics.push(message);
+                Err(keybind_diagnostics) => {
+                    let mut message = keybind_diagnostics.join("; ");
+                    if !message.contains("keeping current keybinds") {
+                        message.push_str("; keeping current keybinds");
+                    }
+                    diagnostics.push(message);
+                }
             }
         }
 
-        diagnostics.extend(config.ui.sound.diagnostics());
+        if !invalid_section("ui") {
+            diagnostics.extend(config.ui.sound.diagnostics());
 
-        let previous_default_sidebar_width = self.state.default_sidebar_width;
-        self.state.default_sidebar_width = config.ui.sidebar_width;
-        if self.state.sidebar_width == previous_default_sidebar_width {
-            self.state.sidebar_width = config.ui.sidebar_width;
+            self.state.default_sidebar_width = config.ui.sidebar_width;
+            if self.state.sidebar_width_source == state::SidebarWidthSource::ConfigDefault {
+                self.state.sidebar_width = config.ui.sidebar_width;
+            }
+            self.state.confirm_close = config.ui.confirm_close;
+            self.state.accent = crate::config::parse_color(&config.ui.accent);
+            if !self.state.local_sound_playback && self.state.sound != config.ui.sound {
+                self.state.request_client_sound_config_reload = true;
+            }
+            self.state.sound = config.ui.sound.clone();
+            self.state.toast_config = config.ui.toast.clone();
         }
-        self.state.confirm_close = config.ui.confirm_close;
-        self.state.pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes;
-        self.state.accent = crate::config::parse_color(&config.ui.accent);
-        self.state.sound = config.ui.sound.clone();
-        self.state.toast_config = config.ui.toast.clone();
-        self.state.palette = resolve_palette(config);
-        self.state.theme_name = config
-            .theme
-            .name
-            .clone()
-            .unwrap_or_else(|| "catppuccin".to_string());
+
+        if !invalid_section("advanced") {
+            self.state.pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes;
+        }
+
+        if !invalid_section("theme") {
+            self.state.palette = resolve_palette_with_legacy_accent(config, !invalid_section("ui"));
+            self.state.theme_name = config
+                .theme
+                .name
+                .clone()
+                .unwrap_or_else(|| "catppuccin".to_string());
+        }
 
         let status = if diagnostics.is_empty() {
             crate::config::ConfigReloadStatus::Applied
@@ -904,6 +954,37 @@ mod tests {
     }
 
     #[test]
+    fn reload_config_updates_sidebar_width_only_when_config_owned() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-sidebar-width");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        assert_eq!(
+            app.state.sidebar_width_source,
+            state::SidebarWidthSource::ConfigDefault
+        );
+
+        std::fs::write(&path, "[ui]\nsidebar_width = 42\n").unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.state.default_sidebar_width, 42);
+        assert_eq!(app.state.sidebar_width, 42);
+
+        app.state.sidebar_width = 31;
+        app.state.sidebar_width_source = state::SidebarWidthSource::Manual;
+        std::fs::write(&path, "[ui]\nsidebar_width = 44\n").unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.state.default_sidebar_width, 44);
+        assert_eq!(app.state.sidebar_width, 31);
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn reload_config_keeps_current_keybinds_on_invalid_binding_but_applies_other_sections() {
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("reload-config-invalid-keybind");
@@ -938,6 +1019,41 @@ mod tests {
                 message.contains("keys.new_workspace")
                     && message.contains("keeping current keybinds")
             }));
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_config_preserves_invalid_ui_section_but_applies_valid_keys() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-invalid-ui-section");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "[keys]\nnew_workspace = \"g\"\n[ui.toast]\ndelivery = \"desktop\"\n",
+        )
+        .unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert_eq!(
+            app.state.keybinds.new_workspace,
+            (KeyCode::Char('g'), KeyModifiers::empty())
+        );
+        assert_eq!(
+            app.state.toast_config.delivery,
+            crate::config::ToastDelivery::Herdr
+        );
+        assert!(app
+            .state
+            .config_diagnostic
+            .as_deref()
+            .is_some_and(|message| message.contains("invalid ui config")));
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

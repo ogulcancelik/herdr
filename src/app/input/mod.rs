@@ -138,6 +138,8 @@ impl App {
 
             if is_double_click {
                 self.state.sidebar_width = self.state.default_sidebar_width;
+                self.state.sidebar_width_source =
+                    crate::app::state::SidebarWidthSource::ConfigDefault;
                 self.state.sidebar_width_auto = false;
                 self.state.mark_session_dirty();
                 self.state.drag = None;

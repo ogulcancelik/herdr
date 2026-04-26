@@ -578,6 +578,13 @@ pub struct KeybindHelpState {
     pub scroll: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarWidthSource {
+    ConfigDefault,
+    Persisted,
+    Manual,
+}
+
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 pub struct AppState {
@@ -594,6 +601,9 @@ pub struct AppState {
     pub request_new_workspace: bool,
     pub request_new_tab: bool,
     pub request_reload_config: bool,
+    /// Set when the headless server should ask attached clients to reload
+    /// their client-local sound config from disk.
+    pub request_client_sound_config_reload: bool,
     /// Set when UI interaction requested a clipboard write that must be
     /// handled by the outer App/event loop instead of directly from AppState.
     pub request_clipboard_write: Option<Vec<u8>>,
@@ -626,6 +636,7 @@ pub struct AppState {
     pub prefix_mods: KeyModifiers,
     pub default_sidebar_width: u16,
     pub sidebar_width: u16,
+    pub sidebar_width_source: SidebarWidthSource,
     pub sidebar_width_auto: bool,
     pub sidebar_collapsed: bool,
     /// Ratio of sidebar height allocated to the workspaces section.
@@ -719,6 +730,7 @@ impl AppState {
             request_new_workspace: false,
             request_new_tab: false,
             request_reload_config: false,
+            request_client_sound_config_reload: false,
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
@@ -757,6 +769,7 @@ impl AppState {
             prefix_mods: KeyModifiers::CONTROL,
             default_sidebar_width: 26,
             sidebar_width: 26,
+            sidebar_width_source: SidebarWidthSource::ConfigDefault,
             sidebar_width_auto: false,
             sidebar_collapsed: false,
             sidebar_section_split: 0.5,

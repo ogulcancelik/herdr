@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -209,6 +209,9 @@ pub enum ServerMessage {
         /// Base64-encoded clipboard data.
         data: String,
     },
+
+    /// Client-local sound config changed on disk; refresh it without reconnecting.
+    ReloadSoundConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -476,7 +479,7 @@ mod tests {
     #[test]
     fn client_hello_roundtrip() {
         let msg = ClientMessage::Hello {
-            version: 1,
+            version: PROTOCOL_VERSION,
             cols: 80,
             rows: 24,
         };
@@ -520,7 +523,7 @@ mod tests {
     #[test]
     fn server_welcome_roundtrip() {
         let msg = ServerMessage::Welcome {
-            version: 1,
+            version: PROTOCOL_VERSION,
             error: None,
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
@@ -532,7 +535,7 @@ mod tests {
     #[test]
     fn server_welcome_with_error_roundtrip() {
         let msg = ServerMessage::Welcome {
-            version: 1,
+            version: PROTOCOL_VERSION,
             error: Some("incompatible version".to_owned()),
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
@@ -638,12 +641,21 @@ mod tests {
         assert_eq!(msg, decoded);
     }
 
+    #[test]
+    fn server_reload_sound_config_roundtrip() {
+        let msg = ServerMessage::ReloadSoundConfig;
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ServerMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
     // ---- Framing ----
 
     #[test]
     fn framing_small_message_roundtrip() {
         let msg = ClientMessage::Hello {
-            version: 1,
+            version: PROTOCOL_VERSION,
             cols: 80,
             rows: 24,
         };
@@ -708,7 +720,7 @@ mod tests {
         for i in 0..150u32 {
             let msg = match i % 4 {
                 0 => ClientMessage::Hello {
-                    version: 1,
+                    version: PROTOCOL_VERSION,
                     cols: (80 + (i % 40) as u16),
                     rows: (24 + (i % 20) as u16),
                 },
@@ -820,22 +832,19 @@ mod tests {
 
     #[test]
     fn version_compatible() {
-        assert_eq!(check_client_version(1), VersionCheck::Compatible);
+        assert_eq!(
+            check_client_version(PROTOCOL_VERSION),
+            VersionCheck::Compatible
+        );
     }
 
     #[test]
     fn version_older_client_rejected() {
-        match check_client_version(1) {
-            VersionCheck::Compatible => {} // current version
-            _ => panic!("current version should be compatible"),
+        let result = check_client_version(PROTOCOL_VERSION - 1);
+        assert!(matches!(result, VersionCheck::Incompatible(_)));
+        if let VersionCheck::Incompatible(msg) = result {
+            assert!(msg.contains("older"), "error should mention older version");
         }
-        // If we imagine a future server version 2, a v1 client would be rejected.
-        // We test this by checking the logic directly.
-        let result = check_client_version(0);
-        assert!(
-            matches!(result, VersionCheck::Incompatible(_)),
-            "version 0 should be incompatible"
-        );
     }
 
     #[test]
@@ -1119,7 +1128,7 @@ mod tests {
     fn read_message_accepts_exact_payload() {
         // A normally-framed message should decode without error.
         let msg = ClientMessage::Hello {
-            version: 1,
+            version: PROTOCOL_VERSION,
             cols: 80,
             rows: 24,
         };
@@ -1149,7 +1158,7 @@ mod tests {
 
         let messages = vec![
             ClientMessage::Hello {
-                version: 1,
+                version: PROTOCOL_VERSION,
                 cols: 200,
                 rows: 60,
             },

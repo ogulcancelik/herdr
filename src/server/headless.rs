@@ -518,6 +518,8 @@ impl HeadlessServer {
                 needs_render = true;
             }
 
+            self.drain_client_sound_config_reload_request();
+
             self.app.sync_headless_animation_timer(now);
 
             // 7. Render virtually and stream frames.
@@ -825,7 +827,7 @@ impl HeadlessServer {
                             crate::sound::Sound::Done => "agent done",
                             crate::sound::Sound::Request => "agent attention",
                         };
-                        self.send_to_all_clients(ServerMessage::Notify {
+                        self.send_to_foreground_client(ServerMessage::Notify {
                             kind: protocol::NotifyKind::Sound,
                             message: msg.to_owned(),
                         });
@@ -854,7 +856,7 @@ impl HeadlessServer {
                     };
 
                 if let Some(msg) = toast_msg {
-                    self.send_to_all_clients(ServerMessage::Notify {
+                    self.send_to_foreground_client(ServerMessage::Notify {
                         kind: protocol::NotifyKind::Toast,
                         message: msg,
                     });
@@ -921,7 +923,7 @@ impl HeadlessServer {
                             crate::sound::Sound::Done => "agent done",
                             crate::sound::Sound::Request => "agent attention",
                         };
-                        self.send_to_all_clients(ServerMessage::Notify {
+                        self.send_to_foreground_client(ServerMessage::Notify {
                             kind: protocol::NotifyKind::Sound,
                             message: msg.to_owned(),
                         });
@@ -950,7 +952,7 @@ impl HeadlessServer {
                     };
 
                 if let Some(msg) = toast_msg {
-                    self.send_to_all_clients(ServerMessage::Notify {
+                    self.send_to_foreground_client(ServerMessage::Notify {
                         kind: protocol::NotifyKind::Toast,
                         message: msg,
                     });
@@ -982,7 +984,7 @@ impl HeadlessServer {
                     };
 
                 if let Some(msg) = toast_msg {
-                    self.send_to_all_clients(ServerMessage::Notify {
+                    self.send_to_foreground_client(ServerMessage::Notify {
                         kind: protocol::NotifyKind::Toast,
                         message: msg,
                     });
@@ -1010,15 +1012,23 @@ impl HeadlessServer {
     /// - Forward `ClipboardWrite` as `ServerMessage::Clipboard` to the
     ///   foreground client only.
     /// - Detect when a sound would be played and forward as
-    ///   `ServerMessage::Notify { kind: Sound }` to all clients.
+    ///   `ServerMessage::Notify { kind: Sound }` to the foreground client.
     /// - Detect when a toast is set on AppState and forward as
-    ///   `ServerMessage::Notify { kind: Toast }` to all clients.
+    ///   `ServerMessage::Notify { kind: Toast }` to the foreground client.
     fn drain_internal_events_with_forwarding(&mut self) -> bool {
         let mut changed = false;
         while let Ok(ev) = self.app.event_rx.try_recv() {
             changed |= self.handle_internal_event_with_forwarding(ev);
         }
         changed
+    }
+
+    fn drain_client_sound_config_reload_request(&mut self) {
+        if !self.app.state.request_client_sound_config_reload {
+            return;
+        }
+        self.app.state.request_client_sound_config_reload = false;
+        self.send_to_all_clients(ServerMessage::ReloadSoundConfig);
     }
 
     /// Encodes a server message into a length-prefixed frame.
@@ -1056,6 +1066,14 @@ impl HeadlessServer {
                 self.resize_shared_runtime_to_effective_size();
             }
         }
+    }
+
+    /// Sends a client-local side effect to the foreground client only.
+    fn send_to_foreground_client(&mut self, msg: ServerMessage) -> bool {
+        let Some(client_id) = self.foreground_client_id else {
+            return false;
+        };
+        self.send_to_client(client_id, msg)
     }
 
     /// Sends a message to a specific client. Returns false if the client
@@ -1298,7 +1316,7 @@ impl HeadlessServer {
                 if let Some(toast) = &toast_after {
                     let msg_text = format!("{}: {}", toast.title, toast.context);
                     debug!(msg = %msg_text, "forwarding toast notification from API request");
-                    self.send_to_all_clients(ServerMessage::Notify {
+                    self.send_to_foreground_client(ServerMessage::Notify {
                         kind: protocol::NotifyKind::Toast,
                         message: msg_text,
                     });
@@ -1392,7 +1410,7 @@ impl HeadlessServer {
                                     *pane_id,
                                 )
                             );
-                            self.send_to_all_clients(ServerMessage::Notify {
+                            self.send_to_foreground_client(ServerMessage::Notify {
                                 kind: protocol::NotifyKind::Toast,
                                 message: msg_text,
                             });
@@ -1413,7 +1431,7 @@ impl HeadlessServer {
                             crate::sound::Sound::Request => "agent attention",
                         };
                         debug!(sound = ?sound, "forwarding sound notification from API request");
-                        self.send_to_all_clients(ServerMessage::Notify {
+                        self.send_to_foreground_client(ServerMessage::Notify {
                             kind: protocol::NotifyKind::Sound,
                             message: msg_text.to_owned(),
                         });
@@ -2370,6 +2388,36 @@ mod tests {
     }
 
     #[test]
+    fn client_sound_reload_request_refreshes_attached_clients() {
+        let mut server = test_headless_server();
+        let (client_tx, client_rx) = std::sync::mpsc::channel();
+
+        server.clients.insert(
+            1,
+            ClientConnection {
+                terminal_size: (80, 24),
+                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
+                last_activity: 1,
+                last_frame: None,
+                writer: Some(client_tx),
+            },
+        );
+        server.app.state.request_client_sound_config_reload = true;
+
+        server.drain_client_sound_config_reload_request();
+
+        match read_server_message(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("client sound reload message"),
+        ) {
+            ServerMessage::ReloadSoundConfig => {}
+            other => panic!("expected ReloadSoundConfig, got {other:?}"),
+        }
+        assert!(!server.app.state.request_client_sound_config_reload);
+    }
+
+    #[test]
     fn clipboard_write_targets_foreground_client_only() {
         let mut server = test_headless_server();
         let (background_tx, background_rx) = std::sync::mpsc::channel();
@@ -2416,6 +2464,59 @@ mod tests {
                 .recv_timeout(Duration::from_millis(50))
                 .is_err(),
             "background client should not receive clipboard writes"
+        );
+    }
+
+    #[test]
+    fn client_local_notifications_target_foreground_client_only() {
+        let mut server = test_headless_server();
+        let (background_tx, background_rx) = std::sync::mpsc::channel();
+        let (foreground_tx, foreground_rx) = std::sync::mpsc::channel();
+
+        server.clients.insert(
+            1,
+            ClientConnection {
+                terminal_size: (120, 40),
+                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
+                last_activity: 1,
+                last_frame: None,
+                writer: Some(background_tx),
+            },
+        );
+        server.clients.insert(
+            2,
+            ClientConnection {
+                terminal_size: (80, 24),
+                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
+                last_activity: 2,
+                last_frame: None,
+                writer: Some(foreground_tx),
+            },
+        );
+        server.foreground_client_id = Some(2);
+        server.sync_foreground_client_state();
+
+        assert!(server.send_to_foreground_client(ServerMessage::Notify {
+            kind: protocol::NotifyKind::Toast,
+            message: "pi finished: workspace 1".to_string(),
+        }));
+
+        match read_server_message(
+            foreground_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("foreground toast message"),
+        ) {
+            ServerMessage::Notify { kind, message } => {
+                assert_eq!(kind, protocol::NotifyKind::Toast);
+                assert_eq!(message, "pi finished: workspace 1");
+            }
+            other => panic!("expected toast notify, got {other:?}"),
+        }
+        assert!(
+            background_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "background client should not receive client-local notifications"
         );
     }
 

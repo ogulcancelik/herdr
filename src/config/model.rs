@@ -44,6 +44,7 @@ pub struct Config {
 pub struct LoadedConfig {
     pub config: Config,
     pub diagnostics: Vec<String>,
+    pub invalid_sections: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

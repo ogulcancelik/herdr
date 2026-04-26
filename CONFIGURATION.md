@@ -31,15 +31,15 @@ Reloadable now:
 - theme, custom theme colors, and legacy `ui.accent`
 - `ui.confirm_close`
 - `ui.toast.delivery`
-- server-side `ui.sound` policy
+- server-side `ui.sound` policy; attached thin clients refresh local sound config after a successful sound-policy change
 - `advanced.scrollback_limit_bytes` for panes created after reload
-- `ui.sidebar_width` as the default width
+- `ui.sidebar_width` as the default width; current width updates only while it is still config-owned
 
 Startup-only or special-case:
 - `onboarding` does not reopen onboarding during reload
 - `advanced.allow_nested` is checked before launch and needs a restart
 - existing pane scrollback buffers are not resized during reload
-- already-attached thin clients may need to reconnect before client-local sound file/path changes are picked up
+- terminal notifications and sounds are client-local side effects and are sent to the foreground attached client
 
 If the TOML cannot be read or parsed, reload applies nothing and keeps the current running state. If keybindings are invalid, herdr keeps the current keybindings while applying other valid reloadable settings where possible.
 
