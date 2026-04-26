@@ -278,6 +278,7 @@ impl AppState {
             self.workspace_scroll = 0;
             self.tab_scroll = 0;
             self.tab_scroll_follow_active = true;
+            mark_empty_named_session_dirty(self);
         } else {
             if self.selected >= self.workspaces.len() {
                 self.selected = self.workspaces.len() - 1;
@@ -403,6 +404,7 @@ impl AppState {
             .is_some_and(|ws| ws.tabs.len() <= 1);
         if should_close_workspace {
             self.close_selected_workspace();
+            mark_empty_named_session_dirty(self);
             return;
         }
         if let Some(ws_idx) = self.active {
@@ -468,6 +470,12 @@ impl AppState {
         }
 
         self.selection = None;
+    }
+}
+
+pub fn mark_empty_named_session_dirty(state: &mut AppState) {
+    if state.workspaces.is_empty() && state.active_session.is_some() {
+        state.session_dirty = true;
     }
 }
 
@@ -649,6 +657,7 @@ impl AppState {
                 if self.mode == Mode::Terminal {
                     self.mode = Mode::Navigate;
                 }
+                mark_empty_named_session_dirty(self);
             } else {
                 if let Some(active) = self.active {
                     if active >= self.workspaces.len() {
@@ -702,6 +711,18 @@ mod tests {
         let toast = state.toast.as_ref().expect("update toast");
         assert_eq!(toast.title, "v0.5.0 available");
         assert_eq!(toast.context, "detach, then run `herdr update`");
+    }
+
+    #[test]
+    fn empty_named_session_stays_active() {
+        let mut state = AppState::test_new();
+        let name = crate::persist::SessionName("fresh".to_string());
+        state.active_session = Some(name.clone());
+
+        mark_empty_named_session_dirty(&mut state);
+
+        assert_eq!(state.active_session, Some(name));
+        assert!(state.session_dirty);
     }
 
     #[test]

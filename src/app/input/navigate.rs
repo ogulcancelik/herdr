@@ -64,6 +64,15 @@ pub(crate) fn terminal_direct_navigation_action(
     {
         return Some(NavigateAction::FocusPaneRight);
     }
+    if !state.session_picker_enabled {
+        return None;
+    }
+    if kb
+        .session_picker
+        .is_some_and(|(code, mods)| key_matches(key, code, mods))
+    {
+        return Some(NavigateAction::OpenSessionPicker);
+    }
     None
 }
 
@@ -351,6 +360,7 @@ pub(crate) enum NavigateAction {
     EnterResizeMode,
     ToggleSidebar,
     Detach,
+    OpenSessionPicker,
 }
 
 fn navigate_action_for_key(state: &AppState, key: &KeyEvent) -> Option<NavigateAction> {
@@ -427,6 +437,15 @@ fn navigate_action_for_key(state: &AppState, key: &KeyEvent) -> Option<NavigateA
     {
         return Some(NavigateAction::Detach);
     }
+    if !state.session_picker_enabled {
+        return None;
+    }
+    if kb
+        .session_picker
+        .is_some_and(|(code, mods)| key_matches(key, code, mods))
+    {
+        return Some(NavigateAction::OpenSessionPicker);
+    }
     None
 }
 
@@ -500,6 +519,12 @@ pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateActi
         }
         NavigateAction::Detach => {
             state.detach_requested = true;
+            leave_navigate_mode(state);
+        }
+        NavigateAction::OpenSessionPicker => {
+            if state.session_picker_enabled {
+                state.request_open_session_picker = true;
+            }
             leave_navigate_mode(state);
         }
     }

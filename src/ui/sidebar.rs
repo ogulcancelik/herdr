@@ -76,6 +76,7 @@ fn agent_panel_current_workspace_idx(app: &AppState) -> Option<usize> {
             | Mode::Settings
             | Mode::GlobalMenu
             | Mode::KeybindHelp
+            | Mode::SessionPicker
     ) {
         Some(app.selected)
     } else {
@@ -721,6 +722,23 @@ fn render_workspace_list(app: &AppState, frame: &mut Frame, area: Rect, is_navig
             Paragraph::new(Span::styled("new", Style::default().fg(p.overlay0))),
             new_rect,
         );
+
+        if app.session_picker_enabled {
+            let sess_rect = app.sidebar_sessions_button_rect();
+            let label = if sess_rect.width >= 8 {
+                Some("sessions")
+            } else if sess_rect.width >= 4 {
+                Some("sess")
+            } else {
+                None
+            };
+            if let Some(label) = label {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(label, Style::default().fg(p.overlay0))),
+                    sess_rect,
+                );
+            }
+        }
 
         let menu_rect = app.global_launcher_rect();
         let menu_line = if app.update_available.is_some() {

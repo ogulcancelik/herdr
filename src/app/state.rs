@@ -356,6 +356,7 @@ pub enum Mode {
     Settings,
     GlobalMenu,
     KeybindHelp,
+    SessionPicker,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -580,6 +581,60 @@ pub struct KeybindHelpState {
 
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
+// ---------------------------------------------------------------------------
+// Session picker state
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionEntry {
+    pub id: crate::persist::SessionId,
+    pub label: String,
+    pub active: bool,
+    pub deletable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionPickerState {
+    pub sessions: Vec<SessionEntry>,
+    pub highlighted: usize,
+    pub scroll: usize,
+    pub creating: bool,
+    pub name_input: String,
+    pub pending_delete: Option<crate::persist::SessionName>,
+    pub error: Option<String>,
+}
+
+impl SessionPickerState {
+    pub fn reset(
+        entries: Vec<SessionEntry>,
+        active_id: Option<&crate::persist::SessionId>,
+    ) -> Self {
+        let highlighted = entries
+            .iter()
+            .position(|e| {
+                active_id.map_or(false, |id| match (&e.id, id) {
+                    (crate::persist::SessionId::Default, crate::persist::SessionId::Default) => {
+                        true
+                    }
+                    (crate::persist::SessionId::Named(a), crate::persist::SessionId::Named(b)) => {
+                        a == b
+                    }
+                    _ => false,
+                })
+            })
+            .unwrap_or(0);
+        Self {
+            sessions: entries,
+            highlighted,
+            scroll: 0,
+            creating: false,
+            name_input: String::new(),
+            pending_delete: None,
+            error: None,
+        }
+    }
+}
+
 pub struct AppState {
     pub workspaces: Vec<Workspace>,
     pub active: Option<usize>,
@@ -652,6 +707,14 @@ pub struct AppState {
     pub host_terminal_theme: TerminalTheme,
     /// Set when a persisted session snapshot would change.
     pub session_dirty: bool,
+    /// Whether the session picker feature is enabled (false in --no-session mode).
+    pub session_picker_enabled: bool,
+    /// The currently active named session, if any. Runtime-only, not persisted.
+    pub active_session: Option<crate::persist::SessionName>,
+    /// State for the session picker modal.
+    pub session_picker: SessionPickerState,
+    /// Deferred request to open the session picker.
+    pub request_open_session_picker: bool,
 }
 
 impl AppState {
@@ -676,6 +739,13 @@ impl AppState {
             (info.rect.height, info.rect.width)
         } else {
             (24, 80)
+        }
+    }
+
+    pub fn current_session_id(&self) -> crate::persist::SessionId {
+        match &self.active_session {
+            Some(name) => crate::persist::SessionId::Named(name.clone()),
+            None => crate::persist::SessionId::Default,
         }
     }
 }
@@ -811,6 +881,8 @@ impl AppState {
                 resize_mode_label: "r".into(),
                 toggle_sidebar: (KeyCode::Char('b'), KeyModifiers::empty()),
                 toggle_sidebar_label: "b".into(),
+                session_picker: Some((KeyCode::Char('s'), KeyModifiers::CONTROL)),
+                session_picker_label: Some("ctrl+s".into()),
                 custom_commands: Vec::new(),
             },
             spinner_tick: 0,
@@ -825,6 +897,18 @@ impl AppState {
             global_menu: MenuListState::new(0),
             host_terminal_theme: TerminalTheme::default(),
             session_dirty: false,
+            session_picker_enabled: false,
+            active_session: None,
+            session_picker: SessionPickerState {
+                sessions: Vec::new(),
+                highlighted: 0,
+                scroll: 0,
+                creating: false,
+                name_input: String::new(),
+                pending_delete: None,
+                error: None,
+            },
+            request_open_session_picker: false,
         }
     }
 }

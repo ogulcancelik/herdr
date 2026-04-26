@@ -163,7 +163,7 @@ impl App {
             .session_save_deadline
             .is_some_and(|deadline| now >= deadline)
         {
-            self.save_session_now();
+            changed |= self.save_session_now();
         }
 
         self.sync_animation_timer(now);

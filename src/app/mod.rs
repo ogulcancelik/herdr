@@ -177,6 +177,7 @@ impl App {
                     24,
                     80,
                     config.advanced.scrollback_limit_bytes,
+                    crate::terminal_theme::TerminalTheme::default(),
                     event_tx.clone(),
                     render_notify.clone(),
                     render_dirty.clone(),
@@ -317,6 +318,18 @@ impl App {
             global_menu: state::MenuListState::new(0),
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
             session_dirty: false,
+            session_picker_enabled: !no_session,
+            active_session: None,
+            session_picker: state::SessionPickerState {
+                sessions: Vec::new(),
+                highlighted: 0,
+                scroll: 0,
+                creating: false,
+                name_input: String::new(),
+                pending_delete: None,
+                error: None,
+            },
+            request_open_session_picker: false,
         };
 
         for ws in &mut state.workspaces {
@@ -420,6 +433,14 @@ impl App {
                 self.reload_keybinds();
                 needs_render = true;
             }
+
+            if self.state.request_open_session_picker {
+                self.state.request_open_session_picker = false;
+                self.open_session_picker();
+                needs_render = true;
+            }
+
+            self.ensure_session_picker_populated();
 
             let now = Instant::now();
             self.sync_animation_timer(now);
@@ -683,6 +704,12 @@ impl App {
             }
             Mode::Settings => {
                 self.handle_settings_key(key_event);
+            }
+            Mode::SessionPicker => {
+                if let Some(action) = input::update_session_picker_state(&mut self.state, key_event)
+                {
+                    self.execute_session_picker_action(action);
+                }
             }
             Mode::Terminal => {
                 // Should not be called in terminal mode.

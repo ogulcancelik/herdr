@@ -27,6 +27,7 @@ mod mouse;
 mod navigate;
 mod overlays;
 mod selection;
+mod session_picker;
 mod settings;
 mod sidebar;
 mod terminal;
@@ -37,6 +38,7 @@ pub(crate) use self::{
         handle_keybind_help_key, handle_rename_key, handle_resize_key,
     },
     navigate::{handle_navigate_key, terminal_direct_navigation_action},
+    session_picker::{update_session_picker_state, SessionPickerAction},
     settings::open_settings,
 };
 use self::{
@@ -53,6 +55,14 @@ use super::App;
 // ---------------------------------------------------------------------------
 
 impl App {
+    pub(super) fn execute_session_picker_action(&mut self, action: SessionPickerAction) {
+        match action {
+            SessionPickerAction::Switch(id) => self.switch_session(id),
+            SessionPickerAction::Create(name) => self.create_session(name),
+            SessionPickerAction::Delete(name) => self.delete_session(name),
+        }
+    }
+
     pub(super) async fn handle_key(&mut self, key: TerminalKey) {
         match self.state.mode {
             Mode::Terminal => self.handle_terminal_key(key).await,
@@ -71,6 +81,11 @@ impl App {
                     Mode::Settings => self.handle_settings_key(key),
                     Mode::GlobalMenu => handle_global_menu_key(&mut self.state, key),
                     Mode::KeybindHelp => handle_keybind_help_key(&mut self.state, key),
+                    Mode::SessionPicker => {
+                        if let Some(action) = update_session_picker_state(&mut self.state, key) {
+                            self.execute_session_picker_action(action);
+                        }
+                    }
                     Mode::Terminal => unreachable!(),
                 }
             }
@@ -143,6 +158,13 @@ impl App {
                 self.state.drag = None;
                 return;
             }
+        }
+
+        if self.state.mode == Mode::SessionPicker {
+            if let Some(action) = self.state.handle_session_picker_mouse(mouse) {
+                self.execute_session_picker_action(action);
+            }
+            return;
         }
 
         if let Some(action) = self.state.handle_mouse(mouse) {

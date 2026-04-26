@@ -79,6 +79,8 @@ pub struct KeysConfig {
     pub resize_mode: String,
     /// Toggle sidebar collapse. Default: "b"
     pub toggle_sidebar: String,
+    /// Open the session picker. Default: "ctrl+s"
+    pub session_picker: String,
     /// Prefix-mode custom command bindings.
     pub command: Vec<CommandKeybindConfig>,
 }
@@ -133,6 +135,7 @@ impl Default for KeysConfig {
             fullscreen: "f".into(),
             resize_mode: "r".into(),
             toggle_sidebar: "b".into(),
+            session_picker: "ctrl+s".into(),
             command: Vec::new(),
         }
     }

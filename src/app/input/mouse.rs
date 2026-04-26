@@ -261,6 +261,18 @@ impl AppState {
                         return None;
                     }
 
+                    if self.session_picker_enabled {
+                        let sess_button = self.sidebar_sessions_button_rect();
+                        let on_sess_button = mouse.row >= sess_button.y
+                            && mouse.row < sess_button.y + sess_button.height
+                            && mouse.column >= sess_button.x
+                            && mouse.column < sess_button.x + sess_button.width;
+                        if on_sess_button {
+                            self.request_open_session_picker = true;
+                            return None;
+                        }
+                    }
+
                     if let Some(target) =
                         self.workspace_list_scrollbar_target_at(mouse.column, mouse.row)
                     {

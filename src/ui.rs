@@ -12,6 +12,7 @@ mod onboarding;
 mod panes;
 mod release_notes;
 mod scrollbar;
+mod session_picker;
 mod settings;
 mod sidebar;
 mod status;
@@ -35,6 +36,10 @@ pub(crate) use self::release_notes::{
 pub(crate) use self::scrollbar::{
     pane_scrollbar_rect, release_notes_scrollbar_rect, scrollbar_offset_from_drag_row,
     scrollbar_offset_from_row, scrollbar_thumb_grab_offset, should_show_scrollbar,
+};
+use self::session_picker::render_session_picker_overlay;
+pub(crate) use self::session_picker::{
+    session_picker_modal_rect, session_picker_new_button_rect, session_picker_visible_row_rects,
 };
 use self::settings::render_settings_overlay;
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
@@ -186,6 +191,7 @@ pub fn render(app: &AppState, frame: &mut Frame) {
         Mode::RenameWorkspace | Mode::RenameTab => render_rename_overlay(app, frame, frame.area()),
         Mode::GlobalMenu => render_global_launcher_menu(app, frame),
         Mode::KeybindHelp => render_keybind_help_overlay(app, frame),
+        Mode::SessionPicker => render_session_picker_overlay(app, frame, frame.area()),
         Mode::Terminal => {}
     }
 
@@ -389,6 +395,74 @@ mod tests {
         assert_eq!(custom_style.bg, Some(app.palette.accent));
         assert_eq!(custom_style.fg, Some(app.palette.surface_dim));
         assert!(custom_style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn sidebar_footer_shows_full_sessions_label_when_space_allows() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.session_picker_enabled = true;
+        app.mode = Mode::Navigate;
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let sessions_rect = app.sidebar_sessions_button_rect();
+        assert_eq!(sessions_rect.width, 8);
+        assert_eq!(
+            buffer_row_text(buffer, sessions_rect, sessions_rect.y),
+            "sessions"
+        );
+    }
+
+    #[test]
+    fn session_picker_labels_render_with_contrasting_row_styles() {
+        let named = crate::persist::SessionName("project".to_string());
+        let mut app = crate::app::state::AppState::test_new();
+        app.mode = Mode::SessionPicker;
+        app.session_picker = crate::app::state::SessionPickerState::reset(
+            vec![
+                crate::app::state::SessionEntry {
+                    id: crate::persist::SessionId::Default,
+                    label: "default".to_string(),
+                    active: true,
+                    deletable: false,
+                },
+                crate::app::state::SessionEntry {
+                    id: crate::persist::SessionId::Named(named),
+                    label: "project".to_string(),
+                    active: false,
+                    deletable: true,
+                },
+            ],
+            Some(&crate::persist::SessionId::Default),
+        );
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let modal = session_picker_modal_rect(Rect::new(0, 0, 80, 20)).expect("modal rect");
+        let inner = Rect::new(modal.x + 1, modal.y + 1, modal.width - 2, modal.height - 2);
+        let content = modal_stack_areas(inner, 2, 1, 0, 1).content;
+
+        let default_cell =
+            find_buffer_text(buffer, content, "default").expect("default session row visible");
+        let default_style = buffer[default_cell].style();
+        assert_eq!(default_style.bg, Some(app.palette.accent));
+        assert_eq!(default_style.fg, Some(app.palette.panel_bg));
+        assert!(default_style.add_modifier.contains(Modifier::BOLD));
+
+        let project_cell =
+            find_buffer_text(buffer, content, "project").expect("named session row visible");
+        let project_style = buffer[project_cell].style();
+        assert_eq!(project_style.bg, Some(app.palette.panel_bg));
+        assert_eq!(project_style.fg, Some(app.palette.text));
     }
 
     #[test]
@@ -615,6 +689,24 @@ mod tests {
             .collect::<String>()
             .trim_end()
             .to_string()
+    }
+
+    fn find_buffer_text(
+        buffer: &ratatui::buffer::Buffer,
+        area: Rect,
+        needle: &str,
+    ) -> Option<(u16, u16)> {
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let suffix = (x..area.x + area.width)
+                    .map(|col| buffer[(col, y)].symbol())
+                    .collect::<String>();
+                if suffix.starts_with(needle) {
+                    return Some((x, y));
+                }
+            }
+        }
+        None
     }
 
     fn temp_git_repo(branch: &str) -> std::path::PathBuf {

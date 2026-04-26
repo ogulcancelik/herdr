@@ -169,6 +169,16 @@ impl AppState {
         Rect::new(footer.x, footer.y, width, footer.height)
     }
 
+    pub(crate) fn sidebar_sessions_button_rect(&self) -> Rect {
+        let footer = self.sidebar_footer_rect();
+        let new_rect = self.sidebar_new_button_rect();
+        let menu_rect = self.global_launcher_rect();
+        let x = new_rect.x + new_rect.width;
+        let available = menu_rect.x.saturating_sub(x);
+        let width = 8u16.min(available);
+        Rect::new(x, footer.y, width, footer.height)
+    }
+
     pub(crate) fn global_launcher_rect(&self) -> Rect {
         let footer = self.sidebar_footer_rect();
         let width = if self.update_available.is_some() {
@@ -314,6 +324,7 @@ impl AppState {
                 | Mode::Settings
                 | Mode::GlobalMenu
                 | Mode::KeybindHelp
+                | Mode::SessionPicker
         ) {
             Some(self.selected)
         } else {

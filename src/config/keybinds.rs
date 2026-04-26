@@ -99,6 +99,8 @@ pub struct Keybinds {
     pub resize_mode_label: String,
     pub toggle_sidebar: (KeyCode, KeyModifiers),
     pub toggle_sidebar_label: String,
+    pub session_picker: Option<(KeyCode, KeyModifiers)>,
+    pub session_picker_label: Option<String>,
     pub custom_commands: Vec<CustomCommandKeybind>,
 }
 
@@ -328,6 +330,19 @@ impl Config {
             ),
         ];
 
+        let session_picker_nav = optional_binding(
+            BindingScope::Navigate,
+            "keys.session_picker",
+            &self.keys.session_picker,
+            &mut diagnostics,
+        );
+        let session_picker_direct = optional_binding(
+            BindingScope::TerminalDirect,
+            "keys.session_picker",
+            &self.keys.session_picker,
+            &mut diagnostics,
+        );
+
         let mut optional_bindings = vec![
             optional_binding(
                 BindingScope::Navigate,
@@ -428,6 +443,96 @@ impl Config {
                 continue;
             }
             registry.register(binding.scope, value, binding.field);
+        }
+
+        // Register session_picker separately so we can apply reserved-key checks.
+        let mut session_picker_value = session_picker_nav.value;
+        let mut session_picker_label = session_picker_nav.label.clone();
+        if let Some(value) = session_picker_value {
+            if let Some(first_field) = registry.conflict(BindingScope::Navigate, value) {
+                let diag = format!(
+                    "duplicate keybinding: keys.session_picker conflicts with {}; disabling binding",
+                    first_field
+                );
+                warn!(message = %diag, "config diagnostic");
+                diagnostics.push(diag);
+                session_picker_value = None;
+                session_picker_label = None;
+            } else {
+                registry.register(BindingScope::Navigate, value, "keys.session_picker");
+            }
+        }
+
+        // Reserved navigate key shadowing check for session_picker.
+        let reserved_navigate_bindings: &[(KeyCode, KeyModifiers)] = &[
+            (KeyCode::Char('q'), KeyModifiers::empty()),
+            (KeyCode::Enter, KeyModifiers::empty()),
+            (KeyCode::Char('s'), KeyModifiers::empty()),
+            (KeyCode::Char('?'), KeyModifiers::empty()),
+            (KeyCode::Up, KeyModifiers::empty()),
+            (KeyCode::Down, KeyModifiers::empty()),
+            (KeyCode::Char('h'), KeyModifiers::empty()),
+            (KeyCode::Char('j'), KeyModifiers::empty()),
+            (KeyCode::Char('k'), KeyModifiers::empty()),
+            (KeyCode::Char('l'), KeyModifiers::empty()),
+            (KeyCode::Left, KeyModifiers::empty()),
+            (KeyCode::Right, KeyModifiers::empty()),
+            (KeyCode::Tab, KeyModifiers::empty()),
+            (KeyCode::BackTab, KeyModifiers::empty()),
+            (KeyCode::Esc, KeyModifiers::empty()),
+            (KeyCode::Char('1'), KeyModifiers::empty()),
+            (KeyCode::Char('2'), KeyModifiers::empty()),
+            (KeyCode::Char('3'), KeyModifiers::empty()),
+            (KeyCode::Char('4'), KeyModifiers::empty()),
+            (KeyCode::Char('5'), KeyModifiers::empty()),
+            (KeyCode::Char('6'), KeyModifiers::empty()),
+            (KeyCode::Char('7'), KeyModifiers::empty()),
+            (KeyCode::Char('8'), KeyModifiers::empty()),
+            (KeyCode::Char('9'), KeyModifiers::empty()),
+        ];
+        if let Some(value) = session_picker_value {
+            if reserved_navigate_bindings.iter().any(|b| b == &value) {
+                let diag = format!(
+                    "keys.session_picker ({}) conflicts with a reserved navigate key; disabling binding",
+                    session_picker_label.as_deref().unwrap_or("?")
+                );
+                warn!(message = %diag, "config diagnostic");
+                diagnostics.push(diag);
+                session_picker_value = None;
+                session_picker_label = None;
+            }
+        }
+
+        // Prefix key conflict check for session_picker.
+        if let Some(value) = session_picker_value {
+            if value == prefix {
+                let diag = format!(
+                    "keys.session_picker ({}) conflicts with the prefix key; disabling binding",
+                    session_picker_label.as_deref().unwrap_or("?")
+                );
+                warn!(message = %diag, "config diagnostic");
+                diagnostics.push(diag);
+                session_picker_value = None;
+                session_picker_label = None;
+            }
+        }
+
+        // Also register the TerminalDirect scope for session_picker if still enabled.
+        let session_picker_direct_value = if session_picker_value.is_some() {
+            session_picker_direct.value
+        } else {
+            None
+        };
+        if let Some(value) = session_picker_direct_value {
+            if let Some(first_field) = registry.conflict(BindingScope::TerminalDirect, value) {
+                let diag = format!(
+                    "duplicate keybinding: keys.session_picker (terminal direct) conflicts with {}; disabling terminal-direct binding",
+                    first_field
+                );
+                warn!(message = %diag, "config diagnostic");
+                diagnostics.push(diag);
+            }
+            // We don't store the direct scope separately; the action is the same.
         }
 
         registry.reserve_if_unbound(BindingScope::Navigate, prefix, "keys.prefix");
@@ -612,6 +717,8 @@ impl Config {
             resize_mode_label: bindings[8].label.clone(),
             toggle_sidebar: bindings[9].value,
             toggle_sidebar_label: bindings[9].label.clone(),
+            session_picker: session_picker_value,
+            session_picker_label: session_picker_label.clone(),
             custom_commands,
         };
 

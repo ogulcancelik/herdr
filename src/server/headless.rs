@@ -476,6 +476,14 @@ impl HeadlessServer {
                 needs_render = true;
             }
 
+            if self.app.state.request_open_session_picker {
+                self.app.state.request_open_session_picker = false;
+                self.app.open_session_picker();
+                needs_render = true;
+            }
+
+            self.app.ensure_session_picker_populated();
+
             self.app.sync_headless_animation_timer(now);
 
             // 7. Render virtually and stream frames.
@@ -1616,7 +1624,7 @@ impl HeadlessServer {
             .session_save_deadline
             .is_some_and(|deadline| now >= deadline)
         {
-            self.app.save_session_now();
+            changed |= self.app.save_session_now();
         }
 
         self.app.sync_headless_animation_timer(now);
