@@ -1215,8 +1215,8 @@ mod tests {
         assert_ne!(root_layout_ratio(&before), root_layout_ratio(&after));
     }
 
-    #[test]
-    fn dragging_vertical_pane_split_still_resizes_when_pane_mouse_reporting_is_enabled() {
+    #[tokio::test]
+    async fn dragging_vertical_pane_split_still_resizes_when_pane_mouse_reporting_is_enabled() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
         let first_pane = ws.tabs[0].root_pane;
@@ -1284,8 +1284,8 @@ mod tests {
         assert_ne!(root_layout_ratio(&before), root_layout_ratio(&after));
     }
 
-    #[test]
-    fn dragging_horizontal_pane_split_still_resizes_when_pane_mouse_reporting_is_enabled() {
+    #[tokio::test]
+    async fn dragging_horizontal_pane_split_still_resizes_when_pane_mouse_reporting_is_enabled() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
         let first_pane = ws.tabs[0].root_pane;
