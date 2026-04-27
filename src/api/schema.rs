@@ -428,6 +428,7 @@ pub struct ErrorBody {
 pub enum ResponseResult {
     Pong {
         version: String,
+        protocol: u32,
     },
     WorkspaceInfo {
         workspace: WorkspaceInfo,
@@ -940,6 +941,7 @@ mod tests {
             id: "req_1".into(),
             result: ResponseResult::Pong {
                 version: "0.1.2".into(),
+                protocol: 2,
             },
         };
 

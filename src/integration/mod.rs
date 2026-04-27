@@ -141,6 +141,27 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
     )?;
     ensure_command_hook(
         hooks,
+        "PostToolUse",
+        format!("bash {quoted_hook_path} working"),
+        10,
+        Some("*"),
+    )?;
+    ensure_command_hook(
+        hooks,
+        "PostToolUseFailure",
+        format!("bash {quoted_hook_path} working"),
+        10,
+        Some("*"),
+    )?;
+    ensure_command_hook(
+        hooks,
+        "SubagentStop",
+        format!("bash {quoted_hook_path} working"),
+        10,
+        Some("*"),
+    )?;
+    ensure_command_hook(
+        hooks,
         "Stop",
         format!("bash {quoted_hook_path} idle"),
         10,
@@ -303,6 +324,21 @@ pub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {
                 hooks,
                 "PermissionRequest",
                 &format!("bash {quoted_hook_path} blocked"),
+            )?;
+            updated_settings |= remove_command_hook(
+                hooks,
+                "PostToolUse",
+                &format!("bash {quoted_hook_path} working"),
+            )?;
+            updated_settings |= remove_command_hook(
+                hooks,
+                "PostToolUseFailure",
+                &format!("bash {quoted_hook_path} working"),
+            )?;
+            updated_settings |= remove_command_hook(
+                hooks,
+                "SubagentStop",
+                &format!("bash {quoted_hook_path} working"),
             )?;
             updated_settings |=
                 remove_command_hook(hooks, "Stop", &format!("bash {quoted_hook_path} idle"))?;
@@ -747,6 +783,20 @@ mod tests {
                 .unwrap()
                 .contains(" blocked")
         );
+        assert!(settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains(" working"));
+        assert!(
+            settings["hooks"]["PostToolUseFailure"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .contains(" working")
+        );
+        assert!(settings["hooks"]["SubagentStop"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains(" working"));
         assert!(settings["hooks"]["Stop"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap()
@@ -790,6 +840,21 @@ mod tests {
                 .len(),
             1
         );
+        assert_eq!(
+            settings["hooks"]["PostToolUse"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            settings["hooks"]["PostToolUseFailure"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            settings["hooks"]["SubagentStop"].as_array().unwrap().len(),
+            1
+        );
         assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 1);
         assert_eq!(settings["hooks"]["SessionEnd"].as_array().unwrap().len(), 1);
 
@@ -810,7 +875,11 @@ mod tests {
         fs::write(
             claude_dir.join("settings.json"),
             format!(
-                r#"{{"hooks":{{"UserPromptSubmit":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}},{{"type":"command","command":"echo keep","timeout":10}}]}}],"Stop":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' idle","timeout":10}}]}}],"SessionEnd":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' release","timeout":10}}]}}]}}}}"#,
+                r#"{{"hooks":{{"UserPromptSubmit":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}},{{"type":"command","command":"echo keep","timeout":10}}]}}],"PermissionRequest":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' blocked","timeout":10}}]}}],"PostToolUse":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}}]}}],"PostToolUseFailure":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}}]}}],"SubagentStop":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}}]}}],"Stop":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' idle","timeout":10}}]}}],"SessionEnd":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' release","timeout":10}}]}}]}}}}"#,
+                hook_path.display(),
+                hook_path.display(),
+                hook_path.display(),
+                hook_path.display(),
                 hook_path.display(),
                 hook_path.display(),
                 hook_path.display(),
@@ -838,6 +907,10 @@ mod tests {
             settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
             "echo keep"
         );
+        assert!(settings["hooks"].get("PermissionRequest").is_none());
+        assert!(settings["hooks"].get("PostToolUse").is_none());
+        assert!(settings["hooks"].get("PostToolUseFailure").is_none());
+        assert!(settings["hooks"].get("SubagentStop").is_none());
         assert!(settings["hooks"].get("Stop").is_none());
         assert!(settings["hooks"].get("SessionEnd").is_none());
 

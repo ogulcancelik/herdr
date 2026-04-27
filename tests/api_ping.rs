@@ -223,6 +223,7 @@ fn ping_over_socket_returns_version() {
     assert_eq!(value["id"], "req_1");
     assert_eq!(value["result"]["type"], "pong");
     assert_eq!(value["result"]["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(value["result"]["protocol"], 2);
 
     cleanup_spawned_herdr(child, base);
 }

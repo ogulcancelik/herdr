@@ -91,14 +91,17 @@ current hook mapping:
 - `UserPromptSubmit` → `working`
 - `PreToolUse` → `working`
 - `PermissionRequest` → `blocked`
+- `PostToolUse` → `working`
+- `PostToolUseFailure` → `working`
+- `SubagentStop` → `working`
 - `Stop` → `idle`
 - `SessionEnd` → `release`
 
 notes:
 
-- claude's current hook surface improves state reporting, but it is not a perfect permission lifecycle.
-- when a permission prompt is canceled, claude does not currently give herdr a clean hook event that always resolves the pane out of `blocked` immediately.
-- that is acceptable in herdr's model: process detection still owns liveness, and heuristics remain the fallback for unresolved edges.
+- claude code hooks also run inside subagents. herdr treats subagent `working` and `blocked` reports as real pane state.
+- subagent stop/release events are converted to `working` by the bundled hook script so a completed subagent does not make the parent claude pane look idle.
+- `PostToolUse` and `PostToolUseFailure` move the pane back to `working` after a permissioned tool call resolves.
 
 uninstall:
 

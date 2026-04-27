@@ -6,7 +6,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -286,6 +286,111 @@ fn send_request(socket_path: &Path, json: &str) -> serde_json::Value {
     serde_json::from_str(&line).unwrap()
 }
 
+fn run_claude_hook(action: &str, hook_input: &str) -> Option<serde_json::Value> {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("herdr.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+
+    let server = thread::spawn(move || {
+        listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_millis(700);
+        while Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    reader.read_line(&mut line).unwrap();
+                    stream
+                        .write_all(br#"{"id":"test","result":{"type":"ok"}}"#)
+                        .unwrap();
+                    stream.write_all(b"\n").unwrap();
+                    stream.flush().unwrap();
+                    return Some(line);
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("accept failed: {err}"),
+            }
+        }
+        None
+    });
+
+    let hook_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/integration/assets/claude/herdr-agent-state.sh");
+    let mut child = Command::new("bash")
+        .arg(hook_path)
+        .arg(action)
+        .env("HERDR_ENV", "1")
+        .env("HERDR_SOCKET_PATH", &socket_path)
+        .env("HERDR_PANE_ID", "p_test")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(hook_input.as_bytes()).unwrap();
+    drop(stdin);
+
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "hook failed: status={:?} stderr={} stdout={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let request = server.join().unwrap();
+    cleanup_test_base(&base);
+    request.map(|line| serde_json::from_str(&line).unwrap())
+}
+
+#[test]
+fn claude_hook_reports_subagent_working_and_blocked() {
+    let subagent_input = r#"{"hook_event_name":"Notification","agent_id":"agent-abc123","agent_type":"Explore","notification_type":"permission_prompt"}"#;
+
+    let working =
+        run_claude_hook("working", subagent_input).expect("subagent working should report working");
+    assert_eq!(working["method"], "pane.report_agent");
+    assert_eq!(working["params"]["state"], "working");
+
+    let blocked =
+        run_claude_hook("blocked", subagent_input).expect("subagent blocked should report blocked");
+    assert_eq!(blocked["method"], "pane.report_agent");
+    assert_eq!(blocked["params"]["state"], "blocked");
+}
+
+#[test]
+fn claude_hook_converts_subagent_idle_and_release_to_working() {
+    let subagent_input =
+        r#"{"hook_event_name":"SubagentStop","agent_id":"agent-abc123","agent_type":"Explore"}"#;
+
+    let idle = run_claude_hook("idle", subagent_input)
+        .expect("subagent idle should keep parent pane working");
+    assert_eq!(idle["method"], "pane.report_agent");
+    assert_eq!(idle["params"]["state"], "working");
+
+    let release = run_claude_hook("release", subagent_input)
+        .expect("subagent release should keep parent pane working");
+    assert_eq!(release["method"], "pane.report_agent");
+    assert_eq!(release["params"]["state"], "working");
+}
+
+#[test]
+fn claude_hook_keeps_parent_agent_type_only_blocked() {
+    let request = run_claude_hook(
+        "blocked",
+        r#"{"hook_event_name":"PermissionRequest","agent_type":"Explore"}"#,
+    )
+    .expect("parent blocked should still report blocked");
+
+    assert_eq!(request["method"], "pane.report_agent");
+    assert_eq!(request["params"]["state"], "blocked");
+}
+
 #[test]
 fn pane_run_sends_one_send_input_request_with_enter_key() {
     let base = unique_test_dir();
@@ -357,6 +462,56 @@ fn pane_run_sends_one_send_input_request_with_enter_key() {
 }
 
 #[test]
+fn help_commands_exit_successfully() {
+    let help_cases: &[&[&str]] = &[
+        &["-h"],
+        &["--help"],
+        &["status", "-h"],
+        &["server", "-h"],
+        &["workspace", "-h"],
+        &["tab", "-h"],
+        &["pane", "-h"],
+        &["wait", "-h"],
+        &["integration", "-h"],
+    ];
+
+    for args in help_cases {
+        let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+            .args(*args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "herdr {} failed: status={:?} stdout={} stderr={}",
+            args.join(" "),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn removed_show_changelog_flag_fails_before_nested_guard() {
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .arg("--show-changelog")
+        .env("HERDR_ENV", "1")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown option: --show-changelog"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("nested herdr"),
+        "unknown flag should be rejected before nested guard: {stderr}"
+    );
+}
+
+#[test]
 fn integration_commands_honor_socket_override_when_server_is_missing() {
     let base = unique_test_dir();
     let home_dir = base.join("home");
@@ -404,6 +559,106 @@ fn integration_commands_honor_socket_override_when_server_is_missing() {
     assert!(
         !expected_extension.exists(),
         "integration uninstall should also be socket-backed when socket is missing"
+    );
+
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn status_commands_report_client_and_server_versions() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let full = run_cli(&socket_path, &["status"]);
+    assert!(
+        full.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&full.stderr)
+    );
+    let full_stdout = String::from_utf8_lossy(&full.stdout);
+    assert!(full_stdout.contains("client:\n"), "stdout: {full_stdout}");
+    assert!(
+        full_stdout.contains(&format!("  version: {}", env!("CARGO_PKG_VERSION"))),
+        "stdout: {full_stdout}"
+    );
+    assert!(
+        full_stdout.contains("  protocol: 2"),
+        "stdout: {full_stdout}"
+    );
+    assert!(full_stdout.contains("server:\n"), "stdout: {full_stdout}");
+    assert!(
+        full_stdout.contains("  status: running"),
+        "stdout: {full_stdout}"
+    );
+    assert!(
+        full_stdout.contains("  compatible: yes"),
+        "stdout: {full_stdout}"
+    );
+    assert!(
+        full_stdout.contains("  restart_needed: no"),
+        "stdout: {full_stdout}"
+    );
+    assert!(
+        full_stdout.contains(&socket_path.display().to_string()),
+        "stdout: {full_stdout}"
+    );
+
+    let server = run_cli(&socket_path, &["status", "server"]);
+    assert!(server.status.success());
+    let server_stdout = String::from_utf8_lossy(&server.stdout);
+    assert!(
+        server_stdout.contains("status: running"),
+        "stdout: {server_stdout}"
+    );
+    assert!(
+        server_stdout.contains(&format!("version: {}", env!("CARGO_PKG_VERSION"))),
+        "stdout: {server_stdout}"
+    );
+    assert!(
+        server_stdout.contains("protocol: 2"),
+        "stdout: {server_stdout}"
+    );
+
+    let client = run_cli(&socket_path, &["status", "client"]);
+    assert!(client.status.success());
+    let client_stdout = String::from_utf8_lossy(&client.stdout);
+    assert!(
+        client_stdout.contains(&format!("version: {}", env!("CARGO_PKG_VERSION"))),
+        "stdout: {client_stdout}"
+    );
+    assert!(
+        client_stdout.contains("protocol: 2"),
+        "stdout: {client_stdout}"
+    );
+    assert!(
+        client_stdout.contains("binary: "),
+        "stdout: {client_stdout}"
+    );
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
+fn status_reports_not_running_when_server_socket_is_missing() {
+    let base = unique_test_dir();
+    let runtime_dir = base.join("runtime");
+    fs::create_dir_all(&runtime_dir).unwrap();
+    register_runtime_dir(&runtime_dir);
+    let socket_path = runtime_dir.join("missing.sock");
+
+    let status = run_cli(&socket_path, &["status"]);
+    assert!(status.status.success());
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(stdout.contains("  status: not running"), "stdout: {stdout}");
+    assert!(stdout.contains("  restart_needed: no"), "stdout: {stdout}");
+    assert!(
+        stdout.contains(&socket_path.display().to_string()),
+        "stdout: {stdout}"
     );
 
     cleanup_test_base(&base);
