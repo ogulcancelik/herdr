@@ -125,6 +125,8 @@ pub enum RawInputEvent {
     Key(TerminalKey),
     Paste(String),
     Mouse(MouseEvent),
+    OuterFocusGained,
+    OuterFocusLost,
     HostDefaultColor {
         kind: DefaultColorKind,
         color: RgbColor,
@@ -295,6 +297,12 @@ fn extract_one_event(buffer: &[u8]) -> Option<(RawInputEvent, usize)> {
 
         if let Some((kind, color)) = parse_default_color_response(seq) {
             return Some((RawInputEvent::HostDefaultColor { kind, color }, seq_len));
+        }
+
+        match seq {
+            "\x1b[I" => return Some((RawInputEvent::OuterFocusGained, seq_len)),
+            "\x1b[O" => return Some((RawInputEvent::OuterFocusLost, seq_len)),
+            _ => {}
         }
 
         if let Some(mouse) = parse_sgr_mouse(seq) {
@@ -601,6 +609,17 @@ mod tests {
         };
         assert_eq!(consumed, 3);
         assert_eq!(key.code, KeyCode::Up);
+    }
+
+    #[test]
+    fn parses_outer_focus_events() {
+        let (event, consumed) = extract_one_event(b"\x1b[I").unwrap();
+        assert_eq!(consumed, 3);
+        assert!(matches!(event, RawInputEvent::OuterFocusGained));
+
+        let (event, consumed) = extract_one_event(b"\x1b[O").unwrap();
+        assert_eq!(consumed, 3);
+        assert!(matches!(event, RawInputEvent::OuterFocusLost));
     }
 
     #[test]

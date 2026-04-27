@@ -1,8 +1,9 @@
 use std::io;
 
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 
@@ -342,6 +343,7 @@ fn main() -> io::Result<()> {
         let _ = execute!(
             io::stdout(),
             PopKeyboardEnhancementFlags,
+            DisableFocusChange,
             DisableBracketedPaste,
             DisableMouseCapture
         );
@@ -368,6 +370,7 @@ fn main() -> io::Result<()> {
             io::stdout(),
             EnableMouseCapture,
             EnableBracketedPaste,
+            EnableFocusChange,
             PushKeyboardEnhancementFlags(
                 KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                     | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
@@ -406,6 +409,7 @@ fn main() -> io::Result<()> {
         execute!(
             io::stdout(),
             PopKeyboardEnhancementFlags,
+            DisableFocusChange,
             DisableBracketedPaste,
             DisableMouseCapture
         )?;

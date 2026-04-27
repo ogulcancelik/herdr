@@ -15,8 +15,15 @@ fn is_background_completion_transition(prev_state: AgentState, new_state: AgentS
         && matches!(prev_state, AgentState::Working | AgentState::Blocked)
 }
 
-pub fn notification_sound_for_state_change(
+pub fn active_tab_suppresses_notifications(
     is_active_tab: bool,
+    outer_terminal_focus: Option<bool>,
+) -> bool {
+    is_active_tab && outer_terminal_focus != Some(false)
+}
+
+pub fn notification_sound_for_state_change(
+    suppress_active_tab_notifications: bool,
     prev_state: AgentState,
     new_state: AgentState,
 ) -> Option<crate::sound::Sound> {
@@ -27,7 +34,8 @@ pub fn notification_sound_for_state_change(
     match new_state {
         AgentState::Blocked => Some(crate::sound::Sound::Request),
         AgentState::Idle
-            if is_background_completion_transition(prev_state, new_state) && !is_active_tab =>
+            if is_background_completion_transition(prev_state, new_state)
+                && !suppress_active_tab_notifications =>
         {
             Some(crate::sound::Sound::Done)
         }
@@ -36,11 +44,11 @@ pub fn notification_sound_for_state_change(
 }
 
 pub fn notification_toast_for_state_change(
-    is_active_tab: bool,
+    suppress_active_tab_notifications: bool,
     prev_state: AgentState,
     new_state: AgentState,
 ) -> Option<ToastKind> {
-    if is_active_tab || new_state == prev_state {
+    if suppress_active_tab_notifications || new_state == prev_state {
         return None;
     }
 
@@ -573,6 +581,8 @@ impl AppState {
         change: &EffectiveStateChange,
     ) {
         let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
+        let suppress_active_tab_notifications =
+            active_tab_suppresses_notifications(is_active_tab, self.outer_terminal_focus);
         let Some(pane) = self.workspaces[ws_idx]
             .tabs
             .iter_mut()
@@ -582,14 +592,14 @@ impl AppState {
         };
 
         if is_background_completion_transition(change.previous_state, change.state)
-            && !is_active_tab
+            && !suppress_active_tab_notifications
         {
             pane.seen = false;
         }
 
         if self.local_sound_playback && self.sound.allows(change.known_agent) {
             if let Some(sound) = notification_sound_for_state_change(
-                is_active_tab,
+                suppress_active_tab_notifications,
                 change.previous_state,
                 change.state,
             ) {
@@ -1063,6 +1073,31 @@ mod tests {
         });
 
         assert!(state.toast.is_none());
+    }
+
+    #[test]
+    fn active_workspace_active_tab_keeps_herdr_toast_suppressed_when_outer_terminal_is_unfocused() {
+        let mut state = app_with_workspaces(&["active"]);
+        state.active = Some(0);
+        state.outer_terminal_focus = Some(false);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Blocked,
+        });
+
+        assert!(state.toast.is_none());
+    }
+
+    #[test]
+    fn active_tab_suppression_preserves_unknown_focus_behavior() {
+        assert!(active_tab_suppresses_notifications(true, None));
+        assert!(active_tab_suppresses_notifications(true, Some(true)));
+        assert!(!active_tab_suppresses_notifications(true, Some(false)));
+        assert!(!active_tab_suppresses_notifications(false, None));
     }
 
     #[test]

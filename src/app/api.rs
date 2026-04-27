@@ -70,10 +70,12 @@ impl App {
             self.restore_overlay_after_exit(overlay);
         }
 
-        if matches!(
-            self.state.toast_config.delivery,
-            crate::config::ToastDelivery::Terminal
-        ) {
+        if self.local_terminal_notifications
+            && matches!(
+                self.state.toast_config.delivery,
+                crate::config::ToastDelivery::Terminal
+            )
+        {
             if let Some(version) = update_ready_version {
                 let _ = crate::terminal_notify::show_notification(
                     &format!("v{version} available"),
@@ -84,8 +86,13 @@ impl App {
                     let is_active_tab = self
                         .state
                         .pane_is_in_active_tab(update.ws_idx, update.pane_id);
+                    let suppress_active_tab_notifications =
+                        crate::app::actions::active_tab_suppresses_notifications(
+                            is_active_tab,
+                            self.state.outer_terminal_focus,
+                        );
                     let Some(kind) = crate::app::actions::notification_toast_for_state_change(
-                        is_active_tab,
+                        suppress_active_tab_notifications,
                         update.previous_state,
                         update.state,
                     ) else {

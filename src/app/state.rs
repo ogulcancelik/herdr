@@ -631,6 +631,9 @@ pub struct AppState {
     pub update_dismissed: bool,
     pub config_diagnostic: Option<String>,
     pub toast: Option<ToastNotification>,
+    /// Last reported focus state for the outer terminal hosting herdr.
+    /// None means unsupported or not yet reported, which preserves active-pane suppression.
+    pub outer_terminal_focus: Option<bool>,
     // Config
     pub prefix_code: KeyCode,
     pub prefix_mods: KeyModifiers,
@@ -765,6 +768,7 @@ impl AppState {
             update_dismissed: false,
             config_diagnostic: None,
             toast: None,
+            outer_terminal_focus: None,
             prefix_code: KeyCode::Char('b'),
             prefix_mods: KeyModifiers::CONTROL,
             default_sidebar_width: 26,

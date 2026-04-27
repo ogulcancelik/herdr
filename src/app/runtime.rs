@@ -89,6 +89,14 @@ impl App {
                 self.handle_mouse(mouse);
                 true
             }
+            crate::raw_input::RawInputEvent::OuterFocusGained => {
+                self.state.outer_terminal_focus = Some(true);
+                false
+            }
+            crate::raw_input::RawInputEvent::OuterFocusLost => {
+                self.state.outer_terminal_focus = Some(false);
+                false
+            }
             crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
                 self.update_host_terminal_theme(kind, color)
             }

@@ -77,6 +77,7 @@ pub struct App {
     pub render_notify: Arc<Notify>,
     pub render_dirty: Arc<AtomicBool>,
     pub(crate) overlay_panes: HashMap<crate::layout::PaneId, OverlayPaneState>,
+    pub(crate) local_terminal_notifications: bool,
 }
 
 pub(crate) enum LoopEvent {
@@ -315,6 +316,7 @@ impl App {
             update_dismissed: false,
             config_diagnostic,
             toast: None,
+            outer_terminal_focus: None,
             prefix_code,
             prefix_mods,
             default_sidebar_width: config.ui.sidebar_width,
@@ -395,6 +397,7 @@ impl App {
             render_notify,
             render_dirty,
             overlay_panes: HashMap::new(),
+            local_terminal_notifications: true,
         }
     }
 
@@ -761,6 +764,8 @@ impl App {
                         }
                     }
                 }
+                crate::raw_input::RawInputEvent::OuterFocusGained
+                | crate::raw_input::RawInputEvent::OuterFocusLost => {}
                 crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
                     if apply_host_terminal_theme {
                         self.update_host_terminal_theme(kind, color);

@@ -22,8 +22,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use tracing::{debug, info, warn};
@@ -136,6 +137,7 @@ fn setup_terminal() -> io::Result<TerminalGuard> {
         io::stdout(),
         EnableMouseCapture,
         EnableBracketedPaste,
+        EnableFocusChange,
         PushKeyboardEnhancementFlags(
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                 | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
@@ -175,6 +177,7 @@ fn restore_terminal_state(in_tmux: bool) {
     let _ = execute!(
         io::stdout(),
         PopKeyboardEnhancementFlags,
+        DisableFocusChange,
         DisableBracketedPaste,
         DisableMouseCapture
     );
