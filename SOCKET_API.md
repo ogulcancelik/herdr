@@ -50,7 +50,8 @@ successful responses look like:
   "id": "req_1",
   "result": {
     "type": "pong",
-    "version": "0.1.2"
+    "version": "0.1.2",
+    "protocol": 2
   }
 }
 ```
@@ -891,9 +892,19 @@ example pushed `pane.agent_status_changed` event:
 `agent` in pushed events follows the same rules as `pane_info.agent`: it may be a built-in detected name, a custom hook-reported label, or omitted.
 ## cli wrappers
 
-these commands talk to the same local socket surface and are usually the easiest starting point for shell scripts and coding agents.
+these commands provide the shell-facing control surface. most command groups talk to the local socket; `status client` only inspects the local executable.
 
 ### command groups
+
+status commands:
+
+```text
+herdr status
+herdr status server
+herdr status client
+```
+
+`herdr -V` and `herdr --version` print the local executable version without contacting the server. `herdr status` compares that local executable with the running server when one is reachable.
 
 workspace commands:
 
@@ -939,6 +950,9 @@ herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [
 
 ### cli behavior notes
 
+- `status` prints local client version/protocol, running server version/protocol when reachable, socket path, compatibility, and whether a restart is needed
+- `status server` prints only the running server side; if no server is reachable it exits successfully and prints `status: not running`
+- `status client` prints only the local executable version/protocol and binary path without contacting the server
 - `workspace create` focuses by default; pass `--no-focus` to keep focus where it is
 - `workspace create` without `--label` keeps the default cwd-based workspace naming
 - `workspace create --label` applies the custom workspace name immediately

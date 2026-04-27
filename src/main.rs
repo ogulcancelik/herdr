@@ -188,35 +188,61 @@ fn main() -> io::Result<()> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("herdr — terminal workspace manager for AI coding agents");
         println!();
-        println!("Usage: herdr [options]");
-        println!("       herdr update");
-        println!("       herdr server stop");
-        println!("       herdr server reload-config");
-        println!("       herdr workspace <subcommand> ...");
-        println!("       herdr tab <subcommand> ...");
-        println!("       herdr pane <subcommand> ...");
-        println!("       herdr wait <subcommand> ...");
-        println!("       herdr integration <subcommand> ...");
+        println!("Usage: herdr [options] [command]");
         println!();
-        println!("Commands:");
-        println!("  server              Run as headless server (no terminal, persists after client disconnect)");
-        println!("  server stop         Stop the running server via the API socket");
-        println!("  server reload-config  Reload config.toml in the running server");
-        println!("  client             Connect to a running server as a thin client");
+        println!("Common commands:");
         println!(
-            "  update              Download and install the latest version (run outside herdr)"
+            "  {:<32} {}",
+            "herdr", "Launch or attach to the persistent session"
         );
-        println!("  workspace           workspace helpers over the socket api");
-        println!("  tab                 tab helpers over the socket api");
-        println!("  pane                pane control helpers over the socket api");
-        println!("  wait                blocking wait helpers over the socket api");
-        println!("  integration         manage built-in agent integrations");
+        println!(
+            "  {:<32} {}",
+            "herdr status [server|client]", "Show local client and running server status"
+        );
+        println!(
+            "  {:<32} {}",
+            "herdr update", "Download and install the latest version"
+        );
+        println!(
+            "  {:<32} {}",
+            "herdr server stop", "Stop the running server via the API socket"
+        );
+        println!(
+            "  {:<32} {}",
+            "herdr server reload-config", "Reload config.toml in the running server"
+        );
+        println!(
+            "  {:<32} {}",
+            "herdr workspace <subcommand>", "Workspace helpers over the socket API"
+        );
+        println!(
+            "  {:<32} {}",
+            "herdr tab <subcommand>", "Tab helpers over the socket API"
+        );
+        println!(
+            "  {:<32} {}",
+            "herdr pane <subcommand>", "Pane control helpers over the socket API"
+        );
+        println!(
+            "  {:<32} {}",
+            "herdr wait <subcommand>", "Blocking wait helpers over the socket API"
+        );
+        println!(
+            "  {:<32} {}",
+            "herdr integration <subcommand>", "Manage built-in agent integrations"
+        );
+        println!();
+        println!("Advanced commands:");
+        println!("  {:<32} {}", "herdr server", "Run as headless server");
+        println!(
+            "  {:<32} {}",
+            "herdr client", "Connect to a running server as a thin client"
+        );
         println!();
         println!("Options:");
         println!("  --no-session        Run monolithically (no server/client, escape hatch)");
         println!("  --default-config    Print default configuration and exit");
         println!("  --version, -V       Print version and exit");
-        println!("  --show-changelog    Preview the current version's release notes");
         println!("  --help, -h          Show this help");
         println!();
         println!("Config: {}", config::config_path().display());
@@ -242,7 +268,6 @@ fn main() -> io::Result<()> {
         "--version",
         "-V",
         "--default-config",
-        "--show-changelog",
         "--help",
         "-h",
     ];
@@ -257,6 +282,7 @@ fn main() -> io::Result<()> {
                 "server",
                 "client",
                 "update",
+                "status",
                 "workspace",
                 "pane",
                 "wait",
@@ -304,7 +330,6 @@ fn main() -> io::Result<()> {
         Err(err) => return Err(err),
     };
 
-    let show_changelog = args.iter().any(|a| a == "--show-changelog");
     let in_tmux = std::env::var("TMUX").is_ok();
 
     let original_hook = std::panic::take_hook();
@@ -359,11 +384,7 @@ fn main() -> io::Result<()> {
             std::io::stdout().flush()?;
         }
 
-        let startup_release_notes = if show_changelog {
-            crate::release_notes::load_preview_from_local_changelog(env!("CARGO_PKG_VERSION"))
-        } else {
-            crate::release_notes::load_pending_for_current_version()
-        };
+        let startup_release_notes = crate::release_notes::load_pending_for_current_version();
 
         let mut app = app::App::new(
             config,

@@ -1948,7 +1948,6 @@ pub fn run_server() -> io::Result<()> {
     };
 
     let no_session = false; // Server always does session persistence.
-    let _show_changelog = false;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

@@ -304,6 +304,7 @@ fn handle_request(request: Request, api_tx: &ApiRequestSender) -> String {
             id: request.id,
             result: ResponseResult::Pong {
                 version: env!("CARGO_PKG_VERSION").into(),
+                protocol: crate::server::protocol::PROTOCOL_VERSION,
             },
         })
         .unwrap_or_else(|_| {

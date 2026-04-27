@@ -49,6 +49,7 @@ Unit tests live next to the code (`#[cfg(test)] mod tests`). If you add behavior
 ## Conventions
 
 - Conventional commits, lowercase, no emojis.
+- Do not edit `CHANGELOG.md` during normal feature or fix work. Changelog entries are drafted and applied immediately before release.
 - When a commit fully fixes a GitHub issue, include `fixes #<issue-number>` in the commit body so GitHub closes it on merge.
 - Rust: no `unwrap()` in production code. `tracing` for logging. `#[allow]` only with a comment explaining why.
 - Don't bypass checks. If tests fail, fix them before committing.

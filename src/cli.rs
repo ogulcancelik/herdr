@@ -9,9 +9,9 @@ use crate::api::schema::{
     AgentStatus, EmptyParams, IntegrationInstallParams, IntegrationTarget,
     IntegrationUninstallParams, Method, OutputMatch, PaneListParams, PaneReadParams,
     PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneTarget,
-    PaneWaitForOutputParams, ReadSource, Request, SplitDirection, Subscription, TabCreateParams,
-    TabListParams, TabRenameParams, TabTarget, WorkspaceCreateParams, WorkspaceRenameParams,
-    WorkspaceTarget,
+    PaneWaitForOutputParams, PingParams, ReadSource, Request, SplitDirection, Subscription,
+    TabCreateParams, TabListParams, TabRenameParams, TabTarget, WorkspaceCreateParams,
+    WorkspaceRenameParams, WorkspaceTarget,
 };
 
 pub enum CommandOutcome {
@@ -31,6 +31,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
             };
             exit_code
         }
+        "status" => run_status_command(&args[2..])?,
         "workspace" => run_workspace_command(&args[2..])?,
         "tab" => run_tab_command(&args[2..])?,
         "pane" => run_pane_command(&args[2..])?,
@@ -61,6 +62,160 @@ fn run_server_command(args: &[String]) -> std::io::Result<Option<i32>> {
     }
 }
 
+fn run_status_command(args: &[String]) -> std::io::Result<i32> {
+    match args.first().map(|arg| arg.as_str()) {
+        None => print_full_status(),
+        Some("server") => {
+            if args.len() > 1 {
+                eprintln!("usage: herdr status server");
+                return Ok(2);
+            }
+            print_server_status()
+        }
+        Some("client") => {
+            if args.len() > 1 {
+                eprintln!("usage: herdr status client");
+                return Ok(2);
+            }
+            print_client_status();
+            Ok(0)
+        }
+        Some("help" | "--help" | "-h") => {
+            print_status_help();
+            Ok(0)
+        }
+        Some(_) => {
+            print_status_help();
+            Ok(2)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ServerRuntimeStatus {
+    Running {
+        version: Option<String>,
+        protocol: Option<u32>,
+    },
+    NotRunning,
+}
+
+fn print_full_status() -> std::io::Result<i32> {
+    let server = read_server_runtime_status()?;
+
+    println!("client:");
+    println!("  version: {}", env!("CARGO_PKG_VERSION"));
+    println!("  protocol: {}", crate::server::protocol::PROTOCOL_VERSION);
+    println!();
+    println!("server:");
+    print_server_status_body(&server, "  ");
+    println!();
+    println!("update:");
+    println!("  restart_needed: {}", restart_needed_label(&server));
+
+    Ok(0)
+}
+
+fn print_server_status() -> std::io::Result<i32> {
+    let server = read_server_runtime_status()?;
+    print_server_status_body(&server, "");
+    Ok(0)
+}
+
+fn print_client_status() {
+    println!("version: {}", env!("CARGO_PKG_VERSION"));
+    println!("protocol: {}", crate::server::protocol::PROTOCOL_VERSION);
+    println!("binary: {}", current_exe_label());
+}
+
+fn print_server_status_body(server: &ServerRuntimeStatus, indent: &str) {
+    match server {
+        ServerRuntimeStatus::Running { version, protocol } => {
+            println!("{indent}status: running");
+            println!("{indent}version: {}", option_label(version.as_deref()));
+            println!("{indent}protocol: {}", protocol_label(*protocol));
+            println!("{indent}compatible: {}", compatibility_label(*protocol));
+            println!("{indent}socket: {}", api::socket_path().display());
+        }
+        ServerRuntimeStatus::NotRunning => {
+            println!("{indent}status: not running");
+            println!("{indent}socket: {}", api::socket_path().display());
+        }
+    }
+}
+
+fn read_server_runtime_status() -> std::io::Result<ServerRuntimeStatus> {
+    match send_request(&Request {
+        id: "cli:status:server".into(),
+        method: Method::Ping(PingParams::default()),
+    }) {
+        Ok(response) => {
+            if response.get("error").is_some() {
+                return Err(std::io::Error::other(format!(
+                    "server status request failed: {}",
+                    response
+                )));
+            }
+
+            let result = &response["result"];
+            Ok(ServerRuntimeStatus::Running {
+                version: result
+                    .get("version")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned),
+                protocol: result
+                    .get("protocol")
+                    .and_then(|value| value.as_u64())
+                    .and_then(|value| u32::try_from(value).ok()),
+            })
+        }
+        Err(err) if server_not_running_error(&err) => Ok(ServerRuntimeStatus::NotRunning),
+        Err(err) => Err(err),
+    }
+}
+
+fn server_not_running_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+    )
+}
+
+fn option_label(value: Option<&str>) -> &str {
+    value.unwrap_or("unknown")
+}
+
+fn protocol_label(protocol: Option<u32>) -> String {
+    protocol
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn compatibility_label(protocol: Option<u32>) -> &'static str {
+    match protocol {
+        Some(protocol) if protocol == crate::server::protocol::PROTOCOL_VERSION => "yes",
+        Some(_) => "no",
+        None => "unknown",
+    }
+}
+
+fn restart_needed_label(server: &ServerRuntimeStatus) -> &'static str {
+    match server {
+        ServerRuntimeStatus::Running { version, .. } => match version.as_deref() {
+            Some(version) if version == env!("CARGO_PKG_VERSION") => "no",
+            Some(_) => "yes",
+            None => "unknown",
+        },
+        ServerRuntimeStatus::NotRunning => "no",
+    }
+}
+
+fn current_exe_label() -> String {
+    std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|err| format!("unknown ({err})"))
+}
+
 fn run_workspace_command(args: &[String]) -> std::io::Result<i32> {
     let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
         print_workspace_help();
@@ -74,6 +229,10 @@ fn run_workspace_command(args: &[String]) -> std::io::Result<i32> {
         "focus" => workspace_focus(&args[1..]),
         "rename" => workspace_rename(&args[1..]),
         "close" => workspace_close(&args[1..]),
+        "help" | "--help" | "-h" => {
+            print_workspace_help();
+            Ok(0)
+        }
         _ => {
             print_workspace_help();
             Ok(2)
@@ -94,6 +253,10 @@ fn run_tab_command(args: &[String]) -> std::io::Result<i32> {
         "focus" => tab_focus(&args[1..]),
         "rename" => tab_rename(&args[1..]),
         "close" => tab_close(&args[1..]),
+        "help" | "--help" | "-h" => {
+            print_tab_help();
+            Ok(0)
+        }
         _ => {
             print_tab_help();
             Ok(2)
@@ -116,6 +279,10 @@ fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "send-text" => pane_send_text(&args[1..]),
         "send-keys" => pane_send_keys(&args[1..]),
         "run" => pane_run(&args[1..]),
+        "help" | "--help" | "-h" => {
+            print_pane_help();
+            Ok(0)
+        }
         _ => {
             print_pane_help();
             Ok(2)
@@ -132,6 +299,10 @@ fn run_wait_command(args: &[String]) -> std::io::Result<i32> {
     match subcommand {
         "output" => wait_output(&args[1..]),
         "agent-status" => wait_agent_status(&args[1..]),
+        "help" | "--help" | "-h" => {
+            print_wait_help();
+            Ok(0)
+        }
         _ => {
             print_wait_help();
             Ok(2)
@@ -148,6 +319,10 @@ fn run_integration_command(args: &[String]) -> std::io::Result<i32> {
     match subcommand {
         "install" => integration_install(&args[1..]),
         "uninstall" => integration_uninstall(&args[1..]),
+        "help" | "--help" | "-h" => {
+            print_integration_help();
+            Ok(0)
+        }
         _ => {
             print_integration_help();
             Ok(2)
@@ -1053,8 +1228,15 @@ fn parse_u64_flag(flag: &str, value: &str) -> std::io::Result<u64> {
 fn print_server_help() {
     eprintln!("herdr server commands:");
     eprintln!("  herdr server                run as headless server");
-    eprintln!("  herdr server stop           stop the running server via the api socket");
+    eprintln!("  herdr server stop           stop the running server via the API socket");
     eprintln!("  herdr server reload-config  reload config.toml in the running server");
+}
+
+fn print_status_help() {
+    eprintln!("herdr status commands:");
+    eprintln!("  herdr status         show local client and running server status");
+    eprintln!("  herdr status server  show running server status");
+    eprintln!("  herdr status client  show local client binary status");
 }
 
 fn print_workspace_help() {
@@ -1083,7 +1265,7 @@ fn print_pane_help() {
     eprintln!("herdr pane commands:");
     eprintln!("  herdr pane list [--workspace <workspace_id>]");
     eprintln!("  herdr pane get <pane_id>");
-    eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N]");
+    eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--raw]");
     eprintln!("  herdr pane split <pane_id> --direction right|down [--cwd PATH] [--no-focus]");
     eprintln!("  herdr pane close <pane_id>");
     eprintln!("  herdr pane send-text <pane_id> <text>");
@@ -1093,7 +1275,7 @@ fn print_pane_help() {
 
 fn print_wait_help() {
     eprintln!("herdr wait commands:");
-    eprintln!("  herdr wait output <pane_id> --match <text> [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--regex]");
+    eprintln!("  herdr wait output <pane_id> --match <text> [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--regex] [--raw]");
     eprintln!(
         "  herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [--timeout MS]"
     );
