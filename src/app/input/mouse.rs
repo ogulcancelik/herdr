@@ -361,10 +361,12 @@ impl AppState {
                     return None;
                 }
 
-                if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
-                    if self.forward_pane_mouse_button(&info, mouse) {
-                        self.selection = None;
-                        return None;
+                if self.drag.is_none() {
+                    if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
+                        if self.forward_pane_mouse_button(&info, mouse) {
+                            self.selection = None;
+                            return None;
+                        }
                     }
                 }
 
@@ -489,13 +491,15 @@ impl AppState {
                     return None;
                 }
 
-                if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
-                    if self.forward_pane_mouse_button(&info, mouse) {
-                        self.selection = None;
-                        self.workspace_press = None;
-                        self.tab_press = None;
-                        self.drag = None;
-                        return None;
+                if self.drag.is_none() {
+                    if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
+                        if self.forward_pane_mouse_button(&info, mouse) {
+                            self.selection = None;
+                            self.workspace_press = None;
+                            self.tab_press = None;
+                            self.drag = None;
+                            return None;
+                        }
                     }
                 }
 
@@ -1193,6 +1197,144 @@ mod tests {
         app.state.workspaces[0].test_split(Direction::Horizontal);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
         let border = app.state.view.split_borders[0].clone();
+        let before = capture_snapshot(&app.state);
+        let drag_row = border.area.y.saturating_add(1);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            border.pos,
+            drag_row,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            border.pos.saturating_add(6),
+            drag_row,
+        ));
+
+        let after = capture_snapshot(&app.state);
+        assert_ne!(root_layout_ratio(&before), root_layout_ratio(&after));
+    }
+
+    #[test]
+    fn dragging_vertical_pane_split_still_resizes_when_pane_mouse_reporting_is_enabled() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let first_pane = ws.tabs[0].root_pane;
+        let second_pane = ws.test_split(Direction::Vertical);
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+
+        let pane_infos = app.state.view.pane_infos.clone();
+        let first_info = pane_infos
+            .iter()
+            .find(|info| info.id == first_pane)
+            .expect("first pane info")
+            .clone();
+        let second_info = pane_infos
+            .iter()
+            .find(|info| info.id == second_pane)
+            .expect("second pane info")
+            .clone();
+
+        app.state.workspaces[0].tabs[0].runtimes.insert(
+            first_pane,
+            crate::pane::PaneRuntime::test_with_screen_bytes(
+                first_info.inner_rect.width.max(1),
+                first_info.inner_rect.height.max(1),
+                b"\x1b[?1002h",
+            ),
+        );
+        app.state.workspaces[0].tabs[0].runtimes.insert(
+            second_pane,
+            crate::pane::PaneRuntime::test_with_screen_bytes(
+                second_info.inner_rect.width.max(1),
+                second_info.inner_rect.height.max(1),
+                b"\x1b[?1002h",
+            ),
+        );
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let border = app
+            .state
+            .view
+            .split_borders
+            .iter()
+            .find(|border| border.direction == Direction::Vertical)
+            .expect("vertical split border")
+            .clone();
+        let before = capture_snapshot(&app.state);
+        let drag_col = border.area.x.saturating_add(1);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            drag_col,
+            border.pos,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            drag_col,
+            border.pos.saturating_add(4),
+        ));
+
+        let after = capture_snapshot(&app.state);
+        assert_ne!(root_layout_ratio(&before), root_layout_ratio(&after));
+    }
+
+    #[test]
+    fn dragging_horizontal_pane_split_still_resizes_when_pane_mouse_reporting_is_enabled() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let first_pane = ws.tabs[0].root_pane;
+        let second_pane = ws.test_split(Direction::Horizontal);
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+
+        let pane_infos = app.state.view.pane_infos.clone();
+        let first_info = pane_infos
+            .iter()
+            .find(|info| info.id == first_pane)
+            .expect("first pane info")
+            .clone();
+        let second_info = pane_infos
+            .iter()
+            .find(|info| info.id == second_pane)
+            .expect("second pane info")
+            .clone();
+
+        app.state.workspaces[0].tabs[0].runtimes.insert(
+            first_pane,
+            crate::pane::PaneRuntime::test_with_screen_bytes(
+                first_info.inner_rect.width.max(1),
+                first_info.inner_rect.height.max(1),
+                b"\x1b[?1002h",
+            ),
+        );
+        app.state.workspaces[0].tabs[0].runtimes.insert(
+            second_pane,
+            crate::pane::PaneRuntime::test_with_screen_bytes(
+                second_info.inner_rect.width.max(1),
+                second_info.inner_rect.height.max(1),
+                b"\x1b[?1002h",
+            ),
+        );
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let border = app
+            .state
+            .view
+            .split_borders
+            .iter()
+            .find(|border| border.direction == Direction::Horizontal)
+            .expect("horizontal split border")
+            .clone();
         let before = capture_snapshot(&app.state);
         let drag_row = border.area.y.saturating_add(1);
 
