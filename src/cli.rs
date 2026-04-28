@@ -341,6 +341,10 @@ fn run_session_command(args: &[String]) -> std::io::Result<i32> {
         "list" => session_list(&args[1..]),
         "stop" => session_stop(&args[1..]),
         "delete" => session_delete(&args[1..]),
+        "help" | "--help" | "-h" => {
+            print_session_help();
+            Ok(0)
+        }
         _ => {
             print_session_help();
             Ok(2)

@@ -492,7 +492,12 @@ mod tests {
             while keep_running_for_thread.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        if let Ok(reader_stream) = stream.try_clone() {
+                            let mut request = String::new();
+                            let _ = BufReader::new(reader_stream).read_line(&mut request);
+                        }
                         let _ = stream.write_all(b"{\"id\":\"cli:session:stop\",\"result\":{}}\n");
+                        let _ = stream.flush();
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(5));
