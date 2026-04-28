@@ -58,6 +58,8 @@ pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
             std::env::remove_var(SESSION_ENV_VAR);
         }
         EXPLICIT_SESSION_REQUESTED.store(true, Ordering::Relaxed);
+    } else if std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR).is_some() {
+        EXPLICIT_SESSION_REQUESTED.store(false, Ordering::Relaxed);
     } else if let Ok(session) = std::env::var(SESSION_ENV_VAR) {
         if normalize_name(&session)?.is_none() {
             std::env::remove_var(SESSION_ENV_VAR);
@@ -162,6 +164,10 @@ pub fn parse_target_name(name: &str) -> Result<Option<String>, String> {
 }
 
 pub fn stop_session(name: Option<&str>) -> Result<SessionInfo, String> {
+    stop_session_with_timeout(name, STOP_WAIT_TIMEOUT)
+}
+
+fn stop_session_with_timeout(name: Option<&str>, timeout: Duration) -> Result<SessionInfo, String> {
     let socket_path = api_socket_path_for(name);
     let request = serde_json::json!({
         "id": "cli:session:stop",
@@ -189,7 +195,14 @@ pub fn stop_session(name: Option<&str>) -> Result<SessionInfo, String> {
     if let Some(error) = response.get("error") {
         return Err(error.to_string());
     }
-    wait_until_stopped(&socket_path, STOP_WAIT_TIMEOUT);
+    if !wait_until_stopped(&socket_path, timeout) {
+        return Err(format!(
+            "session {} did not stop within {}ms; socket is still reachable at {}",
+            name.unwrap_or(DEFAULT_SESSION_NAME),
+            timeout.as_millis(),
+            socket_path.display()
+        ));
+    }
     Ok(session_info(name))
 }
 
@@ -217,14 +230,15 @@ fn is_running_at(socket_path: &Path) -> bool {
     socket_path.exists() && UnixStream::connect(socket_path).is_ok()
 }
 
-fn wait_until_stopped(socket_path: &Path, timeout: Duration) {
+fn wait_until_stopped(socket_path: &Path, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if !is_running_at(socket_path) {
-            return;
+            return true;
         }
         std::thread::sleep(STOP_WAIT_POLL);
     }
+    !is_running_at(socket_path)
 }
 
 pub fn validate_name(name: &str) -> Result<(), String> {
@@ -435,6 +449,71 @@ mod tests {
         std::env::remove_var(SESSION_ENV_VAR);
         clear_explicit_session_for_test();
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+    }
+
+    #[test]
+    fn env_socket_override_skips_invalid_env_session_validation_without_explicit_session() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var(SESSION_ENV_VAR, "bad/name");
+        clear_explicit_session_for_test();
+        std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, "/tmp/herdr.sock");
+        let args = vec![
+            "herdr".to_string(),
+            "workspace".to_string(),
+            "list".to_string(),
+        ];
+
+        let cleaned = configure_from_args(&args).unwrap();
+
+        assert_eq!(cleaned, vec!["herdr", "workspace", "list"]);
+        assert!(!explicit_session_requested());
+        assert_eq!(active_api_socket_path(), PathBuf::from("/tmp/herdr.sock"));
+        assert_eq!(std::env::var(SESSION_ENV_VAR).as_deref(), Ok("bad/name"));
+
+        std::env::remove_var(SESSION_ENV_VAR);
+        clear_explicit_session_for_test();
+        std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+    }
+
+    #[test]
+    fn stop_session_fails_when_socket_remains_reachable_after_timeout() {
+        let _guard = env_lock().lock().unwrap();
+        let config_home = PathBuf::from(format!("/tmp/hs-stop-{}", std::process::id()));
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        let session_name = "slow";
+        let socket_path = api_socket_path_for(Some(session_name));
+        std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let keep_running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let keep_running_for_thread = keep_running.clone();
+        let handle = std::thread::spawn(move || {
+            while keep_running_for_thread.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.write_all(b"{\"id\":\"cli:session:stop\",\"result\":{}}\n");
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let err = stop_session_with_timeout(Some(session_name), Duration::from_millis(75))
+            .expect_err("still-running session should fail");
+
+        assert!(err.contains("did not stop"), "{err}");
+        assert!(
+            err.contains(socket_path.to_string_lossy().as_ref()),
+            "{err}"
+        );
+        keep_running.store(false, Ordering::Relaxed);
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(&config_home);
+        std::env::remove_var("XDG_CONFIG_HOME");
     }
 
     #[test]
