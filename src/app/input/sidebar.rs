@@ -1121,6 +1121,7 @@ mod tests {
         first.tabs[0]
             .pane_cwds
             .insert(first_root, first_repo.clone());
+        first.refresh_git_ahead_behind();
 
         let mut second = Workspace::test_new("b");
         let second_root = second.tabs[0].root_pane;
@@ -1128,6 +1129,7 @@ mod tests {
         second.tabs[0]
             .pane_cwds
             .insert(second_root, second_repo.clone());
+        second.refresh_git_ahead_behind();
 
         app.state.workspaces = vec![first, second];
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
