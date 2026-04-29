@@ -276,9 +276,9 @@ impl App {
         use bytes::Bytes;
 
         use crate::api::schema::{
-            ErrorBody, ErrorResponse, IntegrationInstallResult, IntegrationTarget,
-            IntegrationUninstallResult, Method, PaneListParams, PaneReadResult, ReadSource,
-            ResponseResult, SuccessResponse, TabListParams,
+            ErrorBody, ErrorResponse, IntegrationInstallResult, IntegrationUninstallResult, Method,
+            PaneListParams, PaneReadResult, ReadSource, ResponseResult, SuccessResponse,
+            TabListParams,
         };
 
         let response = match request.method {
@@ -1252,107 +1252,17 @@ impl App {
             }
             Method::IntegrationInstall(params) => {
                 let target = params.target;
-                let messages = match target {
-                    IntegrationTarget::Pi => {
-                        let path = crate::integration::install_pi().map_err(|err| {
-                            serde_json::to_string(&ErrorResponse {
-                                id: request.id.clone(),
-                                error: ErrorBody {
-                                    code: "integration_install_failed".into(),
-                                    message: err.to_string(),
-                                },
-                            })
-                            .unwrap()
-                        });
-                        match path {
-                            Ok(path) => {
-                                crate::logging::integration_action("install", "pi", "ok");
-                                vec![format!("installed pi integration to {}", path.display())]
-                            }
-                            Err(response) => return response,
-                        }
-                    }
-                    IntegrationTarget::Claude => {
-                        let installed = crate::integration::install_claude().map_err(|err| {
-                            serde_json::to_string(&ErrorResponse {
-                                id: request.id.clone(),
-                                error: ErrorBody {
-                                    code: "integration_install_failed".into(),
-                                    message: err.to_string(),
-                                },
-                            })
-                            .unwrap()
-                        });
-                        match installed {
-                            Ok(installed) => {
-                                crate::logging::integration_action("install", "claude", "ok");
-                                vec![
-                                    format!(
-                                        "installed claude integration hook to {}",
-                                        installed.hook_path.display()
-                                    ),
-                                    format!(
-                                        "ensured claude settings at {}",
-                                        installed.settings_path.display()
-                                    ),
-                                ]
-                            }
-                            Err(response) => return response,
-                        }
-                    }
-                    IntegrationTarget::Codex => {
-                        let installed = crate::integration::install_codex().map_err(|err| {
-                            serde_json::to_string(&ErrorResponse {
-                                id: request.id.clone(),
-                                error: ErrorBody {
-                                    code: "integration_install_failed".into(),
-                                    message: err.to_string(),
-                                },
-                            })
-                            .unwrap()
-                        });
-                        match installed {
-                            Ok(installed) => {
-                                crate::logging::integration_action("install", "codex", "ok");
-                                vec![
-                                    format!(
-                                        "installed codex integration hook to {}",
-                                        installed.hook_path.display()
-                                    ),
-                                    format!(
-                                        "ensured codex hooks at {}",
-                                        installed.hooks_path.display()
-                                    ),
-                                    format!(
-                                        "ensured codex config at {}",
-                                        installed.config_path.display()
-                                    ),
-                                ]
-                            }
-                            Err(response) => return response,
-                        }
-                    }
-                    IntegrationTarget::Opencode => {
-                        let installed = crate::integration::install_opencode().map_err(|err| {
-                            serde_json::to_string(&ErrorResponse {
-                                id: request.id.clone(),
-                                error: ErrorBody {
-                                    code: "integration_install_failed".into(),
-                                    message: err.to_string(),
-                                },
-                            })
-                            .unwrap()
-                        });
-                        match installed {
-                            Ok(installed) => {
-                                crate::logging::integration_action("install", "opencode", "ok");
-                                vec![format!(
-                                    "installed opencode integration plugin to {}",
-                                    installed.plugin_path.display()
-                                )]
-                            }
-                            Err(response) => return response,
-                        }
+                let messages = match crate::integration::install_target(target) {
+                    Ok(messages) => messages,
+                    Err(err) => {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "integration_install_failed".into(),
+                                message: err.to_string(),
+                            },
+                        })
+                        .unwrap();
                     }
                 };
 
@@ -1366,152 +1276,17 @@ impl App {
             }
             Method::IntegrationUninstall(params) => {
                 let target = params.target;
-                let messages = match target {
-                    IntegrationTarget::Pi => {
-                        let result = crate::integration::uninstall_pi().map_err(|err| {
-                            serde_json::to_string(&ErrorResponse {
-                                id: request.id.clone(),
-                                error: ErrorBody {
-                                    code: "integration_uninstall_failed".into(),
-                                    message: err.to_string(),
-                                },
-                            })
-                            .unwrap()
-                        });
-                        match result {
-                            Ok(result) => {
-                                crate::logging::integration_action("uninstall", "pi", "ok");
-                                if result.removed_extension {
-                                    vec![format!(
-                                        "removed pi integration extension at {}",
-                                        result.extension_path.display()
-                                    )]
-                                } else {
-                                    vec![format!(
-                                        "no pi integration extension found at {}",
-                                        result.extension_path.display()
-                                    )]
-                                }
-                            }
-                            Err(response) => return response,
-                        }
-                    }
-                    IntegrationTarget::Claude => {
-                        let result = crate::integration::uninstall_claude().map_err(|err| {
-                            serde_json::to_string(&ErrorResponse {
-                                id: request.id.clone(),
-                                error: ErrorBody {
-                                    code: "integration_uninstall_failed".into(),
-                                    message: err.to_string(),
-                                },
-                            })
-                            .unwrap()
-                        });
-                        match result {
-                            Ok(result) => {
-                                crate::logging::integration_action("uninstall", "claude", "ok");
-                                let mut messages = Vec::new();
-                                if result.removed_hook_file {
-                                    messages.push(format!(
-                                        "removed claude hook at {}",
-                                        result.hook_path.display()
-                                    ));
-                                } else {
-                                    messages.push(format!(
-                                        "no claude hook found at {}",
-                                        result.hook_path.display()
-                                    ));
-                                }
-                                if result.updated_settings {
-                                    messages.push(format!(
-                                        "removed herdr claude hook entries from {}",
-                                        result.settings_path.display()
-                                    ));
-                                } else {
-                                    messages.push(format!(
-                                        "no herdr claude hook entries found in {}",
-                                        result.settings_path.display()
-                                    ));
-                                }
-                                messages
-                            }
-                            Err(response) => return response,
-                        }
-                    }
-                    IntegrationTarget::Codex => {
-                        let result = crate::integration::uninstall_codex().map_err(|err| {
-                            serde_json::to_string(&ErrorResponse {
-                                id: request.id.clone(),
-                                error: ErrorBody {
-                                    code: "integration_uninstall_failed".into(),
-                                    message: err.to_string(),
-                                },
-                            })
-                            .unwrap()
-                        });
-                        match result {
-                            Ok(result) => {
-                                crate::logging::integration_action("uninstall", "codex", "ok");
-                                let mut messages = Vec::new();
-                                if result.removed_hook_file {
-                                    messages.push(format!(
-                                        "removed codex hook at {}",
-                                        result.hook_path.display()
-                                    ));
-                                } else {
-                                    messages.push(format!(
-                                        "no codex hook found at {}",
-                                        result.hook_path.display()
-                                    ));
-                                }
-                                if result.updated_hooks {
-                                    messages.push(format!(
-                                        "removed herdr codex hook entries from {}",
-                                        result.hooks_path.display()
-                                    ));
-                                } else {
-                                    messages.push(format!(
-                                        "no herdr codex hook entries found in {}",
-                                        result.hooks_path.display()
-                                    ));
-                                }
-                                messages.push(format!(
-                                    "left codex config unchanged at {}",
-                                    result.config_path.display()
-                                ));
-                                messages
-                            }
-                            Err(response) => return response,
-                        }
-                    }
-                    IntegrationTarget::Opencode => {
-                        let result = crate::integration::uninstall_opencode().map_err(|err| {
-                            serde_json::to_string(&ErrorResponse {
-                                id: request.id.clone(),
-                                error: ErrorBody {
-                                    code: "integration_uninstall_failed".into(),
-                                    message: err.to_string(),
-                                },
-                            })
-                            .unwrap()
-                        });
-                        match result {
-                            Ok(result) => {
-                                crate::logging::integration_action("uninstall", "opencode", "ok");
-                                if result.removed_plugin {
-                                    vec![format!(
-                                        "removed opencode integration plugin at {}",
-                                        result.plugin_path.display()
-                                    )]
-                                } else {
-                                    vec![format!(
-                                        "no opencode integration plugin found at {}",
-                                        result.plugin_path.display()
-                                    )]
-                                }
-                            }
-                            Err(response) => return response,
-                        }
+                let messages = match crate::integration::uninstall_target(target) {
+                    Ok(messages) => messages,
+                    Err(err) => {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "integration_uninstall_failed".into(),
+                                message: err.to_string(),
+                            },
+                        })
+                        .unwrap();
                     }
                 };
 

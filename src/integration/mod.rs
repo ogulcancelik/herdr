@@ -69,6 +69,159 @@ pub(crate) fn apply_pane_env(cmd: &mut CommandBuilder, pane_id: PaneId) {
     cmd.env(HERDR_PANE_ID_ENV_VAR, format!("p_{}", pane_id.raw()));
 }
 
+pub(crate) fn install_target(
+    target: crate::api::schema::IntegrationTarget,
+) -> io::Result<Vec<String>> {
+    let messages = match target {
+        crate::api::schema::IntegrationTarget::Pi => {
+            let path = install_pi()?;
+            vec![format!("installed pi integration to {}", path.display())]
+        }
+        crate::api::schema::IntegrationTarget::Claude => {
+            let installed = install_claude()?;
+            vec![
+                format!(
+                    "installed claude integration hook to {}",
+                    installed.hook_path.display()
+                ),
+                format!(
+                    "ensured claude settings at {}",
+                    installed.settings_path.display()
+                ),
+            ]
+        }
+        crate::api::schema::IntegrationTarget::Codex => {
+            let installed = install_codex()?;
+            vec![
+                format!(
+                    "installed codex integration hook to {}",
+                    installed.hook_path.display()
+                ),
+                format!("ensured codex hooks at {}", installed.hooks_path.display()),
+                format!(
+                    "ensured codex config at {}",
+                    installed.config_path.display()
+                ),
+            ]
+        }
+        crate::api::schema::IntegrationTarget::Opencode => {
+            let installed = install_opencode()?;
+            vec![format!(
+                "installed opencode integration plugin to {}",
+                installed.plugin_path.display()
+            )]
+        }
+    };
+
+    crate::logging::integration_action("install", integration_target_label(target), "ok");
+    Ok(messages)
+}
+
+pub(crate) fn uninstall_target(
+    target: crate::api::schema::IntegrationTarget,
+) -> io::Result<Vec<String>> {
+    let messages = match target {
+        crate::api::schema::IntegrationTarget::Pi => {
+            let result = uninstall_pi()?;
+            if result.removed_extension {
+                vec![format!(
+                    "removed pi integration extension at {}",
+                    result.extension_path.display()
+                )]
+            } else {
+                vec![format!(
+                    "no pi integration extension found at {}",
+                    result.extension_path.display()
+                )]
+            }
+        }
+        crate::api::schema::IntegrationTarget::Claude => {
+            let result = uninstall_claude()?;
+            let mut messages = Vec::new();
+            if result.removed_hook_file {
+                messages.push(format!(
+                    "removed claude hook at {}",
+                    result.hook_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no claude hook found at {}",
+                    result.hook_path.display()
+                ));
+            }
+            if result.updated_settings {
+                messages.push(format!(
+                    "removed herdr claude hook entries from {}",
+                    result.settings_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no herdr claude hook entries found in {}",
+                    result.settings_path.display()
+                ));
+            }
+            messages
+        }
+        crate::api::schema::IntegrationTarget::Codex => {
+            let result = uninstall_codex()?;
+            let mut messages = Vec::new();
+            if result.removed_hook_file {
+                messages.push(format!(
+                    "removed codex hook at {}",
+                    result.hook_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no codex hook found at {}",
+                    result.hook_path.display()
+                ));
+            }
+            if result.updated_hooks {
+                messages.push(format!(
+                    "removed herdr codex hook entries from {}",
+                    result.hooks_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no herdr codex hook entries found in {}",
+                    result.hooks_path.display()
+                ));
+            }
+            messages.push(format!(
+                "left codex config unchanged at {}",
+                result.config_path.display()
+            ));
+            messages
+        }
+        crate::api::schema::IntegrationTarget::Opencode => {
+            let result = uninstall_opencode()?;
+            if result.removed_plugin {
+                vec![format!(
+                    "removed opencode integration plugin at {}",
+                    result.plugin_path.display()
+                )]
+            } else {
+                vec![format!(
+                    "no opencode integration plugin found at {}",
+                    result.plugin_path.display()
+                )]
+            }
+        }
+    };
+
+    crate::logging::integration_action("uninstall", integration_target_label(target), "ok");
+    Ok(messages)
+}
+
+fn integration_target_label(target: crate::api::schema::IntegrationTarget) -> &'static str {
+    match target {
+        crate::api::schema::IntegrationTarget::Pi => "pi",
+        crate::api::schema::IntegrationTarget::Claude => "claude",
+        crate::api::schema::IntegrationTarget::Codex => "codex",
+        crate::api::schema::IntegrationTarget::Opencode => "opencode",
+    }
+}
+
 pub(crate) fn install_pi() -> io::Result<PathBuf> {
     let dir = pi_extension_dir()?;
     if !dir.is_dir() {

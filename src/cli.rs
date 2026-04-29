@@ -6,12 +6,11 @@ use serde::Serialize;
 
 use crate::api;
 use crate::api::schema::{
-    AgentStatus, EmptyParams, IntegrationInstallParams, IntegrationTarget,
-    IntegrationUninstallParams, Method, OutputMatch, PaneListParams, PaneReadParams,
-    PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneTarget,
-    PaneWaitForOutputParams, PingParams, ReadSource, Request, SplitDirection, Subscription,
-    TabCreateParams, TabListParams, TabRenameParams, TabTarget, WorkspaceCreateParams,
-    WorkspaceRenameParams, WorkspaceTarget,
+    AgentStatus, EmptyParams, IntegrationTarget, Method, OutputMatch, PaneListParams,
+    PaneReadParams, PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams,
+    PaneTarget, PaneWaitForOutputParams, PingParams, ReadSource, Request, SplitDirection,
+    Subscription, TabCreateParams, TabListParams, TabRenameParams, TabTarget,
+    WorkspaceCreateParams, WorkspaceRenameParams, WorkspaceTarget,
 };
 
 pub enum CommandOutcome {
@@ -962,26 +961,16 @@ fn integration_install(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     };
 
-    let response = send_request(&Request {
-        id: "cli:integration:install".into(),
-        method: Method::IntegrationInstall(IntegrationInstallParams { target }),
-    })?;
-
-    if let Some(error) = response.get("error") {
-        eprintln!("{}", serde_json::to_string(error).unwrap());
-        return Ok(1);
+    match crate::integration::install_target(target) {
+        Ok(messages) => {
+            print_integration_messages(messages);
+            Ok(0)
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            Ok(1)
+        }
     }
-
-    let Some(messages) = response["result"]["details"]["messages"].as_array() else {
-        eprintln!("invalid integration install response");
-        return Ok(1);
-    };
-
-    for message in messages.iter().filter_map(|entry| entry.as_str()) {
-        println!("{message}");
-    }
-
-    Ok(0)
 }
 
 fn integration_uninstall(args: &[String]) -> std::io::Result<i32> {
@@ -989,26 +978,22 @@ fn integration_uninstall(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     };
 
-    let response = send_request(&Request {
-        id: "cli:integration:uninstall".into(),
-        method: Method::IntegrationUninstall(IntegrationUninstallParams { target }),
-    })?;
-
-    if let Some(error) = response.get("error") {
-        eprintln!("{}", serde_json::to_string(error).unwrap());
-        return Ok(1);
+    match crate::integration::uninstall_target(target) {
+        Ok(messages) => {
+            print_integration_messages(messages);
+            Ok(0)
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            Ok(1)
+        }
     }
+}
 
-    let Some(messages) = response["result"]["details"]["messages"].as_array() else {
-        eprintln!("invalid integration uninstall response");
-        return Ok(1);
-    };
-
-    for message in messages.iter().filter_map(|entry| entry.as_str()) {
+fn print_integration_messages(messages: Vec<String>) {
+    for message in messages {
         println!("{message}");
     }
-
-    Ok(0)
 }
 
 fn parse_integration_target(

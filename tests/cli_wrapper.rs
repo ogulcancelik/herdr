@@ -796,7 +796,7 @@ fn named_sessions_use_separate_servers_and_workspace_state() {
 }
 
 #[test]
-fn integration_commands_honor_socket_override_when_server_is_missing() {
+fn integration_commands_run_locally_when_server_is_missing() {
     let base = unique_test_dir();
     let home_dir = base.join("home");
     let extensions_dir = home_dir.join(".pi/agent/extensions");
@@ -827,10 +827,10 @@ fn integration_commands_honor_socket_override_when_server_is_missing() {
         .env("HOME", &home_dir)
         .output()
         .unwrap();
-    assert_eq!(integration_install.status.code(), Some(1));
+    assert_eq!(integration_install.status.code(), Some(0));
     assert!(
-        !expected_extension.exists(),
-        "integration install should not run local install logic when socket is missing"
+        expected_extension.exists(),
+        "integration install should write local files without a server"
     );
 
     let integration_uninstall = Command::new(env!("CARGO_BIN_EXE_herdr"))
@@ -839,10 +839,10 @@ fn integration_commands_honor_socket_override_when_server_is_missing() {
         .env("HOME", &home_dir)
         .output()
         .unwrap();
-    assert_eq!(integration_uninstall.status.code(), Some(1));
+    assert_eq!(integration_uninstall.status.code(), Some(0));
     assert!(
         !expected_extension.exists(),
-        "integration uninstall should also be socket-backed when socket is missing"
+        "integration uninstall should remove local files without a server"
     );
 
     cleanup_test_base(&base);
