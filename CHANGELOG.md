@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Added
+- Added named persistent sessions, so you can keep separate herdr environments for different projects or contexts while sharing the same global config. See the docs for the full session CLI. (#57, thanks @fbettag)
+- Added `herdr status`, `herdr status server`, and `herdr status client` to inspect the local client, running server, protocol compatibility, socket path, and whether a restart is needed.
+
+### Changed
+- Focused panes can now still alert you through terminal notifications when the herdr terminal window is unfocused, so active work does not go quiet just because you switched to another app.
+
+### Fixed
+- Dragging pane split borders now works when the app inside the pane has mouse reporting enabled, including Claude Code no-flicker mode. (#61, thanks @EYH0602)
+- Pressing the prefix key twice now forwards a literal prefix key into the focused pane in client mode again.
+- `herdr integration install` and `herdr integration uninstall` now work without requiring a running herdr server.
+- Pane PTYs now keep their last attached size while detached, preventing detached output from being resized or rewrapped to fallback dimensions.
+
 ## [0.5.2] - 2026-04-27
 
 ### Added
