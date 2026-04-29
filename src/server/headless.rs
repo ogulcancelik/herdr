@@ -1529,10 +1529,11 @@ impl HeadlessServer {
         if render_targets.is_empty() {
             let (cols, rows) = self.effective_size;
             let area = Rect::new(0, 0, cols, rows);
-            let _ = render_virtual(&mut self.app.state, area, true);
+            let resize_panes = self.app.state.view.pane_infos.is_empty();
+            let _ = render_virtual(&mut self.app.state, area, resize_panes);
             debug!(
                 cols,
-                rows, "rendered virtual frame with no attached clients"
+                rows, resize_panes, "rendered virtual frame with no attached clients"
             );
             return;
         }

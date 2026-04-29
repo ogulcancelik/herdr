@@ -168,6 +168,66 @@ fn pane_read_recent(socket_path: &PathBuf, pane_id: &str) -> Value {
     )
 }
 
+fn pane_read_recent_text(socket_path: &PathBuf, pane_id: &str) -> String {
+    pane_read_recent(socket_path, pane_id)["result"]["read"]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn pane_send_text(socket_path: &PathBuf, pane_id: &str, text: &str) -> Value {
+    send_json_request(
+        socket_path,
+        &format!(
+            r#"{{"id":"pane_send_text","method":"pane.send_text","params":{{"pane_id":"{pane_id}","text":{}}}}}"#,
+            serde_json::to_string(text).unwrap()
+        ),
+    )
+}
+
+fn parse_size_after_marker(text: &str, marker: &str) -> Option<(u16, u16)> {
+    let lines: Vec<&str> = text.lines().collect();
+    for (idx, line) in lines.iter().enumerate() {
+        if !line.contains(marker) {
+            continue;
+        }
+        for candidate in lines.iter().skip(idx + 1).take(6) {
+            let mut parts = candidate.split_whitespace();
+            let Some(rows) = parts.next().and_then(|part| part.parse::<u16>().ok()) else {
+                continue;
+            };
+            let Some(cols) = parts.next().and_then(|part| part.parse::<u16>().ok()) else {
+                continue;
+            };
+            if parts.next().is_none() {
+                return Some((rows, cols));
+            }
+        }
+    }
+    None
+}
+
+fn read_pane_tty_size_after_marker(
+    socket_path: &PathBuf,
+    pane_id: &str,
+    marker: &str,
+    timeout: Duration,
+) -> (u16, u16) {
+    pane_send_text(socket_path, pane_id, &format!("echo {marker}; stty size\n"));
+
+    let deadline = Instant::now() + timeout;
+    let mut last_text = String::new();
+    while Instant::now() < deadline {
+        last_text = pane_read_recent_text(socket_path, pane_id);
+        if let Some(size) = parse_size_after_marker(&last_text, marker) {
+            return size;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    panic!("did not observe tty size after marker {marker}. pane output:\n{last_text}");
+}
+
 fn workspace_id_by_label(response: &Value, label: &str) -> String {
     response["result"]["workspaces"]
         .as_array()
@@ -574,6 +634,64 @@ fn server_persists_after_client_connection_drop() {
         client_handshake(&mut stream_b, 2, 80, 24).expect("reattach handshake should succeed");
     assert_eq!(version, 2);
     assert!(error.is_none(), "reattach should succeed: {:?}", error);
+
+    cleanup_spawned_herdr(spawned, base);
+}
+
+#[test]
+fn detached_output_preserves_last_attached_pty_size() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_file(&client_socket, Duration::from_secs(10));
+
+    let mut stream = UnixStream::connect(&client_socket).expect("client should connect");
+    let (version, error) =
+        client_handshake(&mut stream, 2, 120, 40).expect("handshake should succeed");
+    assert_eq!(version, 2);
+    assert!(error.is_none(), "{:?}", error);
+    drain_messages(&mut stream);
+
+    let create = workspace_create(&api_socket, "detached-size");
+    let pane_id = create["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("root pane id")
+        .to_string();
+
+    let before = read_pane_tty_size_after_marker(
+        &api_socket,
+        &pane_id,
+        "SIZE_BEFORE_DETACH",
+        Duration::from_secs(5),
+    );
+
+    send_detach(&mut stream).expect("send detach");
+    drop(stream);
+
+    assert!(
+        wait_until(Duration::from_secs(2), Duration::from_millis(25), || {
+            ping_socket(&api_socket).contains("pong")
+        }),
+        "server should persist after detach"
+    );
+
+    let while_detached = read_pane_tty_size_after_marker(
+        &api_socket,
+        &pane_id,
+        "SIZE_WHILE_DETACHED",
+        Duration::from_secs(5),
+    );
+
+    assert_eq!(
+        while_detached, before,
+        "detached renders should not resize live pane PTYs to a fallback size"
+    );
 
     cleanup_spawned_herdr(spawned, base);
 }
