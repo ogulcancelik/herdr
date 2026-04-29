@@ -37,7 +37,7 @@ socket path resolution order:
 
 this means `HERDR_SOCKET_PATH` remains an exact low-level socket override, but an explicit cli `--session <name>` still wins when a command runs inside a pane that inherited `HERDR_SOCKET_PATH`.
 
-session names may contain ASCII letters, numbers, `.`, `_`, and `-`. `default` is reserved for the default session. use `herdr session list`, `herdr session stop <name>`, and `herdr session delete <name>` to inspect and manage session namespaces. `session delete` refuses running sessions and does not delete the default session.
+session names may contain ASCII letters, numbers, `.`, `_`, and `-`. `default` is reserved for the default session. use `herdr session list`, `herdr session attach <name>`, `herdr session stop <name>`, and `herdr session delete <name>` to inspect and manage session namespaces. session commands print human-readable output by default; pass `--json` for machine-readable output. `session delete` refuses running sessions and does not delete the default session.
 
 ## request and response envelopes
 

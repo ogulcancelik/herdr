@@ -28,6 +28,25 @@ pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
         cleaned.push(program.clone());
     }
 
+    if args.get(1).map(String::as_str) == Some("session")
+        && args.get(2).map(String::as_str) == Some("attach")
+    {
+        if matches!(
+            args.get(3).map(String::as_str),
+            Some("help" | "--help" | "-h")
+        ) {
+            return Ok(args.to_vec());
+        }
+        let Some(name) = args.get(3) else {
+            return Err("usage: herdr session attach <name>".to_string());
+        };
+        if args.len() != 4 {
+            return Err("usage: herdr session attach <name>".to_string());
+        }
+        apply_explicit_name(name)?;
+        return Ok(cleaned);
+    }
+
     let mut requested_session = None;
     let mut index = 1;
     while index < args.len() {
@@ -51,13 +70,7 @@ pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
     }
 
     if let Some(session) = requested_session {
-        let session = normalize_name(&session)?;
-        if let Some(session) = session {
-            std::env::set_var(SESSION_ENV_VAR, session);
-        } else {
-            std::env::remove_var(SESSION_ENV_VAR);
-        }
-        EXPLICIT_SESSION_REQUESTED.store(true, Ordering::Relaxed);
+        apply_explicit_name(&session)?;
     } else if std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR).is_some() {
         EXPLICIT_SESSION_REQUESTED.store(false, Ordering::Relaxed);
     } else if let Ok(session) = std::env::var(SESSION_ENV_VAR) {
@@ -264,6 +277,17 @@ pub fn validate_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn apply_explicit_name(name: &str) -> Result<(), String> {
+    let session = normalize_name(name)?;
+    if let Some(session) = session {
+        std::env::set_var(SESSION_ENV_VAR, session);
+    } else {
+        std::env::remove_var(SESSION_ENV_VAR);
+    }
+    EXPLICIT_SESSION_REQUESTED.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
 fn normalize_name(name: &str) -> Result<Option<String>, String> {
     if name == DEFAULT_SESSION_NAME {
         return Ok(None);
@@ -323,6 +347,47 @@ mod tests {
         assert_eq!(cleaned, vec!["herdr", "server", "stop"]);
         std::env::remove_var(SESSION_ENV_VAR);
         clear_explicit_session_for_test();
+    }
+
+    #[test]
+    fn configure_from_args_rewrites_session_attach_to_default_launch() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var(SESSION_ENV_VAR, "bad/name");
+        std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, "/tmp/inherited.sock");
+        clear_explicit_session_for_test();
+        let args = vec![
+            "herdr".to_string(),
+            "session".to_string(),
+            "attach".to_string(),
+            "work".to_string(),
+        ];
+
+        let cleaned = configure_from_args(&args).unwrap();
+
+        assert_eq!(std::env::var(SESSION_ENV_VAR).as_deref(), Ok("work"));
+        assert!(explicit_session_requested());
+        assert_eq!(cleaned, vec!["herdr"]);
+        std::env::remove_var(SESSION_ENV_VAR);
+        std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+        clear_explicit_session_for_test();
+    }
+
+    #[test]
+    fn configure_from_args_leaves_session_attach_help_for_cli_dispatch() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::remove_var(SESSION_ENV_VAR);
+        clear_explicit_session_for_test();
+        let args = vec![
+            "herdr".to_string(),
+            "session".to_string(),
+            "attach".to_string(),
+            "-h".to_string(),
+        ];
+
+        let cleaned = configure_from_args(&args).unwrap();
+
+        assert_eq!(cleaned, args);
+        assert!(!explicit_session_requested());
     }
 
     #[test]

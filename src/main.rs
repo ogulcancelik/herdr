@@ -200,6 +200,7 @@ fn main() -> io::Result<()> {
         println!();
         println!("Usage: herdr [options]");
         println!("       herdr --session <name> [options]");
+        println!("       herdr session attach <name>");
         println!("       herdr update");
         println!("       herdr server stop");
         println!("       herdr server reload-config");

@@ -46,9 +46,9 @@ by default herdr launches or attaches to one background session server. `ctrl+b 
 named sessions are runtime/socket namespaces for separate persistent herdr servers. they do not replace workspaces; each named session has its own panes, tabs, workspaces, sockets, and session state while sharing the same global config file.
 
 ```bash
-herdr --session work
-herdr --session side-project
 herdr session list
+herdr session attach work
+herdr session attach side-project
 herdr session stop work
 herdr session delete side-project
 ```

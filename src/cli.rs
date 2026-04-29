@@ -339,6 +339,7 @@ fn run_session_command(args: &[String]) -> std::io::Result<i32> {
 
     match subcommand {
         "list" => session_list(&args[1..]),
+        "attach" => session_attach_help(&args[1..]),
         "stop" => session_stop(&args[1..]),
         "delete" => session_delete(&args[1..]),
         "help" | "--help" | "-h" => {
@@ -373,30 +374,43 @@ fn server_reload_config(args: &[String]) -> std::io::Result<i32> {
     })?)
 }
 
-fn session_list(args: &[String]) -> std::io::Result<i32> {
-    if !args.is_empty() {
-        eprintln!("usage: herdr session list");
-        return Ok(2);
+fn session_attach_help(args: &[String]) -> std::io::Result<i32> {
+    if matches!(
+        args.first().map(String::as_str),
+        Some("help" | "--help" | "-h")
+    ) {
+        eprintln!("usage: herdr session attach <name>");
+        return Ok(0);
     }
+    eprintln!("usage: herdr session attach <name>");
+    Ok(2)
+}
+
+fn session_list(args: &[String]) -> std::io::Result<i32> {
+    let json = match parse_session_json_only(args, "usage: herdr session list [--json]") {
+        Ok(json) => json,
+        Err(code) => return Ok(code),
+    };
 
     let sessions = crate::session::list_sessions()?;
-    _print_json(&serde_json::json!({
-        "sessions": sessions,
-    }));
+    if json {
+        _print_json(&serde_json::json!({
+            "sessions": sessions,
+        }));
+    } else {
+        print_session_table(&sessions);
+    }
     Ok(0)
 }
 
 fn session_stop(args: &[String]) -> std::io::Result<i32> {
-    let Some(name) = args.first() else {
-        eprintln!("usage: herdr session stop <name>");
-        return Ok(2);
-    };
-    if args.len() != 1 {
-        eprintln!("usage: herdr session stop <name>");
-        return Ok(2);
-    }
+    let (name, json) =
+        match parse_session_name_and_json(args, "usage: herdr session stop <name> [--json]") {
+            Ok(parsed) => parsed,
+            Err(code) => return Ok(code),
+        };
 
-    let target = match crate::session::parse_target_name(name) {
+    let target = match crate::session::parse_target_name(&name) {
         Ok(target) => target,
         Err(message) => {
             print_session_error("invalid_session_name", &message);
@@ -405,10 +419,14 @@ fn session_stop(args: &[String]) -> std::io::Result<i32> {
     };
     match crate::session::stop_session(target.as_deref()) {
         Ok(session) => {
-            _print_json(&serde_json::json!({
-                "stopped": true,
-                "session": session,
-            }));
+            if json {
+                _print_json(&serde_json::json!({
+                    "stopped": true,
+                    "session": session,
+                }));
+            } else {
+                println!("stopped session {}", session.name);
+            }
             Ok(0)
         }
         Err(message) => {
@@ -419,21 +437,22 @@ fn session_stop(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn session_delete(args: &[String]) -> std::io::Result<i32> {
-    let Some(name) = args.first() else {
-        eprintln!("usage: herdr session delete <name>");
-        return Ok(2);
-    };
-    if args.len() != 1 {
-        eprintln!("usage: herdr session delete <name>");
-        return Ok(2);
-    }
+    let (name, json) =
+        match parse_session_name_and_json(args, "usage: herdr session delete <name> [--json]") {
+            Ok(parsed) => parsed,
+            Err(code) => return Ok(code),
+        };
 
-    match crate::session::delete_session(name) {
+    match crate::session::delete_session(&name) {
         Ok(session) => {
-            _print_json(&serde_json::json!({
-                "deleted": true,
-                "session": session,
-            }));
+            if json {
+                _print_json(&serde_json::json!({
+                    "deleted": true,
+                    "session": session,
+                }));
+            } else {
+                println!("deleted session {}", session.name);
+            }
             Ok(0)
         }
         Err(message) => {
@@ -1317,6 +1336,58 @@ fn parse_u64_flag(flag: &str, value: &str) -> std::io::Result<u64> {
         .map_err(|_| std::io::Error::other(format!("invalid value for {flag}: {value}")))
 }
 
+fn parse_session_json_only(args: &[String], usage: &str) -> Result<bool, i32> {
+    match args {
+        [] => Ok(false),
+        [flag] if flag == "--json" => Ok(true),
+        _ => {
+            eprintln!("{usage}");
+            Err(2)
+        }
+    }
+}
+
+fn parse_session_name_and_json(args: &[String], usage: &str) -> Result<(String, bool), i32> {
+    let mut name = None;
+    let mut json = false;
+    for arg in args {
+        if arg == "--json" {
+            json = true;
+        } else if name.is_none() {
+            name = Some(arg.clone());
+        } else {
+            eprintln!("{usage}");
+            return Err(2);
+        }
+    }
+
+    let Some(name) = name else {
+        eprintln!("{usage}");
+        return Err(2);
+    };
+    Ok((name, json))
+}
+
+fn print_session_table(sessions: &[crate::session::SessionInfo]) {
+    println!(
+        "{:<20} {:<8} {:<48} {}",
+        "name", "status", "directory", "socket"
+    );
+    for session in sessions {
+        println!(
+            "{:<20} {:<8} {:<48} {}",
+            session.name,
+            if session.running {
+                "running"
+            } else {
+                "stopped"
+            },
+            session.session_dir,
+            session.socket_path
+        );
+    }
+}
+
 fn print_session_error(code: &str, message: &str) {
     eprintln!(
         "{}",
@@ -1400,9 +1471,10 @@ fn print_integration_help() {
 
 fn print_session_help() {
     eprintln!("herdr session commands:");
-    eprintln!("  herdr session list");
-    eprintln!("  herdr session stop <name>");
-    eprintln!("  herdr session delete <name>");
+    eprintln!("  herdr session list [--json]");
+    eprintln!("  herdr session attach <name>");
+    eprintln!("  herdr session stop <name> [--json]");
+    eprintln!("  herdr session delete <name> [--json]");
     eprintln!("  use 'default' as <name> to target the default session for stop");
 }
 

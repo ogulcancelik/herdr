@@ -13,7 +13,7 @@ Named sessions share this config file. Sessions are runtime/socket namespaces, n
 ~/.config/herdr/sessions/<name>/session.json
 ```
 
-Use `herdr session list`, `herdr session stop <name>`, and `herdr session delete <name>` to inspect and manage named session namespaces.
+Use `herdr session list`, `herdr session attach <name>`, `herdr session stop <name>`, and `herdr session delete <name>` to inspect and manage named session namespaces. Add `--json` to session commands when scripts need machine-readable output.
 
 print the full default config with:
 

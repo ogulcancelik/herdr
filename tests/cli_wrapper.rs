@@ -571,6 +571,7 @@ fn help_commands_exit_successfully() {
         &["pane", "-h"],
         &["wait", "-h"],
         &["session", "-h"],
+        &["session", "attach", "-h"],
         &["integration", "-h"],
     ];
 
@@ -703,7 +704,25 @@ fn named_sessions_use_separate_servers_and_workspace_state() {
         .collect();
     assert_eq!(labels_via_explicit, vec!["beta-ws"]);
 
-    let sessions = run_named_cli_json(&config_home, &runtime_dir, &["session", "list"]);
+    let human_sessions = run_named_cli(&config_home, &runtime_dir, &["session", "list"]);
+    assert!(human_sessions.status.success());
+    let human_sessions = String::from_utf8_lossy(&human_sessions.stdout);
+    assert!(human_sessions.contains("name"), "stdout: {human_sessions}");
+    assert!(
+        human_sessions.contains("status"),
+        "stdout: {human_sessions}"
+    );
+    assert!(human_sessions.contains("alpha"), "stdout: {human_sessions}");
+    assert!(
+        human_sessions.contains("running"),
+        "stdout: {human_sessions}"
+    );
+    assert!(
+        human_sessions.contains("/sessions/beta"),
+        "stdout: {human_sessions}"
+    );
+
+    let sessions = run_named_cli_json(&config_home, &runtime_dir, &["session", "list", "--json"]);
     let sessions = sessions["sessions"].as_array().unwrap();
     let default_session = sessions
         .iter()
@@ -750,13 +769,19 @@ fn named_sessions_use_separate_servers_and_workspace_state() {
         String::from_utf8_lossy(&delete_default.stderr)
     );
 
-    let stopped_alpha =
-        run_named_cli_json(&config_home, &runtime_dir, &["session", "stop", "alpha"]);
+    let stopped_alpha = run_named_cli_json(
+        &config_home,
+        &runtime_dir,
+        &["session", "stop", "alpha", "--json"],
+    );
     assert_eq!(stopped_alpha["stopped"], true);
     assert_eq!(stopped_alpha["session"]["running"], false);
 
-    let deleted_alpha =
-        run_named_cli_json(&config_home, &runtime_dir, &["session", "delete", "alpha"]);
+    let deleted_alpha = run_named_cli_json(
+        &config_home,
+        &runtime_dir,
+        &["session", "delete", "alpha", "--json"],
+    );
     assert_eq!(deleted_alpha["deleted"], true);
     assert!(!config_home
         .join(app_dir_name())
