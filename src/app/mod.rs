@@ -784,7 +784,7 @@ impl App {
         let key_event = key.as_key_event();
         match self.state.mode {
             Mode::Navigate => {
-                input::handle_navigate_key(&mut self.state, key_event);
+                self.handle_navigate_key(key);
             }
             Mode::RenameWorkspace | Mode::RenameTab => {
                 input::handle_rename_key(&mut self.state, key_event);
@@ -1583,6 +1583,28 @@ mod tests {
             Mode::Terminal,
             "q should leave navigate mode"
         );
+    }
+
+    #[tokio::test]
+    async fn route_client_input_double_prefix_passes_prefix_through_to_focused_pane() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut rx) = PaneRuntime::test_with_channel(80, 24);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.prefix_code = KeyCode::Char('l');
+        app.state.prefix_mods = KeyModifiers::CONTROL;
+
+        app.route_client_input(vec![0x0c]);
+        assert_eq!(app.state.mode, Mode::Navigate);
+
+        app.route_client_input(vec![0x0c]);
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(rx.recv().await.unwrap(), bytes::Bytes::from(vec![0x0c]));
     }
 
     #[tokio::test]

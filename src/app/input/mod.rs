@@ -36,7 +36,7 @@ pub(crate) use self::{
         handle_confirm_close_key, handle_context_menu_key, handle_global_menu_key,
         handle_keybind_help_key, handle_rename_key, handle_resize_key,
     },
-    navigate::{handle_navigate_key, terminal_direct_navigation_action},
+    navigate::terminal_direct_navigation_action,
     settings::open_settings,
 };
 use self::{
@@ -56,12 +56,13 @@ impl App {
     pub(super) async fn handle_key(&mut self, key: TerminalKey) {
         match self.state.mode {
             Mode::Terminal => self.handle_terminal_key(key).await,
+            Mode::Navigate => self.handle_navigate_key(key),
             _ => {
                 let key = key.as_key_event();
                 match self.state.mode {
                     Mode::Onboarding => self.handle_onboarding_key(key),
                     Mode::ReleaseNotes => self.handle_release_notes_key(key),
-                    Mode::Navigate => self.handle_navigate_key(key),
+                    Mode::Navigate => unreachable!(),
                     Mode::RenameWorkspace | Mode::RenameTab => {
                         handle_rename_key(&mut self.state, key)
                     }

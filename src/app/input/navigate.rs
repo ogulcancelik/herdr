@@ -1,5 +1,6 @@
 use std::process::{Command, Stdio};
 
+use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Direction;
 
@@ -8,6 +9,7 @@ use crate::{
         state::{key_matches, AppState, Mode},
         App,
     },
+    input::TerminalKey,
     layout::NavDirection,
 };
 
@@ -68,10 +70,18 @@ pub(crate) fn terminal_direct_navigation_action(
 }
 
 impl App {
-    pub(super) fn handle_navigate_key(&mut self, key: KeyEvent) {
+    pub(crate) fn handle_navigate_key(&mut self, raw_key: TerminalKey) {
+        let key = raw_key.as_key_event();
         self.state.update_dismissed = true;
 
-        if self.state.is_prefix(&key) || key.code == KeyCode::Esc {
+        if self.state.is_prefix(&key) {
+            if !self.pass_through_key_to_focused_pane(raw_key) {
+                leave_navigate_mode(&mut self.state);
+            }
+            return;
+        }
+
+        if key.code == KeyCode::Esc {
             leave_navigate_mode(&mut self.state);
             return;
         }
@@ -88,6 +98,23 @@ impl App {
         if let Some(binding) = navigate_custom_command_for_key(&self.state, &key) {
             self.launch_custom_command(binding);
         }
+    }
+
+    fn pass_through_key_to_focused_pane(&mut self, key: TerminalKey) -> bool {
+        let Some(ws) = self.state.active.and_then(|i| self.state.workspaces.get(i)) else {
+            return false;
+        };
+        let Some(rt) = ws.focused_runtime() else {
+            return false;
+        };
+
+        let bytes = rt.encode_terminal_key(key);
+        if bytes.is_empty() || rt.try_send_bytes(Bytes::from(bytes)).is_err() {
+            return false;
+        }
+
+        self.state.mode = Mode::Terminal;
+        true
     }
 
     fn launch_custom_command(&mut self, binding: crate::config::CustomCommandKeybind) {
