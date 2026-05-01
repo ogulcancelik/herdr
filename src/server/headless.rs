@@ -636,6 +636,9 @@ impl HeadlessServer {
 
         self.effective_size = client.terminal_size;
         self.app.state.outer_terminal_focus = client.outer_terminal_focus;
+        if client.outer_terminal_focus == Some(true) {
+            self.app.state.mark_active_tab_seen();
+        }
         if !client.host_terminal_theme.is_empty() {
             self.app.set_host_terminal_theme(client.host_terminal_theme);
         }

@@ -1153,6 +1153,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn outer_focus_gained_marks_visible_done_panes_seen() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let root_pane = workspace.tabs[0].root_pane;
+        let split_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let background_tab = workspace.test_add_tab(Some("background"));
+        let background_pane = workspace.tabs[background_tab].root_pane;
+
+        workspace.tabs[0].panes.get_mut(&root_pane).unwrap().state = AgentState::Idle;
+        workspace.tabs[0].panes.get_mut(&root_pane).unwrap().seen = false;
+        workspace.tabs[0].panes.get_mut(&split_pane).unwrap().state = AgentState::Idle;
+        workspace.tabs[0].panes.get_mut(&split_pane).unwrap().seen = false;
+        workspace.tabs[background_tab]
+            .panes
+            .get_mut(&background_pane)
+            .unwrap()
+            .state = AgentState::Idle;
+        workspace.tabs[background_tab]
+            .panes
+            .get_mut(&background_pane)
+            .unwrap()
+            .seen = false;
+
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.outer_terminal_focus = Some(false);
+
+        let handled = app
+            .handle_raw_input_event(crate::raw_input::RawInputEvent::OuterFocusGained)
+            .await;
+
+        assert!(handled);
+        assert_eq!(app.state.outer_terminal_focus, Some(true));
+        assert!(app.state.workspaces[0].tabs[0].panes[&root_pane].seen);
+        assert!(app.state.workspaces[0].tabs[0].panes[&split_pane].seen);
+        assert!(!app.state.workspaces[0].tabs[background_tab].panes[&background_pane].seen);
+    }
+
+    #[tokio::test]
     async fn repeat_key_events_are_ignored_outside_terminal_mode() {
         let mut app = test_app();
         app.state.mode = Mode::ReleaseNotes;

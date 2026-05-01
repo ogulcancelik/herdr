@@ -37,6 +37,8 @@ After the change is integrated, remove the task worktree and delete the task bra
 
 ## Testing
 
+Use `just` recipes by default for tests and checks instead of invoking cargo or scripts directly.
+
 ```bash
 just test               # cargo nextest + maintenance script tests
 just check              # formatting check + cargo nextest + maintenance script tests

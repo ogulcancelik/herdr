@@ -179,6 +179,28 @@ impl AppState {
         }
     }
 
+    pub(crate) fn mark_active_tab_seen(&mut self) -> bool {
+        let Some(ws_idx) = self.active else {
+            return false;
+        };
+        let Some(tab) = self
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(crate::workspace::Workspace::active_tab_mut)
+        else {
+            return false;
+        };
+
+        let mut changed = false;
+        for pane in tab.panes.values_mut() {
+            if !pane.seen {
+                pane.seen = true;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     pub fn next_workspace(&mut self) {
         if !self.workspaces.is_empty() {
             let current = self.active.unwrap_or(self.selected);
@@ -591,10 +613,10 @@ impl AppState {
             return;
         };
 
-        if is_background_completion_transition(change.previous_state, change.state)
-            && !suppress_active_tab_notifications
-        {
-            pane.seen = false;
+        if change.state != AgentState::Idle {
+            pane.seen = true;
+        } else if is_background_completion_transition(change.previous_state, change.state) {
+            pane.seen = suppress_active_tab_notifications;
         }
 
         if self.local_sound_playback && self.sound.allows(change.known_agent) {
@@ -911,6 +933,27 @@ mod tests {
 
         let pane = state.workspaces[1].panes.get(&bg_pane_id).unwrap();
         assert!(!pane.seen);
+    }
+
+    #[test]
+    fn active_tab_completion_marks_pane_seen() {
+        let mut state = app_with_workspaces(&["active"]);
+        state.active = Some(0);
+        state.outer_terminal_focus = Some(true);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let pane = state.workspaces[0].panes.get_mut(&pane_id).unwrap();
+        pane.state = AgentState::Working;
+        pane.seen = false;
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Idle,
+        });
+
+        let pane = state.workspaces[0].panes.get(&pane_id).unwrap();
+        assert_eq!(pane.state, AgentState::Idle);
+        assert!(pane.seen);
     }
 
     #[test]
