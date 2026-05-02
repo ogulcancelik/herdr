@@ -4,15 +4,18 @@
 //! 1. On the first frame, write the entire buffer (full redraw).
 //! 2. On subsequent frames, diff against the last frame and only write
 //!    the cells that changed.
-//! 3. Before writing any cells, hide the cursor to avoid stray cursor
+//! 3. Wrap each frame in synchronized output so terminals that support it do
+//!    not expose intermediate cursor positions while the frame is painted.
+//! 4. Before writing any cells, hide the cursor to avoid stray cursor
 //!    artifacts on terminals that render the hardware cursor at intermediate
 //!    `CUP` positions during the frame stream.
-//! 4. After writing all changed cells, restore the final cursor visibility
+//! 5. After writing all changed cells, restore the final cursor visibility
 //!    and position from `frame.cursor`.
 //!
 //! Escape sequences used:
 //! - `CSI H` (CUP) — move cursor to (row, col)
 //! - `CSI m` (SGR) — set graphic rendition (colors, bold, etc.)
+//! - `CSI ? 2026 h/l` — begin/end synchronized output
 //! - `ESC ] 52 ; c ; <base64> BEL` — OSC 52 clipboard write
 //!
 //! The goal is minimal output: skip unchanged cells, batch adjacent changes,
@@ -186,16 +189,36 @@ fn cells_equal(a: &CellData, b: &CellData) -> bool {
 /// On the first frame (no previous), does a full redraw.
 /// On subsequent frames, only writes cells that changed.
 /// After writing cells, positions the cursor.
-pub fn blit_frame(frame: &FrameData, prev: Option<&FrameData>) {
+pub fn blit_frame_with_cursor_memory(
+    frame: &FrameData,
+    prev: Option<&FrameData>,
+    last_visible_cursor: &mut Option<(u16, u16)>,
+) {
     let mut stdout = io::stdout();
-    blit_frame_to(&mut stdout, frame, prev);
+    blit_frame_to_with_cursor_memory(&mut stdout, frame, prev, last_visible_cursor);
 }
 
 /// Blits a frame to a writer, diffing against the previous frame.
-fn blit_frame_to(mut writer: impl Write, frame: &FrameData, prev: Option<&FrameData>) {
+#[cfg(test)]
+fn blit_frame_to(writer: impl Write, frame: &FrameData, prev: Option<&FrameData>) {
+    let mut last_visible_cursor = None;
+    blit_frame_to_with_cursor_memory(writer, frame, prev, &mut last_visible_cursor);
+}
+
+fn blit_frame_to_with_cursor_memory(
+    mut writer: impl Write,
+    frame: &FrameData,
+    prev: Option<&FrameData>,
+    last_visible_cursor: &mut Option<(u16, u16)>,
+) {
     // On first frame or size change, do a full redraw.
     let full_redraw =
         prev.is_none() || prev.is_some_and(|p| p.width != frame.width || p.height != frame.height);
+
+    // Ask terminals that support synchronized output to apply the whole frame
+    // atomically. This keeps IMEs and cursor trackers from observing the
+    // intermediate CUP positions used while painting changed cells.
+    let _ = writer.write_all(b"\x1b[?2026h");
 
     // Hide cursor before any cell writes to avoid stray cursor artifacts
     // on terminals that render the hardware cursor at intermediate CUP positions.
@@ -211,26 +234,63 @@ fn blit_frame_to(mut writer: impl Write, frame: &FrameData, prev: Option<&FrameD
         write_changed_cells(&mut writer, frame, prev);
     }
 
-    // Position the cursor and set visibility.
+    // Position the cursor while it is still hidden, then restore visibility.
+    // Showing before moving makes slow terminals and IMEs briefly observe the
+    // cursor at the last painted cell, which can be an animated sidebar/status
+    // cell rather than the focused pane's input position. When the focused pane
+    // hides its cursor, still park the host cursor intentionally so IMEs do not
+    // anchor to whichever cell happened to be painted last.
     if let Some(cursor) = &frame.cursor {
         if cursor.visible {
-            // Show cursor (restore visibility if it was hidden on a previous frame).
+            let final_position = clamp_cursor_position(frame, cursor.x, cursor.y);
+            *last_visible_cursor = Some(final_position);
+            write_cursor_position(&mut writer, final_position);
+            // Show cursor only after it is already at the final position.
             let _ = writer.write_all(b"\x1b[?25h");
-            // CUP: move cursor to (row+1, col+1) — 1-based.
-            let _ = write!(writer, "\x1b[{};{}H", cursor.y + 1, cursor.x + 1);
         } else {
-            // Hide cursor.
+            let fallback = (*last_visible_cursor)
+                .map(|(x, y)| clamp_cursor_position(frame, x, y))
+                .or_else(|| Some(clamp_cursor_position(frame, cursor.x, cursor.y)))
+                .unwrap_or_else(|| default_hidden_cursor_position(frame));
+            write_cursor_position(&mut writer, fallback);
             let _ = writer.write_all(b"\x1b[?25l");
         }
     } else {
-        // No cursor info — hide cursor.
+        let fallback = (*last_visible_cursor)
+            .map(|(x, y)| clamp_cursor_position(frame, x, y))
+            .unwrap_or_else(|| default_hidden_cursor_position(frame));
+        write_cursor_position(&mut writer, fallback);
         let _ = writer.write_all(b"\x1b[?25l");
     }
+
+    // End the synchronized output block immediately after the final cursor
+    // state is emitted, then flush so supporting terminals can present it.
+    let _ = writer.write_all(b"\x1b[?2026l");
+    let _ = writer.flush();
 }
 
 /// Writes all cells in the frame (full redraw).
 fn cell_width(cell: &CellData) -> usize {
     cell.symbol.width()
+}
+
+fn default_hidden_cursor_position(frame: &FrameData) -> (u16, u16) {
+    (
+        frame.width.saturating_sub(1),
+        frame.height.saturating_sub(1),
+    )
+}
+
+fn clamp_cursor_position(frame: &FrameData, x: u16, y: u16) -> (u16, u16) {
+    (
+        x.min(frame.width.saturating_sub(1)),
+        y.min(frame.height.saturating_sub(1)),
+    )
+}
+
+fn write_cursor_position(writer: &mut impl Write, (x, y): (u16, u16)) {
+    // CUP: move cursor to (row+1, col+1) — 1-based.
+    let _ = write!(writer, "\x1b[{};{}H", y + 1, x + 1);
 }
 
 fn write_all_cells(writer: &mut impl Write, frame: &FrameData) {
@@ -444,8 +504,8 @@ mod tests {
 
         let output_str = String::from_utf8(output).unwrap();
         assert!(
-            output_str.starts_with("\x1b[?25l"),
-            "should hide cursor before any cell writes during full redraw"
+            output_str.starts_with("\x1b[?2026h\x1b[?25l"),
+            "should begin synchronized output and hide cursor before any cell writes during full redraw"
         );
     }
 
@@ -478,8 +538,26 @@ mod tests {
 
         let output_str = String::from_utf8(output).unwrap();
         assert!(
-            output_str.starts_with("\x1b[?25l"),
-            "should hide cursor before any cell writes during diff"
+            output_str.starts_with("\x1b[?2026h\x1b[?25l"),
+            "should begin synchronized output and hide cursor before any cell writes during diff"
+        );
+    }
+
+    #[test]
+    fn blit_frame_wraps_frame_in_synchronized_output() {
+        let frame = make_frame(1, 1, vec![make_cell("A", 0, 0, 0)]);
+
+        let mut output = Vec::new();
+        blit_frame_to(&mut output, &frame, None);
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(
+            output_str.starts_with("\x1b[?2026h"),
+            "should begin synchronized output before frame writes"
+        );
+        assert!(
+            output_str.ends_with("\x1b[?2026l"),
+            "should end synchronized output after final cursor state"
         );
     }
 
@@ -672,7 +750,103 @@ mod tests {
         );
         assert!(
             output_str.contains("\x1b[1;1H"),
-            "should position cursor after showing it"
+            "should position cursor before showing it"
+        );
+    }
+
+    #[test]
+    fn blit_frame_positions_cursor_before_showing_it() {
+        let prev = FrameData {
+            cells: vec![make_cell("A", 0, 0, 0); 9],
+            width: 3,
+            height: 3,
+            cursor: Some(CursorState {
+                x: 0,
+                y: 0,
+                visible: true,
+            }),
+        };
+        let mut curr = prev.clone();
+        curr.cells[0] = make_cell("B", 0, 0, 0);
+        curr.cursor = Some(CursorState {
+            x: 2,
+            y: 2,
+            visible: true,
+        });
+
+        let mut output = Vec::new();
+        blit_frame_to(&mut output, &curr, Some(&prev));
+        let output_str = String::from_utf8(output).unwrap();
+        let final_move = output_str
+            .rfind("\x1b[3;3H")
+            .expect("should move cursor to final position");
+        let show = output_str
+            .rfind("\x1b[?25h")
+            .expect("should show cursor after positioning it");
+
+        assert!(
+            final_move < show,
+            "should move cursor to final position before showing it"
+        );
+    }
+
+    #[test]
+    fn blit_frame_parks_hidden_cursor_at_last_visible_position() {
+        let visible = FrameData {
+            cells: vec![make_cell("A", 0, 0, 0); 9],
+            width: 3,
+            height: 3,
+            cursor: Some(CursorState {
+                x: 1,
+                y: 1,
+                visible: true,
+            }),
+        };
+        let hidden = FrameData {
+            cells: vec![make_cell("B", 0, 0, 0); 9],
+            width: 3,
+            height: 3,
+            cursor: None,
+        };
+        let mut last_visible_cursor = None;
+        let mut output = Vec::new();
+
+        blit_frame_to_with_cursor_memory(&mut output, &visible, None, &mut last_visible_cursor);
+        output.clear();
+        blit_frame_to_with_cursor_memory(
+            &mut output,
+            &hidden,
+            Some(&visible),
+            &mut last_visible_cursor,
+        );
+
+        let output_str = String::from_utf8(output).unwrap();
+        let park = output_str
+            .rfind("\x1b[2;2H")
+            .expect("should park hidden cursor at last visible position");
+        let hide = output_str
+            .rfind("\x1b[?25l")
+            .expect("should keep hidden cursor hidden");
+        assert!(park < hide, "should park cursor before hiding it");
+    }
+
+    #[test]
+    fn blit_frame_parks_hidden_cursor_at_bottom_right_without_history() {
+        let frame = FrameData {
+            cells: vec![make_cell("A", 0, 0, 0); 6],
+            width: 3,
+            height: 2,
+            cursor: None,
+        };
+        let mut last_visible_cursor = None;
+        let mut output = Vec::new();
+
+        blit_frame_to_with_cursor_memory(&mut output, &frame, None, &mut last_visible_cursor);
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(
+            output_str.contains("\x1b[2;3H\x1b[?25l"),
+            "should park hidden cursor at bottom-right before ending the frame"
         );
     }
 
