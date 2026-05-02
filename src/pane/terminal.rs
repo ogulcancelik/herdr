@@ -33,6 +33,13 @@ pub struct ScrollMetrics {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalCursorState {
+    pub x: u16,
+    pub y: u16,
+    pub visible: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InputState {
     pub alternate_screen: bool,
     pub application_cursor: bool,
@@ -116,6 +123,10 @@ impl PaneTerminal {
 
     pub fn input_state(&self) -> Option<InputState> {
         self.ghostty.input_state()
+    }
+
+    pub fn cursor_state(&self) -> Option<TerminalCursorState> {
+        self.ghostty.cursor_state()
     }
 
     pub fn visible_text(&self) -> String {
@@ -452,6 +463,22 @@ impl GhosttyPaneTerminal {
             mouse_protocol_mode,
             mouse_protocol_encoding,
             mouse_alternate_scroll,
+        })
+    }
+
+    pub fn cursor_state(&self) -> Option<TerminalCursorState> {
+        let mut core = self.core.lock().ok()?;
+        let GhosttyPaneCore {
+            terminal,
+            render_state,
+            ..
+        } = &mut *core;
+        render_state.update(terminal).ok()?;
+        let cursor = render_state.cursor_viewport().ok()??;
+        Some(TerminalCursorState {
+            x: cursor.x,
+            y: cursor.y,
+            visible: render_state.cursor_visible().ok()?,
         })
     }
 

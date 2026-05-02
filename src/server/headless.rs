@@ -33,6 +33,7 @@ use base64::Engine;
 use crate::api;
 use crate::app;
 use crate::app::state::AppState;
+use crate::app::Mode;
 use crate::config;
 use crate::detect::AgentState;
 use crate::events::AppEvent;
@@ -361,9 +362,31 @@ fn render_virtual(
         .expect("render to TestBackend should never fail");
 
     let buffer = terminal.backend().buffer().clone();
-    let cursor = terminal.backend().rendered_cursor();
+    let cursor =
+        focused_terminal_cursor(app_state).or_else(|| terminal.backend().rendered_cursor());
 
     (buffer, cursor)
+}
+
+fn focused_terminal_cursor(app_state: &AppState) -> Option<CursorState> {
+    if app_state.mode != Mode::Terminal {
+        return None;
+    }
+
+    let ws_idx = app_state.active?;
+    let ws = app_state.workspaces.get(ws_idx)?;
+    let info = app_state
+        .view
+        .pane_infos
+        .iter()
+        .find(|info| info.is_focused)?;
+    let rt = ws.runtimes.get(&info.id)?;
+    let cursor = rt.cursor_state(info.inner_rect, true)?;
+    Some(CursorState {
+        x: cursor.x,
+        y: cursor.y,
+        visible: cursor.visible,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2305,6 +2328,40 @@ mod tests {
                 x: pane.inner_rect.x + 4,
                 y: pane.inner_rect.y,
                 visible: true,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn virtual_render_preserves_hidden_focused_pane_cursor_position() {
+        let mut state = AppState::test_new();
+        let mut ws = crate::workspace::Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        ws.tabs[0].runtimes.insert(
+            pane_id,
+            crate::pane::PaneRuntime::test_with_screen_bytes(20, 5, b"left\x1b[?25l"),
+        );
+
+        state.workspaces = vec![ws];
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = crate::app::Mode::Terminal;
+
+        let area = Rect::new(0, 0, 80, 24);
+        let (_buffer, cursor) = render_virtual(&mut state, area, true);
+        let pane = state
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == pane_id)
+            .expect("focused pane info");
+
+        assert_eq!(
+            cursor,
+            Some(CursorState {
+                x: pane.inner_rect.x + 4,
+                y: pane.inner_rect.y,
+                visible: false,
             })
         );
     }

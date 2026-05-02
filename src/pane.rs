@@ -26,7 +26,7 @@ use self::{
 };
 pub use self::{
     state::{EffectiveStateChange, PaneState},
-    terminal::{InputState, ScrollMetrics},
+    terminal::{InputState, ScrollMetrics, TerminalCursorState},
 };
 
 const RELEASE_REACQUIRE_SUPPRESSION: std::time::Duration = std::time::Duration::from_secs(1);
@@ -682,6 +682,21 @@ impl PaneRuntime {
 
     pub fn input_state(&self) -> Option<InputState> {
         self.terminal.input_state()
+    }
+
+    pub fn cursor_state(&self, area: Rect, show_cursor: bool) -> Option<TerminalCursorState> {
+        if !show_cursor {
+            return None;
+        }
+        let cursor = self.terminal.cursor_state()?;
+        if cursor.x >= area.width || cursor.y >= area.height {
+            return None;
+        }
+        Some(TerminalCursorState {
+            x: area.x + cursor.x,
+            y: area.y + cursor.y,
+            visible: cursor.visible,
+        })
     }
 
     pub fn visible_text(&self) -> String {

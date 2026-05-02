@@ -11,6 +11,8 @@
 //!    `CUP` positions during the frame stream.
 //! 5. After writing all changed cells, restore the final cursor visibility
 //!    and position from `frame.cursor`.
+//! 6. After ending synchronized output, repeat the final cursor anchor so
+//!    external IMEs can place candidate windows at the real input position.
 //!
 //! Escape sequences used:
 //! - `CSI H` (CUP) — move cursor to (row, col)
@@ -240,38 +242,62 @@ fn blit_frame_to_with_cursor_memory(
     // cell rather than the focused pane's input position. When the focused pane
     // hides its cursor, still park the host cursor intentionally so IMEs do not
     // anchor to whichever cell happened to be painted last.
-    if let Some(cursor) = &frame.cursor {
-        if cursor.visible {
-            let final_position = clamp_cursor_position(frame, cursor.x, cursor.y);
-            *last_visible_cursor = Some(final_position);
-            write_cursor_position(&mut writer, final_position);
-            // Show cursor only after it is already at the final position.
-            let _ = writer.write_all(b"\x1b[?25h");
-        } else {
-            let fallback = (*last_visible_cursor)
-                .map(|(x, y)| clamp_cursor_position(frame, x, y))
-                .or_else(|| Some(clamp_cursor_position(frame, cursor.x, cursor.y)))
-                .unwrap_or_else(|| default_hidden_cursor_position(frame));
-            write_cursor_position(&mut writer, fallback);
-            let _ = writer.write_all(b"\x1b[?25l");
-        }
-    } else {
-        let fallback = (*last_visible_cursor)
-            .map(|(x, y)| clamp_cursor_position(frame, x, y))
-            .unwrap_or_else(|| default_hidden_cursor_position(frame));
-        write_cursor_position(&mut writer, fallback);
-        let _ = writer.write_all(b"\x1b[?25l");
-    }
+    let host_cursor = resolve_host_cursor_state(frame, last_visible_cursor);
+    write_host_cursor_state(&mut writer, host_cursor);
 
     // End the synchronized output block immediately after the final cursor
-    // state is emitted, then flush so supporting terminals can present it.
+    // state is emitted so supporting terminals can present the frame atomically.
     let _ = writer.write_all(b"\x1b[?2026l");
+
+    // Some native IMEs track candidate-window placement from normal terminal
+    // cursor updates and may not observe cursor moves emitted inside synchronized
+    // output. Re-emit only the resolved final cursor anchor after the sync block;
+    // intermediate paint cursor positions remain hidden. When the focused pane
+    // explicitly reports a hidden cursor, expose that anchor to the host terminal
+    // so IMEs can attach to it instead of an older visible cursor position.
+    write_ime_anchor_cursor_state(&mut writer, host_cursor, frame.cursor.is_some());
     let _ = writer.flush();
 }
 
 /// Writes all cells in the frame (full redraw).
 fn cell_width(cell: &CellData) -> usize {
     cell.symbol.width()
+}
+
+#[derive(Clone, Copy)]
+struct HostCursorState {
+    position: (u16, u16),
+    visible: bool,
+}
+
+fn resolve_host_cursor_state(
+    frame: &FrameData,
+    last_visible_cursor: &mut Option<(u16, u16)>,
+) -> HostCursorState {
+    if let Some(cursor) = &frame.cursor {
+        if cursor.visible {
+            let position = clamp_cursor_position(frame, cursor.x, cursor.y);
+            *last_visible_cursor = Some(position);
+            return HostCursorState {
+                position,
+                visible: true,
+            };
+        }
+
+        let position = clamp_cursor_position(frame, cursor.x, cursor.y);
+        return HostCursorState {
+            position,
+            visible: false,
+        };
+    }
+
+    let position = (*last_visible_cursor)
+        .map(|(x, y)| clamp_cursor_position(frame, x, y))
+        .unwrap_or_else(|| default_hidden_cursor_position(frame));
+    HostCursorState {
+        position,
+        visible: false,
+    }
 }
 
 fn default_hidden_cursor_position(frame: &FrameData) -> (u16, u16) {
@@ -291,6 +317,29 @@ fn clamp_cursor_position(frame: &FrameData, x: u16, y: u16) -> (u16, u16) {
 fn write_cursor_position(writer: &mut impl Write, (x, y): (u16, u16)) {
     // CUP: move cursor to (row+1, col+1) — 1-based.
     let _ = write!(writer, "\x1b[{};{}H", y + 1, x + 1);
+}
+
+fn write_host_cursor_state(writer: &mut impl Write, cursor: HostCursorState) {
+    write_cursor_position(writer, cursor.position);
+    if cursor.visible {
+        // Show cursor only after it is already at the final position.
+        let _ = writer.write_all(b"\x1b[?25h");
+    } else {
+        let _ = writer.write_all(b"\x1b[?25l");
+    }
+}
+
+fn write_ime_anchor_cursor_state(
+    writer: &mut impl Write,
+    cursor: HostCursorState,
+    expose_hidden_anchor: bool,
+) {
+    write_cursor_position(writer, cursor.position);
+    if cursor.visible || expose_hidden_anchor {
+        let _ = writer.write_all(b"\x1b[?25h");
+    } else {
+        let _ = writer.write_all(b"\x1b[?25l");
+    }
 }
 
 fn write_all_cells(writer: &mut impl Write, frame: &FrameData) {
@@ -555,9 +604,84 @@ mod tests {
             output_str.starts_with("\x1b[?2026h"),
             "should begin synchronized output before frame writes"
         );
+        let sync_end = output_str
+            .find("\x1b[?2026l")
+            .expect("should end synchronized output after frame writes");
         assert!(
-            output_str.ends_with("\x1b[?2026l"),
-            "should end synchronized output after final cursor state"
+            sync_end + "\x1b[?2026l".len() < output_str.len(),
+            "should end synchronized output before trailing IME cursor update"
+        );
+    }
+
+    #[test]
+    fn blit_frame_repeats_final_cursor_state_after_synchronized_output() {
+        let frame = FrameData {
+            cells: vec![make_cell("A", 0, 0, 0); 9],
+            width: 3,
+            height: 3,
+            cursor: Some(CursorState {
+                x: 2,
+                y: 1,
+                visible: true,
+            }),
+        };
+
+        let mut output = Vec::new();
+        blit_frame_to(&mut output, &frame, None);
+
+        let output_str = String::from_utf8(output).unwrap();
+        let sync_end = output_str
+            .find("\x1b[?2026l")
+            .expect("should end synchronized output");
+        let trailing_cursor = &output_str[sync_end + "\x1b[?2026l".len()..];
+        assert_eq!(
+            trailing_cursor, "\x1b[2;3H\x1b[?25h",
+            "should expose only the final cursor state after synchronized output"
+        );
+    }
+
+    #[test]
+    fn blit_frame_exposes_explicit_hidden_cursor_anchor_after_synchronized_output() {
+        let visible = FrameData {
+            cells: vec![make_cell("A", 0, 0, 0); 9],
+            width: 3,
+            height: 3,
+            cursor: Some(CursorState {
+                x: 0,
+                y: 0,
+                visible: true,
+            }),
+        };
+        let hidden = FrameData {
+            cells: vec![make_cell("B", 0, 0, 0); 9],
+            width: 3,
+            height: 3,
+            cursor: Some(CursorState {
+                x: 2,
+                y: 1,
+                visible: false,
+            }),
+        };
+        let mut last_visible_cursor = None;
+        let mut output = Vec::new();
+
+        blit_frame_to_with_cursor_memory(&mut output, &visible, None, &mut last_visible_cursor);
+        output.clear();
+        blit_frame_to_with_cursor_memory(
+            &mut output,
+            &hidden,
+            Some(&visible),
+            &mut last_visible_cursor,
+        );
+
+        let output_str = String::from_utf8(output).unwrap();
+        let sync_end = output_str
+            .find("\x1b[?2026l")
+            .expect("should end synchronized output");
+        let trailing_cursor = &output_str[sync_end + "\x1b[?2026l".len()..];
+        assert_eq!(
+            trailing_cursor, "\x1b[2;3H\x1b[?25h",
+            "should expose the explicit hidden cursor position for IME anchoring"
         );
     }
 
