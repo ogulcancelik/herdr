@@ -140,7 +140,7 @@ focus_pane_right = "alt+l"
 
 ## theme
 
-herdr ships with 9 built-in color themes. set one in config:
+herdr ships with 10 built-in color themes. set one in config:
 
 ```toml
 [theme]
@@ -160,6 +160,7 @@ name = "tokyo-night"
 | `solarized` | ethan schoonover's classic |
 | `kanagawa` | hokusai-inspired |
 | `rose-pine` | muted, elegant |
+| `vesper` | high-contrast monochrome with peach and mint accents |
 
 theme names are flexible: `tokyo-night`, `tokyonight`, and `tokyo_night` all work.
 

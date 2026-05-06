@@ -250,6 +250,28 @@ impl Palette {
         }
     }
 
+    /// Vesper — minimal high-contrast monochrome with peach and mint accents.
+    pub fn vesper() -> Self {
+        Self {
+            accent: Color::Rgb(255, 199, 153),
+            panel_bg: Color::Rgb(26, 26, 26),
+            surface0: Color::Rgb(35, 35, 35),
+            surface1: Color::Rgb(40, 40, 40),
+            surface_dim: Color::Rgb(16, 16, 16),
+            overlay0: Color::Rgb(92, 92, 92),
+            overlay1: Color::Rgb(126, 126, 126),
+            text: Color::Rgb(255, 255, 255),
+            subtext0: Color::Rgb(160, 160, 160),
+            mauve: Color::Rgb(255, 209, 168),
+            green: Color::Rgb(153, 255, 228),
+            yellow: Color::Rgb(255, 199, 153),
+            red: Color::Rgb(255, 128, 128),
+            blue: Color::Rgb(176, 176, 176),
+            teal: Color::Rgb(102, 221, 204),
+            peach: Color::Rgb(255, 199, 153),
+        }
+    }
+
     /// Resolve a theme by name. Returns None for unknown names.
     pub fn from_name(name: &str) -> Option<Self> {
         match name.to_lowercase().replace([' ', '_'], "-").as_str() {
@@ -262,6 +284,7 @@ impl Palette {
             "solarized" | "solarized-dark" => Some(Self::solarized()),
             "kanagawa" => Some(Self::kanagawa()),
             "rose-pine" | "rosepine" => Some(Self::rose_pine()),
+            "vesper" => Some(Self::vesper()),
             _ => None,
         }
     }
@@ -414,6 +437,7 @@ pub const THEME_NAMES: &[&str] = &[
     "solarized",
     "kanagawa",
     "rose-pine",
+    "vesper",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
