@@ -289,6 +289,7 @@ per-agent values:
 
 available agent keys:
 - `pi`
+- `omp`
 - `claude`
 - `codex`
 - `gemini`

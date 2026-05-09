@@ -20,6 +20,7 @@ pub enum AgentState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Agent {
     Pi,
+    Omp,
     Claude,
     Codex,
     Gemini,
@@ -35,6 +36,7 @@ pub enum Agent {
 pub fn agent_label(agent: Agent) -> &'static str {
     match agent {
         Agent::Pi => "pi",
+        Agent::Omp => "omp",
         Agent::Claude => "claude",
         Agent::Codex => "codex",
         Agent::Gemini => "gemini",
@@ -52,6 +54,7 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
     let name = agent.trim().to_lowercase();
     match name.as_str() {
         "pi" => Some(Agent::Pi),
+        "omp" | "oh-my-pi" | "oh_my_pi" => Some(Agent::Omp),
         "claude" | "claude-code" => Some(Agent::Claude),
         "codex" => Some(Agent::Codex),
         "gemini" => Some(Agent::Gemini),
@@ -73,6 +76,7 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
     // Match against known binary names
     match name.as_str() {
         "pi" => Some(Agent::Pi),
+        "omp" => Some(Agent::Omp),
         "claude" | "claude-code" => Some(Agent::Claude),
         "codex" => Some(Agent::Codex),
         "gemini" => Some(Agent::Gemini),
@@ -114,6 +118,7 @@ pub fn detect_state(agent: Option<Agent>, screen_content: &str) -> AgentState {
     };
     match agent {
         Agent::Pi => detect_pi(screen_content),
+        Agent::Omp => detect_opencode(screen_content),
         Agent::Claude => detect_claude(screen_content),
         Agent::Codex => detect_codex(screen_content),
         Agent::Gemini => detect_gemini(screen_content),
@@ -661,6 +666,7 @@ mod tests {
     #[test]
     fn identify_known_agents() {
         assert_eq!(identify_agent("pi"), Some(Agent::Pi));
+        assert_eq!(identify_agent("omp"), Some(Agent::Omp));
         assert_eq!(identify_agent("claude"), Some(Agent::Claude));
         assert_eq!(identify_agent("claude-code"), Some(Agent::Claude));
         assert_eq!(identify_agent("codex"), Some(Agent::Codex));
@@ -675,6 +681,7 @@ mod tests {
     #[test]
     fn parse_known_agent_labels() {
         assert_eq!(parse_agent_label("pi"), Some(Agent::Pi));
+        assert_eq!(parse_agent_label("omp"), Some(Agent::Omp));
         assert_eq!(parse_agent_label("claude"), Some(Agent::Claude));
         assert_eq!(parse_agent_label("copilot"), Some(Agent::GithubCopilot));
         assert_eq!(
@@ -687,6 +694,7 @@ mod tests {
     #[test]
     fn agent_labels_use_display_names() {
         assert_eq!(agent_label(Agent::Pi), "pi");
+        assert_eq!(agent_label(Agent::Omp), "omp");
         assert_eq!(agent_label(Agent::GithubCopilot), "copilot");
         assert_eq!(agent_label(Agent::OpenCode), "opencode");
     }
@@ -1040,6 +1048,19 @@ mod tests {
             detect_opencode("△ Permission required"),
             AgentState::Blocked
         );
+    }
+
+    #[test]
+    fn omp_uses_opencode_style_terminal_heuristics() {
+        assert_eq!(
+            detect_state(Some(Agent::Omp), "running tool\nesc to interrupt"),
+            AgentState::Working
+        );
+        assert_eq!(
+            detect_state(Some(Agent::Omp), "△ Permission required"),
+            AgentState::Blocked
+        );
+        assert_eq!(detect_state(Some(Agent::Omp), "> "), AgentState::Idle);
     }
 
     #[test]
