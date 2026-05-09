@@ -6,10 +6,11 @@ if you are teaching an agent that is already running inside herdr, start with [`
 
 ## choose your integration layer
 
-there are three practical ways to integrate with herdr:
+there are four practical ways to integrate with herdr:
 
 - **agent skill** — [`SKILL.md`](./SKILL.md). best when an agent inside herdr just needs to learn the workflow quickly.
 - **cli wrappers** — `herdr server stop`, `herdr workspace ...`, `herdr tab ...`, `herdr pane ...`, `herdr wait ...`. best for shell scripts and simple orchestration.
+- **TypeScript SDK** — [`sdk/typescript`](./sdk/typescript). best for Node.js tools that want typed request/result/event shapes without shelling out.
 - **raw socket api** — best when you want direct request/response control or long-lived event subscriptions.
 
 these layers are intentionally stacked on top of the same control surface.

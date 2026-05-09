@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <a href="https://herdr.dev">herdr.dev</a> · <a href="#install">install</a> · <a href="#quick-start">quick start</a> · <a href="#supported-agents">supported agents</a> · <a href="./INTEGRATIONS.md">integrations</a> · <a href="./CONFIGURATION.md">configuration</a> · <a href="./SOCKET_API.md">socket api</a>
+  <a href="https://herdr.dev">herdr.dev</a> · <a href="#install">install</a> · <a href="#quick-start">quick start</a> · <a href="#supported-agents">supported agents</a> · <a href="./INTEGRATIONS.md">integrations</a> · <a href="./CONFIGURATION.md">configuration</a> · <a href="./SOCKET_API.md">socket api</a> · <a href="./sdk/typescript">typescript sdk</a>
 </p>
 
 ---
@@ -141,7 +141,7 @@ herdr pane read 1-2 --source recent --lines 50
 herdr pane read 1-2 --source visible --ansi
 ```
 
-full reference: [`SOCKET_API.md`](./SOCKET_API.md) and [`SKILL.md`](./SKILL.md).
+full reference: [`SOCKET_API.md`](./SOCKET_API.md), [`SKILL.md`](./SKILL.md), and the [`TypeScript SDK`](./sdk/typescript).
 
 ## supported agents
 

@@ -5,6 +5,8 @@ __pycache__/
 *.swo
 *~
 .DS_Store
+sdk/typescript/dist/
+sdk/typescript/node_modules/
 
 /docs
 
