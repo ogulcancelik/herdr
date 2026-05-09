@@ -788,12 +788,30 @@ fn render_agent_detail(app: &AppState, frame: &mut Frame, area: Rect) {
             break;
         }
 
+        // Check if this agent entry corresponds to the active session
+        let is_active = app.active.map_or(false, |active_ws_idx| {
+            detail.ws_idx == active_ws_idx
+                && detail.tab_idx == app.workspaces[detail.ws_idx].active_tab_index()
+                && app.workspaces[detail.ws_idx]
+                    .active_tab()
+                    .map(|tab| tab.layout.focused())
+                    == Some(detail.pane_id)
+        });
+
         let (icon, icon_style) = agent_icon(detail.state, detail.seen, app.spinner_tick, p);
         let label_color = state_label_color(detail.state, detail.seen, p);
         let label = state_label(detail.state, detail.seen);
 
-        let name_style = Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD);
-        let status_style = Style::default().fg(label_color).add_modifier(Modifier::DIM);
+        let name_style = if is_active {
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
+        };
+        let status_style = if is_active {
+            Style::default().fg(label_color)
+        } else {
+            Style::default().fg(label_color).add_modifier(Modifier::DIM)
+        };
         let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
 
         let primary_label =
@@ -809,6 +827,19 @@ fn render_agent_detail(app: &AppState, frame: &mut Frame, area: Rect) {
             Rect::new(body.x, row_y, body.width, 1),
         );
         row_y += 1;
+
+        // Apply background highlighting for active agent (covering both name and status lines)
+        if is_active {
+            let buf = frame.buffer_mut();
+            // Highlight name line
+            for x in body.x..body.x + body.width {
+                buf[(x, row_y - 1)].set_style(Style::default().bg(p.surface_dim));
+            }
+            // Highlight status line
+            for x in body.x..body.x + body.width {
+                buf[(x, row_y)].set_style(Style::default().bg(p.surface_dim));
+            }
+        }
 
         let mut status_spans = vec![
             Span::styled("   ", Style::default()),
