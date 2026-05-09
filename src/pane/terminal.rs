@@ -491,6 +491,25 @@ impl GhosttyPaneTerminal {
         key: crate::input::TerminalKey,
         protocol: crate::input::KeyboardProtocol,
     ) -> Vec<u8> {
+        // Ghostty's default `shift+enter=text:\x1b\r` keybind translates Shift+Enter
+        // into the literal bytes ESC+CR before they reach our stdin. Crossterm parses
+        // those bytes as Alt+Char('\r') (occasionally Alt+Enter depending on version).
+        // Re-encoding through libghostty or herdr's CSI-u encoder against the pane's
+        // mode would emit something like `\x1b[13;3:1u` (kitty Alt+Enter), which TUIs
+        // like pi do not treat as a newline. Forward the original ESC+CR bytes so the
+        // pane sees exactly what raw Ghostty would have delivered.
+        if matches!(
+            key.kind,
+            crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat
+        ) && key.modifiers == crossterm::event::KeyModifiers::ALT
+            && matches!(
+                key.code,
+                crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Char('\r')
+            )
+        {
+            return b"\x1b\r".to_vec();
+        }
+
         if ghostty_prefers_herdr_text_encoding(key) {
             return crate::input::encode_terminal_key(key, protocol);
         }
@@ -1260,6 +1279,34 @@ mod tests {
             crate::input::KeyboardProtocol::Legacy,
         );
         assert_eq!(after, b"\x1bOA");
+    }
+
+    #[test]
+    fn alt_enter_passes_through_as_esc_cr_regardless_of_pane_kitty_mode() {
+        // Ghostty's default `shift+enter=text:\x1b\r` keybind makes the host
+        // terminal send ESC+CR for Shift+Enter. Crossterm parses those bytes as
+        // either Alt+Enter or Alt+Char('\r'); both must produce a literal ESC+CR
+        // forward, even when the pane has pushed kitty keyboard mode, so TUIs
+        // like pi.dev that rely on the raw bytes for newline continue to work.
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.write(b"\x1b[>7u");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        for key in [
+            crate::input::TerminalKey::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::ALT,
+            ),
+            crate::input::TerminalKey::new(
+                crossterm::event::KeyCode::Char('\r'),
+                crossterm::event::KeyModifiers::ALT,
+            ),
+        ] {
+            let encoded =
+                pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Kitty { flags: 7 });
+            assert_eq!(encoded, b"\x1b\r", "key={:?}", key);
+        }
     }
 
     #[test]

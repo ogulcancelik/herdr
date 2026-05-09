@@ -69,17 +69,22 @@ impl App {
         let protocol = rt.keyboard_protocol();
         let bytes = rt.encode_terminal_key(key);
 
-        if matches!(key_event.code, KeyCode::Esc)
+        if matches!(key_event.code, KeyCode::Esc | KeyCode::Enter)
             || key_event
                 .modifiers
                 .contains(crossterm::event::KeyModifiers::ALT)
         {
+            let encoded_hex = bytes
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join(" ");
             debug!(
                 code = ?key_event.code,
                 modifiers = ?key_event.modifiers,
                 kind = ?key_event.kind,
                 protocol = ?protocol,
-                encoded = ?bytes,
+                encoded_hex = %encoded_hex,
                 "forwarding potentially-ambiguous terminal key to pane"
             );
         }
