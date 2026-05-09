@@ -789,18 +789,17 @@ fn render_agent_detail(app: &AppState, frame: &mut Frame, area: Rect) {
         }
 
         // Check if this agent entry corresponds to the active session
-        let is_active = app.active.map_or(false, |active_ws_idx| {
-            detail.ws_idx == active_ws_idx
-                && detail.tab_idx == app.workspaces[detail.ws_idx].active_tab_index()
-                && app.workspaces[detail.ws_idx]
-                    .active_tab()
-                    .map(|tab| tab.layout.focused())
-                    == Some(detail.pane_id)
-        });
+        let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
 
         let (icon, icon_style) = agent_icon(detail.state, detail.seen, app.spinner_tick, p);
         let label_color = state_label_color(detail.state, detail.seen, p);
         let label = state_label(detail.state, detail.seen);
+
+        let row_style = if is_active {
+            Style::default().bg(p.surface_dim)
+        } else {
+            Style::default()
+        };
 
         let name_style = if is_active {
             Style::default().fg(p.text).add_modifier(Modifier::BOLD)
@@ -823,23 +822,10 @@ fn render_agent_detail(app: &AppState, frame: &mut Frame, area: Rect) {
             Span::styled(primary_label, name_style),
         ]);
         frame.render_widget(
-            Paragraph::new(name_line),
+            Paragraph::new(name_line).style(row_style),
             Rect::new(body.x, row_y, body.width, 1),
         );
         row_y += 1;
-
-        // Apply background highlighting for active agent (covering both name and status lines)
-        if is_active {
-            let buf = frame.buffer_mut();
-            // Highlight name line
-            for x in body.x..body.x + body.width {
-                buf[(x, row_y - 1)].set_style(Style::default().bg(p.surface_dim));
-            }
-            // Highlight status line
-            for x in body.x..body.x + body.width {
-                buf[(x, row_y)].set_style(Style::default().bg(p.surface_dim));
-            }
-        }
 
         let mut status_spans = vec![
             Span::styled("   ", Style::default()),
@@ -850,7 +836,7 @@ fn render_agent_detail(app: &AppState, frame: &mut Frame, area: Rect) {
             status_spans.push(Span::styled(agent_label, agent_style));
         }
         frame.render_widget(
-            Paragraph::new(Line::from(status_spans)),
+            Paragraph::new(Line::from(status_spans)).style(row_style),
             Rect::new(body.x, row_y, body.width, 1),
         );
         row_y += 1;

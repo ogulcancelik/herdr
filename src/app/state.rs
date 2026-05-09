@@ -735,6 +735,29 @@ impl AppState {
             (24, 80)
         }
     }
+
+    /// Returns true when the given (workspace, tab, pane) refers to the
+    /// currently focused pane in the active workspace's active tab.
+    pub fn is_active_pane(
+        &self,
+        ws_idx: usize,
+        tab_idx: usize,
+        pane_id: crate::layout::PaneId,
+    ) -> bool {
+        let Some(active_ws_idx) = self.active else {
+            return false;
+        };
+        if ws_idx != active_ws_idx {
+            return false;
+        }
+        let Some(ws) = self.workspaces.get(ws_idx) else {
+            return false;
+        };
+        if tab_idx != ws.active_tab_index() {
+            return false;
+        }
+        ws.active_tab().map(|tab| tab.layout.focused()) == Some(pane_id)
+    }
 }
 
 pub fn key_matches(
