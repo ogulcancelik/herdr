@@ -607,7 +607,25 @@ fn normalized_process_name(process: &crate::platform::ForegroundProcess) -> Stri
         }
     }
 
+    if identify_agent(effective).is_some() {
+        return effective.to_string();
+    }
+
+    if let Some(cmdline_name) = process
+        .cmdline
+        .as_deref()
+        .and_then(cmdline_executable_name)
+        .filter(|name| identify_agent(name).is_some())
+    {
+        return cmdline_name.to_string();
+    }
+
     effective.to_string()
+}
+
+fn cmdline_executable_name(cmdline: &str) -> Option<&str> {
+    let executable = cmdline.split_whitespace().next()?;
+    std::path::Path::new(executable).file_name()?.to_str()
 }
 
 fn wrapped_agent_name_from_cmdline(cmdline: &str) -> Option<String> {
@@ -724,6 +742,24 @@ mod tests {
                     cmdline: Some("bash".to_string()),
                 },
             ],
+        };
+
+        assert_eq!(
+            identify_agent_in_job(&job),
+            Some((Agent::Codex, "codex".to_string()))
+        );
+    }
+
+    #[test]
+    fn identify_agent_in_job_detects_nix_wrapped_codex_from_argv0() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 123,
+            processes: vec![crate::platform::ForegroundProcess {
+                pid: 1,
+                name: ".codex-wrapped".to_string(),
+                argv0: None,
+                cmdline: Some("/etc/profiles/per-user/user/bin/codex".to_string()),
+            }],
         };
 
         assert_eq!(
