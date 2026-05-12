@@ -747,12 +747,50 @@ fn run_client_process(local_socket: &Path, reattach_command: &str) -> io::Result
 }
 
 fn local_forward_socket_path(target: &str, session_name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "herdr-remote-{}-{}-{}.sock",
-        std::process::id(),
-        sanitize_path_component(target),
-        sanitize_path_component(session_name)
-    ))
+    let pid = std::process::id();
+    let target_clean = sanitize_path_component(target);
+    let session_clean = sanitize_path_component(session_name);
+
+    let tmpdir = std::env::temp_dir();
+    let readable = tmpdir.join(format!(
+        "herdr-remote-{pid}-{target_clean}-{session_clean}.sock"
+    ));
+    if fits_unix_socket_path(&readable) {
+        return readable;
+    }
+
+    // macOS' per-user TMPDIR (~49 chars under /var/folders/...) can push the
+    // readable name past sun_path's 104-byte ceiling. Fall back to a hashed
+    // short name in TMPDIR, then to /tmp as a last resort when TMPDIR itself
+    // is longer than the budget. The hash covers the full unsanitized
+    // target/session so uniqueness does not depend on the prefix truncation;
+    // the prefix is kept only for debuggability.
+    let target_prefix: String = target_clean.chars().take(8).collect();
+    let hash = short_socket_hash(target, session_name);
+    let short_name = format!("herdr-r-{pid}-{target_prefix}-{hash}.sock");
+    let short_in_tmp = tmpdir.join(&short_name);
+    if fits_unix_socket_path(&short_in_tmp) {
+        return short_in_tmp;
+    }
+    PathBuf::from("/tmp").join(short_name)
+}
+
+fn fits_unix_socket_path(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    // sun_path is byte-limited: 104 bytes on macOS, 108 on Linux. Reserve
+    // 1 byte for the trailing NUL and use the smaller cap for portability.
+    const MAX: usize = 103;
+    path.as_os_str().as_bytes().len() <= MAX
+}
+
+fn short_socket_hash(target: &str, session: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    target.hash(&mut hasher);
+    0u8.hash(&mut hasher);
+    session.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 fn sanitize_path_component(input: &str) -> String {
@@ -922,6 +960,90 @@ mod tests {
             .expect("override source");
         assert_eq!(source.path, PathBuf::from("/tmp/herdr-aarch64"));
         assert!(source.temporary_dir.is_none());
+    }
+
+    fn remote_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    fn socket_path_byte_len(path: &Path) -> usize {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str().as_bytes().len()
+    }
+
+    #[test]
+    fn local_forward_socket_path_uses_readable_name_when_it_fits() {
+        let _guard = remote_env_lock().lock().unwrap();
+        // Short target + session leave plenty of room — keep the human-
+        // readable form so the socket path stays grep-friendly.
+        let path = local_forward_socket_path("dev", "default");
+        let filename = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            filename.starts_with("herdr-remote-"),
+            "expected readable name, got {filename}"
+        );
+        assert!(filename.contains("-dev-default."), "got {filename}");
+        assert!(
+            fits_unix_socket_path(&path),
+            "socket path too long: {} ({} bytes)",
+            path.display(),
+            socket_path_byte_len(&path)
+        );
+    }
+
+    #[test]
+    fn local_forward_socket_path_fits_in_sun_path() {
+        let _guard = remote_env_lock().lock().unwrap();
+        // Worst case for the readable form: macOS-style 49-char TMPDIR +
+        // max-length sanitized components. Should fall back to the hashed
+        // short name, which fits under TMPDIR.
+        let target = "longish-host.example.com";
+        let session = "a-fairly-long-session-name-here";
+        let path = local_forward_socket_path(target, session);
+        assert!(
+            fits_unix_socket_path(&path),
+            "socket path too long for sun_path: {} ({} bytes)",
+            path.display(),
+            socket_path_byte_len(&path)
+        );
+    }
+
+    #[test]
+    fn local_forward_socket_path_falls_back_to_tmp_when_dir_is_long() {
+        let _guard = remote_env_lock().lock().unwrap();
+        // Force a TMPDIR long enough that even the hashed short name cannot
+        // fit inside it. The fallback should drop to /tmp.
+        let prior = std::env::var_os("TMPDIR");
+        let long_dir = std::env::temp_dir().join("a".repeat(80));
+        let _ = fs::create_dir_all(&long_dir);
+        std::env::set_var("TMPDIR", &long_dir);
+
+        let path = local_forward_socket_path("longish-host.example.com", "default");
+        let fits = fits_unix_socket_path(&path);
+        let parent = path.parent().map(Path::to_path_buf);
+        let filename = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        match prior {
+            Some(v) => std::env::set_var("TMPDIR", v),
+            None => std::env::remove_var("TMPDIR"),
+        }
+        let _ = fs::remove_dir_all(&long_dir);
+
+        assert!(fits, "fallback path still overflows: {}", path.display());
+        assert_eq!(parent.as_deref(), Some(Path::new("/tmp")));
+        assert!(
+            filename.starts_with("herdr-r-"),
+            "expected hashed fallback, got {filename}"
+        );
     }
 
     #[test]
