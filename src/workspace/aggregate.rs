@@ -23,6 +23,17 @@ impl Tab {
             .any(|pane| pane.state == AgentState::Working)
     }
 
+    /// Highest-priority pane state in this tab, used to drive the tab-strip
+    /// visual indicator. Returns `None` if no pane warrants an indicator
+    /// (all panes Unknown or Idle-seen).
+    pub fn attention_state(&self) -> Option<(AgentState, bool)> {
+        self.panes
+            .values()
+            .map(|pane| (pane.state, pane.seen))
+            .max_by_key(|(state, seen)| pane_attention_priority(*state, *seen))
+            .filter(|(state, seen)| pane_attention_priority(*state, *seen) >= 2)
+    }
+
     pub fn pane_details(&self) -> Vec<PaneDetail> {
         self.layout
             .pane_ids()
@@ -47,9 +58,10 @@ impl Tab {
 
 fn pane_attention_priority(state: AgentState, seen: bool) -> u8 {
     match (state, seen) {
-        (AgentState::Blocked, _) => 4,
-        (AgentState::Idle, false) => 3,
-        (AgentState::Working, _) => 2,
+        (AgentState::Blocked, _) => 5,
+        (AgentState::Idle, false) => 4,
+        (AgentState::Working, _) => 3,
+        (AgentState::Scheduled, _) => 2,
         (AgentState::Idle, true) => 1,
         (AgentState::Unknown, _) => 0,
     }
@@ -115,6 +127,74 @@ mod tests {
         let (state, seen) = ws.aggregate_state();
         assert_eq!(state, AgentState::Working);
         assert!(seen);
+    }
+
+    #[test]
+    fn aggregate_state_working_beats_scheduled() {
+        let mut ws = Workspace::test_new("test");
+        let id2 = ws.test_split(Direction::Horizontal);
+        let root_id = ws.tabs[0]
+            .panes
+            .keys()
+            .find(|id| **id != id2)
+            .copied()
+            .unwrap();
+        ws.tabs[0].panes.get_mut(&root_id).unwrap().state = AgentState::Scheduled;
+        ws.tabs[0].panes.get_mut(&id2).unwrap().state = AgentState::Working;
+
+        let (state, _) = ws.aggregate_state();
+        assert_eq!(state, AgentState::Working);
+    }
+
+    #[test]
+    fn aggregate_state_scheduled_beats_idle_seen() {
+        let mut ws = Workspace::test_new("test");
+        let id2 = ws.test_split(Direction::Horizontal);
+        let root_id = ws.tabs[0]
+            .panes
+            .keys()
+            .find(|id| **id != id2)
+            .copied()
+            .unwrap();
+        ws.tabs[0].panes.get_mut(&root_id).unwrap().state = AgentState::Idle;
+        ws.tabs[0].panes.get_mut(&id2).unwrap().state = AgentState::Scheduled;
+
+        let (state, _) = ws.aggregate_state();
+        assert_eq!(state, AgentState::Scheduled);
+    }
+
+    #[test]
+    fn attention_state_surfaces_scheduled() {
+        let mut ws = Workspace::test_new("test");
+        let root_id = ws.tabs[0].root_pane;
+        ws.tabs[0].panes.get_mut(&root_id).unwrap().state = AgentState::Scheduled;
+
+        let attention = ws.tabs[0].attention_state();
+        assert_eq!(attention, Some((AgentState::Scheduled, true)));
+    }
+
+    #[test]
+    fn attention_state_none_for_idle_seen_tab() {
+        let ws = Workspace::test_new("test");
+        // Default pane state is Unknown + seen=true; nothing to surface.
+        assert_eq!(ws.tabs[0].attention_state(), None);
+    }
+
+    #[test]
+    fn attention_state_blocked_beats_scheduled() {
+        let mut ws = Workspace::test_new("test");
+        let id2 = ws.test_split(Direction::Horizontal);
+        let root_id = ws.tabs[0]
+            .panes
+            .keys()
+            .find(|id| **id != id2)
+            .copied()
+            .unwrap();
+        ws.tabs[0].panes.get_mut(&root_id).unwrap().state = AgentState::Scheduled;
+        ws.tabs[0].panes.get_mut(&id2).unwrap().state = AgentState::Blocked;
+
+        let attention = ws.tabs[0].attention_state();
+        assert_eq!(attention, Some((AgentState::Blocked, true)));
     }
 
     #[test]

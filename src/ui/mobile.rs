@@ -820,11 +820,13 @@ fn agent_priority_label(app: &AppState) -> String {
     };
     let mut blocked = 0usize;
     let mut working = 0usize;
+    let mut scheduled = 0usize;
     let mut done = 0usize;
     for detail in ws.pane_details() {
         match (detail.state, detail.seen) {
             (AgentState::Blocked, _) => blocked += 1,
             (AgentState::Working, _) => working += 1,
+            (AgentState::Scheduled, _) => scheduled += 1,
             (AgentState::Idle, false) => done += 1,
             _ => {}
         }
@@ -835,6 +837,8 @@ fn agent_priority_label(app: &AppState) -> String {
         format!(" {working} working")
     } else if done > 0 {
         format!(" {done} done")
+    } else if scheduled > 0 {
+        format!(" ⏱ {scheduled} scheduled")
     } else {
         " all idle".to_string()
     }

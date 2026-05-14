@@ -10,6 +10,9 @@ pub enum AgentState {
     Idle,
     /// Agent is actively working/processing.
     Working,
+    /// Agent has armed a background cron / scheduled wakeup and is
+    /// dormant until it fires. Reported only via hook authority.
+    Scheduled,
     /// Agent needs human input and is blocked on a response.
     Blocked,
     /// Plain shell or unrecognized program.

@@ -1,10 +1,12 @@
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
+    text::{Line, Span},
     widgets::Paragraph,
     Frame,
 };
 
+use super::status::state_dot;
 use super::widgets::panel_contrast_fg;
 use crate::app::AppState;
 
@@ -325,8 +327,23 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         };
         let width = rect.width as usize;
         let name = tab.display_name();
-        let text = format!(" {:width$}", name, width = width.saturating_sub(1));
-        frame.render_widget(Paragraph::new(text).style(style), rect);
+        if let Some((state, seen)) = tab.attention_state() {
+            let (dot, base_dot_style) = state_dot(state, seen, p);
+            let dot_style = match style.bg {
+                Some(bg) => base_dot_style.bg(bg),
+                None => base_dot_style,
+            };
+            let name_text = format!("{:width$}", name, width = width.saturating_sub(3));
+            let line = Line::from(vec![
+                Span::styled(" ", style),
+                Span::styled(dot, dot_style),
+                Span::styled(format!(" {name_text}"), style),
+            ]);
+            frame.render_widget(Paragraph::new(line), rect);
+        } else {
+            let text = format!(" {:width$}", name, width = width.saturating_sub(1));
+            frame.render_widget(Paragraph::new(text).style(style), rect);
+        }
     }
 
     if let Some(crate::app::state::DragState {

@@ -1,8 +1,9 @@
 pub(super) fn tab_attention_priority(state: crate::detect::AgentState, seen: bool) -> u8 {
     match (state, seen) {
-        (crate::detect::AgentState::Blocked, _) => 4,
-        (crate::detect::AgentState::Idle, false) => 3,
-        (crate::detect::AgentState::Working, _) => 2,
+        (crate::detect::AgentState::Blocked, _) => 5,
+        (crate::detect::AgentState::Idle, false) => 4,
+        (crate::detect::AgentState::Working, _) => 3,
+        (crate::detect::AgentState::Scheduled, _) => 2,
         (crate::detect::AgentState::Idle, true) => 1,
         (crate::detect::AgentState::Unknown, _) => 0,
     }
@@ -62,6 +63,7 @@ pub(super) fn detect_state_from_api(
     match state {
         crate::api::schema::PaneAgentState::Idle => crate::detect::AgentState::Idle,
         crate::api::schema::PaneAgentState::Working => crate::detect::AgentState::Working,
+        crate::api::schema::PaneAgentState::Scheduled => crate::detect::AgentState::Scheduled,
         crate::api::schema::PaneAgentState::Blocked => crate::detect::AgentState::Blocked,
         crate::api::schema::PaneAgentState::Unknown => crate::detect::AgentState::Unknown,
     }
@@ -75,6 +77,7 @@ pub(super) fn pane_agent_status(
         (crate::detect::AgentState::Idle, false) => crate::api::schema::AgentStatus::Done,
         (crate::detect::AgentState::Idle, true) => crate::api::schema::AgentStatus::Idle,
         (crate::detect::AgentState::Working, _) => crate::api::schema::AgentStatus::Working,
+        (crate::detect::AgentState::Scheduled, _) => crate::api::schema::AgentStatus::Scheduled,
         (crate::detect::AgentState::Blocked, _) => crate::api::schema::AgentStatus::Blocked,
         (crate::detect::AgentState::Unknown, _) => crate::api::schema::AgentStatus::Unknown,
     }

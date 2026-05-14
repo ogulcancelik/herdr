@@ -684,6 +684,7 @@ pub enum EventData {
 pub enum PaneAgentState {
     Idle,
     Working,
+    Scheduled,
     Blocked,
     Unknown,
 }
@@ -693,6 +694,7 @@ pub enum PaneAgentState {
 pub enum AgentStatus {
     Idle,
     Working,
+    Scheduled,
     Blocked,
     Done,
     Unknown,
@@ -741,6 +743,14 @@ mod tests {
         let json = serde_json::to_string(&request).unwrap();
         let restored: Request = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, request);
+    }
+
+    #[test]
+    fn pane_agent_state_scheduled_serializes_as_snake_case() {
+        let json = serde_json::to_string(&PaneAgentState::Scheduled).unwrap();
+        assert_eq!(json, "\"scheduled\"");
+        let restored: PaneAgentState = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, PaneAgentState::Scheduled);
     }
 
     #[test]
