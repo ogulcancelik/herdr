@@ -4,6 +4,7 @@ use super::{KeyboardProtocol, MouseProtocolEncoding, TerminalKey};
 
 const KITTY_FLAG_REPORT_EVENT_TYPES: u16 = 0b0000_0010;
 const KITTY_FLAG_REPORT_ALTERNATE_KEYS: u16 = 0b0000_0100;
+const KITTY_FLAG_REPORT_ALL_KEYS_AS_ESCAPE_CODES: u16 = 0b0000_1000;
 
 /// Encode a key event for a PTY child using the pane's negotiated keyboard protocol.
 #[allow(dead_code)] // exercised in input unit tests; production uses PaneRuntime helpers
@@ -148,6 +149,30 @@ fn try_encode_csi_u(key: &TerminalKey, flags: u16) -> Option<Vec<u8>> {
 
     // Unmodified keys use legacy encoding (more compatible)
     if mods.is_empty() {
+        return None;
+    }
+
+    // Ghostty's default `keybind = shift+enter=text:\n` injects a raw 0x0a
+    // byte on Shift+Enter, bypassing the kitty keyboard protocol entirely.
+    // crossterm reads that byte as Ctrl+J (since 0x0a is historically ^J).
+    // If we re-encode Ctrl+J as CSI-u here, the inner app sees a literal
+    // Ctrl+J event and cannot recover the original Shift+Enter intent.
+    //
+    // Modern Node-based TUIs (pi-tui, Claude Code, Ink, ...) treat a bare
+    // `\n` as Shift+Enter whenever the kitty keyboard protocol is active,
+    // matching what ghostty itself ships out for that keybind. Preserve
+    // that round-trip by emitting the legacy byte for Ctrl+J unless the
+    // inner app has explicitly opted into REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+    // which is the documented signal that it wants every key as CSI-u.
+    //
+    // Limited to Ctrl+J on purpose: this is the only ambiguity Ghostty's
+    // default keybinds create today, and it conflates real Ctrl+J
+    // keystrokes with Shift+Enter (acceptable since Ctrl+J is essentially
+    // never wired as a distinct action in modern TUIs).
+    if matches!(key.code, KeyCode::Char('j'))
+        && mods == KeyModifiers::CONTROL
+        && flags & KITTY_FLAG_REPORT_ALL_KEYS_AS_ESCAPE_CODES == 0
+    {
         return None;
     }
 
@@ -569,6 +594,46 @@ mod tests {
         assert_eq!(
             encode_key(key, KeyboardProtocol::Kitty { flags: 1 }),
             b"\x1b[13;2u"
+        );
+    }
+
+    #[test]
+    fn kitty_ctrl_j_round_trips_as_lf_byte() {
+        // Ghostty's default `keybind = shift+enter=text:\n` injects 0x0a,
+        // which crossterm reads as Ctrl+J. With kitty kbd flags 1|2|4 (the
+        // common pi-tui / Claude Code negotiation), we must NOT re-encode
+        // Ctrl+J as a CSI-u sequence — otherwise inner Node TUIs see
+        // Ctrl+J instead of Shift+Enter. Preserve the legacy byte.
+        let key = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL);
+        assert_eq!(encode_key(key, KeyboardProtocol::Kitty { flags: 1 }), b"\n");
+        assert_eq!(encode_key(key, KeyboardProtocol::Kitty { flags: 7 }), b"\n");
+    }
+
+    #[test]
+    fn kitty_ctrl_j_uses_csi_u_when_report_all_keys_is_set() {
+        // When the inner app explicitly opts into
+        // REPORT_ALL_KEYS_AS_ESCAPE_CODES (flag 8) it asked for every key
+        // as CSI-u, so emit the disambiguated form for Ctrl+J too.
+        let key = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL);
+        let flags = 1 | 2 | 4 | 8; // disambiguate + event types + alt keys + report all
+        assert_eq!(
+            encode_key(key, KeyboardProtocol::Kitty { flags }),
+            b"\x1b[106;5:1u"
+        );
+    }
+
+    #[test]
+    fn kitty_ctrl_shift_j_still_uses_csi_u() {
+        // Ctrl+Shift+J cannot collide with Ghostty's shift+enter keybind
+        // (that sends a bare \n, not a Ctrl+Shift+J event). Keep the
+        // disambiguated CSI-u so apps can bind it as a distinct shortcut.
+        let key = KeyEvent::new(
+            KeyCode::Char('j'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(
+            encode_key(key, KeyboardProtocol::Kitty { flags: 1 }),
+            b"\x1b[106;6u"
         );
     }
 
