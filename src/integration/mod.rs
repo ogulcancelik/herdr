@@ -995,6 +995,11 @@ fn make_executable(path: &Path) -> io::Result<()> {
         perms.set_mode(0o755);
         fs::set_permissions(path, perms)?;
     }
+    #[cfg(not(unix))]
+    {
+        // Windows infers executability from file extension; nothing to do.
+        let _ = path;
+    }
 
     Ok(())
 }

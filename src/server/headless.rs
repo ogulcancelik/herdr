@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::os::unix::net::UnixListener;
+use crate::platform::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -2233,7 +2233,10 @@ fn init_logging() {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+// Headless server tests bind UnixListeners directly and exercise
+// `prepare_socket_path` against live Unix sockets; gate them to unix until
+// the equivalent named-pipe helpers exist.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

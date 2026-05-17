@@ -14,12 +14,15 @@ pub fn app_dir_name() -> &'static str {
 
 pub fn config_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
-        PathBuf::from(dir).join(app_dir_name())
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(format!(".config/{}", app_dir_name()))
-    } else {
-        PathBuf::from(format!("/tmp/{}", app_dir_name()))
+        return PathBuf::from(dir).join(app_dir_name());
     }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home).join(".config").join(app_dir_name());
+    }
+    if let Some(fallback) = crate::platform::host::fallback_config_dir(app_dir_name()) {
+        return fallback;
+    }
+    PathBuf::from(format!("/tmp/{}", app_dir_name()))
 }
 
 impl Config {

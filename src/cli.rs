@@ -1,5 +1,5 @@
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
+use crate::platform::net::UnixStream;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -179,10 +179,7 @@ fn read_server_runtime_status() -> std::io::Result<ServerRuntimeStatus> {
 }
 
 fn server_not_running_error(err: &std::io::Error) -> bool {
-    matches!(
-        err.kind(),
-        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-    )
+    crate::platform::host::is_server_not_running_error(err)
 }
 
 fn option_label(value: Option<&str>) -> &str {

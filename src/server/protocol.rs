@@ -1390,6 +1390,10 @@ mod tests {
 
     // ---- Unix socketpair integration test ----
 
+    // `socketpair` is a Unix-only primitive; the test stays gated to that
+    // family. The framing code itself is exercised by the platform-agnostic
+    // round-trip tests above.
+    #[cfg(unix)]
     #[test]
     fn framing_over_unix_socketpair() {
         use std::os::unix::net::UnixStream;

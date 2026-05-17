@@ -10,6 +10,7 @@
 //! - We avoid duplicating parsing logic in the client
 //! - Raw forwarding preserves all escape sequences faithfully
 
+#[cfg(not(windows))]
 use std::io::{self, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -29,6 +30,7 @@ use super::ClientLoopEvent;
 /// This runs on a dedicated thread because stdin reading is blocking.
 /// The main loop receives the raw bytes and forwards them as
 /// `ClientMessage::Input` to the server.
+#[cfg(not(windows))]
 pub fn stdin_reader_loop(event_tx: mpsc::Sender<ClientLoopEvent>, should_quit: &Arc<AtomicBool>) {
     let stdin = io::stdin();
     let mut reader = stdin.lock();
@@ -72,12 +74,117 @@ pub fn stdin_reader_loop(event_tx: mpsc::Sender<ClientLoopEvent>, should_quit: &
     }
 }
 
+/// Windows console doesn't deliver key/mouse events as byte sequences over
+/// stdin — they come as `INPUT_RECORD` structs and need `ReadConsoleInput`.
+/// crossterm wraps that as `event::read()` returning parsed [`Event`]s, so
+/// we read those, re-encode each event into the same VT escape sequence a
+/// Unix terminal would have produced, and feed it through the existing
+/// byte-oriented client-to-server pipeline.
+#[cfg(windows)]
+pub fn stdin_reader_loop(event_tx: mpsc::Sender<ClientLoopEvent>, should_quit: &Arc<AtomicBool>) {
+    use crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
+
+    use crate::input::{
+        encode_mouse_button, encode_mouse_scroll, encode_terminal_key, KeyboardProtocol,
+        MouseProtocolEncoding, TerminalKey,
+    };
+
+    fn encode_into(batch: &mut Vec<u8>, event: Event) {
+        match event {
+            Event::Key(key) => {
+                if matches!(key.kind, KeyEventKind::Release) {
+                    return;
+                }
+                batch
+                    .extend_from_slice(&encode_terminal_key(TerminalKey::from(key), KeyboardProtocol::Legacy));
+            }
+            Event::Mouse(mouse) => {
+                let encoded = match mouse.kind {
+                    MouseEventKind::Down(_)
+                    | MouseEventKind::Up(_)
+                    | MouseEventKind::Drag(_) => encode_mouse_button(
+                        mouse.kind,
+                        mouse.column,
+                        mouse.row,
+                        mouse.modifiers,
+                        MouseProtocolEncoding::Sgr,
+                    ),
+                    MouseEventKind::ScrollUp
+                    | MouseEventKind::ScrollDown
+                    | MouseEventKind::ScrollLeft
+                    | MouseEventKind::ScrollRight => encode_mouse_scroll(
+                        mouse.kind,
+                        mouse.column,
+                        mouse.row,
+                        mouse.modifiers,
+                        MouseProtocolEncoding::Sgr,
+                    ),
+                    MouseEventKind::Moved => None,
+                };
+                if let Some(bytes) = encoded {
+                    batch.extend_from_slice(&bytes);
+                }
+            }
+            Event::Paste(text) => {
+                batch.extend_from_slice(b"\x1b[200~");
+                batch.extend_from_slice(text.as_bytes());
+                batch.extend_from_slice(b"\x1b[201~");
+            }
+            Event::FocusGained => batch.extend_from_slice(b"\x1b[I"),
+            Event::FocusLost => batch.extend_from_slice(b"\x1b[O"),
+            Event::Resize(_, _) => {}
+        }
+    }
+
+    let mut batch: Vec<u8> = Vec::with_capacity(128);
+
+    while !should_quit.load(Ordering::Acquire) {
+        // Block directly on the console event queue. crossterm wakes us
+        // immediately when a key/mouse/paste arrives, so there's no poll
+        // interval rounding the per-keystroke latency up.
+        let event = match event::read() {
+            Ok(event) => event,
+            Err(err) => {
+                tracing::warn!(?err, "crossterm event::read failed; stopping reader");
+                return;
+            }
+        };
+
+        if should_quit.load(Ordering::Acquire) {
+            return;
+        }
+
+        // Drain any already-queued events into the same batch so a burst
+        // of keystrokes round-trips as one ClientMessage::Input instead of
+        // N separate ones.
+        batch.clear();
+        encode_into(&mut batch, event);
+        while let Ok(true) = event::poll(std::time::Duration::from_secs(0)) {
+            match event::read() {
+                Ok(next) => encode_into(&mut batch, next),
+                Err(_) => break,
+            }
+        }
+
+        if batch.is_empty() {
+            continue;
+        }
+        if event_tx
+            .blocking_send(ClientLoopEvent::StdinInput(std::mem::take(&mut batch)))
+            .is_err()
+        {
+            return;
+        }
+    }
+}
+
 #[cfg(unix)]
 fn stdin_read_ready<R: AsRawFd>(reader: &R, timeout_ms: i32) -> Option<bool> {
     poll_read_ready(reader.as_raw_fd(), timeout_ms)
 }
 
 #[cfg(not(unix))]
+#[allow(dead_code)]
 fn stdin_read_ready<R>(_reader: &R, _timeout_ms: i32) -> Option<bool> {
     None
 }

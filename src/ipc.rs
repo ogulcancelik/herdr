@@ -1,8 +1,8 @@
 use std::fs;
 use std::io;
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixStream;
 use std::path::Path;
+
+use crate::platform::net::UnixStream;
 
 pub(crate) fn prepare_socket_path(
     path: &Path,
@@ -40,7 +40,5 @@ pub(crate) fn prepare_socket_path(
 }
 
 pub(crate) fn restrict_socket_permissions(path: &Path, mode: u32) -> io::Result<()> {
-    let mut permissions = fs::metadata(path)?.permissions();
-    permissions.set_mode(mode);
-    fs::set_permissions(path, permissions)
+    crate::platform::host::restrict_socket_permissions(path, mode)
 }

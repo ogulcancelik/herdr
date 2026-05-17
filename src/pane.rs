@@ -28,6 +28,8 @@ pub use self::{
 use crate::terminal::stabilize_agent_state;
 
 const RELEASE_REACQUIRE_SUPPRESSION: std::time::Duration = std::time::Duration::from_secs(1);
+
+use crate::platform::host::{default_login_shell, shell_command_runner};
 const PANE_TERM: &str = "xterm-256color";
 const PANE_COLORTERM: &str = "truecolor";
 
@@ -271,7 +273,7 @@ impl PaneRuntime {
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
     ) -> std::io::Result<Self> {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let shell = default_login_shell();
         let mut cmd = CommandBuilder::new(&shell);
         cmd.cwd(cwd);
         cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
@@ -304,8 +306,9 @@ impl PaneRuntime {
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
     ) -> std::io::Result<Self> {
-        let mut cmd = CommandBuilder::new("/bin/sh");
-        cmd.arg("-c");
+        let (shell, c_flag) = shell_command_runner();
+        let mut cmd = CommandBuilder::new(shell);
+        cmd.arg(c_flag);
         cmd.arg(command);
         cmd.cwd(cwd);
         cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
@@ -1079,8 +1082,9 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let mut cmd = CommandBuilder::new("/bin/sh");
-        cmd.arg("-c");
+        let (shell, c_flag) = shell_command_runner();
+        let mut cmd = CommandBuilder::new(shell);
+        cmd.arg(c_flag);
         cmd.arg(format!("{command} > '{}'", output_path.display()));
         cmd.cwd(std::env::current_dir().unwrap());
         cmd.env("TERM", "xterm-ghostty");

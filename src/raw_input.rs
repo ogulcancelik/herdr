@@ -1,3 +1,4 @@
+#[cfg(not(windows))]
 use std::io::Read;
 
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -134,6 +135,7 @@ pub(crate) fn events_require_host_surface_redraw(events: &[RawInputEvent]) -> bo
         .any(|event| matches!(event, RawInputEvent::OuterFocusGained))
 }
 
+#[cfg(not(windows))]
 pub fn spawn_input_reader() -> mpsc::Receiver<RawInputEvent> {
     let (tx, rx) = mpsc::channel(256);
 
@@ -162,6 +164,65 @@ pub fn spawn_input_reader() -> mpsc::Receiver<RawInputEvent> {
     rx
 }
 
+/// Windows console doesn't deliver mouse/key events as bytes through
+/// stdin reads — they arrive as `INPUT_RECORD` structures and need
+/// `ReadConsoleInput`. crossterm already abstracts that, so we use its
+/// blocking `event::read()` and translate the parsed events into our
+/// `RawInputEvent` shape instead of running the byte parser.
+#[cfg(windows)]
+pub fn spawn_input_reader() -> mpsc::Receiver<RawInputEvent> {
+    use crossterm::event::{self, Event};
+
+    let (tx, rx) = mpsc::channel(256);
+
+    std::thread::spawn(move || loop {
+        match event::read() {
+            Ok(Event::Key(key)) => {
+                if matches!(key.kind, crossterm::event::KeyEventKind::Release) {
+                    // crossterm reports release events on Windows; the rest
+                    // of the input pipeline only consumes Press/Repeat.
+                    continue;
+                }
+                let mapped = RawInputEvent::Key(TerminalKey::from(key));
+                if tx.blocking_send(mapped).is_err() {
+                    break;
+                }
+            }
+            Ok(Event::Mouse(mouse)) => {
+                if tx.blocking_send(RawInputEvent::Mouse(mouse)).is_err() {
+                    break;
+                }
+            }
+            Ok(Event::Paste(text)) => {
+                if tx.blocking_send(RawInputEvent::Paste(text)).is_err() {
+                    break;
+                }
+            }
+            Ok(Event::FocusGained) => {
+                if tx.blocking_send(RawInputEvent::OuterFocusGained).is_err() {
+                    break;
+                }
+            }
+            Ok(Event::FocusLost) => {
+                if tx.blocking_send(RawInputEvent::OuterFocusLost).is_err() {
+                    break;
+                }
+            }
+            Ok(Event::Resize(_, _)) => {
+                // Resize is handled separately via the render loop's size
+                // query; nothing to forward here.
+            }
+            Err(err) => {
+                tracing::warn!(?err, "crossterm event read failed; stopping reader");
+                break;
+            }
+        }
+    });
+
+    rx
+}
+
+#[allow(dead_code)]
 fn drain_buffer(buffer: &mut Vec<u8>, tx: &mpsc::Sender<RawInputEvent>) {
     for bytes in drain_complete_input_bytes(buffer) {
         let Some((event, _consumed)) = extract_one_event(&bytes) else {
@@ -172,6 +233,7 @@ fn drain_buffer(buffer: &mut Vec<u8>, tx: &mpsc::Sender<RawInputEvent>) {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn drain_complete_input_bytes(buffer: &mut Vec<u8>) -> Vec<Vec<u8>> {
     let mut chunks = Vec::new();
 
@@ -183,6 +245,7 @@ pub(crate) fn drain_complete_input_bytes(buffer: &mut Vec<u8>) -> Vec<Vec<u8>> {
     chunks
 }
 
+#[allow(dead_code)]
 fn flush_incomplete_buffer(buffer: &mut Vec<u8>, tx: &mpsc::Sender<RawInputEvent>) {
     if let Some(bytes) = flush_incomplete_input_bytes(buffer) {
         if bytes.as_slice() == [ESC] {
@@ -200,6 +263,10 @@ fn flush_incomplete_buffer(buffer: &mut Vec<u8>, tx: &mpsc::Sender<RawInputEvent
     }
 }
 
+// Exercised by `client::input` and the byte-reader path on Unix; on Windows the
+// reader uses `crossterm::event::read()` and never sees a partial buffer, so
+// this helper is only reached from the tests below.
+#[allow(dead_code)]
 pub(crate) fn flush_incomplete_input_bytes(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
     if buffer.is_empty() {
         return None;
@@ -246,6 +313,7 @@ fn stdin_read_ready<R: AsRawFd>(_reader: &R, _timeout_ms: i32) -> Option<bool> {
 }
 
 #[cfg(not(unix))]
+#[allow(dead_code)]
 fn stdin_read_ready<R>(_reader: &R, _timeout_ms: i32) -> Option<bool> {
     None
 }
@@ -336,6 +404,9 @@ fn first_complete_utf8_char_len(buffer: &[u8]) -> Option<usize> {
     Some(width)
 }
 
+// Only reachable through `flush_incomplete_input_bytes`; that helper is
+// dead on the Windows event-driven reader, so silence the lint there.
+#[allow(dead_code)]
 fn starts_with_incomplete_utf8_char(buffer: &[u8]) -> bool {
     match std::str::from_utf8(buffer) {
         Ok(_) => false,

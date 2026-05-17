@@ -5,7 +5,7 @@
 //! `HeadlessServer`.
 
 use std::io::{self, Write};
-use std::os::unix::net::UnixStream;
+use crate::platform::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -418,6 +418,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn handshake_negotiates_terminal_ansi_encoding() {
         let (mut client_stream, server_stream) = UnixStream::pair().expect("socket pair");
@@ -486,6 +487,7 @@ mod tests {
             .expect("handshake thread result");
     }
 
+    #[cfg(unix)]
     #[test]
     fn client_read_loop_rejects_oversized_input() {
         let (mut client_stream, server_stream) = UnixStream::pair().expect("socket pair");

@@ -486,17 +486,21 @@ fn main() -> io::Result<()> {
 
     let result = rt.block_on(async {
         let mut terminal = ratatui::init();
+        let _ = crate::platform::terminal::enable_vt_input();
         if config.ui.mouse_capture {
             execute!(io::stdout(), EnableMouseCapture)?;
-        } else {
+        } else if crate::platform::terminal::TOLERATES_UNMATCHED_MOUSE_DISABLE {
             execute!(io::stdout(), DisableMouseCapture)?;
         }
-        execute!(
-            io::stdout(),
-            EnableBracketedPaste,
-            EnableFocusChange,
-            PushKeyboardEnhancementFlags(crate::input::ime_compatible_keyboard_enhancement_flags())
-        )?;
+        execute!(io::stdout(), EnableBracketedPaste, EnableFocusChange)?;
+        if crate::platform::terminal::SUPPORTS_KEYBOARD_ENHANCEMENT {
+            execute!(
+                io::stdout(),
+                PushKeyboardEnhancementFlags(
+                    crate::input::ime_compatible_keyboard_enhancement_flags()
+                )
+            )?;
+        }
 
         // tmux doesn't understand kitty keyboard protocol push (\e[>1u).
         // It uses modifyOtherKeys mode to send CSI u sequences for modified keys.
@@ -529,13 +533,20 @@ fn main() -> io::Result<()> {
         if crate::kitty_graphics::is_enabled() {
             crate::kitty_graphics::clear_all_host_graphics()?;
         }
-        execute!(
-            io::stdout(),
-            PopKeyboardEnhancementFlags,
-            DisableFocusChange,
-            DisableBracketedPaste,
-            DisableMouseCapture
-        )?;
+        if crate::platform::terminal::SUPPORTS_KEYBOARD_ENHANCEMENT {
+            execute!(
+                io::stdout(),
+                PopKeyboardEnhancementFlags,
+                DisableFocusChange,
+                DisableBracketedPaste,
+                DisableMouseCapture
+            )?;
+        } else {
+            let _ = execute!(io::stdout(), DisableFocusChange, DisableBracketedPaste);
+            if config.ui.mouse_capture {
+                let _ = execute!(io::stdout(), DisableMouseCapture);
+            }
+        }
         ratatui::restore();
 
         // Drop app (and all workspaces/panes) before runtime shuts down

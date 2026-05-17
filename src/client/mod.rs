@@ -17,7 +17,7 @@ mod input;
 
 use std::collections::HashSet;
 use std::io::{self, Write as _};
-use std::os::unix::net::UnixStream;
+use crate::platform::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -217,20 +217,24 @@ fn setup_terminal_with_capabilities(
     mouse_capture: bool,
 ) -> io::Result<TerminalGuard> {
     ratatui::init();
+    let _ = crate::platform::terminal::enable_vt_input();
 
     if enable_client_protocols {
         if mouse_capture {
             execute!(io::stdout(), EnableMouseCapture)?;
-        } else {
+        } else if crate::platform::terminal::TOLERATES_UNMATCHED_MOUSE_DISABLE {
             execute!(io::stdout(), DisableMouseCapture)?;
         }
-        execute!(
-            io::stdout(),
-            EnableBracketedPaste,
-            EnableFocusChange,
-            PushKeyboardEnhancementFlags(crate::input::ime_compatible_keyboard_enhancement_flags())
-        )?;
-    } else {
+        execute!(io::stdout(), EnableBracketedPaste, EnableFocusChange)?;
+        if crate::platform::terminal::SUPPORTS_KEYBOARD_ENHANCEMENT {
+            execute!(
+                io::stdout(),
+                PushKeyboardEnhancementFlags(
+                    crate::input::ime_compatible_keyboard_enhancement_flags()
+                )
+            )?;
+        }
+    } else if crate::platform::terminal::TOLERATES_UNMATCHED_MOUSE_DISABLE {
         execute!(io::stdout(), DisableMouseCapture)?;
     }
 

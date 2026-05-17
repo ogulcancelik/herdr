@@ -2,7 +2,7 @@ pub mod schema;
 
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+use crate::platform::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -1109,7 +1109,10 @@ fn error_response_json(id: String, code: &str, message: String) -> String {
     })
 }
 
-#[cfg(test)]
+// The integration tests below exercise raw UnixStream socketpairs and Unix
+// file permissions; they stay unix-gated. Windows coverage will need a
+// rewrite against named-pipe pair helpers.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

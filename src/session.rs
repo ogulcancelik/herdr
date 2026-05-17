@@ -1,5 +1,5 @@
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
+use crate::platform::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -296,7 +296,10 @@ fn normalize_name(name: &str) -> Result<Option<String>, String> {
     Ok(Some(name.to_string()))
 }
 
-#[cfg(test)]
+// Session tests use hardcoded /tmp paths and bind raw UnixListeners; keep
+// them unix-only until the Windows config-dir layout and pipe-based stubs
+// land.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};

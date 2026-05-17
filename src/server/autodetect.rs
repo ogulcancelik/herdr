@@ -9,12 +9,12 @@
 //! (escape hatch for users who want the traditional single-process behavior).
 
 use std::io;
-use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
+
+use crate::platform::net::UnixStream;
 
 use tracing::{info, warn};
 
@@ -145,12 +145,9 @@ pub fn spawn_server_daemon() -> io::Result<u32> {
 
 fn build_server_daemon_command(exe: PathBuf) -> Command {
     let mut command = Command::new(&exe);
+    command.arg("server");
+    crate::platform::host::detach_daemon_command(&mut command);
     command
-        .arg("server")
-        // Create a new process group so the server survives the parent's exit
-        // and doesn't receive SIGHUP when the client's terminal closes.
-        .process_group(0)
-        // Redirect stdio to /dev/null
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -230,7 +227,9 @@ pub fn auto_detect_launch() -> io::Result<()> {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+// These integration tests reach into the live socket path layout and assume
+// Unix semantics for process-group detachment; keep them unix-only for now.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::ffi::OsStr;
