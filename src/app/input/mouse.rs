@@ -210,6 +210,14 @@ impl AppState {
                     return None;
                 }
 
+                if self.on_files_section_divider(mouse.column, mouse.row) {
+                    self.drag = Some(DragState {
+                        target: DragTarget::FilesSectionDivider,
+                    });
+                    self.set_files_section_split(mouse.row);
+                    return None;
+                }
+
                 if !in_sidebar {
                     if let Some(border) = self.find_border_at(mouse.column, mouse.row) {
                         self.drag = Some(DragState {
@@ -363,6 +371,26 @@ impl AppState {
                         self.mode = Mode::Terminal;
                         return None;
                     }
+
+                    if let Some(target) =
+                        self.files_panel_scrollbar_target_at(mouse.column, mouse.row)
+                    {
+                        if let ScrollbarClickTarget::Track { offset_from_bottom } = target {
+                            self.set_files_panel_offset_from_bottom(offset_from_bottom);
+                        }
+                        return None;
+                    }
+
+                    if let Some(target) = self.files_row_at(mouse.column, mouse.row) {
+                        if target.is_dir {
+                            if !self.files_expanded.remove(&target.path) {
+                                self.files_expanded.insert(target.path);
+                            }
+                        } else {
+                            self.open_path_in_pane(&target.path);
+                        }
+                        return None;
+                    }
                 } else if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
                     self.focus_pane(info.id);
                     if self.mode != Mode::Terminal {
@@ -514,6 +542,9 @@ impl AppState {
                         DragTarget::SidebarSectionDivider => {
                             self.set_sidebar_section_split(mouse.row);
                         }
+                        DragTarget::FilesSectionDivider => {
+                            self.set_files_section_split(mouse.row);
+                        }
                         DragTarget::ReleaseNotesScrollbar { .. }
                         | DragTarget::KeybindHelpScrollbar { .. } => {}
                     }
@@ -622,11 +653,18 @@ impl AppState {
             }
 
             MouseEventKind::ScrollUp if in_sidebar => {
+                let files_area = self.files_panel_rect();
+                let over_files_panel = files_area != Rect::default()
+                    && mouse.row >= files_area.y
+                    && mouse.row < files_area.y + files_area.height;
                 let agent_area = self.agent_panel_rect();
-                let over_agent_panel = agent_area != Rect::default()
+                let over_agent_panel = !over_files_panel
+                    && agent_area != Rect::default()
                     && mouse.row >= agent_area.y
                     && mouse.row < agent_area.y + agent_area.height;
-                if over_agent_panel {
+                if over_files_panel {
+                    self.scroll_files_panel(-1);
+                } else if over_agent_panel {
                     if crate::ui::should_show_scrollbar(crate::ui::agent_panel_scroll_metrics(
                         self, agent_area,
                     )) {
@@ -642,11 +680,18 @@ impl AppState {
                 }
             }
             MouseEventKind::ScrollDown if in_sidebar => {
+                let files_area = self.files_panel_rect();
+                let over_files_panel = files_area != Rect::default()
+                    && mouse.row >= files_area.y
+                    && mouse.row < files_area.y + files_area.height;
                 let agent_area = self.agent_panel_rect();
-                let over_agent_panel = agent_area != Rect::default()
+                let over_agent_panel = !over_files_panel
+                    && agent_area != Rect::default()
                     && mouse.row >= agent_area.y
                     && mouse.row < agent_area.y + agent_area.height;
-                if over_agent_panel {
+                if over_files_panel {
+                    self.scroll_files_panel(1);
+                } else if over_agent_panel {
                     if crate::ui::should_show_scrollbar(crate::ui::agent_panel_scroll_metrics(
                         self, agent_area,
                     )) {

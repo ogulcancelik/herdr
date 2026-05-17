@@ -226,6 +226,56 @@ impl AppState {
             }
         }
     }
+
+    /// Open a file from the filesystem panel by splitting the active
+    /// workspace's focused pane with `$VISUAL`/`$EDITOR` (falling back to vi).
+    pub(crate) fn open_path_in_pane(&mut self, path: &std::path::Path) {
+        let Some(ws_idx) = self.active else {
+            return;
+        };
+        let (rows, cols) = self.estimate_pane_size();
+        let new_rows = (rows / 2).max(4);
+        let new_cols = (cols / 2).max(10);
+
+        let editor = std::env::var("VISUAL")
+            .or_else(|_| std::env::var("EDITOR"))
+            .unwrap_or_else(|_| "vi".to_string());
+        let mut argv: Vec<String> = editor.split_whitespace().map(|s| s.to_string()).collect();
+        if argv.is_empty() {
+            argv.push("vi".to_string());
+        }
+        argv.push(path.to_string_lossy().into_owned());
+
+        let cwd = path.parent().map(|p| p.to_path_buf());
+
+        let Some(ws) = self.workspaces.get_mut(ws_idx) else {
+            return;
+        };
+        let Some(focused) = ws.focused_pane_id() else {
+            return;
+        };
+        let Some(Ok((_, new_pane))) = ws.split_pane_argv_command(
+            focused,
+            Direction::Horizontal,
+            new_rows,
+            new_cols,
+            cwd,
+            &argv,
+            self.pane_scrollback_limit_bytes,
+            self.host_terminal_theme,
+            true,
+        ) else {
+            return;
+        };
+        let new_id = new_pane.pane_id;
+        self.terminal_runtimes
+            .insert(new_pane.terminal.id.clone(), new_pane.runtime);
+        self.terminals
+            .insert(new_pane.terminal.id.clone(), new_pane.terminal);
+        ws.layout.focus_pane(new_id);
+        self.mark_session_dirty();
+        self.mode = Mode::Terminal;
+    }
 }
 
 #[cfg(test)]
@@ -295,6 +345,7 @@ fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
         state.agent_panel_scope,
         state.sidebar_width,
         state.sidebar_section_split,
+        state.files_section_split,
     )
 }
 

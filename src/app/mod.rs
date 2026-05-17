@@ -217,6 +217,7 @@ impl App {
             sidebar_width,
             sidebar_width_source,
             sidebar_section_split,
+            files_section_split,
         ) = if no_session {
             (
                 Vec::new(),
@@ -226,6 +227,7 @@ impl App {
                 config.ui.sidebar_width,
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
+                0.35_f32,
             )
         } else if let Some(snap) = crate::persist::load() {
             let (ws, terminals, terminal_runtimes) = crate::persist::restore(
@@ -253,6 +255,7 @@ impl App {
                         state::SidebarWidthSource::ConfigDefault
                     },
                     snap.sidebar_section_split.unwrap_or(0.5),
+                    snap.files_section_split.unwrap_or(0.35),
                 )
             } else {
                 crate::logging::session_restored(ws.len(), "ok");
@@ -270,6 +273,7 @@ impl App {
                         state::SidebarWidthSource::ConfigDefault
                     },
                     snap.sidebar_section_split.unwrap_or(0.5),
+                    snap.files_section_split.unwrap_or(0.35),
                 )
             }
         } else {
@@ -281,6 +285,7 @@ impl App {
                 config.ui.sidebar_width,
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
+                0.35_f32,
             )
         };
 
@@ -340,6 +345,8 @@ impl App {
             keybind_help: state::KeybindHelpState { scroll: 0 },
             workspace_scroll: 0,
             agent_panel_scroll: 0,
+            files_expanded: std::collections::HashSet::new(),
+            files_scroll: 0,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,
@@ -347,6 +354,7 @@ impl App {
                 layout: state::ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
+                files_rows: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),
@@ -379,6 +387,7 @@ impl App {
             sidebar_width_auto: false,
             sidebar_collapsed: false,
             sidebar_section_split,
+            files_section_split,
             agent_panel_scope,
             mouse_capture: config.ui.mouse_capture,
             confirm_close: config.ui.confirm_close,

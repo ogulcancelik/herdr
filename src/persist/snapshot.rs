@@ -25,6 +25,8 @@ pub struct SessionSnapshot {
     pub sidebar_width: Option<u16>,
     #[serde(default)]
     pub sidebar_section_split: Option<f32>,
+    #[serde(default)]
+    pub files_section_split: Option<f32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -130,6 +132,8 @@ struct RawSessionSnapshot {
     sidebar_width: Option<u16>,
     #[serde(default)]
     sidebar_section_split: Option<f32>,
+    #[serde(default)]
+    files_section_split: Option<f32>,
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
@@ -145,6 +149,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         agent_panel_scope: raw.agent_panel_scope,
         sidebar_width: raw.sidebar_width,
         sidebar_section_split: raw.sidebar_section_split,
+        files_section_split: raw.files_section_split,
     })
 }
 
@@ -210,6 +215,7 @@ pub fn capture(
     agent_panel_scope: crate::app::state::AgentPanelScope,
     sidebar_width: u16,
     sidebar_section_split: f32,
+    files_section_split: f32,
 ) -> SessionSnapshot {
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
@@ -222,6 +228,7 @@ pub fn capture(
         agent_panel_scope,
         sidebar_width: Some(sidebar_width),
         sidebar_section_split: Some(sidebar_section_split),
+        files_section_split: Some(files_section_split),
     }
 }
 
@@ -382,6 +389,7 @@ mod tests {
             state.agent_panel_scope,
             state.sidebar_width,
             state.sidebar_section_split,
+            state.files_section_split,
         )
     }
 
@@ -402,6 +410,7 @@ mod tests {
             agent_panel_scope: AgentPanelScope::CurrentWorkspace,
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
+            files_section_split: Some(0.35),
         };
         let json = serde_json::to_string(&snap).unwrap();
         let restored = parse_snapshot(&json).unwrap();
@@ -478,6 +487,7 @@ mod tests {
             agent_panel_scope: AgentPanelScope::CurrentWorkspace,
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
+            files_section_split: Some(0.35),
             version: SNAPSHOT_VERSION,
         };
 
@@ -803,6 +813,7 @@ mod tests {
             agent_panel_scope: AgentPanelScope::CurrentWorkspace,
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
+            files_section_split: Some(0.35),
         };
 
         let json = serde_json::to_string(&snap).unwrap();

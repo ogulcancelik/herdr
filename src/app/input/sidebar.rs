@@ -18,9 +18,25 @@ impl AppState {
         if self.sidebar_collapsed || sidebar.width <= 1 || sidebar.height == 0 {
             return Rect::default();
         }
-        let (_, detail_area) =
-            crate::ui::expanded_sidebar_sections(sidebar, self.sidebar_section_split);
+        let (_, detail_area, _) = crate::ui::expanded_sidebar_sections(
+            sidebar,
+            self.sidebar_section_split,
+            self.files_section_split,
+        );
         detail_area
+    }
+
+    pub(super) fn files_panel_rect(&self) -> Rect {
+        let sidebar = self.view.sidebar_rect;
+        if self.sidebar_collapsed || sidebar.width <= 1 || sidebar.height == 0 {
+            return Rect::default();
+        }
+        let (_, _, files_area) = crate::ui::expanded_sidebar_sections(
+            sidebar,
+            self.sidebar_section_split,
+            self.files_section_split,
+        );
+        files_area
     }
 
     pub(super) fn workspace_list_scrollbar_target_at(
@@ -154,6 +170,66 @@ impl AppState {
         }
     }
 
+    pub(super) fn files_panel_scrollbar_target_at(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Option<ScrollbarClickTarget> {
+        let area = self.files_panel_rect();
+        let metrics = crate::ui::files_panel_scroll_metrics(self, area);
+        let track = crate::ui::files_panel_scrollbar_rect(self, area)?;
+        if col < track.x
+            || col >= track.x + track.width
+            || row < track.y
+            || row >= track.y + track.height
+        {
+            return None;
+        }
+        if let Some(grab_row_offset) = crate::ui::scrollbar_thumb_grab_offset(metrics, track, row) {
+            Some(ScrollbarClickTarget::Thumb { grab_row_offset })
+        } else {
+            Some(ScrollbarClickTarget::Track {
+                offset_from_bottom: crate::ui::scrollbar_offset_from_row(metrics, track, row),
+            })
+        }
+    }
+
+    pub(super) fn set_files_panel_offset_from_bottom(&mut self, offset_from_bottom: usize) {
+        let area = self.files_panel_rect();
+        let metrics = crate::ui::files_panel_scroll_metrics(self, area);
+        self.files_scroll = metrics
+            .max_offset_from_bottom
+            .saturating_sub(offset_from_bottom);
+    }
+
+    pub(super) fn scroll_files_panel(&mut self, delta: i16) {
+        let area = self.files_panel_rect();
+        let max_scroll = crate::ui::files_panel_scroll_metrics(self, area).max_offset_from_bottom;
+        if delta.is_negative() {
+            self.files_scroll = self
+                .files_scroll
+                .saturating_sub(delta.unsigned_abs() as usize);
+        } else {
+            self.files_scroll = self
+                .files_scroll
+                .saturating_add(delta as usize)
+                .min(max_scroll);
+        }
+    }
+
+    /// The filesystem-panel row under the cursor, if any.
+    pub(super) fn files_row_at(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Option<crate::app::state::FilesRowArea> {
+        self.view
+            .files_rows
+            .iter()
+            .find(|r| row == r.rect.y && col >= r.rect.x && col < r.rect.x + r.rect.width)
+            .cloned()
+    }
+
     pub(crate) fn sidebar_footer_rect(&self) -> Rect {
         let ws_area = self.workspace_list_rect();
         if ws_area == Rect::default() {
@@ -274,6 +350,43 @@ impl AppState {
         let relative_y = row.saturating_sub(sidebar.y);
         let ratio = (relative_y as f32) / (content_height as f32);
         self.sidebar_section_split = ratio.clamp(0.1, 0.9);
+        self.mark_session_dirty();
+    }
+
+    pub(super) fn on_files_section_divider(&self, col: u16, row: u16) -> bool {
+        if self.sidebar_collapsed {
+            return false;
+        }
+        let rect = crate::ui::files_section_divider_rect(
+            self.view.sidebar_rect,
+            self.sidebar_section_split,
+            self.files_section_split,
+        );
+        rect.width > 0
+            && col >= rect.x
+            && col < rect.x + rect.width
+            && row >= rect.y
+            && row < rect.y + rect.height
+    }
+
+    pub(super) fn set_files_section_split(&mut self, row: u16) {
+        let sidebar = self.view.sidebar_rect;
+        let (_, agent_area, _) = crate::ui::expanded_sidebar_sections(
+            sidebar,
+            self.sidebar_section_split,
+            self.files_section_split,
+        );
+        let lower_top = agent_area.y;
+        let lower_bottom = sidebar.y + sidebar.height;
+        let lower_h = lower_bottom.saturating_sub(lower_top);
+        if lower_h == 0 {
+            return;
+        }
+        // The divider row becomes the top of the files panel, so files take
+        // everything from `row` down to the bottom of the lower region.
+        let files_h = lower_bottom.saturating_sub(row);
+        let ratio = (files_h as f32) / (lower_h as f32);
+        self.files_section_split = ratio.clamp(0.1, 0.9);
         self.mark_session_dirty();
     }
 
@@ -400,9 +513,10 @@ impl AppState {
             return false;
         }
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+        let (_, detail_area, _) = crate::ui::expanded_sidebar_sections(
             self.view.sidebar_rect,
             self.sidebar_section_split,
+            self.files_section_split,
         );
         let rect = crate::ui::agent_panel_toggle_rect(detail_area, self.agent_panel_scope);
         rect.width > 0
@@ -682,9 +796,10 @@ mod tests {
         app.state.mode = Mode::Terminal;
         app.state.agent_panel_scroll = 3;
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+        let (_, detail_area, _) = crate::ui::expanded_sidebar_sections(
             app.state.view.sidebar_rect,
             app.state.sidebar_section_split,
+            app.state.files_section_split,
         );
         let toggle = crate::ui::agent_panel_toggle_rect(detail_area, app.state.agent_panel_scope);
         app.handle_mouse(mouse(
@@ -737,9 +852,10 @@ mod tests {
         app.state.mode = Mode::Terminal;
         app.state.agent_panel_scope = AgentPanelScope::AllWorkspaces;
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+        let (_, detail_area, _) = crate::ui::expanded_sidebar_sections(
             app.state.view.sidebar_rect,
             app.state.sidebar_section_split,
+            app.state.files_section_split,
         );
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -1263,6 +1379,39 @@ mod tests {
         assert_eq!(
             snapshot.sidebar_section_split,
             Some(app.state.sidebar_section_split)
+        );
+    }
+
+    #[test]
+    fn dragging_files_section_divider_resizes_and_persists() {
+        let mut app = app_for_mouse_test();
+        // A tall sidebar so the files panel is shown and its divider exists.
+        app.state.view.sidebar_rect = ratatui::layout::Rect::new(0, 0, 26, 40);
+
+        let divider = crate::ui::files_section_divider_rect(
+            app.state.view.sidebar_rect,
+            app.state.sidebar_section_split,
+            app.state.files_section_split,
+        );
+        assert!(divider.width > 0, "files divider should be visible");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            divider.x + 1,
+            divider.y,
+        ));
+        // Drag the divider up → files panel grows.
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            divider.x + 1,
+            divider.y - 4,
+        ));
+
+        assert!(app.state.files_section_split > 0.35);
+        let snapshot = capture_snapshot(&app.state);
+        assert_eq!(
+            snapshot.files_section_split,
+            Some(app.state.files_section_split)
         );
     }
 

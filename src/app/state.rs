@@ -511,6 +511,15 @@ pub struct WorkspaceCardArea {
     pub rect: Rect,
 }
 
+/// One visible row in the filesystem panel, used for click hit-testing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilesRowArea {
+    pub path: std::path::PathBuf,
+    pub is_dir: bool,
+    pub depth: u16,
+    pub rect: Rect,
+}
+
 /// Computed view geometry — derived from AppState + terminal size.
 /// Updated before each render, consumed by render and mouse handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -523,6 +532,7 @@ pub struct ViewState {
     pub layout: ViewLayout,
     pub sidebar_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
+    pub files_rows: Vec<FilesRowArea>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
     pub tab_scroll_left_hit_area: Rect,
@@ -703,6 +713,7 @@ pub(crate) enum DragTarget {
     },
     SidebarDivider,
     SidebarSectionDivider,
+    FilesSectionDivider,
 }
 
 /// Active mouse drag on a split border or sidebar divider.
@@ -853,6 +864,9 @@ pub struct AppState {
     pub keybind_help: KeybindHelpState,
     pub workspace_scroll: usize,
     pub agent_panel_scroll: usize,
+    /// Directories the user has expanded in the filesystem panel.
+    pub files_expanded: std::collections::HashSet<std::path::PathBuf>,
+    pub files_scroll: usize,
     pub tab_scroll: usize,
     pub tab_scroll_follow_active: bool,
     pub mobile_switcher_scroll: usize,
@@ -883,6 +897,8 @@ pub struct AppState {
     pub sidebar_collapsed: bool,
     /// Ratio of sidebar height allocated to the workspaces section.
     pub sidebar_section_split: f32,
+    /// Ratio of the lower (non-spaces) region allocated to the files panel.
+    pub files_section_split: f32,
     pub agent_panel_scope: AgentPanelScope,
     /// Capture mouse input for Herdr's own mouse UI. When false, Herdr only
     /// captures mouse while the focused pane app requests mouse reporting.
@@ -1084,6 +1100,8 @@ impl AppState {
             keybind_help: KeybindHelpState { scroll: 0 },
             workspace_scroll: 0,
             agent_panel_scroll: 0,
+            files_expanded: std::collections::HashSet::new(),
+            files_scroll: 0,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,
@@ -1091,6 +1109,7 @@ impl AppState {
                 layout: ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
+                files_rows: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),
@@ -1123,6 +1142,7 @@ impl AppState {
             sidebar_width_auto: false,
             sidebar_collapsed: false,
             sidebar_section_split: 0.5,
+            files_section_split: 0.35,
             agent_panel_scope: AgentPanelScope::AllWorkspaces,
             mouse_capture: true,
             confirm_close: true,

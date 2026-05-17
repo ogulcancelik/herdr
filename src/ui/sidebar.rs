@@ -44,16 +44,47 @@ fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
     (ws_h, detail_h)
 }
 
-pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, Rect) {
+/// Split the lower (non-spaces) region into the agents area and a fixed-size
+/// files area at the very bottom. The files panel is only shown when the lower
+/// region is tall enough to host it without starving the agents list.
+const LOWER_MIN_AGENTS: u16 = 9;
+const LOWER_MIN_FILES: u16 = 6;
+
+fn lower_section_split(lower_h: u16, files_split: f32) -> (u16, u16) {
+    // Only carve a files panel when the lower region is tall enough to keep
+    // the agents list usable; on short sidebars agents take all of it.
+    if lower_h < LOWER_MIN_AGENTS + LOWER_MIN_FILES {
+        return (lower_h, 0);
+    }
+    let ratio = files_split.clamp(0.1, 0.9);
+    let files_h = ((lower_h as f32) * ratio).round() as u16;
+    let files_h = files_h.clamp(LOWER_MIN_FILES, lower_h - LOWER_MIN_AGENTS);
+    (lower_h - files_h, files_h)
+}
+
+/// Returns `(spaces_area, agents_area, files_area)`. `files_area` may have
+/// zero height when the sidebar is too short.
+pub(crate) fn expanded_sidebar_sections(
+    area: Rect,
+    split_ratio: f32,
+    files_split: f32,
+) -> (Rect, Rect, Rect) {
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
     if content.width == 0 || content.height == 0 {
-        return (Rect::default(), Rect::default());
+        return (Rect::default(), Rect::default(), Rect::default());
     }
 
-    let (ws_h, detail_h) = sidebar_section_heights(content.height, split_ratio);
+    let (ws_h, lower_h) = sidebar_section_heights(content.height, split_ratio);
+    let (agent_h, files_h) = lower_section_split(lower_h, files_split);
     let ws_area = Rect::new(content.x, content.y, content.width, ws_h);
-    let detail_area = Rect::new(content.x, content.y + ws_h, content.width, detail_h);
-    (ws_area, detail_area)
+    let agent_area = Rect::new(content.x, content.y + ws_h, content.width, agent_h);
+    let files_area = Rect::new(
+        content.x,
+        content.y + ws_h + agent_h,
+        content.width,
+        files_h,
+    );
+    (ws_area, agent_area, files_area)
 }
 
 pub(crate) fn sidebar_section_divider_rect(area: Rect, split_ratio: f32) -> Rect {
@@ -64,6 +95,44 @@ pub(crate) fn sidebar_section_divider_rect(area: Rect, split_ratio: f32) -> Rect
 
     let (ws_h, _) = sidebar_section_heights(content.height, split_ratio);
     Rect::new(content.x, content.y + ws_h, content.width, 1)
+}
+
+/// The draggable divider row between the agents and files panels. Empty when
+/// the files panel is hidden (sidebar too short).
+pub(crate) fn files_section_divider_rect(area: Rect, split_ratio: f32, files_split: f32) -> Rect {
+    let (_, _, files_area) = expanded_sidebar_sections(area, split_ratio, files_split);
+    if files_area.height == 0 || files_area.width == 0 {
+        return Rect::default();
+    }
+    Rect::new(files_area.x, files_area.y, files_area.width, 1)
+}
+
+/// Draw a section divider as a bright rule with a centered grip handle, so it
+/// reads as resizable instead of blending into the background. Turns the accent
+/// color while it is being dragged.
+pub(crate) fn render_section_divider(frame: &mut Frame, row: Rect, dragging: bool, p: &Palette) {
+    if row.width == 0 || row.height == 0 {
+        return;
+    }
+    let line_color = if dragging { p.accent } else { p.overlay1 };
+    let grip_color = if dragging { p.accent } else { p.text };
+    let grip = "⣿⣿⣿";
+    let grip_w = grip.chars().count() as u16;
+    let grip_x = row.x + row.width.saturating_sub(grip_w) / 2;
+    let buf = frame.buffer_mut();
+    for x in row.x..row.x + row.width {
+        buf[(x, row.y)].set_symbol("─");
+        buf[(x, row.y)].set_style(Style::default().fg(line_color));
+    }
+    for (i, ch) in grip.chars().enumerate() {
+        let gx = grip_x + i as u16;
+        if gx < row.x + row.width {
+            let mut tmp = [0u8; 4];
+            buf[(gx, row.y)].set_symbol(ch.encode_utf8(&mut tmp));
+            buf[(gx, row.y)]
+                .set_style(Style::default().fg(grip_color).add_modifier(Modifier::BOLD));
+        }
+    }
 }
 
 fn agent_panel_current_workspace_idx(app: &AppState) -> Option<usize> {
@@ -224,7 +293,8 @@ fn workspace_row_height(ws: &crate::workspace::Workspace) -> u16 {
 }
 
 pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32) -> Rect {
-    let (ws_area, _) = expanded_sidebar_sections(area, split_ratio);
+    // The spaces area is independent of the agents/files split ratio.
+    let (ws_area, _, _) = expanded_sidebar_sections(area, split_ratio, 0.5);
     ws_area
 }
 
@@ -556,10 +626,12 @@ pub(super) fn render_sidebar(app: &AppState, frame: &mut Frame, area: Rect) {
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-    let (ws_area, detail_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+    let (ws_area, detail_area, files_area) =
+        expanded_sidebar_sections(area, app.sidebar_section_split, app.files_section_split);
 
     render_workspace_list(app, frame, ws_area, is_navigating);
     render_agent_detail(app, frame, detail_area);
+    super::files::render_files_panel(app, frame, files_area);
     render_sidebar_toggle(app, frame, area, false, p);
 }
 
@@ -755,11 +827,11 @@ fn render_agent_detail(app: &AppState, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let sep_line = "─".repeat(area.width as usize);
-    frame.render_widget(
-        Paragraph::new(Span::styled(&sep_line, Style::default().fg(p.surface_dim))),
-        Rect::new(area.x, area.y, area.width, 1),
+    let dragging = matches!(
+        app.drag.as_ref().map(|d| &d.target),
+        Some(crate::app::state::DragTarget::SidebarSectionDivider)
     );
+    render_section_divider(frame, Rect::new(area.x, area.y, area.width, 1), dragging, p);
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
@@ -958,10 +1030,12 @@ mod tests {
 
     #[test]
     fn expanded_sidebar_sections_handle_tiny_heights() {
-        let (ws_area, detail_area) = expanded_sidebar_sections(Rect::new(0, 0, 20, 5), 0.9);
+        let (ws_area, detail_area, files_area) =
+            expanded_sidebar_sections(Rect::new(0, 0, 20, 5), 0.9, 0.35);
 
         assert_eq!(ws_area, Rect::new(0, 0, 19, 3));
         assert_eq!(detail_area, Rect::new(0, 3, 19, 2));
+        assert_eq!(files_area, Rect::new(0, 5, 19, 0));
     }
 
     #[test]
