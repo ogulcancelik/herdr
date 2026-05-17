@@ -129,6 +129,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Sidebar width (auto-scaled based on workspace names, this sets the default)
 # sidebar_width = 26
 
+# Minimum sidebar width when expanded (columns)
+# sidebar_min_width = 18
+
+# Maximum sidebar width when expanded (columns)
+# sidebar_max_width = 36
+
 # Capture mouse input for Herdr's mouse UI.
 # Set false to let the terminal handle normal clicks, such as Cmd-clicking URLs.
 # Pane apps like lazygit and btop can still receive mouse when they request it.

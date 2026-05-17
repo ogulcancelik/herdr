@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Added `ui.sidebar_min_width` and `ui.sidebar_max_width` to configure the sidebar's expanded resize bounds. Defaults remain 18 and 36 columns; existing configs are unchanged.
+
 ## [0.5.10] - 2026-05-17
 
 ### Added

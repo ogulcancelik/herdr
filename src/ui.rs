@@ -71,8 +71,6 @@ use crate::app::state::ViewLayout;
 use crate::app::{AppState, Mode};
 
 const COLLAPSED_WIDTH: u16 = 4; // num + space + dot + separator
-pub(crate) const MIN_SIDEBAR_WIDTH: u16 = 18;
-pub(crate) const MAX_SIDEBAR_WIDTH: u16 = 36;
 
 // Braille spinner frames — smooth rotation
 const SPINNERS: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -147,7 +145,7 @@ fn compute_view_internal(
         COLLAPSED_WIDTH
     } else {
         app.sidebar_width
-            .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
+            .clamp(app.sidebar_min_width, app.sidebar_max_width)
     };
 
     let [sidebar_area, main_area] =
@@ -448,6 +446,36 @@ mod tests {
             app.view.mobile_menu_hit_area.x + app.view.mobile_menu_hit_area.width,
             44
         );
+    }
+
+    #[test]
+    fn compute_view_clamps_sidebar_width_to_configured_max() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.sidebar_max_width = 30;
+        app.sidebar_width = 999;
+
+        compute_view(&mut app, Rect::new(0, 0, 100, 20));
+
+        assert_eq!(app.view.sidebar_rect.width, 30);
+    }
+
+    #[test]
+    fn compute_view_clamps_sidebar_width_to_configured_min() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.sidebar_min_width = 22;
+        app.sidebar_width = 5;
+
+        compute_view(&mut app, Rect::new(0, 0, 100, 20));
+
+        assert_eq!(app.view.sidebar_rect.width, 22);
     }
 
     #[test]

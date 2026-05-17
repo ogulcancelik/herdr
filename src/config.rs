@@ -16,8 +16,8 @@ pub use self::{
         Keybinds, LiveKeybindConfig,
     },
     model::{
-        AgentPanelScopeConfig, Config, ConfigReloadReport, ConfigReloadStatus, ToastConfig,
-        ToastDelivery,
+        validated_sidebar_bounds, AgentPanelScopeConfig, Config, ConfigReloadReport,
+        ConfigReloadStatus, ToastConfig, ToastDelivery,
     },
     sound::SoundConfig,
     theme::{parse_color, CustomThemeColors, ThemeConfig},
