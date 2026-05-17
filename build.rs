@@ -11,6 +11,9 @@ fn zig_target(target: &str) -> &str {
         "aarch64-unknown-linux-musl" => "aarch64-linux-musl",
         "x86_64-apple-darwin" => "x86_64-macos",
         "aarch64-apple-darwin" => "aarch64-macos",
+        "x86_64-pc-windows-msvc" => "x86_64-windows-msvc",
+        "aarch64-pc-windows-msvc" => "aarch64-windows-msvc",
+        "x86_64-pc-windows-gnu" => "x86_64-windows-gnu",
         other => panic!("unsupported target for libghostty-vt build: {other}"),
     }
 }
@@ -67,7 +70,18 @@ fn main() {
     if target.contains("apple-darwin") {
         let static_lib = lib_dir.join("libghostty-vt.a");
         println!("cargo:rustc-link-arg={}", static_lib.display());
+    } else if target.contains("windows") {
+        // zig emits `ghostty-vt.lib` (an import lib for the shipped DLL)
+        // and `ghostty-vt-static.lib` (the actual archive). Link the latter
+        // so the resulting herdr.exe has no ghostty-vt.dll dependency.
+        println!("cargo:rustc-link-lib=static=ghostty-vt-static");
     } else {
         println!("cargo:rustc-link-lib=static=ghostty-vt");
+    }
+    if target.contains("windows") {
+        println!("cargo:rustc-link-lib=ws2_32");
+        println!("cargo:rustc-link-lib=userenv");
+        println!("cargo:rustc-link-lib=bcrypt");
+        println!("cargo:rustc-link-lib=ntdll");
     }
 }
