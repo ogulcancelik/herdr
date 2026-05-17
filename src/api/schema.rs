@@ -396,6 +396,7 @@ pub enum IntegrationTarget {
     Pi,
     Claude,
     Codex,
+    Hermes,
     Opencode,
 }
 

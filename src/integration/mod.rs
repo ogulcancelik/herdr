@@ -25,6 +25,9 @@ const CODEX_HOME_ENV_VAR: &str = "CODEX_HOME";
 const OPENCODE_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state.js";
 const OPENCODE_PLUGIN_ASSET: &str = include_str!("assets/opencode/herdr-agent-state.js");
 const OPENCODE_INTEGRATION_VERSION: u32 = 1;
+const HERMES_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
+const HERMES_HOOK_ASSET: &str = include_str!("assets/hermes/herdr-agent-state.sh");
+const HERMES_INTEGRATION_VERSION: u32 = 1;
 const INTEGRATION_VERSION_MARKER: &str = "HERDR_INTEGRATION_VERSION=";
 
 #[derive(Debug)]
@@ -43,6 +46,12 @@ pub(crate) struct CodexInstallPaths {
 #[derive(Debug)]
 pub(crate) struct OpenCodeInstallPaths {
     pub plugin_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct HermesInstallPaths {
+    pub hook_path: PathBuf,
+    pub plugin_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +97,14 @@ pub(crate) struct CodexUninstallResult {
 pub(crate) struct OpenCodeUninstallResult {
     pub plugin_path: PathBuf,
     pub removed_plugin: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct HermesUninstallResult {
+    pub hook_path: PathBuf,
+    pub plugin_dir: PathBuf,
+    pub removed_hook_file: bool,
+    pub removed_plugin_dir: bool,
 }
 
 pub(crate) fn apply_pane_env(cmd: &mut CommandBuilder, pane_id: PaneId) {
@@ -136,6 +153,19 @@ pub(crate) fn install_target(
                 "installed opencode integration plugin to {}",
                 installed.plugin_path.display()
             )]
+        }
+        crate::api::schema::IntegrationTarget::Hermes => {
+            let installed = install_hermes()?;
+            vec![
+                format!(
+                    "installed hermes integration hook to {}",
+                    installed.hook_path.display()
+                ),
+                format!(
+                    "installed hermes plugin directory at {}",
+                    installed.plugin_dir.display()
+                ),
+            ]
         }
     };
 
@@ -233,6 +263,33 @@ pub(crate) fn uninstall_target(
                 )]
             }
         }
+        crate::api::schema::IntegrationTarget::Hermes => {
+            let result = uninstall_hermes()?;
+            let mut messages = Vec::new();
+            if result.removed_hook_file {
+                messages.push(format!(
+                    "removed hermes hook at {}",
+                    result.hook_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no hermes hook found at {}",
+                    result.hook_path.display()
+                ));
+            }
+            if result.removed_plugin_dir {
+                messages.push(format!(
+                    "removed hermes plugin directory at {}",
+                    result.plugin_dir.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no hermes plugin directory found at {}",
+                    result.plugin_dir.display()
+                ));
+            }
+            messages
+        }
     };
 
     crate::logging::integration_action("uninstall", integration_target_label(target), "ok");
@@ -247,6 +304,7 @@ pub(crate) fn integration_target_label(
         crate::api::schema::IntegrationTarget::Claude => "claude",
         crate::api::schema::IntegrationTarget::Codex => "codex",
         crate::api::schema::IntegrationTarget::Opencode => "opencode",
+        crate::api::schema::IntegrationTarget::Hermes => "hermes",
     }
 }
 
@@ -270,7 +328,7 @@ fn integration_specs() -> [(
     crate::api::schema::IntegrationTarget,
     io::Result<PathBuf>,
     u32,
-); 4] {
+); 5] {
     [
         (
             crate::api::schema::IntegrationTarget::Pi,
@@ -291,6 +349,11 @@ fn integration_specs() -> [(
             crate::api::schema::IntegrationTarget::Opencode,
             opencode_dir().map(|dir| dir.join("plugins").join(OPENCODE_PLUGIN_INSTALL_NAME)),
             OPENCODE_INTEGRATION_VERSION,
+        ),
+        (
+            crate::api::schema::IntegrationTarget::Hermes,
+            hermes_dir().map(|dir| dir.join("hooks").join(HERMES_HOOK_INSTALL_NAME)),
+            HERMES_INTEGRATION_VERSION,
         ),
     ]
 }
@@ -589,6 +652,31 @@ pub(crate) fn install_opencode() -> io::Result<OpenCodeInstallPaths> {
 
     Ok(OpenCodeInstallPaths { plugin_path })
 }
+pub(crate) fn install_hermes() -> io::Result<HermesInstallPaths> {
+    let dir = hermes_dir()?;
+    if !dir.is_dir() {
+        return Err(io::Error::other(format!(
+            "hermes config directory not found at {}. install hermes agent first",
+            dir.display()
+        )));
+    }
+
+    let hooks_dir = dir.join("hooks");
+    fs::create_dir_all(&hooks_dir)?;
+
+    let hook_path = hooks_dir.join(HERMES_HOOK_INSTALL_NAME);
+    fs::write(&hook_path, HERMES_HOOK_ASSET)?;
+    make_executable(&hook_path)?;
+
+    let plugin_dir = dir.join("plugins").join("herdr-agent-state");
+    fs::create_dir_all(&plugin_dir)?;
+
+    Ok(HermesInstallPaths {
+        hook_path,
+        plugin_dir,
+    })
+}
+
 
 pub(crate) fn uninstall_pi() -> io::Result<PiUninstallResult> {
     let extension_path = pi_extension_dir()?.join(PI_EXTENSION_INSTALL_NAME);
@@ -739,6 +827,22 @@ pub(crate) fn uninstall_opencode() -> io::Result<OpenCodeUninstallResult> {
     Ok(OpenCodeUninstallResult {
         plugin_path,
         removed_plugin,
+    })
+}
+
+pub(crate) fn uninstall_hermes() -> io::Result<HermesUninstallResult> {
+    let dir = hermes_dir()?;
+    let hook_path = dir.join("hooks").join(HERMES_HOOK_INSTALL_NAME);
+    let plugin_dir = dir.join("plugins").join("herdr-agent-state");
+
+    let removed_hook_file = remove_file_if_exists(&hook_path)?;
+    let removed_plugin_dir = remove_file_if_exists(&plugin_dir)?;
+
+    Ok(HermesUninstallResult {
+        hook_path,
+        plugin_dir,
+        removed_hook_file,
+        removed_plugin_dir,
     })
 }
 
@@ -1051,6 +1155,10 @@ fn expand_tilde_path(path: PathBuf) -> io::Result<PathBuf> {
 
 fn opencode_dir() -> io::Result<PathBuf> {
     Ok(home_dir()?.join(".config/opencode"))
+}
+
+fn hermes_dir() -> io::Result<PathBuf> {
+    Ok(home_dir()?.join(".hermes"))
 }
 
 fn home_dir() -> io::Result<PathBuf> {
