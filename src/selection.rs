@@ -59,6 +59,28 @@ impl Selection {
         }
     }
 
+    /// Convert the anchor's absolute row and pane-relative column back to
+    /// screen coordinates. Adds the pane origin before clamping so the
+    /// returned (screen_row, screen_col) can be compared directly against
+    /// mouse screen positions.
+    pub fn anchor_screen_pos(
+        &self,
+        pane_inner: Rect,
+        metrics: Option<ScrollMetrics>,
+    ) -> (u16, u16) {
+        let viewport_row = viewport_row_for_absolute_row(self.anchor.0, metrics);
+        // Convert pane-relative to screen coordinates, then clamp.
+        let row = (viewport_row.saturating_add(pane_inner.y)).clamp(
+            pane_inner.y,
+            pane_inner.y + pane_inner.height.saturating_sub(1),
+        );
+        let col = (self.anchor.1.saturating_add(pane_inner.x)).clamp(
+            pane_inner.x,
+            pane_inner.x + pane_inner.width.saturating_sub(1),
+        );
+        (row, col)
+    }
+
     /// Extend the selection as the mouse drags. Activates highlighting
     /// once the cursor moves to a different cell than the anchor.
     /// Screen coordinates are clamped to the pane boundary.
@@ -97,9 +119,28 @@ impl Selection {
         self.phase == Phase::Anchored
     }
 
+    /// Whether the user just clicked without dragging (not a selection).
+    pub fn is_just_click(&self) -> bool {
+        self.phase == Phase::Anchored
+    }
+
+    /// Force the selection into Dragging phase, used when the mouse
+    /// has moved off the anchor cell but drag() couldn't transition
+    /// because the cursor was clamped to the same cell as the anchor.
+    pub fn force_dragging(&mut self) {
+        if self.phase == Phase::Anchored {
+            self.phase = Phase::Dragging;
+        }
+    }
+
     /// Whether the pointer is still down and the selection can keep extending.
     pub fn is_in_progress(&self) -> bool {
         matches!(self.phase, Phase::Anchored | Phase::Dragging)
+    }
+
+    /// Whether the user is actively dragging (cursor moved from anchor).
+    pub fn is_dragging(&self) -> bool {
+        self.phase == Phase::Dragging
     }
 
     /// Returns (start, end) in reading order (top-left to bottom-right).
@@ -151,6 +192,13 @@ fn viewport_top_row(metrics: Option<ScrollMetrics>) -> u32 {
 
 fn absolute_row_for_viewport_row(viewport_row: u16, metrics: Option<ScrollMetrics>) -> u32 {
     viewport_top_row(metrics) + u32::from(viewport_row)
+}
+
+fn viewport_row_for_absolute_row(absolute_row: u32, metrics: Option<ScrollMetrics>) -> u16 {
+    absolute_row
+        .saturating_sub(viewport_top_row(metrics))
+        .try_into()
+        .unwrap_or(0)
 }
 
 fn clamp_to_pane(screen_col: u16, screen_row: u16, pane_inner: Rect) -> (u16, u16) {
@@ -341,5 +389,29 @@ mod tests {
         let (row, col) = clamp_to_pane(0, 0, Rect::new(10, 5, 80, 24));
         assert_eq!(row, 0);
         assert_eq!(col, 0);
+    }
+
+    #[test]
+    fn anchor_screen_pos_adds_pane_origin() {
+        // Pane offset by sidebar (x=10) and tab bar (y=5).
+        // Anchor at viewport_row=3, col=5 (pane-relative).
+        let sel = Selection::anchor(PaneId::from_raw(0), 3, 5, None);
+        let pane_inner = Rect::new(10, 5, 80, 24);
+        let (row, col) = sel.anchor_screen_pos(pane_inner, None);
+        // Screen row = 3 + 5 = 8, screen col = 5 + 10 = 15
+        assert_eq!(row, 8);
+        assert_eq!(col, 15);
+    }
+
+    #[test]
+    fn anchor_screen_pos_same_cell_as_mouse_with_offset() {
+        // When the pane has a non-zero origin, anchor and mouse on the same
+        // screen cell must compare equal — no false drag detection.
+        let pane_inner = Rect::new(10, 5, 80, 24);
+        // Mouse clicked at screen (15, 8) → anchor stored as (viewport_row=3, col=5)
+        let sel = Selection::anchor(PaneId::from_raw(0), 3, 5, None);
+        let (ar, ac) = sel.anchor_screen_pos(pane_inner, None);
+        // Screen position of the anchor must match the mouse position
+        assert_eq!((ar, ac), (8, 15));
     }
 }

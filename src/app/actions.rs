@@ -113,6 +113,8 @@ impl AppState {
 
     pub fn switch_workspace(&mut self, idx: usize) {
         if idx < self.workspaces.len() {
+            self.selection = None;
+            self.selection_autoscroll = None;
             self.active = Some(idx);
             self.selected = idx;
             let workspace_id = self.workspaces[idx].id.clone();
@@ -196,6 +198,8 @@ impl AppState {
 
     pub fn switch_tab(&mut self, idx: usize) {
         if let Some(ws_idx) = self.active {
+            self.selection = None;
+            self.selection_autoscroll = None;
             let Some(ws) = self.workspaces.get_mut(ws_idx) else {
                 return;
             };
@@ -470,6 +474,8 @@ impl AppState {
         if self.workspaces.is_empty() {
             return;
         }
+        self.selection = None;
+        self.selection_autoscroll = None;
         self.mark_session_dirty();
         let terminal_ids = self.terminal_ids_for_workspace(self.selected);
         let workspace_id = self.workspaces[self.selected].id.clone();
@@ -590,6 +596,8 @@ impl AppState {
     }
 
     pub fn close_pane(&mut self) {
+        self.selection = None;
+        self.selection_autoscroll = None;
         self.mark_session_dirty();
         let active = self.active;
         let terminal_ids = active
@@ -615,6 +623,8 @@ impl AppState {
     }
 
     pub fn close_tab(&mut self) {
+        self.selection = None;
+        self.selection_autoscroll = None;
         self.mark_session_dirty();
         let should_close_workspace = self
             .active
@@ -654,6 +664,11 @@ impl AppState {
 impl AppState {
     pub fn clear_selection(&mut self) {
         self.selection = None;
+        self.selection_autoscroll = None;
+    }
+
+    pub(crate) fn stop_selection_autoscroll_state(&mut self) {
+        self.selection_autoscroll = None;
     }
 
     pub fn copy_selection(&mut self) {
@@ -682,6 +697,7 @@ impl AppState {
         }
 
         self.selection = None;
+        self.selection_autoscroll = None;
     }
 }
 
@@ -917,6 +933,15 @@ impl AppState {
             warn!(pane = pane_id.raw(), "PaneDied for unknown pane");
             return;
         };
+
+        if self
+            .selection
+            .as_ref()
+            .is_some_and(|s| s.pane_id == pane_id)
+        {
+            self.selection = None;
+            self.selection_autoscroll = None;
+        }
 
         let pane_terminal_id = self.terminal_id_for_pane(ws_idx, pane_id);
         let workspace_terminal_ids = self.terminal_ids_for_workspace(ws_idx);
@@ -1337,6 +1362,51 @@ mod tests {
         state.handle_pane_died(fake_id);
 
         assert_eq!(state.workspaces.len(), 1);
+    }
+
+    #[test]
+    fn pane_died_unrelated_pane_preserves_selection() {
+        // Two workspaces; user is selecting text in workspace 0.
+        // A pane in workspace 1 dies — selection must be preserved.
+        let mut state = app_with_workspaces(&["active", "bg"]);
+        let active_pane = *state.workspaces[0].panes.keys().next().unwrap();
+        let bg_pane = *state.workspaces[1].panes.keys().next().unwrap();
+
+        state.selection = Some(crate::selection::Selection::anchor(active_pane, 0, 0, None));
+        state.selection_autoscroll = Some(crate::app::state::SelectionAutoscroll {
+            direction: crate::app::state::SelectionAutoscrollDirection::Down,
+            last_mouse_screen_col: 0,
+            last_mouse_screen_row: 23,
+            inner_rect: ratatui::layout::Rect::new(0, 0, 80, 24),
+        });
+
+        state.handle_pane_died(bg_pane);
+
+        assert!(state.selection.is_some());
+        assert!(state.selection_autoscroll.is_some());
+    }
+
+    #[test]
+    fn pane_died_same_pane_clears_selection() {
+        let mut state = app_with_workspaces(&["test"]);
+        let first_id = state.workspaces[0].tabs[0].root_pane;
+        let second_id = state.workspaces[0].test_split(Direction::Horizontal);
+
+        state.selection = Some(crate::selection::Selection::anchor(second_id, 0, 0, None));
+        state.selection_autoscroll = Some(crate::app::state::SelectionAutoscroll {
+            direction: crate::app::state::SelectionAutoscrollDirection::Down,
+            last_mouse_screen_col: 0,
+            last_mouse_screen_row: 23,
+            inner_rect: ratatui::layout::Rect::new(0, 0, 80, 24),
+        });
+
+        state.handle_pane_died(second_id);
+
+        // first_id still alive, workspace stays, but selection was on the dying pane
+        assert!(state.selection.is_none());
+        assert!(state.selection_autoscroll.is_none());
+        assert_eq!(state.workspaces[0].panes.len(), 1);
+        assert_eq!(state.workspaces[0].panes.keys().next().unwrap(), &first_id);
     }
 
     #[test]

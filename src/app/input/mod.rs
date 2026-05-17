@@ -177,6 +177,15 @@ impl App {
                 tracing::warn!("failed to queue clipboard write event");
             }
         }
+
+        // Sync autoscroll deadline with state (mouse handler may have
+        // set or cleared selection_autoscroll during handle_mouse).
+        if self.state.selection_autoscroll.is_none() {
+            self.selection_autoscroll_deadline = None;
+        } else if self.selection_autoscroll_deadline.is_none() {
+            self.selection_autoscroll_deadline =
+                Some(std::time::Instant::now() + super::SELECTION_AUTOSCROLL_INTERVAL);
+        }
     }
 }
 

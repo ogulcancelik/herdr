@@ -133,6 +133,7 @@ impl AppState {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.selection = None;
+                self.selection_autoscroll = None;
                 self.workspace_press = None;
 
                 if self.mode == Mode::ConfirmClose {
@@ -371,6 +372,7 @@ impl AppState {
 
                     if self.forward_pane_mouse_button(&info, mouse) {
                         self.selection = None;
+                        self.selection_autoscroll = None;
                         return None;
                     }
 
@@ -408,6 +410,7 @@ impl AppState {
                     if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
                         if self.forward_pane_mouse_button(&info, mouse) {
                             self.selection = None;
+                            self.selection_autoscroll = None;
                             return None;
                         }
                     }
@@ -525,9 +528,11 @@ impl AppState {
                     self.workspace_press = None;
                     self.tab_press = None;
                     self.drag = None;
+                    self.selection_autoscroll = None;
                     let was_click = self.selection.as_ref().is_some_and(|s| s.was_just_click());
                     if was_click {
                         self.selection = None;
+                        self.selection_autoscroll = None;
                     } else {
                         self.copy_selection();
                     }
@@ -538,6 +543,7 @@ impl AppState {
                     if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
                         if self.forward_pane_mouse_button(&info, mouse) {
                             self.selection = None;
+                            self.selection_autoscroll = None;
                             self.workspace_press = None;
                             self.tab_press = None;
                             self.drag = None;
@@ -588,6 +594,7 @@ impl AppState {
                         let was_click = self.selection.as_ref().is_some_and(|s| s.was_just_click());
                         if was_click {
                             self.selection = None;
+                            self.selection_autoscroll = None;
                         } else {
                             self.copy_selection();
                         }
@@ -618,6 +625,7 @@ impl AppState {
 
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if !in_sidebar => {
                 self.selection = None;
+                self.selection_autoscroll = None;
                 self.handle_terminal_wheel(mouse);
             }
 
@@ -1010,7 +1018,7 @@ impl AppState {
             .or_else(|| self.pane_frame_at(col, row))
     }
 
-    pub(super) fn pane_info_by_id(&self, pane_id: crate::layout::PaneId) -> Option<&PaneInfo> {
+    pub(crate) fn pane_info_by_id(&self, pane_id: crate::layout::PaneId) -> Option<&PaneInfo> {
         self.view.pane_infos.iter().find(|info| info.id == pane_id)
     }
 
@@ -1061,7 +1069,7 @@ impl AppState {
         self.mode = Mode::Terminal;
     }
 
-    pub(super) fn scroll_pane_up(&self, pane_id: crate::layout::PaneId, lines: usize) {
+    pub(crate) fn scroll_pane_up(&self, pane_id: crate::layout::PaneId, lines: usize) {
         if let Some(ws_idx) = self.active {
             if let Some(rt) = self.runtime_for_pane_in_workspace(ws_idx, pane_id) {
                 rt.scroll_up(lines);
@@ -1069,7 +1077,7 @@ impl AppState {
         }
     }
 
-    pub(super) fn scroll_pane_down(&self, pane_id: crate::layout::PaneId, lines: usize) {
+    pub(crate) fn scroll_pane_down(&self, pane_id: crate::layout::PaneId, lines: usize) {
         if let Some(ws_idx) = self.active {
             if let Some(rt) = self.runtime_for_pane_in_workspace(ws_idx, pane_id) {
                 rt.scroll_down(lines);
@@ -1077,7 +1085,7 @@ impl AppState {
         }
     }
 
-    pub(super) fn pane_scroll_metrics(
+    pub(crate) fn pane_scroll_metrics(
         &self,
         pane_id: crate::layout::PaneId,
     ) -> Option<crate::pane::ScrollMetrics> {

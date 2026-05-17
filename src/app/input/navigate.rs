@@ -113,6 +113,7 @@ impl App {
             } else {
                 execute_navigate_action(&mut self.state, action);
             }
+            self.selection_autoscroll_deadline = None;
             return;
         }
 

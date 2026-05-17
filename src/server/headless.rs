@@ -2024,6 +2024,15 @@ impl HeadlessServer {
             changed = true;
         }
 
+        if self
+            .app
+            .selection_autoscroll_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.app.tick_selection_autoscroll(now);
+            changed = true;
+        }
+
         self.app.start_git_status_refresh_if_due(now);
 
         if self

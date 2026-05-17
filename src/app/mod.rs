@@ -29,6 +29,7 @@ const MIN_RENDER_INTERVAL: Duration = Duration::from_millis(16);
 pub(crate) const ANIMATION_INTERVAL: Duration = Duration::from_millis(16);
 pub(crate) const HEADLESS_ANIMATION_INTERVAL: Duration = Duration::from_millis(128);
 pub(crate) const HEADLESS_ANIMATION_TICK_STEP: u32 = 8;
+pub(crate) const SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(30);
 const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const GIT_REMOTE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
@@ -77,6 +78,7 @@ pub struct App {
     pub(crate) next_resize_poll: Instant,
     pub(crate) next_animation_tick: Option<Instant>,
     pub(crate) next_auto_update_check: Option<Instant>,
+    pub(crate) selection_autoscroll_deadline: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
     pub(crate) last_render_at: Option<Instant>,
     pub(crate) suppressed_repeat_keys:
@@ -363,6 +365,7 @@ impl App {
             workspace_press: None,
             tab_press: None,
             selection: None,
+            selection_autoscroll: None,
             context_menu: None,
             update_available,
             update_install_command,
@@ -451,6 +454,7 @@ impl App {
             next_auto_update_check: auto_updates_enabled(no_session)
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
             session_save_deadline: None,
+            selection_autoscroll_deadline: None,
             last_render_at: None,
             suppressed_repeat_keys: HashSet::new(),
             api_rx,
@@ -2041,6 +2045,51 @@ mod tests {
         app.handle_scheduled_tasks(Instant::now());
 
         assert!(app.session_save_deadline.is_none());
+    }
+
+    #[test]
+    fn next_loop_deadline_includes_selection_autoscroll_deadline() {
+        let mut app = test_app();
+        let now = Instant::now();
+        app.selection_autoscroll_deadline = Some(now + Duration::from_millis(5));
+        app.next_animation_tick = Some(now + Duration::from_millis(100));
+        app.session_save_deadline = Some(now + Duration::from_millis(200));
+        assert_eq!(
+            app.next_loop_deadline(now, false),
+            app.selection_autoscroll_deadline
+        );
+    }
+
+    #[test]
+    fn tick_selection_autoscroll_self_heals_when_state_cleared() {
+        let mut app = test_app();
+        let now = Instant::now();
+        app.state.selection_autoscroll = None;
+        app.selection_autoscroll_deadline = Some(now);
+        app.tick_selection_autoscroll(now);
+        assert!(app.selection_autoscroll_deadline.is_none());
+    }
+
+    #[test]
+    fn tick_selection_autoscroll_stops_on_rect_change() {
+        let mut app = test_app();
+        let now = Instant::now();
+        let ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        app.state.workspaces.push(ws);
+        app.state.active = Some(0);
+        app.state.selection = Some(crate::selection::Selection::anchor(pane_id, 0, 0, None));
+        // Set autoscroll with a stale inner_rect that doesn't match pane_infos
+        app.state.selection_autoscroll = Some(state::SelectionAutoscroll {
+            direction: state::SelectionAutoscrollDirection::Down,
+            last_mouse_screen_col: 0,
+            last_mouse_screen_row: 999,
+            inner_rect: ratatui::layout::Rect::new(0, 0, 1, 1), // wrong rect
+        });
+        app.selection_autoscroll_deadline = Some(now);
+        app.tick_selection_autoscroll(now);
+        assert!(app.state.selection_autoscroll.is_none());
+        assert!(app.selection_autoscroll_deadline.is_none());
     }
 
     #[tokio::test]

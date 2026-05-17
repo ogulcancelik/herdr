@@ -5,6 +5,31 @@ use ratatui::style::Color;
 
 use crate::layout::{PaneId, PaneInfo, SplitBorder};
 use crate::selection::Selection;
+
+// ---------------------------------------------------------------------------
+// Selection autoscroll types
+// ---------------------------------------------------------------------------
+
+/// Direction of automatic scrolling during text selection drag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SelectionAutoscrollDirection {
+    Up,
+    Down,
+}
+
+/// State for automatic scrolling during text selection drag.
+///
+/// When the cursor hovers in the 1-row hot zone at the top or bottom edge
+/// of a pane (or outside the pane), this struct captures the direction and
+/// last known mouse position so a recurring 30ms tick can continue scrolling
+/// and extending the selection even when the mouse is not moving.
+#[derive(Clone, Debug)]
+pub(crate) struct SelectionAutoscroll {
+    pub direction: SelectionAutoscrollDirection,
+    pub last_mouse_screen_col: u16,
+    pub last_mouse_screen_row: u16,
+    pub inner_rect: Rect,
+}
 use crate::terminal_theme::TerminalTheme;
 use crate::workspace::Workspace;
 
@@ -862,6 +887,7 @@ pub struct AppState {
     pub(crate) workspace_press: Option<WorkspacePressState>,
     pub(crate) tab_press: Option<TabPressState>,
     pub selection: Option<Selection>,
+    pub selection_autoscroll: Option<SelectionAutoscroll>,
     pub context_menu: Option<ContextMenuState>,
     // Notifications
     pub update_available: Option<String>,
@@ -936,7 +962,7 @@ impl AppState {
             && self
                 .active
                 .and_then(|idx| self.focused_runtime_in_workspace(idx))
-                .and_then(crate::pane::PaneRuntime::input_state)
+                .and_then(crate::terminal::TerminalRuntime::input_state)
                 .is_some_and(crate::pane::InputState::mouse_reporting_enabled)
     }
 
@@ -1107,6 +1133,7 @@ impl AppState {
             workspace_press: None,
             tab_press: None,
             selection: None,
+            selection_autoscroll: None,
             context_menu: None,
             update_available: None,
             update_install_command: "herdr update".into(),
