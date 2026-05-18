@@ -408,6 +408,7 @@ impl App {
                 original_theme: None,
             },
             global_menu: state::MenuListState::new(0),
+            goto: state::GotoState::default(),
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
             session_dirty: false,
         };
@@ -933,6 +934,9 @@ impl App {
             }
             Mode::GlobalMenu => {
                 input::handle_global_menu_key(&mut self.state, key_event);
+            }
+            Mode::Goto => {
+                input::handle_goto_key(&mut self.state, key_event);
             }
             Mode::Onboarding => {
                 self.handle_onboarding_key(key_event);

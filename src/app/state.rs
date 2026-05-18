@@ -576,6 +576,38 @@ pub enum Mode {
     Settings,
     GlobalMenu,
     KeybindHelp,
+    Goto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GotoTarget {
+    Space {
+        ws_idx: usize,
+    },
+    Tab {
+        ws_idx: usize,
+        tab_idx: usize,
+    },
+    Agent {
+        ws_idx: usize,
+        tab_idx: usize,
+        pane_id: crate::layout::PaneId,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct GotoItem {
+    pub target: GotoTarget,
+    pub label: String,
+    pub haystack: String,
+    pub is_current: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct GotoState {
+    pub filter: String,
+    pub list: usize,
+    pub items: Vec<GotoItem>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -934,6 +966,8 @@ pub struct AppState {
     pub settings: SettingsState,
     /// Highlight state for the bottom-right global launcher menu.
     pub global_menu: MenuListState,
+    /// Picker state for the `goto` overlay.
+    pub goto: GotoState,
     /// Resolved host terminal default colors for theming embedded panes.
     pub host_terminal_theme: TerminalTheme,
     /// Set when a persisted session snapshot would change.
@@ -1225,6 +1259,8 @@ impl AppState {
                 resize_mode_label: "r".into(),
                 toggle_sidebar: (KeyCode::Char('b'), KeyModifiers::empty()),
                 toggle_sidebar_label: "b".into(),
+                goto: (KeyCode::Char('g'), KeyModifiers::empty()),
+                goto_label: "g".into(),
                 custom_commands: Vec::new(),
             },
             spinner_tick: 0,
@@ -1237,6 +1273,7 @@ impl AppState {
                 original_theme: None,
             },
             global_menu: MenuListState::new(0),
+            goto: GotoState::default(),
             host_terminal_theme: TerminalTheme::default(),
             session_dirty: false,
         }

@@ -32,6 +32,7 @@ pub(super) fn keybind_help_groups(
                 "navigate mode",
             ),
             ("prefix + ?".to_string(), "keybinds"),
+            (kb.goto_label.clone(), "goto (space / tab / agent)"),
             (
                 optional_keybind_label(&kb.reload_config_label),
                 "reload config",

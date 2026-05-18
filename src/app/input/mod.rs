@@ -22,6 +22,7 @@ enum WheelRouting {
 const WORKSPACE_DRAG_THRESHOLD: u16 = 1;
 const TAB_DRAG_THRESHOLD: u16 = 1;
 
+mod goto;
 mod modal;
 mod mouse;
 mod navigate;
@@ -32,6 +33,7 @@ mod sidebar;
 mod terminal;
 
 pub(crate) use self::{
+    goto::handle_goto_key,
     modal::{
         handle_confirm_close_key, handle_context_menu_key, handle_global_menu_key,
         handle_keybind_help_key, handle_rename_key, handle_resize_key,
@@ -72,6 +74,7 @@ impl App {
                     Mode::Settings => self.handle_settings_key(key),
                     Mode::GlobalMenu => handle_global_menu_key(&mut self.state, key),
                     Mode::KeybindHelp => handle_keybind_help_key(&mut self.state, key),
+                    Mode::Goto => handle_goto_key(&mut self.state, key),
                     Mode::Terminal => unreachable!(),
                 }
             }

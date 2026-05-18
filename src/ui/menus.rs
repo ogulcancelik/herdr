@@ -51,6 +51,8 @@ pub(super) fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: R
         Span::styled(" zoom  ", dim),
         Span::styled(kb.resize_mode_label.as_str(), key),
         Span::styled(" resize  ", dim),
+        Span::styled(kb.goto_label.as_str(), key),
+        Span::styled(" goto  ", dim),
         Span::styled("?", key),
         Span::styled(" keybinds  ", dim),
         Span::styled("s", key),

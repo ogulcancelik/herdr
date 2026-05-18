@@ -492,6 +492,7 @@ pub(crate) enum NavigateAction {
     ReloadConfig,
     OpenNotificationTarget,
     Detach,
+    Goto,
 }
 
 fn indexed_navigation_action(state: &AppState, key: &KeyEvent) -> Option<NavigateAction> {
@@ -618,6 +619,9 @@ fn navigate_action_for_key(state: &AppState, key: &KeyEvent) -> Option<NavigateA
     }
     if key_matches(key, kb.toggle_sidebar.0, kb.toggle_sidebar.1) {
         return Some(NavigateAction::ToggleSidebar);
+    }
+    if key_matches(key, kb.goto.0, kb.goto.1) {
+        return Some(NavigateAction::Goto);
     }
     if kb
         .reload_config
@@ -768,6 +772,7 @@ pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateActi
             state.detach_requested = true;
             leave_navigate_mode(state);
         }
+        NavigateAction::Goto => super::goto::open_goto(state),
     }
 }
 

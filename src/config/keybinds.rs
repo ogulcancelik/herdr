@@ -117,6 +117,8 @@ pub struct Keybinds {
     pub resize_mode_label: String,
     pub toggle_sidebar: (KeyCode, KeyModifiers),
     pub toggle_sidebar_label: String,
+    pub goto: (KeyCode, KeyModifiers),
+    pub goto_label: String,
     pub custom_commands: Vec<CustomCommandKeybind>,
 }
 
@@ -382,6 +384,14 @@ impl Config {
                 &self.keys.toggle_sidebar,
                 "b",
                 (KeyCode::Char('b'), KeyModifiers::empty()),
+                &mut diagnostics,
+            ),
+            required_binding(
+                BindingScope::Navigate,
+                "keys.goto",
+                &self.keys.goto,
+                "g",
+                (KeyCode::Char('g'), KeyModifiers::empty()),
                 &mut diagnostics,
             ),
         ];
@@ -797,6 +807,8 @@ impl Config {
             resize_mode_label: bindings[8].label.clone(),
             toggle_sidebar: bindings[9].value,
             toggle_sidebar_label: bindings[9].label.clone(),
+            goto: bindings[10].value,
+            goto_label: bindings[10].label.clone(),
             custom_commands,
         };
 

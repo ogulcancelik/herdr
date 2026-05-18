@@ -126,6 +126,8 @@ pub struct KeysConfig {
     pub resize_mode: String,
     /// Toggle sidebar collapse. Default: "b"
     pub toggle_sidebar: String,
+    /// Open the goto picker (filterable list of spaces, tabs, agents). Default: "g"
+    pub goto: String,
     /// Optional indexed shortcuts expanded over number keys 1-9.
     pub indexed: IndexedKeysConfig,
     /// Prefix-mode custom command bindings.
@@ -214,6 +216,7 @@ impl Default for KeysConfig {
             zoom: "f".into(),
             resize_mode: "r".into(),
             toggle_sidebar: "b".into(),
+            goto: "g".into(),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
         }
