@@ -70,6 +70,23 @@ pub struct Config {
     pub ui: UiConfig,
     pub advanced: AdvancedConfig,
     pub experimental: ExperimentalConfig,
+    /// Remote workspace providers. Each entry adds an option to the
+    /// new-workspace picker that runs `list_command` to enumerate targets
+    /// and `connect_command` (with `{name}` substituted) to spawn the
+    /// root pane against the selected target.
+    pub remote: Vec<RemoteProvider>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RemoteProvider {
+    /// Display name shown in the picker (e.g. "coder").
+    pub name: String,
+    /// Shell command whose stdout is parsed line-by-line as picker entries.
+    /// Blank lines are ignored. Runs via `sh -c`.
+    pub list_command: String,
+    /// Shell command template used to connect. `{name}` is replaced with
+    /// the selected entry. Runs via `sh -c` as the new pane's argv.
+    pub connect_command: String,
 }
 
 #[derive(Debug)]
@@ -318,6 +335,32 @@ show_agent_labels_on_pane_borders = true
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.ui.show_agent_labels_on_pane_borders);
+    }
+
+    #[test]
+    fn remote_providers_parse() {
+        let toml = r#"
+[[remote]]
+name = "coder"
+list_command = "coder ls --output csv | tail -n +2 | cut -d, -f1"
+connect_command = "coder ssh {name}"
+
+[[remote]]
+name = "ssh-hosts"
+list_command = "awk '/^Host /{print $2}' ~/.ssh/config"
+connect_command = "ssh {name}"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.remote.len(), 2);
+        assert_eq!(config.remote[0].name, "coder");
+        assert_eq!(config.remote[0].connect_command, "coder ssh {name}");
+        assert_eq!(config.remote[1].name, "ssh-hosts");
+    }
+
+    #[test]
+    fn remote_providers_default_empty() {
+        let config = Config::default();
+        assert!(config.remote.is_empty());
     }
 
     #[test]

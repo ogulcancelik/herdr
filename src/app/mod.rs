@@ -428,6 +428,8 @@ impl App {
             global_menu: state::MenuListState::new(0),
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
             session_dirty: false,
+            remote_providers: config.remote.clone(),
+            new_workspace_picker: None,
         };
 
         state.terminals = restored_terminals;
@@ -807,6 +809,8 @@ impl App {
             self.state.pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes;
         }
 
+        self.state.remote_providers = config.remote.clone();
+
         if !invalid_section("theme") {
             self.state.palette = resolve_palette_with_legacy_accent(config, !invalid_section("ui"));
             self.state.theme_name = config
@@ -975,6 +979,9 @@ impl App {
             }
             Mode::GlobalMenu => {
                 input::handle_global_menu_key(&mut self.state, key_event);
+            }
+            Mode::NewWorkspaceTypePicker | Mode::NewWorkspaceRemotePicker => {
+                self.handle_new_workspace_picker_key(key_event);
             }
             Mode::Onboarding => {
                 self.handle_onboarding_key(key_event);

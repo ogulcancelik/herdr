@@ -37,6 +37,14 @@ pub struct WorkspaceSnapshot {
     pub tabs: Vec<TabSnapshot>,
     #[serde(default)]
     pub active_tab: usize,
+    /// Argv to use when spawning new panes/tabs in this workspace, set when
+    /// the workspace was created via a remote provider. None for local
+    /// workspaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_argv: Option<Vec<String>>,
+    /// Display name of the remote provider used to create this workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_provider_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -110,6 +118,8 @@ impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
             identity_cwd,
             tabs: vec![tab],
             active_tab: 0,
+            remote_argv: None,
+            remote_provider_name: None,
         }
     }
 }
@@ -248,6 +258,8 @@ fn capture_workspace(
             .map(|tab| capture_tab(tab, terminals, terminal_runtimes))
             .collect(),
         active_tab: ws.active_tab,
+        remote_argv: ws.remote_argv.clone(),
+        remote_provider_name: ws.remote_provider_name.clone(),
     }
 }
 
@@ -472,6 +484,8 @@ mod tests {
                     root_pane: Some(0),
                 }],
                 active_tab: 0,
+                remote_argv: None,
+                remote_provider_name: None,
             }],
             active: Some(0),
             selected: 0,
@@ -797,6 +811,8 @@ mod tests {
                     root_pane: Some(0),
                 }],
                 active_tab: 0,
+                remote_argv: None,
+                remote_provider_name: None,
             }],
             active: Some(0),
             selected: 0,

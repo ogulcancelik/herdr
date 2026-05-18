@@ -321,6 +321,43 @@ Changing the agent panel scope from the sidebar writes `agent_panel_scope` to co
 - hex like `#89b4fa`
 - rgb like `rgb(137,180,250)`
 
+## remote workspaces
+
+Configure one or more `[[remote]]` providers to add entries to the
+new-workspace picker. When the user creates a new workspace (via the `n`
+keybind or the sidebar "new" button), herdr opens a picker offering `local`
+plus each provider by name. Selecting a provider runs its `list_command`,
+parses stdout one entry per line, and prompts the user to pick a target.
+The selected workspace is then spawned with `connect_command` (with
+`{name}` substituted for the chosen entry) as its root pane.
+
+New tabs created inside a remote workspace reuse the same connect command,
+so they land on the same remote target.
+
+```toml
+[[remote]]
+name = "coder"
+list_command = "coder ls --output csv | tail -n +2 | cut -d, -f1"
+connect_command = "coder ssh {name}"
+
+[[remote]]
+name = "ssh-hosts"
+list_command = "awk '/^Host /{print $2}' ~/.ssh/config"
+connect_command = "ssh {name}"
+```
+
+### options
+
+| option | description |
+|--------|-------------|
+| `name` | Display name shown in the picker (e.g. `coder`) |
+| `list_command` | Shell command whose stdout is split by newlines into picker entries. Runs via `sh -c`. Blank lines are ignored. |
+| `connect_command` | Shell command template for the new pane. `{name}` is replaced with the selected entry. Runs via `sh -c`. |
+
+When no `[[remote]]` providers are configured, the picker is skipped and
+new workspaces behave exactly as before — opening the current directory
+locally.
+
 ## toast notifications
 
 ```toml

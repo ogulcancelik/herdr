@@ -1,4 +1,4 @@
-use crate::config::{Keybinds, SoundConfig, ToastConfig, ToastDelivery};
+use crate::config::{Keybinds, RemoteProvider, SoundConfig, ToastConfig, ToastDelivery};
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Direction, Rect};
 use ratatui::style::Color;
@@ -599,6 +599,10 @@ pub enum Mode {
     Settings,
     GlobalMenu,
     KeybindHelp,
+    /// Choose between local workspace or a configured remote provider.
+    NewWorkspaceTypePicker,
+    /// After picking a remote provider, choose which target to connect to.
+    NewWorkspaceRemotePicker,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -964,6 +968,27 @@ pub struct AppState {
     pub host_terminal_theme: TerminalTheme,
     /// Set when a persisted session snapshot would change.
     pub session_dirty: bool,
+    /// Configured remote workspace providers (from `[[remote]]` in config).
+    pub remote_providers: Vec<RemoteProvider>,
+    /// Active picker for new-workspace flow (type or remote-target picker).
+    pub new_workspace_picker: Option<NewWorkspacePickerState>,
+}
+
+/// State for the new-workspace picker dialogs.
+///
+/// `entries` is the list of choices currently displayed; `highlighted` is the
+/// 0-based index of the selected entry. For the type picker, `provider_index`
+/// is `None`; once a remote provider is chosen we store its index here so the
+/// remote picker knows which connect template to substitute into.
+#[derive(Debug, Clone)]
+pub struct NewWorkspacePickerState {
+    pub entries: Vec<String>,
+    pub highlighted: usize,
+    /// Index into `state.remote_providers`. None means we are still on the
+    /// type picker (entries are "local" + provider names).
+    pub provider_index: Option<usize>,
+    /// Optional error/info message shown beneath the list (e.g. command failed).
+    pub message: Option<String>,
 }
 
 impl AppState {
@@ -1267,6 +1292,8 @@ impl AppState {
             global_menu: MenuListState::new(0),
             host_terminal_theme: TerminalTheme::default(),
             session_dirty: false,
+            remote_providers: Vec::new(),
+            new_workspace_picker: None,
         }
     }
 

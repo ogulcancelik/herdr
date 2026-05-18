@@ -72,6 +72,9 @@ impl App {
                     Mode::Settings => self.handle_settings_key(key),
                     Mode::GlobalMenu => handle_global_menu_key(&mut self.state, key),
                     Mode::KeybindHelp => handle_keybind_help_key(&mut self.state, key),
+                    Mode::NewWorkspaceTypePicker | Mode::NewWorkspaceRemotePicker => {
+                        self.handle_new_workspace_picker_key(key)
+                    }
                     Mode::Terminal => unreachable!(),
                 }
             }

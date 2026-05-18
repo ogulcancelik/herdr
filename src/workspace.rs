@@ -62,6 +62,14 @@ pub struct Workspace {
     pub(crate) next_public_pane_number: usize,
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
+    /// When set, new tabs and splits created inside this workspace spawn their
+    /// root pane with this argv instead of a login shell. Used to keep new tabs
+    /// in a remote-workspace bound to the same remote provider (e.g. `coder ssh
+    /// my-workspace`).
+    pub remote_argv: Option<Vec<String>>,
+    /// Display name of the remote provider this workspace was created from
+    /// (e.g. "coder"). Used for the workspace label and UI hints.
+    pub remote_provider_name: Option<String>,
     #[cfg(test)]
     pub(crate) test_runtimes: HashMap<PaneId, TerminalRuntime>,
 }
@@ -181,6 +189,8 @@ impl Workspace {
                 next_public_pane_number: 2,
                 tabs: vec![tab],
                 active_tab: 0,
+                remote_argv: None,
+                remote_provider_name: None,
                 #[cfg(test)]
                 test_runtimes: HashMap::new(),
             },
@@ -231,6 +241,25 @@ impl Workspace {
             scrollback_limit_bytes,
             host_terminal_theme,
             None,
+        )
+    }
+
+    pub fn create_tab_argv(
+        &mut self,
+        rows: u16,
+        cols: u16,
+        cwd: PathBuf,
+        argv: &[String],
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+    ) -> std::io::Result<(usize, TerminalState, TerminalRuntime)> {
+        self.create_tab_with_runtime(
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            Some(argv),
         )
     }
 
@@ -692,6 +721,8 @@ impl Workspace {
             next_public_pane_number: 2,
             tabs: vec![tab],
             active_tab: 0,
+            remote_argv: None,
+            remote_provider_name: None,
             test_runtimes: HashMap::new(),
         }
     }

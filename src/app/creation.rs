@@ -1,10 +1,19 @@
+use std::process::Command;
+use std::time::Duration;
+
+use crossterm::event::{KeyCode, KeyEvent};
 use tracing::error;
 
 use super::{
     api_helpers::{pane_agent_status, tab_attention_priority},
+    state::NewWorkspacePickerState,
     App, Mode,
 };
 use crate::workspace::Workspace;
+
+/// How long to wait for a remote provider's `list_command` before bailing.
+/// Synchronous on purpose for v1 — refactor to async if this proves slow.
+const REMOTE_LIST_TIMEOUT: Duration = Duration::from_secs(8);
 
 impl App {
     pub(super) fn seed_cwd_from_workspace(&self, ws_idx: usize) -> Option<std::path::PathBuf> {
@@ -30,7 +39,20 @@ impl App {
     }
 
     /// Create a workspace with a real PTY (needs event_tx).
+    ///
+    /// If at least one `[[remote]]` provider is configured, this opens the
+    /// new-workspace type picker. The user can choose `local` (current
+    /// behavior) or a provider, in which case the provider's `list_command`
+    /// is run and the user picks a target to spawn under `connect_command`.
     pub(crate) fn create_workspace(&mut self) {
+        if !self.state.remote_providers.is_empty() {
+            self.open_new_workspace_type_picker();
+            return;
+        }
+        self.create_local_workspace();
+    }
+
+    fn create_local_workspace(&mut self) {
         let initial_cwd = self
             .workspace_creation_source()
             .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx))
@@ -39,6 +61,196 @@ impl App {
         if let Err(e) = self.create_workspace_with_options(initial_cwd, true) {
             error!(err = %e, "failed to create workspace");
             self.state.mode = Mode::Navigate;
+        }
+    }
+
+    fn open_new_workspace_type_picker(&mut self) {
+        let mut entries = vec!["local".to_string()];
+        entries.extend(self.state.remote_providers.iter().map(|p| p.name.clone()));
+        self.state.new_workspace_picker = Some(NewWorkspacePickerState {
+            entries,
+            highlighted: 0,
+            provider_index: None,
+            message: None,
+        });
+        self.state.mode = Mode::NewWorkspaceTypePicker;
+    }
+
+    fn open_new_workspace_remote_picker(&mut self, provider_idx: usize) {
+        let Some(provider) = self.state.remote_providers.get(provider_idx).cloned() else {
+            self.close_new_workspace_picker();
+            return;
+        };
+
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(&provider.list_command)
+            .output();
+
+        let (entries, message) = match output {
+            Ok(out) if out.status.success() => {
+                let entries: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                if entries.is_empty() {
+                    (entries, Some("no entries returned".to_string()))
+                } else {
+                    (entries, None)
+                }
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let trimmed = stderr.trim();
+                let msg = if trimmed.is_empty() {
+                    format!("list_command exited {}", out.status)
+                } else {
+                    format!("list_command failed: {trimmed}")
+                };
+                (Vec::new(), Some(msg))
+            }
+            Err(err) => (Vec::new(), Some(format!("could not run list_command: {err}"))),
+        };
+
+        // We don't enforce REMOTE_LIST_TIMEOUT yet (would need a thread or
+        // async wrapper); use it as docs for now and keep the constant alive.
+        let _ = REMOTE_LIST_TIMEOUT;
+
+        self.state.new_workspace_picker = Some(NewWorkspacePickerState {
+            entries,
+            highlighted: 0,
+            provider_index: Some(provider_idx),
+            message,
+        });
+        self.state.mode = Mode::NewWorkspaceRemotePicker;
+    }
+
+    fn close_new_workspace_picker(&mut self) {
+        self.state.new_workspace_picker = None;
+        self.state.mode = if self.state.active.is_some() {
+            Mode::Terminal
+        } else {
+            Mode::Navigate
+        };
+    }
+
+    fn confirm_type_picker_selection(&mut self) {
+        let Some(picker) = self.state.new_workspace_picker.as_ref() else {
+            return;
+        };
+        let highlighted = picker.highlighted;
+        // entries[0] is always "local"; entries[1..] mirror remote_providers.
+        if highlighted == 0 {
+            self.close_new_workspace_picker();
+            self.create_local_workspace();
+            return;
+        }
+        let provider_idx = highlighted - 1;
+        self.open_new_workspace_remote_picker(provider_idx);
+    }
+
+    fn confirm_remote_picker_selection(&mut self) {
+        let Some(picker) = self.state.new_workspace_picker.as_ref() else {
+            return;
+        };
+        if picker.entries.is_empty() {
+            return;
+        }
+        let Some(target) = picker.entries.get(picker.highlighted).cloned() else {
+            return;
+        };
+        let Some(provider_idx) = picker.provider_index else {
+            return;
+        };
+        let Some(provider) = self.state.remote_providers.get(provider_idx).cloned() else {
+            self.close_new_workspace_picker();
+            return;
+        };
+        self.close_new_workspace_picker();
+
+        let connect = provider.connect_command.replace("{name}", &target);
+        let argv = vec!["sh".to_string(), "-c".to_string(), connect.clone()];
+        let initial_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+        let label = format!("{}: {}", provider.name, target);
+
+        if let Err(e) = self.create_remote_workspace_with_argv(
+            initial_cwd,
+            argv,
+            provider.name.clone(),
+            label,
+        ) {
+            error!(err = %e, "failed to create remote workspace");
+            self.state.mode = Mode::Navigate;
+        }
+    }
+
+    fn create_remote_workspace_with_argv(
+        &mut self,
+        initial_cwd: std::path::PathBuf,
+        argv: Vec<String>,
+        provider_name: String,
+        label: String,
+    ) -> std::io::Result<usize> {
+        let (rows, cols) = self.state.estimate_pane_size();
+        let (mut ws, terminal, runtime) = Workspace::new_argv_command(
+            initial_cwd,
+            rows,
+            cols,
+            &argv,
+            self.state.pane_scrollback_limit_bytes,
+            self.state.host_terminal_theme,
+            self.event_tx.clone(),
+            self.render_notify.clone(),
+            self.render_dirty.clone(),
+        )?;
+        ws.custom_name = Some(label);
+        ws.remote_argv = Some(argv);
+        ws.remote_provider_name = Some(provider_name);
+        self.state
+            .terminal_runtimes
+            .insert(terminal.id.clone(), runtime);
+        self.state.terminals.insert(terminal.id.clone(), terminal);
+        self.state.workspaces.push(ws);
+        let idx = self.state.workspaces.len() - 1;
+        let workspace_id = self.state.workspaces[idx].id.clone();
+        let root_pane = self.state.workspaces[idx].tabs[0].root_pane.raw();
+        crate::logging::workspace_created(&workspace_id, root_pane);
+        self.state.switch_workspace(idx);
+        self.state.mode = Mode::Terminal;
+        self.schedule_session_save();
+        Ok(idx)
+    }
+
+    pub(crate) fn handle_new_workspace_picker_key(&mut self, key: KeyEvent) {
+        let Some(picker) = self.state.new_workspace_picker.as_mut() else {
+            self.close_new_workspace_picker();
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.close_new_workspace_picker(),
+            KeyCode::Up | KeyCode::Char('k') => {
+                if picker.highlighted > 0 {
+                    picker.highlighted -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if !picker.entries.is_empty() && picker.highlighted + 1 < picker.entries.len() {
+                    picker.highlighted += 1;
+                }
+            }
+            KeyCode::Home => picker.highlighted = 0,
+            KeyCode::End => {
+                if !picker.entries.is_empty() {
+                    picker.highlighted = picker.entries.len() - 1;
+                }
+            }
+            KeyCode::Enter => match self.state.mode {
+                Mode::NewWorkspaceTypePicker => self.confirm_type_picker_selection(),
+                Mode::NewWorkspaceRemotePicker => self.confirm_remote_picker_selection(),
+                _ => {}
+            },
+            _ => {}
         }
     }
 
@@ -81,13 +293,24 @@ impl App {
         };
         let (rows, cols) = self.state.estimate_pane_size();
         let ws = &mut self.state.workspaces[ws_idx];
-        let (idx, terminal, runtime) = ws.create_tab(
-            rows,
-            cols,
-            initial_cwd,
-            self.state.pane_scrollback_limit_bytes,
-            self.state.host_terminal_theme,
-        )?;
+        let (idx, terminal, runtime) = if let Some(argv) = ws.remote_argv.clone() {
+            ws.create_tab_argv(
+                rows,
+                cols,
+                initial_cwd,
+                &argv,
+                self.state.pane_scrollback_limit_bytes,
+                self.state.host_terminal_theme,
+            )?
+        } else {
+            ws.create_tab(
+                rows,
+                cols,
+                initial_cwd,
+                self.state.pane_scrollback_limit_bytes,
+                self.state.host_terminal_theme,
+            )?
+        };
         self.state
             .terminal_runtimes
             .insert(terminal.id.clone(), runtime);

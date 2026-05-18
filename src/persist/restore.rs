@@ -109,6 +109,8 @@ fn restore_workspace(
             next_public_pane_number,
             active_tab: snap.active_tab.min(tabs.len().saturating_sub(1)),
             tabs,
+            remote_argv: snap.remote_argv.clone(),
+            remote_provider_name: snap.remote_provider_name.clone(),
             #[cfg(test)]
             test_runtimes: HashMap::new(),
         },
