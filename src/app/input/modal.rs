@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Direction, Rect};
 
 use crate::{
@@ -505,6 +505,25 @@ pub(super) fn apply_context_menu_action(state: &mut AppState, menu: ContextMenuS
             } else {
                 Mode::Navigate
             };
+        }
+        (ContextMenuKind::Pane { pane_id, .. }, Some("Right click")) => {
+            if let Some(info) = state.pane_info_by_id(pane_id).cloned() {
+                let down = MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Right),
+                    column: menu.x,
+                    row: menu.y,
+                    modifiers: KeyModifiers::empty(),
+                };
+                let up = MouseEvent {
+                    kind: MouseEventKind::Up(MouseButton::Right),
+                    column: menu.x,
+                    row: menu.y,
+                    modifiers: KeyModifiers::empty(),
+                };
+                state.forward_pane_mouse_button(&info, down);
+                state.forward_pane_mouse_button(&info, up);
+            }
+            state.mode = Mode::Terminal;
         }
         _ => leave_modal(state),
     }
