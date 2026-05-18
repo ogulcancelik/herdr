@@ -1,0 +1,7 @@
+---
+import { readFile } from 'node:fs/promises';
+
+const homepage = await readFile(new URL('../../index.html', import.meta.url), 'utf8');
+---
+
+<Fragment set:html={homepage} />

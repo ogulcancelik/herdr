@@ -1,0 +1,186 @@
+---
+title: CLI reference
+description: Herdr commands for sessions, workspaces, tabs, panes, agents, waits, integrations, and status.
+---
+
+Herdr’s CLI talks to the running server over the same local socket API used by integrations and agents.
+
+Most commands print JSON responses. Use them from scripts when you want deterministic automation.
+
+## Launch and status
+
+```bash
+herdr                         # launch or attach to the default session
+herdr --session work          # launch or attach to a named session
+herdr --remote workbox        # attach through SSH
+herdr --no-session            # single-process escape hatch
+herdr --default-config        # print default config
+herdr --version               # print version
+```
+
+Status commands:
+
+```bash
+herdr status
+herdr status server
+herdr status client
+```
+
+## Server
+
+```bash
+herdr server stop
+herdr server reload-config
+```
+
+`reload-config` applies reloadable settings without restarting panes.
+
+## Sessions
+
+```bash
+herdr session list [--json]
+herdr session attach <name>
+herdr session stop <name> [--json]
+herdr session delete <name> [--json]
+```
+
+Use `default` as the session name when you need to stop the default session explicitly.
+
+## Workspaces
+
+```bash
+herdr workspace list
+herdr workspace create [--cwd PATH] [--label TEXT] [--focus] [--no-focus]
+herdr workspace get <workspace_id>
+herdr workspace focus <workspace_id>
+herdr workspace rename <workspace_id> <label>
+herdr workspace close <workspace_id>
+```
+
+Create a workspace without stealing focus:
+
+```bash
+herdr workspace create --cwd ~/project --label api --no-focus
+```
+
+## Tabs
+
+```bash
+herdr tab list [--workspace <workspace_id>]
+herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--label TEXT] [--focus] [--no-focus]
+herdr tab get <tab_id>
+herdr tab focus <tab_id>
+herdr tab rename <tab_id> <label>
+herdr tab close <tab_id>
+```
+
+## Panes
+
+```bash
+herdr pane list [--workspace <workspace_id>]
+herdr pane get <pane_id>
+herdr pane rename <pane_id> <label>|--clear
+herdr pane split <pane_id> --direction right|down [--cwd PATH] [--focus] [--no-focus]
+herdr pane close <pane_id>
+```
+
+Read output:
+
+```bash
+herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N]
+herdr pane read <pane_id> --source visible --ansi
+herdr pane read <pane_id> --source recent-unwrapped --lines 120
+```
+
+Send input:
+
+```bash
+herdr pane send-text <pane_id> <text>
+herdr pane send-keys <pane_id> <key> [key ...]
+herdr pane run <pane_id> <command>
+```
+
+`pane run` submits text plus Enter atomically. Prefer it over `send-text` plus `send-keys Enter` for commands.
+
+Report agent state from custom hooks:
+
+```bash
+herdr pane report-agent <pane_id> \
+  --source ID \
+  --agent LABEL \
+  --state idle|working|blocked|unknown \
+  [--message TEXT] \
+  [--custom-status TEXT] \
+  [--seq N]
+```
+
+## Agents
+
+```bash
+herdr agent list
+herdr agent get <target>
+herdr agent read <target> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]
+herdr agent send <target> <text>
+herdr agent rename <target> <name>|--clear
+herdr agent focus <target>
+herdr agent wait <target> --status <idle|working|blocked|unknown> [--timeout MS]
+herdr agent attach <target> [--takeover]
+herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--focus|--no-focus] -- <argv...>
+```
+
+Targets accept terminal IDs, unique agent names, and legacy pane IDs.
+
+## Direct terminal attach
+
+```bash
+herdr terminal attach <terminal_id> [--takeover]
+```
+
+Detach from direct attach with `ctrl+b q`. Send literal `ctrl+b` with `ctrl+b ctrl+b`.
+
+## Waits
+
+Wait for output in a pane:
+
+```bash
+herdr wait output <pane_id> --match <text> [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--regex] [--raw]
+```
+
+Wait for pane agent state:
+
+```bash
+herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [--timeout MS]
+```
+
+Use `wait output` for normal commands and servers. Use `wait agent-status` for coding agents.
+
+## Integrations
+
+```bash
+herdr integration install pi
+herdr integration install claude
+herdr integration install codex
+herdr integration install opencode
+herdr integration uninstall pi
+herdr integration uninstall claude
+herdr integration uninstall codex
+herdr integration uninstall opencode
+herdr integration status [--outdated-only]
+```
+
+## Read sources
+
+| Source | Meaning |
+| --- | --- |
+| `visible` | Current rendered screen. Best for UI feedback loops. |
+| `recent` | Recent scrollback with terminal wrapping. |
+| `recent-unwrapped` | Recent scrollback without soft wrapping. Best for logs. |
+
+## Environment variables
+
+| Variable | Purpose |
+| --- | --- |
+| `HERDR_CONFIG_PATH` | Override the config file path. |
+| `HERDR_SESSION` | Select a named session for CLI commands. |
+| `HERDR_SOCKET_PATH` | Low-level socket path override. |
+| `HERDR_LOG` | Set log filter, for example `HERDR_LOG=herdr=debug`. |

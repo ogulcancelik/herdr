@@ -1,0 +1,120 @@
+---
+title: Agents
+description: See what Herdr can detect, how agent state works, and how integrations improve it.
+---
+
+Herdr is useful because it knows when agents are working, blocked, done, or idle. You can scan the sidebar instead of checking every pane manually.
+
+## Supported agents
+
+Automatic detection works out of the box for common coding agents.
+
+| Agent | Idle / done | Working | Blocked |
+| --- | --- | --- | --- |
+| Pi | yes | yes | partial |
+| Claude Code | yes | yes | yes |
+| Codex | yes | yes | yes |
+| Droid | yes | yes | yes |
+| Amp | yes | yes | yes |
+| OpenCode | yes | yes | yes |
+| Grok CLI | yes | yes | yes |
+
+Detected but less thoroughly tested: Gemini CLI, Cursor Agent, Cline, Kimi, and GitHub Copilot CLI.
+
+Unsupported agents still run normally as terminal processes. They just may not get rich state unless you add an integration or report state over the socket API.
+
+## How detection works
+
+Herdr combines three signals:
+
+1. foreground process detection
+2. terminal output heuristics
+3. integration state reports
+
+Process detection tells Herdr which pane owns an agent. Heuristics infer state when no hook is available. Integrations provide the most precise semantic state.
+
+## State rollups
+
+The sidebar rolls state upward.
+
+A blocked agent makes its pane, tab, and workspace look blocked. A working agent makes the workspace look active. A done agent stays visible until you view it.
+
+This lets you scan many projects quickly.
+
+## Direct integrations
+
+Install integrations for agents that expose hooks or plugins:
+
+```bash
+herdr integration install pi
+herdr integration install claude
+herdr integration install codex
+herdr integration install opencode
+```
+
+Check installed integration versions:
+
+```bash
+herdr integration status
+```
+
+Show only outdated integrations:
+
+```bash
+herdr integration status --outdated-only
+```
+
+## Custom agent labels
+
+You can rename an agent target for display:
+
+```bash
+herdr agent rename 1-1 reviewer
+herdr agent rename reviewer --clear
+```
+
+Targets accept terminal IDs, unique agent names, and legacy pane IDs.
+
+## Custom status labels
+
+Integrations can report a visual status label without changing semantic state.
+
+```bash
+herdr pane report-agent 1-1 \
+  --source custom:indexer \
+  --agent docs-bot \
+  --state working \
+  --custom-status indexing
+```
+
+`state` controls waits, notifications, and rollups. `custom-status` is only display text.
+
+## Start agents from the CLI
+
+Spawn an agent into Herdr from a script:
+
+```bash
+herdr agent start reviewer --cwd ~/project --split right -- pi
+```
+
+You can target a workspace or tab:
+
+```bash
+herdr agent start tests --workspace 1 --tab 1-1 -- cargo test
+```
+
+## Attach directly to an agent
+
+Attach your current terminal to one agent terminal instead of the full Herdr UI:
+
+```bash
+herdr agent attach reviewer
+```
+
+Detach with `ctrl+b q`. Send a literal `ctrl+b` with `ctrl+b ctrl+b`.
+
+Use `--takeover` if another direct attach client already owns input:
+
+```bash
+herdr agent attach reviewer --takeover
+```

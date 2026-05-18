@@ -1,0 +1,116 @@
+---
+title: Integrations
+description: Install Herdr integrations for Pi, Claude Code, Codex, and OpenCode.
+---
+
+Herdr detects supported agents automatically. Integrations make that detection more precise by reporting semantic state directly to Herdr.
+
+Use integrations when you want reliable `working`, `blocked`, `idle`, and `done` state from agent hooks or plugins.
+
+## Install integrations
+
+```bash
+herdr integration install pi
+herdr integration install claude
+herdr integration install codex
+herdr integration install opencode
+```
+
+## Uninstall integrations
+
+```bash
+herdr integration uninstall pi
+herdr integration uninstall claude
+herdr integration uninstall codex
+herdr integration uninstall opencode
+```
+
+## How Herdr uses integrations
+
+Herdr combines three signals:
+
+| Signal | Purpose |
+| --- | --- |
+| Process detection | Identifies which pane owns which running process. |
+| Agent integration events | Reports semantic state such as `working` or `blocked`. |
+| Screen heuristics | Fills gaps when hooks are unavailable or incomplete. |
+
+Integrations enrich state reporting. They do not replace process detection.
+
+## Pi
+
+Install the Pi integration:
+
+```bash
+herdr integration install pi
+```
+
+Herdr writes the bundled extension to:
+
+```text
+~/.pi/agent/extensions/herdr-agent-state.ts
+```
+
+If `PI_CODING_AGENT_DIR` is set, Herdr writes to that agent directory instead.
+
+## Claude Code
+
+Install the Claude Code hook:
+
+```bash
+herdr integration install claude
+```
+
+The hook reports agent state to the local Herdr socket when Claude Code exposes hook events.
+
+## Codex
+
+Install the Codex hook:
+
+```bash
+herdr integration install codex
+```
+
+Codex state is reported through the same local socket API used by other integrations.
+
+## OpenCode
+
+Install the OpenCode plugin:
+
+```bash
+herdr integration install opencode
+```
+
+The plugin reports semantic state while OpenCode runs inside a Herdr pane.
+
+## Custom status labels
+
+Integrations can report a short visual label without changing the semantic state.
+
+For example, an agent can remain semantically `working` while showing `indexing` in the UI.
+
+```bash
+herdr pane report-agent 1-1 \
+  --source custom:docs \
+  --agent docs-bot \
+  --state working \
+  --custom-status indexing
+```
+
+Custom status is visual-only. Waits, notifications, and workspace rollups still use the semantic state.
+
+## Debug integration state
+
+List known agents:
+
+```bash
+herdr agent list
+```
+
+Read a pane when you need to verify what Herdr can see:
+
+```bash
+herdr pane read 1-1 --source recent --lines 50
+```
+
+If integration state looks wrong, first confirm the agent is running inside Herdr and that the relevant hook or plugin was installed for the same user account.
