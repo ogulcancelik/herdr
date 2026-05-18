@@ -126,6 +126,11 @@ pub struct KeysConfig {
     pub resize_mode: String,
     /// Toggle sidebar collapse. Default: "b"
     pub toggle_sidebar: String,
+    /// Run the project layout script (`.herdr-project`) found by walking up
+    /// from the focused pane cwd. Unset by default.
+    pub apply_project_layout: String,
+    /// Filename to search for when applying a project layout. Default: ".herdr-project".
+    pub project_layout_filename: String,
     /// Optional indexed shortcuts expanded over number keys 1-9.
     pub indexed: IndexedKeysConfig,
     /// Prefix-mode custom command bindings.
@@ -214,6 +219,8 @@ impl Default for KeysConfig {
             zoom: "f".into(),
             resize_mode: "r".into(),
             toggle_sidebar: "b".into(),
+            apply_project_layout: "".into(),
+            project_layout_filename: ".herdr-project".into(),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
         }

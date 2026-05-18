@@ -108,10 +108,10 @@ impl App {
         }
 
         if let Some(action) = navigate_action_for_key(&self.state, &key) {
-            if action == NavigateAction::EditScrollback {
-                self.launch_focused_scrollback_editor();
-            } else {
-                execute_navigate_action(&mut self.state, action);
+            match action {
+                NavigateAction::EditScrollback => self.launch_focused_scrollback_editor(),
+                NavigateAction::ApplyProjectLayout => self.launch_project_layout(),
+                _ => execute_navigate_action(&mut self.state, action),
             }
             self.selection_autoscroll_deadline = None;
             return;
@@ -231,6 +231,63 @@ impl App {
         }
         command.spawn()?;
         Ok(())
+    }
+
+    fn launch_project_layout(&mut self) {
+        let previous_toast = self.state.toast.clone();
+        let (env, search_root) = self.custom_command_env();
+        let filename = self.state.keybinds.project_layout_filename.clone();
+        let search_root = search_root.or_else(|| std::env::current_dir().ok());
+
+        let Some(start) = search_root else {
+            self.state.toast = Some(crate::app::state::ToastNotification {
+                kind: crate::app::state::ToastKind::NeedsAttention,
+                title: "project layout".to_string(),
+                context: "no working directory available".to_string(),
+                target: None,
+            });
+            self.sync_toast_deadline(previous_toast);
+            return;
+        };
+
+        let script = find_project_layout(&start, &filename);
+        let Some(script) = script else {
+            self.state.toast = Some(crate::app::state::ToastNotification {
+                kind: crate::app::state::ToastKind::NeedsAttention,
+                title: "project layout".to_string(),
+                context: format!("no {filename} found from {}", start.display()),
+                target: None,
+            });
+            self.sync_toast_deadline(previous_toast);
+            return;
+        };
+
+        let project_root = script
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| start.clone());
+        let mut env = env;
+        env.push((
+            "HERDR_PROJECT_LAYOUT_FILE".to_string(),
+            script.display().to_string(),
+        ));
+        env.push((
+            "HERDR_PROJECT_ROOT".to_string(),
+            project_root.display().to_string(),
+        ));
+
+        match spawn_project_layout(&script, &project_root, &env) {
+            Ok(()) => leave_navigate_mode(&mut self.state),
+            Err(err) => {
+                self.state.toast = Some(crate::app::state::ToastNotification {
+                    kind: crate::app::state::ToastKind::NeedsAttention,
+                    title: "project layout failed".to_string(),
+                    context: format!("{}: {err}", script.display()),
+                    target: None,
+                });
+                self.sync_toast_deadline(previous_toast);
+            }
+        }
     }
 
     fn launch_focused_scrollback_editor(&mut self) {
@@ -357,6 +414,40 @@ impl App {
         self.state.mode = Mode::Terminal;
         Ok(())
     }
+}
+
+fn find_project_layout(start: &std::path::Path, filename: &str) -> Option<std::path::PathBuf> {
+    let start = if start.is_dir() {
+        start.to_path_buf()
+    } else {
+        start.parent()?.to_path_buf()
+    };
+    for dir in start.ancestors() {
+        let candidate = dir.join(filename);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn spawn_project_layout(
+    script: &std::path::Path,
+    cwd: &std::path::Path,
+    env: &[(String, String)],
+) -> std::io::Result<()> {
+    let quoted = shell_quote(&script.display().to_string());
+    let command = format!("exec {quoted}");
+    let mut sh = Command::new("/bin/sh");
+    sh.arg("-lc")
+        .arg(command)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    sh.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    sh.spawn()?;
+    Ok(())
 }
 
 fn navigate_custom_command_for_key(
@@ -492,6 +583,7 @@ pub(crate) enum NavigateAction {
     ReloadConfig,
     OpenNotificationTarget,
     Detach,
+    ApplyProjectLayout,
 }
 
 fn indexed_navigation_action(state: &AppState, key: &KeyEvent) -> Option<NavigateAction> {
@@ -637,6 +729,12 @@ fn navigate_action_for_key(state: &AppState, key: &KeyEvent) -> Option<NavigateA
     {
         return Some(NavigateAction::Detach);
     }
+    if kb
+        .apply_project_layout
+        .is_some_and(|(code, mods)| key_matches(key, code, mods))
+    {
+        return Some(NavigateAction::ApplyProjectLayout);
+    }
     None
 }
 
@@ -745,6 +843,7 @@ pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateActi
             leave_navigate_mode(state);
         }
         NavigateAction::EditScrollback => {}
+        NavigateAction::ApplyProjectLayout => {}
         NavigateAction::Zoom => {
             state.toggle_zoom();
             leave_navigate_mode(state);
@@ -920,6 +1019,135 @@ mod tests {
 
         assert!(state.request_reload_config);
         assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn find_project_layout_walks_up_directories() {
+        let base = unique_temp_path("project-layout-find");
+        std::fs::create_dir_all(base.join("a/b/c")).unwrap();
+        let script = base.join("a/.herdr-project");
+        std::fs::write(&script, "#!/bin/sh\n").unwrap();
+
+        let found = super::find_project_layout(&base.join("a/b/c"), ".herdr-project");
+        assert_eq!(found.as_deref(), Some(script.as_path()));
+
+        let not_found = super::find_project_layout(&base, ".herdr-project");
+        assert!(not_found.is_none());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn apply_project_layout_key_runs_script_with_env() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+
+        let base = unique_temp_path("apply-project-layout");
+        let project_dir = base.join("project");
+        let nested = project_dir.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let marker = base.join("marker");
+        let script_path = project_dir.join(".herdr-project");
+        let script_contents = format!(
+            "#!/bin/sh\nprintf '%s\\n%s\\n' \"$HERDR_PROJECT_ROOT\" \"$HERDR_PROJECT_LAYOUT_FILE\" > '{}'\n",
+            marker.display()
+        );
+        std::fs::write(&script_path, script_contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).unwrap();
+        }
+
+        let mut workspace = Workspace::test_new("test");
+        workspace.identity_cwd = nested.clone();
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.ensure_test_terminals();
+
+        app.state.keybinds.apply_project_layout =
+            Some((KeyCode::Char('g'), KeyModifiers::empty()));
+        app.state.keybinds.apply_project_layout_label = Some("g".into());
+        app.state.keybinds.project_layout_filename = ".herdr-project".into();
+
+        app.handle_key(TerminalKey::new(
+            app.state.prefix_code,
+            app.state.prefix_mods,
+        ))
+        .await;
+        app.handle_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()))
+            .await;
+
+        let content = wait_for_file(&marker);
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            std::fs::canonicalize(lines[0]).unwrap(),
+            std::fs::canonicalize(&project_dir).unwrap()
+        );
+        assert_eq!(
+            std::fs::canonicalize(lines[1]).unwrap(),
+            std::fs::canonicalize(&script_path).unwrap()
+        );
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app.state.toast.is_none(), "no error toast expected");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn apply_project_layout_missing_file_shows_toast() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+
+        let base = unique_temp_path("apply-project-layout-missing");
+        std::fs::create_dir_all(&base).unwrap();
+
+        let mut workspace = Workspace::test_new("test");
+        workspace.identity_cwd = base.clone();
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.ensure_test_terminals();
+
+        let needle: String = format!("herdr-needle-{}", std::process::id());
+        app.state.keybinds.apply_project_layout =
+            Some((KeyCode::Char('g'), KeyModifiers::empty()));
+        app.state.keybinds.apply_project_layout_label = Some("g".into());
+        app.state.keybinds.project_layout_filename = needle.clone();
+
+        app.handle_key(TerminalKey::new(
+            app.state.prefix_code,
+            app.state.prefix_mods,
+        ))
+        .await;
+        app.handle_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()))
+            .await;
+
+        let toast = app.state.toast.as_ref().expect("missing toast");
+        assert_eq!(toast.title, "project layout");
+        assert!(toast.context.contains(&needle));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

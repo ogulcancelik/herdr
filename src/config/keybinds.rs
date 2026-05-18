@@ -117,6 +117,9 @@ pub struct Keybinds {
     pub resize_mode_label: String,
     pub toggle_sidebar: (KeyCode, KeyModifiers),
     pub toggle_sidebar_label: String,
+    pub apply_project_layout: Option<(KeyCode, KeyModifiers)>,
+    pub apply_project_layout_label: Option<String>,
+    pub project_layout_filename: String,
     pub custom_commands: Vec<CustomCommandKeybind>,
 }
 
@@ -494,6 +497,12 @@ impl Config {
                 &self.keys.focus_pane_right,
                 &mut diagnostics,
             ),
+            optional_binding(
+                navigate_scope(),
+                "keys.apply_project_layout",
+                &self.keys.apply_project_layout,
+                &mut diagnostics,
+            ),
         ];
 
         let mut indexed_bindings = vec![
@@ -785,6 +794,16 @@ impl Config {
             focus_pane_up_label: optional_bindings[15].label.clone(),
             focus_pane_right: optional_bindings[16].value,
             focus_pane_right_label: optional_bindings[16].label.clone(),
+            apply_project_layout: optional_bindings[17].value,
+            apply_project_layout_label: optional_bindings[17].label.clone(),
+            project_layout_filename: {
+                let raw = self.keys.project_layout_filename.trim().to_string();
+                if raw.is_empty() {
+                    ".herdr-project".to_string()
+                } else {
+                    raw
+                }
+            },
             split_vertical: bindings[4].value,
             split_vertical_label: bindings[4].label.clone(),
             split_horizontal: bindings[5].value,
@@ -1253,6 +1272,43 @@ rename_tab = "g"
             (KeyCode::Char('g'), KeyModifiers::empty())
         );
         assert_eq!(kb.rename_tab, None);
+    }
+
+    #[test]
+    fn apply_project_layout_parses_and_defaults_to_unset() {
+        let default_kb = Config::default().keybinds();
+        assert!(default_kb.apply_project_layout.is_none());
+        assert_eq!(default_kb.project_layout_filename, ".herdr-project");
+
+        let toml = r#"
+[keys]
+apply_project_layout = "P"
+project_layout_filename = ".layout"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let kb = config.keybinds();
+        assert_eq!(
+            kb.apply_project_layout,
+            Some((KeyCode::Char('p'), KeyModifiers::SHIFT))
+        );
+        assert_eq!(kb.apply_project_layout_label.as_deref(), Some("P"));
+        assert_eq!(kb.project_layout_filename, ".layout");
+    }
+
+    #[test]
+    fn apply_project_layout_conflict_is_disabled_with_diagnostic() {
+        let toml = r#"
+[keys]
+new_workspace = "p"
+apply_project_layout = "p"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let diagnostics = config.collect_diagnostics();
+        let kb = config.keybinds();
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.contains("keys.apply_project_layout") && d.contains("disabling binding")));
+        assert!(kb.apply_project_layout.is_none());
     }
 
     #[test]

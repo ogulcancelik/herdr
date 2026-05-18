@@ -130,14 +130,17 @@ pub(super) fn keybind_help_groups(
     ];
     groups.push(("panes", panes));
 
-    if !kb.custom_commands.is_empty() {
-        groups.push((
-            "custom",
+    if kb.apply_project_layout_label.is_some() || !kb.custom_commands.is_empty() {
+        let mut custom = Vec::new();
+        if let Some(label) = &kb.apply_project_layout_label {
+            custom.push((label.clone(), "apply project layout"));
+        }
+        custom.extend(
             kb.custom_commands
                 .iter()
-                .map(|binding| (binding.label.clone(), "custom command"))
-                .collect(),
-        ));
+                .map(|binding| (binding.label.clone(), "custom command")),
+        );
+        groups.push(("custom", custom));
     }
 
     groups

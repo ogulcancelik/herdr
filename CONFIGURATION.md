@@ -156,6 +156,7 @@ agents = ""     # optional; follows visible agent panel order
 | `zoom` | `f` | zoom focused pane; legacy alias: `fullscreen` |
 | `resize_mode` | `r` | enter or leave resize mode |
 | `toggle_sidebar` | `b` | collapse or expand the sidebar |
+| `apply_project_layout` | unset | run the project layout script for the focused pane's project (see [project layouts](#project-layouts)) |
 
 `edit_scrollback` writes the focused pane's retained plain-text scrollback to a temporary file, opens `${EDITOR:-vi}` on that file in a temporary zoomed pane, then removes the file when the editor exits.
 
@@ -213,6 +214,53 @@ key = "shift+g"
 type = "shell"
 command = "notify-send herdr 'custom command ran'"
 ```
+
+## project layouts
+
+Bind `keys.apply_project_layout` to a prefix-mode key to spawn a project's layout script on demand. When pressed, herdr walks up from the focused pane's working directory until it finds a `.herdr-project` file (or whatever filename `keys.project_layout_filename` is set to), then runs it through `/bin/sh -lc` with the script's own directory as the working directory.
+
+```toml
+[keys]
+apply_project_layout = "P"
+# project_layout_filename = ".herdr-project"  # optional, this is the default
+```
+
+The script receives the same environment variables as `[[keys.command]]`, plus:
+
+| variable | value |
+|----------|-------|
+| `HERDR_PROJECT_LAYOUT_FILE` | absolute path to the discovered layout script |
+| `HERDR_PROJECT_ROOT` | directory containing the layout script |
+
+Make the file executable (`chmod +x .herdr-project`). Anything you can call from a shell — including the `herdr` CLI itself — works. Existing tabs/panes are not duplicated as long as your script checks for them, so re-pressing the key is safe.
+
+Example `.herdr-project` that opens a `backend` tab plus a `web` tab and skips work if those tabs already exist (mirrors the tmux pattern):
+
+```bash
+#!/usr/bin/env bash
+set -e
+
+ws="$HERDR_ACTIVE_WORKSPACE_ID"
+
+tab_exists() {
+  herdr tab list --workspace "$ws" | jq -e --arg label "$1" '.tabs[]? | select(.label == $label)' > /dev/null
+}
+
+start_tab() {
+  local label="$1" cwd="$2" cmd="$3"
+  tab_exists "$label" && return
+  local tab_id
+  tab_id="$(herdr tab create --workspace "$ws" --label "$label" --cwd "$cwd" --no-focus | jq -r '.tab.id // .tab_id')"
+  herdr pane run "$tab_id" "$cmd"
+}
+
+start_tab backend "$HERDR_PROJECT_ROOT/apps/backend" "bun run dev"
+start_tab web     "$HERDR_PROJECT_ROOT/apps/web"     "bun run dev"
+```
+
+The script uses the `herdr` CLI (see [`SOCKET_API.md`](./SOCKET_API.md) for the full reference), but you can drive any tooling you want from it — `tmux`, `kitten`, plain background processes, etc.
+
+If no layout file is found by the time herdr reaches the filesystem root, an error toast is shown and nothing else happens.
 
 ## theme
 
