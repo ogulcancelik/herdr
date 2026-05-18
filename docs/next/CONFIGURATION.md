@@ -106,6 +106,7 @@ rename_pane = ""        # optional, unset by default
 edit_scrollback = ""    # optional, opens focused pane scrollback in $EDITOR
 zoom = "f"               # legacy alias: fullscreen
 resize_mode = "r"
+cycle_layout = "space"
 toggle_sidebar = "b"
 previous_workspace = "ctrl+alt+["
 next_workspace = "ctrl+alt+]"
@@ -155,6 +156,7 @@ agents = ""     # optional; follows visible agent panel order
 | `edit_scrollback` | unset | open the focused pane's retained scrollback in `$EDITOR` inside a temporary zoomed pane |
 | `zoom` | `f` | zoom focused pane; legacy alias: `fullscreen` |
 | `resize_mode` | `r` | enter or leave resize mode |
+| `cycle_layout` | `space` | cycle through preset pane layouts (even-horizontal, even-vertical, main-vertical, main-horizontal, tiled) |
 | `toggle_sidebar` | `b` | collapse or expand the sidebar |
 
 `edit_scrollback` writes the focused pane's retained plain-text scrollback to a temporary file, opens `${EDITOR:-vi}` on that file in a temporary zoomed pane, then removes the file when the editor exits.

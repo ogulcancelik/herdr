@@ -488,6 +488,7 @@ pub(crate) enum NavigateAction {
     EditScrollback,
     Zoom,
     EnterResizeMode,
+    CycleLayout,
     ToggleSidebar,
     ReloadConfig,
     OpenNotificationTarget,
@@ -615,6 +616,9 @@ fn navigate_action_for_key(state: &AppState, key: &KeyEvent) -> Option<NavigateA
     }
     if key_matches(key, kb.resize_mode.0, kb.resize_mode.1) {
         return Some(NavigateAction::EnterResizeMode);
+    }
+    if key_matches(key, kb.cycle_layout.0, kb.cycle_layout.1) {
+        return Some(NavigateAction::CycleLayout);
     }
     if key_matches(key, kb.toggle_sidebar.0, kb.toggle_sidebar.1) {
         return Some(NavigateAction::ToggleSidebar);
@@ -750,6 +754,10 @@ pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateActi
             leave_navigate_mode(state);
         }
         NavigateAction::EnterResizeMode => state.mode = Mode::Resize,
+        NavigateAction::CycleLayout => {
+            state.cycle_layout();
+            leave_navigate_mode(state);
+        }
         NavigateAction::ToggleSidebar => {
             state.sidebar_collapsed = !state.sidebar_collapsed;
             leave_navigate_mode(state);

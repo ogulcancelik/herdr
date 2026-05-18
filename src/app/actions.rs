@@ -567,6 +567,18 @@ impl AppState {
         }
     }
 
+    pub fn cycle_layout(&mut self) {
+        if let Some(tab) = self
+            .active
+            .and_then(|i| self.workspaces.get_mut(i))
+            .and_then(|ws| ws.active_tab_mut())
+        {
+            let main = tab.layout.focused();
+            tab.layout.cycle_layout(main);
+            self.mark_session_dirty();
+        }
+    }
+
     pub fn cycle_pane(&mut self, reverse: bool) {
         if let Some(tab) = self
             .active

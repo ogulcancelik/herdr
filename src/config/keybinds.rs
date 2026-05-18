@@ -115,6 +115,8 @@ pub struct Keybinds {
     pub zoom_label: String,
     pub resize_mode: (KeyCode, KeyModifiers),
     pub resize_mode_label: String,
+    pub cycle_layout: (KeyCode, KeyModifiers),
+    pub cycle_layout_label: String,
     pub toggle_sidebar: (KeyCode, KeyModifiers),
     pub toggle_sidebar_label: String,
     pub custom_commands: Vec<CustomCommandKeybind>,
@@ -374,6 +376,14 @@ impl Config {
                 &self.keys.resize_mode,
                 "r",
                 (KeyCode::Char('r'), KeyModifiers::empty()),
+                &mut diagnostics,
+            ),
+            required_binding(
+                BindingScope::Navigate,
+                "keys.cycle_layout",
+                &self.keys.cycle_layout,
+                "space",
+                (KeyCode::Char(' '), KeyModifiers::empty()),
                 &mut diagnostics,
             ),
             required_binding(
@@ -795,8 +805,10 @@ impl Config {
             zoom_label: bindings[7].label.clone(),
             resize_mode: bindings[8].value,
             resize_mode_label: bindings[8].label.clone(),
-            toggle_sidebar: bindings[9].value,
-            toggle_sidebar_label: bindings[9].label.clone(),
+            cycle_layout: bindings[9].value,
+            cycle_layout_label: bindings[9].label.clone(),
+            toggle_sidebar: bindings[10].value,
+            toggle_sidebar_label: bindings[10].label.clone(),
             custom_commands,
         };
 

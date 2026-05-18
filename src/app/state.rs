@@ -1223,6 +1223,8 @@ impl AppState {
                 zoom_label: "f".into(),
                 resize_mode: (KeyCode::Char('r'), KeyModifiers::empty()),
                 resize_mode_label: "r".into(),
+                cycle_layout: (KeyCode::Char(' '), KeyModifiers::empty()),
+                cycle_layout_label: "space".into(),
                 toggle_sidebar: (KeyCode::Char('b'), KeyModifiers::empty()),
                 toggle_sidebar_label: "b".into(),
                 custom_commands: Vec::new(),

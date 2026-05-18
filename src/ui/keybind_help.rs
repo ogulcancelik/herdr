@@ -110,6 +110,7 @@ pub(super) fn keybind_help_groups(
         ),
         (kb.zoom_label.clone(), "zoom pane"),
         (kb.resize_mode_label.clone(), "resize mode"),
+        (kb.cycle_layout_label.clone(), "cycle layout"),
         (kb.toggle_sidebar_label.clone(), "toggle sidebar"),
         (
             optional_keybind_label(&kb.focus_pane_left_label),

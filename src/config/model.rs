@@ -124,6 +124,9 @@ pub struct KeysConfig {
     pub zoom: String,
     /// Enter resize mode. Default: "r"
     pub resize_mode: String,
+    /// Cycle through preset pane layouts (even-horizontal, even-vertical,
+    /// main-vertical, main-horizontal, tiled). Default: "space"
+    pub cycle_layout: String,
     /// Toggle sidebar collapse. Default: "b"
     pub toggle_sidebar: String,
     /// Optional indexed shortcuts expanded over number keys 1-9.
@@ -213,6 +216,7 @@ impl Default for KeysConfig {
             close_pane: "x".into(),
             zoom: "f".into(),
             resize_mode: "r".into(),
+            cycle_layout: "space".into(),
             toggle_sidebar: "b".into(),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
