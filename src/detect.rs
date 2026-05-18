@@ -96,6 +96,17 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
 }
 
 pub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Agent, String)> {
+    if let Some(process) = job
+        .processes
+        .iter()
+        .find(|process| process.pid == job.process_group_id)
+    {
+        let candidate = normalized_process_name(process);
+        if let Some(agent) = identify_agent(&candidate) {
+            return Some((agent, candidate));
+        }
+    }
+
     let mut best: Option<(u8, Agent, String)> = None;
 
     for process in &job.processes {
@@ -819,6 +830,58 @@ mod tests {
                     name: "bash".to_string(),
                     argv0: None,
                     cmdline: Some("bash".to_string()),
+                },
+            ],
+        };
+
+        assert_eq!(
+            identify_agent_in_job(&job),
+            Some((Agent::Codex, "codex".to_string()))
+        );
+    }
+
+    #[test]
+    fn identify_agent_in_job_prefers_recognized_process_group_leader() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 42,
+            processes: vec![
+                crate::platform::ForegroundProcess {
+                    pid: 42,
+                    name: "claude".to_string(),
+                    argv0: None,
+                    cmdline: Some("claude".to_string()),
+                },
+                crate::platform::ForegroundProcess {
+                    pid: 43,
+                    name: "node".to_string(),
+                    argv0: None,
+                    cmdline: Some("node /tmp/mcp/bin/codex".to_string()),
+                },
+            ],
+        };
+
+        assert_eq!(
+            identify_agent_in_job(&job),
+            Some((Agent::Claude, "claude".to_string()))
+        );
+    }
+
+    #[test]
+    fn identify_agent_in_job_falls_back_when_process_group_leader_is_unrecognized() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 42,
+            processes: vec![
+                crate::platform::ForegroundProcess {
+                    pid: 42,
+                    name: "bash".to_string(),
+                    argv0: None,
+                    cmdline: Some("bash".to_string()),
+                },
+                crate::platform::ForegroundProcess {
+                    pid: 43,
+                    name: "node".to_string(),
+                    argv0: None,
+                    cmdline: Some("node /tmp/mcp/bin/codex".to_string()),
                 },
             ],
         };
