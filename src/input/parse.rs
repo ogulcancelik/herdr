@@ -67,6 +67,7 @@ fn parse_legacy_key_sequence(data: &str) -> Option<TerminalKey> {
         "\r" => Some(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty())),
         "\t" => Some(TerminalKey::new(KeyCode::Tab, KeyModifiers::empty())),
         "\x1b" => Some(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty())),
+        "\x1b\x7f" => Some(TerminalKey::new(KeyCode::Backspace, KeyModifiers::ALT)),
         "\x7f" => Some(TerminalKey::new(KeyCode::Backspace, KeyModifiers::empty())),
         _ if data.starts_with('\x1b') => {
             let rest = data.strip_prefix('\x1b')?;
@@ -442,6 +443,15 @@ mod tests {
     }
 
     #[test]
+    fn parse_kitty_alt_backspace_sequence() {
+        let key = parse_terminal_key_sequence("\x1b[127;3u").unwrap();
+        assert_eq!(key.code, KeyCode::Backspace);
+        assert_eq!(key.modifiers, KeyModifiers::ALT);
+        assert_eq!(key.kind, crossterm::event::KeyEventKind::Press);
+        assert_eq!(key.shifted_codepoint, None);
+    }
+
+    #[test]
     fn parse_modify_other_keys_sequence() {
         let key = parse_terminal_key_sequence("\x1b[27;6;108~").unwrap();
         assert_eq!(key.code, KeyCode::Char('l'));
@@ -462,6 +472,13 @@ mod tests {
         let key = parse_terminal_key_sequence("\x1b[A").unwrap();
         assert_eq!(key.code, KeyCode::Up);
         assert_eq!(key.modifiers, KeyModifiers::empty());
+    }
+
+    #[test]
+    fn parse_legacy_alt_backspace_sequence() {
+        let key = parse_terminal_key_sequence("\x1b\x7f").unwrap();
+        assert_eq!(key.code, KeyCode::Backspace);
+        assert_eq!(key.modifiers, KeyModifiers::ALT);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
     Frame,
@@ -293,10 +293,7 @@ pub(super) fn render_panes(app: &AppState, frame: &mut Frame, area: Rect) {
                 for y in inner.y..inner.y + inner.height {
                     for x in inner.x..inner.x + inner.width {
                         let cell = &mut buf[(x, y)];
-                        let style = cell.style();
-                        let fg = style.fg.unwrap_or(Color::White);
-                        let dimmed_fg = dim_color(fg);
-                        cell.set_style(style.fg(dimmed_fg));
+                        cell.set_style(cell.style().add_modifier(Modifier::DIM));
                     }
                 }
             }
@@ -310,30 +307,6 @@ pub(super) fn render_panes(app: &AppState, frame: &mut Frame, area: Rect) {
                 &app.palette,
             );
         }
-    }
-}
-
-/// Render selection highlight for a pane by inverting fg/bg colors.
-/// Reduce a color's brightness by blending it toward black.
-fn dim_color(color: Color) -> Color {
-    match color {
-        Color::Rgb(r, g, b) => Color::Rgb(r / 3, g / 3, b / 3),
-        Color::White => Color::DarkGray,
-        Color::Gray => Color::DarkGray,
-        Color::DarkGray => Color::Rgb(30, 30, 30),
-        Color::Red => Color::Rgb(60, 0, 0),
-        Color::Green => Color::Rgb(0, 60, 0),
-        Color::Yellow => Color::Rgb(60, 60, 0),
-        Color::Blue => Color::Rgb(0, 0, 60),
-        Color::Magenta => Color::Rgb(60, 0, 60),
-        Color::Cyan => Color::Rgb(0, 60, 60),
-        Color::LightRed => Color::Rgb(80, 30, 30),
-        Color::LightGreen => Color::Rgb(30, 80, 30),
-        Color::LightYellow => Color::Rgb(80, 80, 30),
-        Color::LightBlue => Color::Rgb(30, 30, 80),
-        Color::LightMagenta => Color::Rgb(80, 30, 80),
-        Color::LightCyan => Color::Rgb(30, 80, 80),
-        _ => Color::DarkGray,
     }
 }
 

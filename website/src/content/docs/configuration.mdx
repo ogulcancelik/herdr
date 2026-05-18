@@ -1,0 +1,238 @@
+---
+title: Configuration
+description: Configure Herdr keybindings, themes, sidebar behavior, notifications, and advanced options.
+---
+
+Herdr works without a config file. Add one when you want custom keys, themes, sidebar settings, notifications, or advanced behavior.
+
+## Config file
+
+Herdr reads config from:
+
+```text
+~/.config/herdr/config.toml
+```
+
+Print the full default config:
+
+```bash
+herdr --default-config
+```
+
+Save it as your config if you want a complete starting point:
+
+```bash
+herdr --default-config > ~/.config/herdr/config.toml
+```
+
+If a config value is invalid, Herdr falls back to a safe default and shows a startup warning.
+
+## Reload config
+
+Reload a running server after editing `config.toml`:
+
+```bash
+herdr server reload-config
+```
+
+You can also open the global menu in Herdr and choose `reload config`.
+
+Reload applies most UI settings without restarting panes. Startup-only settings still need a restart.
+
+## Keybindings
+
+Herdr has a prefix mode similar to tmux. The default prefix is `ctrl+b`.
+
+A small keybinding override looks like this:
+
+```toml
+[keys]
+prefix = "ctrl+b"
+new_workspace = "n"
+rename_workspace = "shift+n"
+close_workspace = "shift+d"
+new_tab = "c"
+split_vertical = "v"
+split_horizontal = "-"
+close_pane = "x"
+zoom = "f"
+resize_mode = "r"
+toggle_sidebar = "b"
+```
+
+Optional actions are unset by default. Bind them when you want direct shortcuts:
+
+```toml
+[keys]
+detach = "q"
+reload_config = "R"
+open_notification_target = "o"
+previous_workspace = "H"
+next_workspace = "L"
+previous_tab = "J"
+next_tab = "K"
+rename_pane = "p"
+edit_scrollback = "e"
+focus_pane_left = "h"
+focus_pane_down = "j"
+focus_pane_up = "k"
+focus_pane_right = "l"
+```
+
+Use the full default config to see every available action.
+
+## Indexed jumps
+
+Indexed keybindings let you jump directly to visible positions.
+
+```toml
+[keys.indexed]
+workspaces = "ctrl+shift"
+tabs = "ctrl"
+agents = "alt"
+```
+
+These expand over number keys 1 through 9. For example, `tabs = "ctrl"` makes `ctrl+1` through `ctrl+9` switch tabs.
+
+## Custom command keybindings
+
+Custom prefix-mode commands can run shell helpers from inside Herdr.
+
+```toml
+[[keys.command]]
+key = "g"
+type = "pane"
+command = "lazygit"
+```
+
+`type = "pane"` opens a temporary pane and closes it when the command exits.
+
+`type = "shell"` runs detached in the background.
+
+## Theme
+
+Choose a built-in theme:
+
+```toml
+[theme]
+name = "catppuccin"
+```
+
+Built-in themes:
+
+`catppuccin`, `catppuccin-latte`, `tokyo-night`, `tokyo-night-day`, `dracula`, `nord`, `gruvbox`, `gruvbox-light`, `one-dark`, `one-light`, `solarized`, `solarized-light`, `kanagawa`, `kanagawa-lotus`, `rose-pine`, `rose-pine-dawn`, `vesper`.
+
+You can override individual colors:
+
+```toml
+[theme.custom]
+panel_bg = "reset"
+accent = "#a6e3a1"
+green = "#a6e3a1"
+blue = "#89b4fa"
+red = "#f38ba8"
+yellow = "#f9e2af"
+```
+
+Color values accept hex, named colors, `rgb(r,g,b)`, or reset aliases like `reset`, `default`, `none`, and `transparent`.
+
+## UI and sidebar
+
+The sidebar is the main Herdr dashboard. It shows workspaces, tabs, panes, and agent state.
+
+Common options:
+
+```toml
+[ui]
+sidebar_width = 32
+mouse_capture = true
+confirm_close = true
+prompt_new_tab_name = true
+show_agent_labels_on_pane_borders = false
+agent_panel_scope = "all"
+accent = "cyan"
+```
+
+`agent_panel_scope` can be `all` or `current`. Use `current` if you only want the agent panel to show agents in the active workspace.
+
+Set `mouse_capture = false` if you want your terminal to handle normal clicks, such as command-clicking URLs.
+
+Set `show_agent_labels_on_pane_borders = true` if you want detected agent labels in split pane borders when no manual pane label is set.
+
+## Notifications
+
+Herdr can show toast notifications when agents finish or need input.
+
+```toml
+[ui.toast]
+delivery = "auto"
+```
+
+On macOS, Herdr can use system notifications when supported by the foreground client.
+
+## Sound
+
+Sound is optional and server-owned.
+
+```toml
+[ui.sound]
+enabled = false
+```
+
+Keep sound off on shared machines or remote servers unless you explicitly want it.
+
+## Scrollback
+
+Set the scrollback buffer size for newly created panes:
+
+```toml
+[advanced]
+scrollback_limit_bytes = 10485760
+```
+
+Existing panes keep their current buffer until they are recreated.
+
+## Nested launches
+
+Herdr normally protects you from launching Herdr inside Herdr.
+
+```toml
+[experimental]
+allow_nested = false
+```
+
+Only enable nested launches for testing.
+
+## Kitty graphics
+
+Kitty graphics support is experimental.
+
+```toml
+[experimental]
+kitty_graphics = false
+```
+
+Leave this off unless you are testing terminal image behavior.
+
+## Environment variables
+
+| Variable | Purpose |
+| --- | --- |
+| `HERDR_CONFIG_PATH` | Override the config file path. |
+| `HERDR_SESSION` | Select a named session for CLI commands. |
+| `HERDR_SOCKET_PATH` | Low-level socket path override. |
+| `HERDR_LOG` | Set log filtering, for example `HERDR_LOG=herdr=debug`. |
+
+## Logs
+
+Logs are useful when diagnosing startup warnings, integration state, or socket API behavior.
+
+Common log files:
+
+```text
+~/.config/herdr/herdr.log
+~/.config/herdr/herdr-client.log
+~/.config/herdr/herdr-server.log
+```
+
+Logs rotate automatically. Include the current log and rotated siblings when reporting issues.

@@ -244,8 +244,7 @@ impl AppState {
     pub(super) fn set_manual_sidebar_width(&mut self, divider_col: u16) {
         let sidebar = self.view.sidebar_rect;
         let width = divider_col.saturating_sub(sidebar.x).saturating_add(1);
-        self.sidebar_width =
-            width.clamp(crate::ui::MIN_SIDEBAR_WIDTH, crate::ui::MAX_SIDEBAR_WIDTH);
+        self.sidebar_width = width.clamp(self.sidebar_min_width, self.sidebar_max_width);
         self.sidebar_width_source = crate::app::state::SidebarWidthSource::Manual;
         self.mark_session_dirty();
     }
@@ -1237,6 +1236,28 @@ mod tests {
         assert_eq!(app.state.sidebar_width, 31);
         let snapshot = capture_snapshot(&app.state);
         assert_eq!(snapshot.sidebar_width, Some(31));
+    }
+
+    #[test]
+    fn dragging_past_max_clamps_to_configured_max() {
+        let mut app = app_for_mouse_test();
+        app.state.sidebar_max_width = 30;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 25, 5));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 50, 5));
+
+        assert_eq!(app.state.sidebar_width, 30);
+    }
+
+    #[test]
+    fn dragging_below_min_clamps_to_configured_min() {
+        let mut app = app_for_mouse_test();
+        app.state.sidebar_min_width = 22;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 25, 5));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 5, 5));
+
+        assert_eq!(app.state.sidebar_width, 22);
     }
 
     #[test]

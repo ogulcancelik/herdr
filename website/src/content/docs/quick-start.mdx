@@ -1,0 +1,80 @@
+---
+title: Quick start
+description: Create your first Herdr workspace and run agents in persistent terminal panes.
+---
+
+Start Herdr from any project directory:
+
+```bash
+herdr
+```
+
+Herdr launches or attaches to your default background session. If you detach, agents keep running.
+
+## Create a workspace
+
+Press `n` to create a workspace. A workspace is a project-level container for tabs, panes, and agents.
+
+Give each active project its own workspace. This keeps agent state readable in the sidebar.
+
+## Run an agent
+
+Start your agent in the root pane.
+
+```bash
+pi
+```
+
+Herdr detects supported agents automatically. The sidebar shows whether each agent is `working`, `blocked`, `done`, or `idle`.
+
+## Navigate
+
+Press `ctrl+b` to enter navigate mode.
+
+Common actions:
+
+| Action | Key |
+| --- | --- |
+| Split right | `v` |
+| Split down | `-` |
+| New tab | `c` |
+| New workspace | `n` |
+| Detach client | `q` |
+
+After detaching, run `herdr` again to reattach to the same session.
+
+## Use the mouse
+
+Herdr is mouse-native. You can click panes, tabs, workspaces, and agents; drag borders; select text; and use right-click menus.
+
+## Manage named sessions
+
+Named sessions are separate Herdr server namespaces. Use them when you want fully separate runtime state.
+
+```bash
+herdr session list
+herdr session attach work
+herdr session attach side-project
+herdr session stop work
+herdr session delete side-project
+```
+
+Workspaces are usually enough. Use named sessions when you need isolation between sets of panes, sockets, and persistent state.
+
+## Attach from another machine
+
+Start Herdr on a server, detach, and come back over SSH later.
+
+```bash
+ssh you@server
+herdr
+```
+
+You can also attach through SSH from your local terminal:
+
+```bash
+herdr --remote workbox
+herdr --remote ssh://you@server:2222
+```
+
+For repeat targets, put the host in your SSH config.

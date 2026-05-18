@@ -1,0 +1,125 @@
+---
+title: Persistence and remote access
+description: Detach from Herdr, reattach later, use named sessions, and connect over SSH.
+---
+
+Herdr keeps panes running in a background server. Your terminal client can detach and reconnect later.
+
+## Detach and reattach
+
+Start Herdr:
+
+```bash
+herdr
+```
+
+Detach the client with `ctrl+b q`.
+
+Your panes and agents keep running. Reattach by running Herdr again:
+
+```bash
+herdr
+```
+
+Stop the default server when you want to end the session:
+
+```bash
+herdr server stop
+```
+
+## Named sessions
+
+Use named sessions when you want independent Herdr servers.
+
+```bash
+herdr session list
+herdr session attach work
+herdr session attach side-project
+herdr session stop work
+herdr session delete side-project
+```
+
+A named session has its own panes, tabs, workspaces, sockets, and runtime state. It still shares the same global config file.
+
+Use `--json` for scripts:
+
+```bash
+herdr session list --json
+herdr session stop work --json
+herdr session delete side-project --json
+```
+
+## Remote attach over SSH
+
+Run Herdr on a server and attach from any SSH client:
+
+```bash
+ssh you@server
+herdr
+```
+
+You can also attach through SSH from your local machine:
+
+```bash
+herdr --remote workbox
+herdr --remote ssh://you@server:2222
+```
+
+For repeat targets, use your SSH config:
+
+```text
+Host workbox
+  HostName server.example.com
+  User you
+  Port 2222
+```
+
+Then attach with:
+
+```bash
+herdr --remote workbox
+```
+
+## Remote named sessions
+
+Use `--session` with `--remote` to attach to a named session on the remote host:
+
+```bash
+herdr --remote workbox --session agents
+```
+
+## Direct terminal attach
+
+Full Herdr attach opens the whole workspace UI. Direct attach opens one server-owned terminal in your current terminal.
+
+Attach by agent target:
+
+```bash
+herdr agent attach reviewer
+```
+
+Attach by terminal ID:
+
+```bash
+herdr terminal attach term_abc123
+```
+
+Direct attach streams the current rendered terminal state, then live ANSI frames. Input goes straight to that terminal.
+
+Detach with `ctrl+b q`. Send a literal `ctrl+b` with `ctrl+b ctrl+b`.
+
+Only one writable direct attach client owns input and resize for a terminal. Use `--takeover` to replace an existing owner:
+
+```bash
+herdr terminal attach term_abc123 --takeover
+```
+
+## Single-process escape hatch
+
+Use `--no-session` to run Herdr without the background server/client split:
+
+```bash
+herdr --no-session
+```
+
+This is mainly an escape hatch for debugging or compatibility. The default persistent session mode is the normal path.

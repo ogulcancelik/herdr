@@ -121,6 +121,28 @@ impl Palette {
         }
     }
 
+    /// Terminal 16-color theme.
+    pub fn terminal() -> Self {
+        Self {
+            accent: Color::Blue,
+            panel_bg: Color::Reset,
+            surface0: Color::Reset,
+            surface1: Color::DarkGray,
+            surface_dim: Color::DarkGray,
+            overlay0: Color::Gray,
+            overlay1: Color::White,
+            text: Color::Reset,
+            subtext0: Color::Gray,
+            mauve: Color::Gray,
+            green: Color::Green,
+            yellow: Color::Yellow,
+            red: Color::LightRed,
+            blue: Color::Blue,
+            teal: Color::Cyan,
+            peach: Color::Yellow,
+        }
+    }
+
     /// Tokyo Night — blue-purple aesthetic.
     pub fn tokyo_night() -> Self {
         Self {
@@ -456,6 +478,7 @@ impl Palette {
         match name.to_lowercase().replace([' ', '_'], "-").as_str() {
             "catppuccin" | "catppuccin-mocha" => Some(Self::catppuccin()),
             "catppuccin-latte" | "latte" | "light" => Some(Self::catppuccin_latte()),
+            "terminal" => Some(Self::terminal()),
             "tokyo-night" | "tokyonight" => Some(Self::tokyo_night()),
             "tokyo-night-day" | "tokyo-day" | "tokyonight-day" => Some(Self::tokyo_night_day()),
             "dracula" => Some(Self::dracula()),
@@ -615,6 +638,7 @@ impl SettingsSection {
 pub const THEME_NAMES: &[&str] = &[
     "catppuccin",
     "catppuccin-latte",
+    "terminal",
     "tokyo-night",
     "tokyo-night-day",
     "dracula",
@@ -906,6 +930,8 @@ pub struct AppState {
     pub prefix_mods: KeyModifiers,
     pub default_sidebar_width: u16,
     pub sidebar_width: u16,
+    pub sidebar_min_width: u16,
+    pub sidebar_max_width: u16,
     pub sidebar_width_source: SidebarWidthSource,
     pub sidebar_width_auto: bool,
     pub sidebar_collapsed: bool,
@@ -1148,6 +1174,8 @@ impl AppState {
             prefix_mods: KeyModifiers::CONTROL,
             default_sidebar_width: 26,
             sidebar_width: 26,
+            sidebar_min_width: 18,
+            sidebar_max_width: 36,
             sidebar_width_source: SidebarWidthSource::ConfigDefault,
             sidebar_width_auto: false,
             sidebar_collapsed: false,

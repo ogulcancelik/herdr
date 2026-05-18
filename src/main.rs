@@ -61,8 +61,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # onboarding = true
 
 [theme]
-# Built-in themes: catppuccin, tokyo-night, dracula, nord, gruvbox,
-#                  one-dark, solarized, kanagawa, rose-pine, vesper
+# Built-in themes: catppuccin, terminal, tokyo-night, dracula, nord,
+#                  gruvbox, one-dark, solarized, kanagawa, rose-pine,
+#                  vesper
 # name = "catppuccin"
 
 # Override individual color tokens on top of the base theme.
@@ -128,6 +129,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 [ui]
 # Sidebar width (auto-scaled based on workspace names, this sets the default)
 # sidebar_width = 26
+
+# Minimum sidebar width when expanded (columns)
+# sidebar_min_width = 18
+
+# Maximum sidebar width when expanded (columns)
+# sidebar_max_width = 36
 
 # Capture mouse input for Herdr's mouse UI.
 # Set false to let the terminal handle normal clicks, such as Cmd-clicking URLs.

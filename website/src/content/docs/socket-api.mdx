@@ -1,0 +1,224 @@
+---
+title: Socket API
+description: Control a running Herdr server from scripts, tools, and coding agents.
+---
+
+Herdr exposes a local socket API for scripts and agents that need to inspect or control a running session.
+
+Most automation should start with the CLI wrappers. Use the raw socket API only when you need direct request/response control or long-lived event subscriptions.
+
+## Choose an integration layer
+
+| Layer | Use it for |
+| --- | --- |
+| Agent skill | Teaching a coding agent how to use Herdr from inside a pane. |
+| CLI wrappers | Shell scripts, simple orchestration, and human debugging. |
+| Raw socket API | Custom tools, protocol clients, and event subscribers. |
+
+The layers share the same control surface.
+
+## What you can control
+
+The socket API can:
+
+- create, list, focus, rename, and close workspaces
+- create, list, focus, rename, and close tabs
+- list, inspect, split, rename, read, close, and send input to panes
+- list, inspect, read, send to, rename, focus, start, and attach agents through CLI helpers
+- report custom agent state from hooks and plugins
+- subscribe to events and wait for output or state changes
+- install and uninstall built-in integrations
+- stop the server and reload config
+
+## CLI examples
+
+Create a workspace:
+
+```bash
+herdr workspace create --cwd ~/project --label api
+```
+
+Create a tab:
+
+```bash
+herdr tab create --label logs
+```
+
+Split a pane and run a command:
+
+```bash
+herdr pane split 1-1 --direction right
+herdr pane run 1-2 "npm test"
+```
+
+Wait for an agent:
+
+```bash
+herdr wait agent-status 1-1 --status done
+```
+
+Read pane output:
+
+```bash
+herdr pane read 1-2 --source recent --lines 50
+```
+
+## Raw methods
+
+Raw socket method names use dot notation:
+
+| Area | Methods |
+| --- | --- |
+| Server | `ping`, `server.stop`, `server.reload_config` |
+| Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.close` |
+| Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.close` |
+| Pane | `pane.split`, `pane.list`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.send`, `agent.rename`, `agent.focus`, `agent.start` |
+| Events | `events.subscribe`, `events.wait` |
+| Integrations | `integration.install`, `integration.uninstall` |
+
+Some CLI commands are conveniences around these methods. For example, `herdr agent wait` resolves an agent target and then subscribes to pane agent state events.
+
+## Socket transport
+
+Herdr uses newline-delimited JSON over a Unix domain socket.
+
+Send one request per line:
+
+```json
+{"id":"req_1","method":"ping","params":{}}
+```
+
+A successful response includes the same `id`:
+
+```json
+{"id":"req_1","result":{"type":"pong"}}
+```
+
+Event subscriptions keep the connection open after the initial response.
+
+## Socket paths
+
+The default socket lives under your Herdr config directory.
+
+Named sessions have separate sockets:
+
+```text
+~/.config/herdr/herdr.sock
+~/.config/herdr/sessions/<name>/herdr.sock
+```
+
+Resolution order:
+
+1. explicit CLI `--session <name>`
+2. `HERDR_SOCKET_PATH`
+3. `HERDR_SESSION=<name>`
+4. default session socket
+
+Use `HERDR_SOCKET_PATH` only for low-level overrides.
+
+## Agent state reporting
+
+Integrations report agent state with `pane.report_agent`.
+
+```json
+{
+  "id": "req_1",
+  "method": "pane.report_agent",
+  "params": {
+    "pane_id": "1-1",
+    "source": "custom:docs",
+    "agent": "docs-bot",
+    "state": "working",
+    "message": "building docs",
+    "custom_status": "indexing"
+  }
+}
+```
+
+`state` is semantic. It affects waits, notifications, and rollups.
+
+`custom_status` is visual. It can show a short label like `indexing` without changing semantic behavior.
+
+## Event subscriptions
+
+Subscribe to events when you need a long-lived stream:
+
+```json
+{
+  "id": "sub_1",
+  "method": "events.subscribe",
+  "params": {
+    "subscriptions": [
+      { "type": "pane.agent_status_changed", "pane_id": "1-1", "agent_status": "blocked" }
+    ]
+  }
+}
+```
+
+The first response acknowledges the subscription. Later lines are pushed events.
+
+Use `events.wait` when you want one matching event and then a response.
+
+## Reading panes
+
+Use `pane.read` through the CLI unless you are writing a protocol client.
+
+```bash
+herdr pane read 1-1 --source visible --lines 80
+herdr pane read 1-1 --source recent --lines 120
+herdr pane read 1-1 --source recent-unwrapped --lines 120
+```
+
+`recent-unwrapped` is useful for logs because it ignores soft wrapping.
+
+## Waiting for state
+
+Use waits to coordinate agents and scripts.
+
+```bash
+herdr wait agent-status 1-1 --status done
+herdr wait agent-status 1-1 --status blocked
+```
+
+Agent waits observe semantic state, not arbitrary command completion.
+
+## Response shapes
+
+Successful responses look like this:
+
+```json
+{
+  "id": "req_1",
+  "result": {
+    "type": "pane_info",
+    "pane": {
+      "pane_id": "1-1",
+      "terminal_id": "term_abc123",
+      "workspace_id": "1",
+      "tab_id": "1-1",
+      "focused": true,
+      "agent_status": "working",
+      "revision": 42
+    }
+  }
+}
+```
+
+Errors look like this:
+
+```json
+{
+  "id": "req_1",
+  "error": {
+    "code": "not_found",
+    "message": "pane not found"
+  }
+}
+```
+
+## Protocol stability
+
+Herdr has a protocol version for client/server compatibility. Protocol changes are reviewed with release compatibility in mind.
+
+Check the server protocol with `ping` or `herdr status` before depending on new behavior. Handle unknown fields gracefully.

@@ -2103,7 +2103,10 @@ fn print_agent_help() {
     eprintln!("  herdr agent wait <target> --status <idle|working|blocked|unknown> [--timeout MS]");
     eprintln!("  herdr agent attach <target> [--takeover]");
     eprintln!("  herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--focus|--no-focus] -- <argv...>");
-    eprintln!("  targets accept terminal ids, unique agent names, and legacy pane ids");
+    eprintln!("  targets accept terminal ids, unique agent names, detected/reported agent labels, and legacy pane ids");
+    eprintln!(
+        "  agent send writes literal text; use pane run when you want command text plus Enter"
+    );
 }
 
 fn print_terminal_help() {

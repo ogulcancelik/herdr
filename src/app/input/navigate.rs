@@ -1209,6 +1209,21 @@ mod tests {
     }
 
     #[test]
+    fn focus_pane_action_keeps_zoomed_when_changing_focus() {
+        let mut state = state_with_workspaces(&["test"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let right = state.workspaces[0].test_split(Direction::Horizontal);
+        state.workspaces[0].layout.focus_pane(root);
+        state.workspaces[0].zoomed = true;
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 100, 20));
+
+        execute_navigate_action(&mut state, NavigateAction::FocusPaneRight);
+
+        assert!(state.workspaces[0].zoomed);
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(right));
+    }
+
+    #[test]
     fn question_mark_opens_keybind_help_from_navigate() {
         let mut state = state_with_workspaces(&["test"]);
 

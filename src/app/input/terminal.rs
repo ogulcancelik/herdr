@@ -487,6 +487,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn alt_backspace_is_forwarded_to_focused_pane() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(0, 0, 80, 24));
+        let info = pane_infos[0].clone();
+        let (runtime, mut rx) = crate::pane::PaneRuntime::test_with_channel(
+            info.inner_rect.width,
+            info.inner_rect.height,
+        );
+        ws.tabs[0].runtimes.insert(pane_id, runtime);
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+
+        let key = crate::input::parse_terminal_key_sequence("\x1b\x7f").unwrap();
+        app.handle_terminal_key_headless(key);
+
+        let bytes = rx.try_recv().unwrap();
+        assert_eq!(bytes.as_ref(), b"\x1b\x7f");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn page_up_scrolls_plain_shell_pane() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");

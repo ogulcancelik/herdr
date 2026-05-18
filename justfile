@@ -28,6 +28,10 @@ install-hooks:
 build:
     cargo build --release --locked
 
+# Build the website and documentation
+website-build:
+    cd website && bun install --frozen-lockfile && bun run build
+
 # Build the vendored libghostty-vt source dist
 build-libghostty-vt:
     scripts/build_vendored_libghostty_vt.sh

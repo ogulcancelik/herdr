@@ -1,0 +1,15 @@
+{
+  "name": "herdr-website",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prepare-docs": "node scripts/prepare-docs.mjs",
+    "dev": "node scripts/prepare-docs.mjs && astro dev",
+    "build": "node scripts/prepare-docs.mjs && astro build",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.36.0",
+    "astro": "^5.0.0"
+  }
+}

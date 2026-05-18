@@ -674,6 +674,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_legacy_alt_backspace() {
+        let (RawInputEvent::Key(key), consumed) = extract_one_event(b"\x1b\x7f").unwrap() else {
+            panic!("expected key");
+        };
+        assert_eq!(consumed, 2);
+        assert_eq!(key.code, KeyCode::Backspace);
+        assert_eq!(key.modifiers, KeyModifiers::ALT);
+    }
+
+    #[test]
+    fn parses_kitty_alt_backspace() {
+        let (RawInputEvent::Key(key), consumed) = extract_one_event(b"\x1b[127;3u").unwrap() else {
+            panic!("expected key");
+        };
+        assert_eq!(consumed, 8);
+        assert_eq!(key.code, KeyCode::Backspace);
+        assert_eq!(key.modifiers, KeyModifiers::ALT);
+    }
+
+    #[test]
     fn parses_enhanced_pageup_press() {
         let (RawInputEvent::Key(key), consumed) = extract_one_event(b"\x1b[5;1:1~").unwrap() else {
             panic!("expected key");
@@ -704,6 +724,8 @@ mod tests {
             (b"\x7f", KeyCode::Backspace, KeyModifiers::empty()),
             (b"\x1b[A", KeyCode::Up, KeyModifiers::empty()),
             (b"\x1b[1;3A", KeyCode::Up, KeyModifiers::ALT),
+            (b"\x1b\x7f", KeyCode::Backspace, KeyModifiers::ALT),
+            (b"\x1b[127;3u", KeyCode::Backspace, KeyModifiers::ALT),
             (b"\x1b[57420;1u", KeyCode::Down, KeyModifiers::empty()),
             (b"\x1b[57423;1u", KeyCode::Home, KeyModifiers::empty()),
             (b"\x1b[49:33;2:1u", KeyCode::Char('1'), KeyModifiers::SHIFT),

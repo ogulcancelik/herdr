@@ -288,6 +288,22 @@ impl App {
 
         let agent_panel_scope = agent_panel_scope_from_config(config.ui.agent_panel_scope);
 
+        // Validate sidebar bounds before they reach any `u16::clamp(min, max)`
+        // call: `clamp` panics when `min > max`. On bad config, fall back to
+        // the built-in defaults rather than crashing on the first render.
+        let (sidebar_min_width, sidebar_max_width) = crate::config::validated_sidebar_bounds(
+            config.ui.sidebar_min_width,
+            config.ui.sidebar_max_width,
+        )
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                min = config.ui.sidebar_min_width,
+                max = config.ui.sidebar_max_width,
+                "ui.sidebar_min_width is greater than sidebar_max_width; falling back to default bounds (18, 36)"
+            );
+            (18, 36)
+        });
+
         info!(
             pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes,
             "using pane scrollback configuration"
@@ -378,6 +394,8 @@ impl App {
             prefix_mods,
             default_sidebar_width: config.ui.sidebar_width,
             sidebar_width,
+            sidebar_min_width,
+            sidebar_max_width,
             sidebar_width_source,
             sidebar_width_auto: false,
             sidebar_collapsed: false,
@@ -730,26 +748,50 @@ impl App {
         }
 
         if !invalid_section("ui") {
-            diagnostics.extend(config.ui.sound.diagnostics());
+            // Validate sidebar bounds before they reach any `u16::clamp` call.
+            // On `min > max`, treat the entire `[ui]` section as invalid: keep
+            // the previous settings and skip the section so the re-clamp below
+            // — and every subsequent render/drag — can never panic.
+            if crate::config::validated_sidebar_bounds(
+                config.ui.sidebar_min_width,
+                config.ui.sidebar_max_width,
+            )
+            .is_none()
+            {
+                diagnostics.push(format!(
+                    "ui.sidebar_min_width ({}) is greater than sidebar_max_width ({}); keeping previous [ui] settings",
+                    config.ui.sidebar_min_width, config.ui.sidebar_max_width,
+                ));
+            } else {
+                diagnostics.extend(config.ui.sound.diagnostics());
 
-            self.state.default_sidebar_width = config.ui.sidebar_width;
-            if self.state.sidebar_width_source == state::SidebarWidthSource::ConfigDefault {
-                self.state.sidebar_width = config.ui.sidebar_width;
+                self.state.default_sidebar_width = config.ui.sidebar_width;
+                if self.state.sidebar_width_source == state::SidebarWidthSource::ConfigDefault {
+                    self.state.sidebar_width = config.ui.sidebar_width;
+                }
+                self.state.sidebar_min_width = config.ui.sidebar_min_width;
+                self.state.sidebar_max_width = config.ui.sidebar_max_width;
+                // Re-clamp the live width to the new bounds. No source guard — bounds
+                // always apply, including to widths owned by Persisted or Manual.
+                self.state.sidebar_width = self
+                    .state
+                    .sidebar_width
+                    .clamp(self.state.sidebar_min_width, self.state.sidebar_max_width);
+                self.state.mouse_capture = config.ui.mouse_capture;
+                self.state.confirm_close = config.ui.confirm_close;
+                self.state.prompt_new_tab_name = config.ui.prompt_new_tab_name;
+                self.state.show_agent_labels_on_pane_borders =
+                    config.ui.show_agent_labels_on_pane_borders;
+                self.state.agent_panel_scope =
+                    agent_panel_scope_from_config(config.ui.agent_panel_scope);
+                self.state.agent_panel_scroll = 0;
+                self.state.accent = crate::config::parse_color(&config.ui.accent);
+                if !self.state.local_sound_playback && self.state.sound != config.ui.sound {
+                    self.state.request_client_sound_config_reload = true;
+                }
+                self.state.sound = config.ui.sound.clone();
+                self.state.toast_config = config.ui.toast.clone();
             }
-            self.state.mouse_capture = config.ui.mouse_capture;
-            self.state.confirm_close = config.ui.confirm_close;
-            self.state.prompt_new_tab_name = config.ui.prompt_new_tab_name;
-            self.state.show_agent_labels_on_pane_borders =
-                config.ui.show_agent_labels_on_pane_borders;
-            self.state.agent_panel_scope =
-                agent_panel_scope_from_config(config.ui.agent_panel_scope);
-            self.state.agent_panel_scroll = 0;
-            self.state.accent = crate::config::parse_color(&config.ui.accent);
-            if !self.state.local_sound_playback && self.state.sound != config.ui.sound {
-                self.state.request_client_sound_config_reload = true;
-            }
-            self.state.sound = config.ui.sound.clone();
-            self.state.toast_config = config.ui.toast.clone();
         }
 
         if !invalid_section("experimental") {
@@ -1170,19 +1212,140 @@ mod tests {
             state::SidebarWidthSource::ConfigDefault
         );
 
-        std::fs::write(&path, "[ui]\nsidebar_width = 42\n").unwrap();
+        std::fs::write(&path, "[ui]\nsidebar_width = 34\n").unwrap();
         let report = app.reload_config();
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
-        assert_eq!(app.state.default_sidebar_width, 42);
-        assert_eq!(app.state.sidebar_width, 42);
+        assert_eq!(app.state.default_sidebar_width, 34);
+        assert_eq!(app.state.sidebar_width, 34);
 
         app.state.sidebar_width = 31;
         app.state.sidebar_width_source = state::SidebarWidthSource::Manual;
-        std::fs::write(&path, "[ui]\nsidebar_width = 44\n").unwrap();
+        std::fs::write(&path, "[ui]\nsidebar_width = 35\n").unwrap();
         let report = app.reload_config();
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
-        assert_eq!(app.state.default_sidebar_width, 44);
+        assert_eq!(app.state.default_sidebar_width, 35);
         assert_eq!(app.state.sidebar_width, 31);
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_config_updates_sidebar_bounds_and_reclamps() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-sidebar-bounds");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        // Default bounds.
+        assert_eq!(app.state.sidebar_min_width, 18);
+        assert_eq!(app.state.sidebar_max_width, 36);
+
+        // Manually set a width and flip the source so the existing
+        // sidebar_width-only-when-config-owned guard does NOT update it.
+        app.state.sidebar_width = 30;
+        app.state.sidebar_width_source = state::SidebarWidthSource::Manual;
+
+        // Tightening max below the current width must re-clamp the live width
+        // even when source is Manual — bounds always apply.
+        std::fs::write(&path, "[ui]\nsidebar_max_width = 24\n").unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.state.sidebar_max_width, 24);
+        assert_eq!(
+            app.state.sidebar_width, 24,
+            "manual width must re-clamp to new max"
+        );
+
+        // Loosening max leaves the live width alone (it's already within bounds).
+        app.state.sidebar_width = 24;
+        std::fs::write(&path, "[ui]\nsidebar_max_width = 60\n").unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.state.sidebar_max_width, 60);
+        assert_eq!(app.state.sidebar_width, 24);
+
+        // Raising min above the current width re-clamps upward.
+        std::fs::write(&path, "[ui]\nsidebar_min_width = 30\n").unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.state.sidebar_min_width, 30);
+        assert_eq!(
+            app.state.sidebar_width, 30,
+            "manual width must re-clamp up to new min"
+        );
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn app_new_falls_back_to_default_bounds_on_inverted_config() {
+        let mut config = Config::default();
+        config.ui.sidebar_min_width = 50;
+        config.ui.sidebar_max_width = 30;
+
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let app = App::new(
+            &config,
+            true,
+            None,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+
+        assert_eq!(
+            app.state.sidebar_min_width, 18,
+            "App::new must fall back to default min when bounds are inverted"
+        );
+        assert_eq!(
+            app.state.sidebar_max_width, 36,
+            "App::new must fall back to default max when bounds are inverted"
+        );
+    }
+
+    #[test]
+    fn reload_config_invalid_sidebar_bounds_keeps_previous_ui_and_returns_partial() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-invalid-sidebar-bounds");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        let original_min = app.state.sidebar_min_width;
+        let original_max = app.state.sidebar_max_width;
+        let original_mouse_capture = app.state.mouse_capture;
+        // Pair the bad bounds with another `[ui]` field change to confirm the
+        // entire section is treated as invalid (not just the bounds).
+        let target_mouse_capture = !original_mouse_capture;
+        std::fs::write(
+            &path,
+            format!(
+                "[ui]\nsidebar_min_width = 50\nsidebar_max_width = 30\nmouse_capture = {}\n",
+                target_mouse_capture
+            ),
+        )
+        .unwrap();
+
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert_eq!(app.state.sidebar_min_width, original_min);
+        assert_eq!(app.state.sidebar_max_width, original_max);
+        assert_eq!(
+            app.state.mouse_capture, original_mouse_capture,
+            "[ui] is treated as invalid on bad bounds; mouse_capture must not apply"
+        );
+        assert!(app
+            .state
+            .config_diagnostic
+            .as_deref()
+            .is_some_and(|message| {
+                message.contains("sidebar_min_width")
+                    && message.contains("sidebar_max_width")
+                    && message.contains("greater")
+            }));
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

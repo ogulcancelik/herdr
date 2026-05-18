@@ -1,1 +1,3 @@
 /install /install.sh 200
+/docs/skill/ /docs/agent-skill/ 301
+/docs/api/ /docs/socket-api/ 301

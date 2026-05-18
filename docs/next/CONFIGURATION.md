@@ -47,6 +47,7 @@ Reloadable now:
 - `experimental.kitty_graphics`
 - `advanced.scrollback_limit_bytes` for panes created after reload
 - `ui.sidebar_width` as the default width; current width updates only while it is still config-owned
+- `ui.sidebar_min_width` and `ui.sidebar_max_width`; the live width is re-clamped to the new bounds on reload
 
 Startup-only or special-case:
 - `onboarding` does not reopen onboarding during reload
@@ -216,7 +217,7 @@ command = "notify-send herdr 'custom command ran'"
 
 ## theme
 
-herdr ships with 17 built-in color themes. set one in config:
+herdr ships with 18 built-in color themes. set one in config:
 
 ```toml
 [theme]
@@ -229,6 +230,7 @@ name = "tokyo-night"
 |------|-------------|
 | `catppuccin` | soft pastel mocha palette (default) |
 | `catppuccin-latte` | light catppuccin palette |
+| `terminal` | use your terminal's 16-color ANSI palette |
 | `tokyo-night` | blue-purple aesthetic |
 | `tokyo-night-day` | light tokyo night palette |
 | `dracula` | purple/pink/green classic |
@@ -294,6 +296,8 @@ for `panel_bg`, you can also use `reset`, `default`, `none`, or `transparent` to
 ```toml
 [ui]
 sidebar_width = 26
+sidebar_min_width = 18
+sidebar_max_width = 36
 mouse_capture = true
 confirm_close = true
 prompt_new_tab_name = true
@@ -307,6 +311,8 @@ accent = "cyan"
 | option | default | description |
 |--------|---------|-------------|
 | `sidebar_width` | `26` | base sidebar width before auto-scaling |
+| `sidebar_min_width` | `18` | minimum sidebar width when expanded |
+| `sidebar_max_width` | `36` | maximum sidebar width when expanded |
 | `mouse_capture` | `true` | capture mouse input for Herdr's mouse UI; set false to let the terminal handle normal clicks while still forwarding mouse to pane apps that request it |
 | `confirm_close` | `true` | ask before closing a workspace |
 | `prompt_new_tab_name` | `true` | ask for a tab name before creating a new tab; set false to create tabs immediately with generated names |
