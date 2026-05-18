@@ -1,13 +1,16 @@
 # source	key	bytes_hex	code	modifiers	kind	shifted_codepoint
+ghostty-macos	alt+backspace	1b7f	backspace	alt	press
 iterm2-macos	alt+up	1b5b313b3341	up	alt	press	
 iterm2-macos	alt+down	1b5b313b3342	down	alt	press	
 iterm2-macos	alt+left	1b62	char:b	alt	press	
 iterm2-macos	alt+right	1b66	char:f	alt	press	
+iterm2-macos	alt+backspace	1b7f	backspace	alt	press
 iterm2-macos	shift+enter	0d	enter	-	press	
 terminal-app-macos	alt+up	1b1b5b41	up	alt	press	
 terminal-app-macos	alt+down	1b1b5b42	down	alt	press	
 terminal-app-macos	alt+left	1b62	char:b	alt	press	
 terminal-app-macos	alt+right	1b66	char:f	alt	press	
+terminal-app-macos	alt+backspace	1b7f	backspace	alt	press
 terminal-app-macos	shift+enter	0d	enter	-	press	
 terminal-app-tmux	alt+up	1b1b5b41	up	alt	press	
 terminal-app-tmux	alt+down	1b1b5b42	down	alt	press	

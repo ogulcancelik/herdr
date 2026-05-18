@@ -4,6 +4,7 @@ legacy_ctrl_z	1a	char:z	control	press
 legacy_enter	0d	enter	-	press	
 legacy_tab	09	tab	-	press	
 legacy_backspace	7f	backspace	-	press	
+legacy_alt_backspace	1b7f	backspace	alt	press
 legacy_up	1b5b41	up	-	press	
 legacy_home	1b5b48	home	-	press	
 xterm_alt_up	1b5b313b3341	up	alt	press	
@@ -12,6 +13,7 @@ xterm_shift_pageup	1b5b353b327e	pageup	shift	press
 ghostty_enhanced_up_press	1b5b313b313a3141	up	-	press	
 ghostty_enhanced_up_release	1b5b313b313a3341	up	-	release	
 modify_other_keys_ctrl_shift_l	1b5b32373b363b3130387e	char:l	control+shift	press	
+kitty_alt_backspace	1b5b3132373b3375	backspace	alt	press
 kitty_shift_letter	1b5b3130383a37363b323a3175	char:l	shift	press	76
 kitty_shift_symbol	1b5b34393a33333b323a3175	char:1	shift	press	33
 kitty_release_letter	1b5b3130383a37363b323a3375	char:l	shift	release	76

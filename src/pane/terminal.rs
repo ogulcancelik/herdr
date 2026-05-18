@@ -1503,6 +1503,20 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_kitty_pane_encodes_parsed_legacy_alt_backspace_as_csi_u() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+        pane.process_pty_bytes(pane_id, 0, b"\x1b[>1u", &tx);
+
+        let key = crate::input::parse_terminal_key_sequence("\x1b\x7f").unwrap();
+        let encoded = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
+
+        assert_eq!(encoded, b"\x1b[127;3u");
+    }
+
+    #[test]
     fn ghostty_key_encoders_are_isolated_per_pane() {
         let (tx, _rx) = mpsc::channel(4);
         let first = GhosttyPaneTerminal::new(

@@ -524,6 +524,12 @@ mod tests {
     }
 
     #[test]
+    fn legacy_alt_backspace_sends_escape_delete() {
+        let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT);
+        assert_eq!(encode_key(key, KeyboardProtocol::Legacy), b"\x1b\x7f");
+    }
+
+    #[test]
     fn application_cursor_keys_use_ss3_sequences() {
         assert_eq!(encode_cursor_key(KeyCode::Up, true), b"\x1bOA");
         assert_eq!(encode_cursor_key(KeyCode::Down, true), b"\x1bOB");
@@ -635,6 +641,15 @@ mod tests {
         assert_eq!(
             encode_key(key, KeyboardProtocol::Kitty { flags: 1 }),
             b"\x1b[13;3u"
+        );
+    }
+
+    #[test]
+    fn kitty_alt_backspace_uses_csi_u() {
+        let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT);
+        assert_eq!(
+            encode_key(key, KeyboardProtocol::Kitty { flags: 1 }),
+            b"\x1b[127;3u"
         );
     }
 
