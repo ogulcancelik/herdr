@@ -8,14 +8,41 @@ fn session_path() -> PathBuf {
     crate::session::data_dir().join("session.json")
 }
 
+// Follow symlinks manually so a write through a (possibly dangling) symlink
+// lands on the target. `fs::canonicalize` requires the target to exist, which
+// excludes the dangling-symlink case stow users hit on the very first save.
+fn resolve_write_target(path: &Path) -> std::io::Result<PathBuf> {
+    let mut current = path.to_path_buf();
+    for _ in 0..16 {
+        let meta = match std::fs::symlink_metadata(&current) {
+            Ok(meta) => meta,
+            Err(_) => return Ok(current),
+        };
+        if !meta.file_type().is_symlink() {
+            return Ok(current);
+        }
+        let link = std::fs::read_link(&current)?;
+        current = if link.is_absolute() {
+            link
+        } else {
+            current
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(link)
+        };
+    }
+    Ok(current)
+}
+
 pub(super) fn save_to_path(path: &Path, snapshot: &SessionSnapshot) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
+    let target = resolve_write_target(path)?;
+    if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let json = serde_json::to_string_pretty(snapshot)?;
-    let tmp_path = path.with_extension("json.tmp");
+    let tmp_path = target.with_extension("json.tmp");
     std::fs::write(&tmp_path, &json)?;
-    if let Err(err) = std::fs::rename(&tmp_path, path) {
+    if let Err(err) = std::fs::rename(&tmp_path, &target) {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(err);
     }
@@ -126,5 +153,61 @@ mod tests {
         clear_path(&path).unwrap();
 
         assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_to_path_preserves_existing_symlink() {
+        let target = temp_session_path("symlink-target");
+        let link = target.with_file_name("link.json");
+        save_to_path(&target, &empty_snapshot()).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let mut snap = empty_snapshot();
+        snap.selected = 7;
+        save_to_path(&link, &snap).unwrap();
+
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let parsed = parse_snapshot(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        assert_eq!(parsed.selected, 7);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_to_path_writes_through_dangling_symlink() {
+        let target = temp_session_path("dangling-target");
+        let link = target.with_file_name("link.json");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        save_to_path(&link, &empty_snapshot()).unwrap();
+
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(target.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_to_path_resolves_relative_symlink() {
+        let session = temp_session_path("relative-symlink");
+        let dir = session.parent().unwrap();
+        std::fs::create_dir_all(dir).unwrap();
+        let target = dir.join("real.json");
+        let link = dir.join("link.json");
+        std::os::unix::fs::symlink("real.json", &link).unwrap();
+
+        save_to_path(&link, &empty_snapshot()).unwrap();
+
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(target.exists());
     }
 }
