@@ -534,12 +534,23 @@ impl AppState {
 
 impl AppState {
     pub fn navigate_pane(&mut self, direction: NavDirection) {
-        let panes = &self.view.pane_infos;
+        let Some(ws_idx) = self.active else {
+            return;
+        };
+        let Some(tab) = self.workspaces.get(ws_idx).and_then(|ws| ws.active_tab()) else {
+            return;
+        };
+        let panes = if tab.zoomed {
+            tab.layout.panes(self.view.terminal_area)
+        } else {
+            self.view.pane_infos.clone()
+        };
+
         if let Some(focused) = panes.iter().find(|p| p.is_focused) {
-            if let Some(target) = find_in_direction(focused, direction, panes) {
+            if let Some(target) = find_in_direction(focused, direction, &panes) {
                 if let Some(tab) = self
-                    .active
-                    .and_then(|i| self.workspaces.get_mut(i))
+                    .workspaces
+                    .get_mut(ws_idx)
                     .and_then(|ws| ws.active_tab_mut())
                 {
                     tab.layout.focus_pane(target);
@@ -1738,6 +1749,28 @@ mod tests {
         let mut state = app_with_workspaces(&["test"]);
         state.toggle_zoom();
         assert!(!state.workspaces[0].zoomed);
+    }
+
+    #[test]
+    fn navigate_pane_changes_focus_while_zoomed() {
+        let mut state = app_with_workspaces(&["test"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let right = state.workspaces[0].test_split(Direction::Horizontal);
+        state.workspaces[0].layout.focus_pane(root);
+        state.workspaces[0].zoomed = true;
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 100, 20));
+
+        assert_eq!(state.view.pane_infos.len(), 1);
+        assert_eq!(state.view.pane_infos[0].id, root);
+
+        state.navigate_pane(NavDirection::Right);
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 100, 20));
+
+        assert!(state.workspaces[0].zoomed);
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(right));
+        assert_eq!(state.view.pane_infos.len(), 1);
+        assert_eq!(state.view.pane_infos[0].id, right);
+        assert!(state.view.pane_infos[0].inner_rect.x > state.view.pane_infos[0].rect.x);
     }
 
     #[test]
