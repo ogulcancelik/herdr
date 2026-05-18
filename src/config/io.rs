@@ -174,6 +174,14 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         &mut invalid_sections,
         |section| config.experimental = section,
     );
+    load_live_section::<Vec<crate::config::RemoteProvider>>(
+        table,
+        "remote",
+        "remote provider config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.remote = section,
+    );
 
     Ok(LoadedConfig {
         config,
