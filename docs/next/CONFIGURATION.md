@@ -216,7 +216,7 @@ command = "notify-send herdr 'custom command ran'"
 
 ## theme
 
-herdr ships with 17 built-in color themes. set one in config:
+herdr ships with 18 built-in color themes. set one in config:
 
 ```toml
 [theme]
@@ -229,6 +229,7 @@ name = "tokyo-night"
 |------|-------------|
 | `catppuccin` | soft pastel mocha palette (default) |
 | `catppuccin-latte` | light catppuccin palette |
+| `terminal` | use your terminal's 16-color ANSI palette |
 | `tokyo-night` | blue-purple aesthetic |
 | `tokyo-night-day` | light tokyo night palette |
 | `dracula` | purple/pink/green classic |

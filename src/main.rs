@@ -61,8 +61,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # onboarding = true
 
 [theme]
-# Built-in themes: catppuccin, tokyo-night, dracula, nord, gruvbox,
-#                  one-dark, solarized, kanagawa, rose-pine, vesper
+# Built-in themes: catppuccin, terminal, tokyo-night, dracula, nord,
+#                  gruvbox, one-dark, solarized, kanagawa, rose-pine,
+#                  vesper
 # name = "catppuccin"
 
 # Override individual color tokens on top of the base theme.
