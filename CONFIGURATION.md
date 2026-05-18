@@ -337,7 +337,7 @@ so they land on the same remote target.
 ```toml
 [[remote]]
 name = "coder"
-list_command = "coder ls --output csv | tail -n +2 | cut -d, -f1"
+list_command = "coder ls --output json | jq -r '.[].name'"
 connect_command = "coder ssh {name}"
 
 [[remote]]
