@@ -118,6 +118,18 @@ pub struct KeysConfig {
     pub rename_pane: String,
     /// Open the focused pane scrollback in $EDITOR. Unset by default.
     pub edit_scrollback: String,
+    /// Override for navigate-mode workspace-up key. Default: "up"
+    pub navigate_up: String,
+    /// Override for navigate-mode workspace-down key. Default: "down"
+    pub navigate_down: String,
+    /// Override for navigate-mode focus-pane-left key. Default: "h"
+    pub navigate_pane_left: String,
+    /// Override for navigate-mode focus-pane-down key. Default: "j"
+    pub navigate_pane_down: String,
+    /// Override for navigate-mode focus-pane-up key. Default: "k"
+    pub navigate_pane_up: String,
+    /// Override for navigate-mode focus-pane-right key. Default: "l"
+    pub navigate_pane_right: String,
     /// Focus the pane to the left in terminal mode. Unset by default.
     pub focus_pane_left: String,
     /// Focus the pane below in terminal mode. Unset by default.
@@ -221,6 +233,12 @@ impl Default for KeysConfig {
             close_tab: "".into(),
             rename_pane: "".into(),
             edit_scrollback: "".into(),
+            navigate_up: "up".into(),
+            navigate_down: "down".into(),
+            navigate_pane_left: "h".into(),
+            navigate_pane_down: "j".into(),
+            navigate_pane_up: "k".into(),
+            navigate_pane_right: "l".into(),
             focus_pane_left: "".into(),
             focus_pane_down: "".into(),
             focus_pane_up: "".into(),

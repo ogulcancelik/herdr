@@ -401,33 +401,37 @@ pub(super) fn handle_navigate_reserved_key(state: &mut AppState, key: KeyEvent) 
             super::modal::open_keybind_help(state);
             true
         }
-        KeyCode::Up => {
+        _ if key_matches(&key, state.keybinds.navigate_up.0, state.keybinds.navigate_up.1) => {
             if state.selected > 0 {
                 state.selected -= 1;
                 state.ensure_workspace_visible(state.selected);
             }
             true
         }
-        KeyCode::Down => {
+        _ if key_matches(&key, state.keybinds.navigate_down.0, state.keybinds.navigate_down.1) => {
             if !state.workspaces.is_empty() && state.selected < state.workspaces.len() - 1 {
                 state.selected += 1;
                 state.ensure_workspace_visible(state.selected);
             }
             true
         }
-        KeyCode::Char('h') | KeyCode::Left => {
+        _ if key.code == KeyCode::Left
+            || key_matches(&key, state.keybinds.navigate_pane_left.0, state.keybinds.navigate_pane_left.1) =>
+        {
             state.navigate_pane(NavDirection::Left);
             true
         }
-        KeyCode::Char('j') => {
+        _ if key_matches(&key, state.keybinds.navigate_pane_down.0, state.keybinds.navigate_pane_down.1) => {
             state.navigate_pane(NavDirection::Down);
             true
         }
-        KeyCode::Char('k') => {
+        _ if key_matches(&key, state.keybinds.navigate_pane_up.0, state.keybinds.navigate_pane_up.1) => {
             state.navigate_pane(NavDirection::Up);
             true
         }
-        KeyCode::Char('l') | KeyCode::Right => {
+        _ if key.code == KeyCode::Right
+            || key_matches(&key, state.keybinds.navigate_pane_right.0, state.keybinds.navigate_pane_right.1) =>
+        {
             state.navigate_pane(NavDirection::Right);
             true
         }

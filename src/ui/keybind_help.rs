@@ -43,8 +43,23 @@ pub(super) fn keybind_help_groups(
         "navigation",
         vec![
             ("esc".to_string(), "back"),
-            ("↑ / ↓".to_string(), "workspace list"),
-            ("h j k l / arrows".to_string(), "move focus"),
+            (
+                format!(
+                    "{} / {}",
+                    kb.navigate_up_label, kb.navigate_down_label
+                ),
+                "workspace list",
+            ),
+            (
+                format!(
+                    "{} {} {} {} / arrows",
+                    kb.navigate_pane_left_label,
+                    kb.navigate_pane_down_label,
+                    kb.navigate_pane_up_label,
+                    kb.navigate_pane_right_label,
+                ),
+                "move focus",
+            ),
             ("tab / shift+tab".to_string(), "cycle pane"),
             ("enter".to_string(), "open workspace"),
             ("s".to_string(), "settings"),
