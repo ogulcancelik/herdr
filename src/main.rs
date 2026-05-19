@@ -110,7 +110,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # zoom = "f"             # legacy alias: fullscreen
 # resize_mode = "r"
 # toggle_sidebar = "b"
-# apply_project_layout = ""       # optional, runs `.herdr-project` discovered by walking up from the focused pane cwd
+# apply_project_layout = ""       # optional, runs `.herdr-project` in the focused pane's cwd
 # project_layout_filename = ".herdr-project"
 
 # Custom prefix-mode commands. Press prefix, then the configured key.

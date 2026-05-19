@@ -255,7 +255,7 @@ impl App {
             self.state.toast = Some(crate::app::state::ToastNotification {
                 kind: crate::app::state::ToastKind::NeedsAttention,
                 title: "project layout".to_string(),
-                context: format!("no {filename} found from {}", start.display()),
+                context: format!("no {filename} in {}", start.display()),
                 target: None,
             });
             self.sync_toast_deadline(previous_toast);
@@ -417,18 +417,13 @@ impl App {
 }
 
 fn find_project_layout(start: &std::path::Path, filename: &str) -> Option<std::path::PathBuf> {
-    let start = if start.is_dir() {
+    let dir = if start.is_dir() {
         start.to_path_buf()
     } else {
         start.parent()?.to_path_buf()
     };
-    for dir in start.ancestors() {
-        let candidate = dir.join(filename);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    let candidate = dir.join(filename);
+    candidate.is_file().then_some(candidate)
 }
 
 fn spawn_project_layout(
@@ -1022,17 +1017,20 @@ mod tests {
     }
 
     #[test]
-    fn find_project_layout_walks_up_directories() {
+    fn find_project_layout_only_checks_current_directory() {
         let base = unique_temp_path("project-layout-find");
         std::fs::create_dir_all(base.join("a/b/c")).unwrap();
         let script = base.join("a/.herdr-project");
         std::fs::write(&script, "#!/bin/sh\n").unwrap();
 
-        let found = super::find_project_layout(&base.join("a/b/c"), ".herdr-project");
-        assert_eq!(found.as_deref(), Some(script.as_path()));
+        let here = super::find_project_layout(&base.join("a"), ".herdr-project");
+        assert_eq!(here.as_deref(), Some(script.as_path()));
 
-        let not_found = super::find_project_layout(&base, ".herdr-project");
-        assert!(not_found.is_none());
+        let nested = super::find_project_layout(&base.join("a/b/c"), ".herdr-project");
+        assert!(nested.is_none(), "ancestor lookup should not be performed");
+
+        let absent = super::find_project_layout(&base, ".herdr-project");
+        assert!(absent.is_none());
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1051,8 +1049,7 @@ mod tests {
 
         let base = unique_temp_path("apply-project-layout");
         let project_dir = base.join("project");
-        let nested = project_dir.join("nested");
-        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&project_dir).unwrap();
         let marker = base.join("marker");
         let script_path = project_dir.join(".herdr-project");
         let script_contents = format!(
@@ -1069,7 +1066,7 @@ mod tests {
         }
 
         let mut workspace = Workspace::test_new("test");
-        workspace.identity_cwd = nested.clone();
+        workspace.identity_cwd = project_dir.clone();
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;

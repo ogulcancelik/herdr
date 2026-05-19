@@ -217,7 +217,7 @@ command = "notify-send herdr 'custom command ran'"
 
 ## project layouts
 
-Bind `keys.apply_project_layout` to a prefix-mode key to spawn a project's layout script on demand. When pressed, herdr walks up from the focused pane's working directory until it finds a `.herdr-project` file (or whatever filename `keys.project_layout_filename` is set to), then runs it through `/bin/sh -lc` with the script's own directory as the working directory.
+Bind `keys.apply_project_layout` to a prefix-mode key to spawn a project's layout script on demand. When pressed, herdr looks for a `.herdr-project` file (or whatever filename `keys.project_layout_filename` is set to) **directly in the focused pane's working directory** — no ancestor walking. If the file is present, herdr runs it through `/bin/sh -lc` with that same directory as the working directory; otherwise a toast reports it as missing.
 
 ```toml
 [keys]
@@ -229,8 +229,8 @@ The script receives the same environment variables as `[[keys.command]]`, plus:
 
 | variable | value |
 |----------|-------|
-| `HERDR_PROJECT_LAYOUT_FILE` | absolute path to the discovered layout script |
-| `HERDR_PROJECT_ROOT` | directory containing the layout script |
+| `HERDR_PROJECT_LAYOUT_FILE` | absolute path to the layout script that ran |
+| `HERDR_PROJECT_ROOT` | the focused pane's working directory (also the script's parent) |
 
 Make the file executable (`chmod +x .herdr-project`). Anything you can call from a shell — including the `herdr` CLI itself — works. Existing tabs/panes are not duplicated as long as your script checks for them, so re-pressing the key is safe.
 

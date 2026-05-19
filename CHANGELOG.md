@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Added
-- Added optional `keys.apply_project_layout` for spawning a per-project layout script (default filename `.herdr-project`) discovered by walking up from the focused pane's cwd. The script receives the same env vars as `[[keys.command]]` plus `HERDR_PROJECT_LAYOUT_FILE` and `HERDR_PROJECT_ROOT`. Filename configurable via `keys.project_layout_filename`.
+- Added optional `keys.apply_project_layout` for spawning a per-project layout script (default filename `.herdr-project`) located directly in the focused pane's working directory. The script receives the same env vars as `[[keys.command]]` plus `HERDR_PROJECT_LAYOUT_FILE` and `HERDR_PROJECT_ROOT`. Filename configurable via `keys.project_layout_filename`.
 
 ## [0.5.10] - 2026-05-17
 

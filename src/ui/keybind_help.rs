@@ -36,6 +36,10 @@ pub(super) fn keybind_help_groups(
                 optional_keybind_label(&kb.reload_config_label),
                 "reload config",
             ),
+            (
+                optional_keybind_label(&kb.apply_project_layout_label),
+                "apply project layout",
+            ),
         ],
     ));
 
@@ -130,17 +134,14 @@ pub(super) fn keybind_help_groups(
     ];
     groups.push(("panes", panes));
 
-    if kb.apply_project_layout_label.is_some() || !kb.custom_commands.is_empty() {
-        let mut custom = Vec::new();
-        if let Some(label) = &kb.apply_project_layout_label {
-            custom.push((label.clone(), "apply project layout"));
-        }
-        custom.extend(
+    if !kb.custom_commands.is_empty() {
+        groups.push((
+            "custom",
             kb.custom_commands
                 .iter()
-                .map(|binding| (binding.label.clone(), "custom command")),
-        );
-        groups.push(("custom", custom));
+                .map(|binding| (binding.label.clone(), "custom command"))
+                .collect(),
+        ));
     }
 
     groups
