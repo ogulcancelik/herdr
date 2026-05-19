@@ -215,8 +215,6 @@ press `ctrl+b` to enter navigate mode.
 
 resize mode: `h`/`l` resize width, `j`/`k` resize height, `esc` exit.
 
-per-project layouts: bind `keys.apply_project_layout` to run a `.herdr-project` script located directly in the focused pane's working directory. see [`CONFIGURATION.md`](./CONFIGURATION.md#project-layouts).
-
 custom command keybindings can launch detached shell helpers or temporary panes from prefix mode:
 
 ```toml

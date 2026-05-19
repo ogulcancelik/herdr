@@ -237,7 +237,6 @@ impl App {
         let previous_toast = self.state.toast.clone();
         let (env, search_root) = self.custom_command_env();
         let filename = self.state.keybinds.project_layout_filename.clone();
-        let search_root = search_root.or_else(|| std::env::current_dir().ok());
 
         let Some(start) = search_root else {
             self.state.toast = Some(crate::app::state::ToastNotification {
@@ -1073,8 +1072,7 @@ mod tests {
         app.state.mode = Mode::Terminal;
         app.state.ensure_test_terminals();
 
-        app.state.keybinds.apply_project_layout =
-            Some((KeyCode::Char('g'), KeyModifiers::empty()));
+        app.state.keybinds.apply_project_layout = Some((KeyCode::Char('g'), KeyModifiers::empty()));
         app.state.keybinds.apply_project_layout_label = Some("g".into());
         app.state.keybinds.project_layout_filename = ".herdr-project".into();
 
@@ -1127,8 +1125,7 @@ mod tests {
         app.state.ensure_test_terminals();
 
         let needle: String = format!("herdr-needle-{}", std::process::id());
-        app.state.keybinds.apply_project_layout =
-            Some((KeyCode::Char('g'), KeyModifiers::empty()));
+        app.state.keybinds.apply_project_layout = Some((KeyCode::Char('g'), KeyModifiers::empty()));
         app.state.keybinds.apply_project_layout_label = Some("g".into());
         app.state.keybinds.project_layout_filename = needle.clone();
 
@@ -1145,6 +1142,40 @@ mod tests {
         assert!(toast.context.contains(&needle));
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn apply_project_layout_without_pane_cwd_shows_toast() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        app.state.keybinds.apply_project_layout = Some((KeyCode::Char('g'), KeyModifiers::empty()));
+        app.state.keybinds.apply_project_layout_label = Some("g".into());
+        app.state.keybinds.project_layout_filename = format!("herdr-needle-{}", std::process::id());
+
+        app.handle_key(TerminalKey::new(
+            app.state.prefix_code,
+            app.state.prefix_mods,
+        ))
+        .await;
+        app.handle_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()))
+            .await;
+
+        let toast = app.state.toast.as_ref().expect("missing toast");
+        assert_eq!(toast.title, "project layout");
+        assert_eq!(toast.context, "no working directory available");
     }
 
     #[test]

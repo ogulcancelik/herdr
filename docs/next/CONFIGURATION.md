@@ -156,6 +156,7 @@ agents = ""     # optional; follows visible agent panel order
 | `zoom` | `f` | zoom focused pane; legacy alias: `fullscreen` |
 | `resize_mode` | `r` | enter or leave resize mode |
 | `toggle_sidebar` | `b` | collapse or expand the sidebar |
+| `apply_project_layout` | unset | run the project layout script for the focused pane's project (see [project layouts](#project-layouts)) |
 
 `edit_scrollback` writes the focused pane's retained plain-text scrollback to a temporary file, opens `${EDITOR:-vi}` on that file in a temporary zoomed pane, then removes the file when the editor exits.
 
@@ -213,6 +214,51 @@ key = "shift+g"
 type = "shell"
 command = "notify-send herdr 'custom command ran'"
 ```
+
+## project layouts
+
+Bind `keys.apply_project_layout` to a prefix-mode key to spawn a project's layout script on demand. When pressed, herdr looks for a `.herdr-project` file (or whatever filename `keys.project_layout_filename` is set to) in the focused pane's working directory. If the file is present, herdr runs it through `/bin/sh -lc` with that same directory as the working directory; otherwise a toast reports it as missing.
+
+```toml
+[keys]
+apply_project_layout = "P"
+# project_layout_filename = ".herdr-project"  # optional, this is the default
+```
+
+The script receives the same environment variables as `[[keys.command]]`, plus:
+
+| variable | value |
+|----------|-------|
+| `HERDR_PROJECT_LAYOUT_FILE` | absolute path to the layout script that ran |
+| `HERDR_PROJECT_ROOT` | the focused pane's working directory (also the script's parent) |
+
+Make the file executable (`chmod +x .herdr-project`). A good pattern is for the script to check whether panes already exist before spawning more.
+
+Example `.herdr-project` that opens a `backend` tab plus a `web` tab and skips work if those tabs already exist:
+
+```bash
+#!/usr/bin/env bash
+set -e
+
+ws="$HERDR_ACTIVE_WORKSPACE_ID"
+
+tab_exists() {
+  herdr tab list --workspace "$ws" | jq -e --arg label "$1" '.result.tabs[]? | select(.label == $label)' > /dev/null
+}
+
+start_tab() {
+  local label="$1" cwd="$2" cmd="$3"
+  tab_exists "$label" && return
+  local pane_id
+  pane_id="$(herdr tab create --workspace "$ws" --label "$label" --cwd "$cwd" --no-focus | jq -r '.result.root_pane.pane_id')"
+  herdr pane run "$pane_id" "$cmd"
+}
+
+start_tab backend "$HERDR_PROJECT_ROOT/apps/backend" "bun run dev"
+start_tab web     "$HERDR_PROJECT_ROOT/apps/web"     "bun run dev"
+```
+
+If no layout file is found, an error toast is shown.
 
 ## theme
 
