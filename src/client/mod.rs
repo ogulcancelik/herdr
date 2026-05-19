@@ -234,20 +234,23 @@ fn setup_terminal_with_capabilities(
         execute!(io::stdout(), DisableMouseCapture)?;
     }
 
-    // tmux doesn't understand kitty keyboard protocol push.
-    // Enable modifyOtherKeys mode 2 for tmux only for the full app client.
-    let in_tmux = enable_client_protocols && std::env::var("TMUX").is_ok();
-    if in_tmux {
+    // Some terminals do not report modified Enter through Kitty keyboard
+    // enhancement alone. modifyOtherKeys mode 2 makes Shift+Enter arrive as
+    // CSI u (\e[13;2u) instead of collapsing to plain Enter (\r).
+    let modify_other_keys_enabled = enable_client_protocols;
+    if modify_other_keys_enabled {
         io::stdout().write_all(b"\x1b[>4;2m")?;
         io::stdout().flush()?;
     }
 
-    Ok(TerminalGuard { in_tmux })
+    Ok(TerminalGuard {
+        modify_other_keys_enabled,
+    })
 }
 
 /// Guard that restores the terminal when dropped.
 struct TerminalGuard {
-    in_tmux: bool,
+    modify_other_keys_enabled: bool,
 }
 
 fn write_terminal_restore_postlude(writer: &mut impl io::Write) -> io::Result<()> {
@@ -264,11 +267,11 @@ fn set_mouse_capture(enabled: bool) -> io::Result<()> {
     }
 }
 
-fn restore_terminal_state(in_tmux: bool) {
+fn restore_terminal_state(modify_other_keys_enabled: bool) {
     let _ = clear_received_kitty_graphics(&mut io::stdout());
 
     // Reset modifyOtherKeys if we enabled it.
-    if in_tmux {
+    if modify_other_keys_enabled {
         let _ = io::stdout().write_all(b"\x1b[>4;0m");
         let _ = io::stdout().flush();
     }
@@ -286,7 +289,7 @@ fn restore_terminal_state(in_tmux: bool) {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        restore_terminal_state(self.in_tmux);
+        restore_terminal_state(self.modify_other_keys_enabled);
     }
 }
 

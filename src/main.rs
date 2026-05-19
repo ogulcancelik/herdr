@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, Write as _};
 
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
@@ -455,15 +455,10 @@ fn main() -> io::Result<()> {
         Err(err) => return Err(err),
     };
 
-    let in_tmux = std::env::var("TMUX").is_ok();
-
     let original_hook = std::panic::take_hook();
-    let panic_in_tmux = in_tmux;
     std::panic::set_hook(Box::new(move |info| {
         tracing::error!("PANIC: {info}");
-        if panic_in_tmux {
-            let _ = std::io::Write::write_all(&mut io::stdout(), b"\x1b[>4;0m");
-        }
+        let _ = std::io::Write::write_all(&mut io::stdout(), b"\x1b[>4;0m");
         if crate::kitty_graphics::is_enabled() {
             let _ = crate::kitty_graphics::clear_all_host_graphics();
         }
@@ -505,14 +500,11 @@ fn main() -> io::Result<()> {
             PushKeyboardEnhancementFlags(crate::input::ime_compatible_keyboard_enhancement_flags())
         )?;
 
-        // tmux doesn't understand kitty keyboard protocol push (\e[>1u).
-        // It uses modifyOtherKeys mode to send CSI u sequences for modified keys.
-        // Enable modifyOtherKeys mode 2 so tmux sends Shift+Enter as \e[13;2u etc.
-        if in_tmux {
-            use std::io::Write;
-            std::io::stdout().write_all(b"\x1b[>4;2m")?;
-            std::io::stdout().flush()?;
-        }
+        // Some terminals do not report modified Enter through Kitty keyboard
+        // enhancement alone. modifyOtherKeys mode 2 makes Shift+Enter arrive as
+        // CSI u (\e[13;2u) instead of collapsing to plain Enter (\r).
+        io::stdout().write_all(b"\x1b[>4;2m")?;
+        io::stdout().flush()?;
 
         let startup_release_notes = crate::release_notes::load_pending_for_current_version();
 
@@ -526,12 +518,9 @@ fn main() -> io::Result<()> {
         );
         let result = app.run(&mut terminal).await;
 
-        // Reset modifyOtherKeys if we enabled it
-        if in_tmux {
-            use std::io::Write;
-            std::io::stdout().write_all(b"\x1b[>4;0m")?;
-            std::io::stdout().flush()?;
-        }
+        // Reset modifyOtherKeys if we enabled it.
+        io::stdout().write_all(b"\x1b[>4;0m")?;
+        io::stdout().flush()?;
 
         if crate::kitty_graphics::is_enabled() {
             crate::kitty_graphics::clear_all_host_graphics()?;

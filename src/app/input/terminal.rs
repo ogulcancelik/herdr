@@ -67,6 +67,19 @@ impl App {
         let pane_id = ws.focused_pane_id()?;
         let rt = self.state.runtime_for_pane_in_workspace(ws_idx, pane_id)?;
 
+        if key_event.code == KeyCode::Enter
+            && key_event
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::SHIFT)
+        {
+            rt.scroll_reset();
+            return Some(PreparedPaneInput {
+                ws_idx,
+                pane_id,
+                bytes: Bytes::from(vec![b'\n']),
+            });
+        }
+
         // Intercept plain PageUp/PageDown presses for pane scrollback when the
         // focused pane doesn't handle its own scrolling (e.g., a plain shell
         // with mouse off). Modified page keys are pane shortcuts, and release
@@ -510,6 +523,32 @@ mod tests {
 
         let bytes = rx.try_recv().unwrap();
         assert_eq!(bytes.as_ref(), b"\x1b\x7f");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn shift_enter_forwards_line_feed_to_focused_pane() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(0, 0, 80, 24));
+        let info = pane_infos[0].clone();
+        let (runtime, mut rx) = crate::pane::PaneRuntime::test_with_channel(
+            info.inner_rect.width,
+            info.inner_rect.height,
+        );
+        ws.tabs[0].runtimes.insert(pane_id, runtime);
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+
+        app.handle_terminal_key_headless(TerminalKey::new(KeyCode::Enter, KeyModifiers::SHIFT));
+
+        let bytes = rx.try_recv().unwrap();
+        assert_eq!(bytes.as_ref(), b"\n");
         assert!(rx.try_recv().is_err());
     }
 
