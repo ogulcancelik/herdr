@@ -56,7 +56,7 @@ jobs:
       LIBGHOSTTY_VT_SIMD: ${{ inputs.libghostty_simd }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
@@ -136,7 +136,7 @@ jobs:
       LIBGHOSTTY_VT_SIMD: ${{ inputs.libghostty_simd }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
