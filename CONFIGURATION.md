@@ -217,7 +217,7 @@ command = "notify-send herdr 'custom command ran'"
 
 ## project layouts
 
-Bind `keys.apply_project_layout` to a prefix-mode key to spawn a project's layout script on demand. When pressed, herdr looks for a `.herdr-project` file (or whatever filename `keys.project_layout_filename` is set to) **directly in the focused pane's working directory** — no ancestor walking. If the file is present, herdr runs it through `/bin/sh -lc` with that same directory as the working directory; otherwise a toast reports it as missing.
+Bind `keys.apply_project_layout` to a prefix-mode key to spawn a project's layout script on demand. When pressed, herdr looks for a `.herdr-project` file (or whatever filename `keys.project_layout_filename` is set to) in the focused pane's working directory. If the file is present, herdr runs it through `/bin/sh -lc` with that same directory as the working directory; otherwise a toast reports it as missing.
 
 ```toml
 [keys]
@@ -232,9 +232,9 @@ The script receives the same environment variables as `[[keys.command]]`, plus:
 | `HERDR_PROJECT_LAYOUT_FILE` | absolute path to the layout script that ran |
 | `HERDR_PROJECT_ROOT` | the focused pane's working directory (also the script's parent) |
 
-Make the file executable (`chmod +x .herdr-project`). Anything you can call from a shell — including the `herdr` CLI itself — works. Existing tabs/panes are not duplicated as long as your script checks for them, so re-pressing the key is safe.
+Make the file executable (`chmod +x .herdr-project`). Good pattern is for the script to check if panes already exist to not respawn.
 
-Example `.herdr-project` that opens a `backend` tab plus a `web` tab and skips work if those tabs already exist (mirrors the tmux pattern):
+Example `.herdr-project` that opens a `backend` tab plus a `web` tab and skips work if those tabs already exist:
 
 ```bash
 #!/usr/bin/env bash
@@ -258,9 +258,7 @@ start_tab backend "$HERDR_PROJECT_ROOT/apps/backend" "bun run dev"
 start_tab web     "$HERDR_PROJECT_ROOT/apps/web"     "bun run dev"
 ```
 
-The script uses the `herdr` CLI (see [`SOCKET_API.md`](./SOCKET_API.md) for the full reference), but you can drive any tooling you want from it — `tmux`, `kitten`, plain background processes, etc.
-
-If no layout file is found by the time herdr reaches the filesystem root, an error toast is shown and nothing else happens.
+If no layout file found, an error toast is shown.
 
 ## theme
 

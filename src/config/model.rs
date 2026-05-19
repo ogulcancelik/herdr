@@ -126,11 +126,10 @@ pub struct KeysConfig {
     pub resize_mode: String,
     /// Toggle sidebar collapse. Default: "b"
     pub toggle_sidebar: String,
-    /// Run the project layout script (`.herdr-project`) located directly in
-    /// the focused pane's working directory. Unset by default.
+    /// Run the .herdr-project script located in the focused pane's
+    /// working directory. Unset by default.
     pub apply_project_layout: String,
-    /// Filename to look for in the focused pane cwd when applying a project layout.
-    /// Default: ".herdr-project".
+    /// Filename for the project layout script. Default: ".herdr-project".
     pub project_layout_filename: String,
     /// Optional indexed shortcuts expanded over number keys 1-9.
     pub indexed: IndexedKeysConfig,
