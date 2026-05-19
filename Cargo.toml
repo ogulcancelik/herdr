@@ -19,7 +19,7 @@ crossterm = "0.29"
 ctrlc = "3"
 libc = "0.2"
 portable-pty = "0.9"
-png = "0.17"
+png = "0.18"
 ratatui = "0.30"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
