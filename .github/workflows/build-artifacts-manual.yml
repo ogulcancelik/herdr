@@ -56,7 +56,7 @@ jobs:
       LIBGHOSTTY_VT_SIMD: ${{ inputs.libghostty_simd }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
@@ -110,7 +110,7 @@ jobs:
           python3 -c "import hashlib, pathlib; artifact = pathlib.Path('${{ matrix.name }}'); print(f'sha256={hashlib.sha256(artifact.read_bytes()).hexdigest()}  {artifact.name}')" >> BUILD_INFO.txt
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}-${{ inputs.libghostty_optimize }}-simd-${{ inputs.libghostty_simd }}
           path: |
@@ -136,7 +136,7 @@ jobs:
       LIBGHOSTTY_VT_SIMD: ${{ inputs.libghostty_simd }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
@@ -172,7 +172,7 @@ jobs:
           python3 -c "import hashlib, pathlib; artifact = pathlib.Path('${{ matrix.name }}'); print(f'sha256={hashlib.sha256(artifact.read_bytes()).hexdigest()}  {artifact.name}')" >> BUILD_INFO.txt
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}-${{ inputs.libghostty_optimize }}-simd-${{ inputs.libghostty_simd }}
           path: |
