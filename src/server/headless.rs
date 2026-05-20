@@ -2758,6 +2758,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn virtual_render_fallback_cursor_when_viewport_none_and_force_ime_enabled() {
+        use crate::server::render_stream::CursorState;
+
+        let mut state = AppState::test_new();
+        state.force_ime_cursor_visibility = true;
+        let mut ws = crate::workspace::Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        // Feed only ?25l with no prior cursor movement — some TUI scenarios
+        // may result in cursor_viewport() returning None.
+        ws.insert_test_runtime(
+            pane_id,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(20, 5, b"\x1b[?25l"),
+        );
+
+        state.workspaces = vec![ws];
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = crate::app::Mode::Terminal;
+
+        let area = Rect::new(0, 0, 80, 24);
+        let (_buffer, cursor) =
+            crate::server::render_stream::render_virtual(&mut state, area, true);
+
+        // Even if cursor_state() returns a position, the cursor must be
+        // visible because force_ime_cursor_visibility is set.
+        assert!(
+            cursor.is_some_and(|c| c.visible),
+            "force_ime_cursor_visibility should ensure a visible cursor even when the pane hides it; got {cursor:?}",
+        );
+    }
+
+    #[tokio::test]
     async fn virtual_render_omits_focused_pane_cursor_while_mobile_switcher_open() {
         let mut state = AppState::test_new();
         let mut ws = crate::workspace::Workspace::test_new("test");

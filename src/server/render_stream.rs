@@ -322,21 +322,35 @@ fn focused_terminal_cursor(app_state: &AppState) -> Option<CursorState> {
         .iter()
         .find(|info| info.is_focused)?;
     let rt = app_state.runtime_for_pane_in_workspace(ws_idx, info.id)?;
-    let cursor = rt.cursor_state(info.inner_rect, true)?;
     let scrolled_back = crate::ui::pane_is_scrolled_back(rt);
-    // When `force_ime_cursor_visibility` is set, expose the cursor anchor to the
-    // outer terminal regardless of the pane's `?25l` request, so macOS IMEs keep
-    // tracking the candidate window when TUIs paint their own cursor. Scrollback
-    // suppression still applies — there is no useful anchor while scrolled back.
-    let visible = if app_state.force_ime_cursor_visibility {
-        !scrolled_back
+
+    if let Some(cursor) = rt.cursor_state(info.inner_rect, true) {
+        // When `force_ime_cursor_visibility` is set, expose the cursor anchor to
+        // the outer terminal regardless of the pane's `?25l` request, so macOS
+        // IMEs keep tracking the candidate window when TUIs paint their own
+        // cursor. Scrollback suppression still applies.
+        let visible = if app_state.force_ime_cursor_visibility {
+            !scrolled_back
+        } else {
+            cursor.visible && !scrolled_back
+        };
+        Some(CursorState {
+            x: cursor.x,
+            y: cursor.y,
+            visible,
+            shape: cursor.shape,
+        })
+    } else if app_state.force_ime_cursor_visibility && !scrolled_back {
+        // cursor_state() returned None — the viewport has no cursor position
+        // (can happen with complex TUIs). Fall back to the pane's top-left so
+        // the outer terminal still exposes a cursor anchor for IME tracking.
+        Some(CursorState {
+            x: info.inner_rect.x,
+            y: info.inner_rect.y,
+            visible: true,
+            shape: 0,
+        })
     } else {
-        cursor.visible && !scrolled_back
-    };
-    Some(CursorState {
-        x: cursor.x,
-        y: cursor.y,
-        visible,
-        shape: cursor.shape,
-    })
+        None
+    }
 }
