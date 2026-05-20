@@ -45,6 +45,12 @@ struct PendingAgentRelease {
     until: std::time::Instant,
 }
 
+#[derive(Clone, Copy, Default)]
+struct SpawnInitialState<'a> {
+    detected_agent: Option<Agent>,
+    history_ansi: Option<&'a str>,
+}
+
 fn active_pending_release(
     pending_release: &Mutex<Option<PendingAgentRelease>>,
     now: std::time::Instant,
@@ -384,6 +390,34 @@ impl PaneRuntime {
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
     ) -> std::io::Result<Self> {
+        Self::spawn_with_initial_history(
+            pane_id,
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            default_shell,
+            None,
+            events,
+            render_notify,
+            render_dirty,
+        )
+    }
+
+    pub(crate) fn spawn_with_initial_history(
+        pane_id: PaneId,
+        rows: u16,
+        cols: u16,
+        cwd: std::path::PathBuf,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        default_shell: &str,
+        initial_history_ansi: Option<&str>,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+    ) -> std::io::Result<Self> {
         let shell = pane_shell(default_shell);
         let mut cmd = CommandBuilder::new(&shell);
         cmd.cwd(cwd);
@@ -401,7 +435,10 @@ impl PaneRuntime {
             render_dirty,
             cmd,
             "failed to spawn shell",
-            None,
+            SpawnInitialState {
+                detected_agent: None,
+                history_ansi: initial_history_ansi,
+            },
         )
     }
 
@@ -439,7 +476,7 @@ impl PaneRuntime {
             render_dirty,
             cmd,
             "failed to spawn command pane",
-            None,
+            SpawnInitialState::default(),
         )
     }
 
@@ -480,7 +517,7 @@ impl PaneRuntime {
             render_dirty,
             cmd,
             "failed to spawn argv command pane",
-            None,
+            SpawnInitialState::default(),
         )
     }
 
@@ -489,7 +526,7 @@ impl PaneRuntime {
         rows: u16,
         cols: u16,
         cwd: std::path::PathBuf,
-        restore_plan: &crate::agent_resume::AgentResumePlan,
+        launch: crate::agent_resume::AgentResumeLaunch<'_>,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         default_shell: &str,
@@ -497,7 +534,7 @@ impl PaneRuntime {
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
     ) -> std::io::Result<Self> {
-        if restore_plan.argv.is_empty() {
+        if launch.plan.argv.is_empty() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "restore argv must not be empty",
@@ -505,7 +542,7 @@ impl PaneRuntime {
         }
 
         let shell = pane_shell(default_shell);
-        let mut cmd = restore_command_builder(&restore_plan.agent, &shell, &restore_plan.argv);
+        let mut cmd = restore_command_builder(&launch.plan.agent, &shell, &launch.plan.argv);
         cmd.cwd(cwd);
         cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
         apply_pane_terminal_env(&mut cmd);
@@ -521,7 +558,10 @@ impl PaneRuntime {
             render_dirty,
             cmd,
             "failed to spawn agent restore pane",
-            crate::detect::parse_agent_label(&restore_plan.agent),
+            SpawnInitialState {
+                detected_agent: crate::detect::parse_agent_label(&launch.plan.agent),
+                history_ansi: launch.initial_history_ansi,
+            },
         )
     }
 
@@ -536,7 +576,7 @@ impl PaneRuntime {
         render_dirty: Arc<AtomicBool>,
         cmd: CommandBuilder,
         spawn_error_message: &'static str,
-        initial_detected_agent: Option<Agent>,
+        initial_state: SpawnInitialState<'_>,
     ) -> std::io::Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -562,6 +602,9 @@ impl PaneRuntime {
         }
         let pane_terminal = GhosttyPaneTerminal::new(terminal, input_tx.clone())?;
         pane_terminal.apply_host_terminal_theme(host_terminal_theme);
+        if let Some(ansi) = initial_state.history_ansi {
+            pane_terminal.seed_history_ansi(ansi);
+        }
         let terminal = Arc::new(PaneTerminal::new(pane_terminal));
         let kitty_keyboard_flags = Arc::new(AtomicU16::new(0));
 
@@ -686,8 +729,9 @@ impl PaneRuntime {
             let pending_release_for_task = pending_release.clone();
 
             let handle = tokio::spawn(async move {
-                let mut agent_presence = AgentDetectionPresence::from_agent(initial_detected_agent);
-                let mut state = if initial_detected_agent.is_some() {
+                let mut agent_presence =
+                    AgentDetectionPresence::from_agent(initial_state.detected_agent);
+                let mut state = if initial_state.detected_agent.is_some() {
                     AgentState::Idle
                 } else {
                     AgentState::Unknown
@@ -696,7 +740,7 @@ impl PaneRuntime {
                 let mut last_foreground_pgid = None;
                 let mut pending_foreground_shell_clear = false;
                 let mut foreground_shell_exit_reported = false;
-                let mut pending_restore_probe = initial_detected_agent.is_some();
+                let mut pending_restore_probe = initial_state.detected_agent.is_some();
                 let mut last_claude_working_at = None;
                 let mut last_visible_blocker = false;
                 let mut last_visible_idle = false;
@@ -1084,6 +1128,11 @@ impl PaneRuntime {
         self.terminal.recent_unwrapped_ansi(lines)
     }
 
+    pub fn snapshot_history(&self) -> Option<String> {
+        let ansi = self.recent_unwrapped_ansi(usize::MAX);
+        (!ansi.trim().is_empty()).then_some(ansi)
+    }
+
     pub fn extract_selection(&self, selection: &crate::selection::Selection) -> Option<String> {
         self.terminal.extract_selection(selection)
     }
@@ -1381,15 +1430,19 @@ mod tests {
     #[tokio::test]
     async fn spawn_agent_restore_keeps_pane_alive_after_early_failure() {
         let (events, mut event_rx) = mpsc::channel(4);
+        let plan = crate::agent_resume::AgentResumePlan {
+            agent: "codex".into(),
+            argv: vec!["/bin/sh".into(), "-c".into(), "exit 7".into()],
+            dedupe_key: "test".into(),
+        };
         let runtime = PaneRuntime::spawn_agent_restore(
             PaneId::from_raw(7),
             24,
             80,
             std::env::current_dir().unwrap(),
-            &crate::agent_resume::AgentResumePlan {
-                agent: "codex".into(),
-                argv: vec!["/bin/sh".into(), "-c".into(), "exit 7".into()],
-                dedupe_key: "test".into(),
+            crate::agent_resume::AgentResumeLaunch {
+                plan: &plan,
+                initial_history_ansi: None,
             },
             0,
             crate::terminal_theme::TerminalTheme::default(),

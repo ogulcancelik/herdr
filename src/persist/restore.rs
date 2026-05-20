@@ -14,11 +14,21 @@ use crate::pane::PaneState;
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalState};
 use crate::workspace::Workspace;
 
-use super::{DirectionSnapshot, LayoutSnapshot, SessionSnapshot, TabSnapshot, WorkspaceSnapshot};
+use super::snapshot::{TabHistorySnapshot, WorkspaceHistorySnapshot};
+use super::{
+    DirectionSnapshot, LayoutSnapshot, SessionHistorySnapshot, SessionSnapshot, TabSnapshot,
+    WorkspaceSnapshot,
+};
+
+struct AgentRestoreState<'a> {
+    enabled: bool,
+    resumed_sessions: &'a mut HashSet<String>,
+}
 
 /// Restore workspaces from a snapshot. Each pane gets a fresh shell in its saved cwd.
 pub fn restore(
     snapshot: &SessionSnapshot,
+    history: Option<&SessionHistorySnapshot>,
     rows: u16,
     cols: u16,
     scrollback_limit_bytes: usize,
@@ -36,9 +46,10 @@ pub fn restore(
     let mut terminals = HashMap::new();
     let mut terminal_runtimes = HashMap::new();
     let mut resumed_agent_sessions = HashSet::new();
-    for ws_snap in &snapshot.workspaces {
+    for (idx, ws_snap) in snapshot.workspaces.iter().enumerate() {
         if let Some((workspace, restored_terminals, restored_runtimes)) = restore_workspace(
             ws_snap,
+            history.and_then(|history| history.workspaces.get(idx)),
             rows,
             cols,
             scrollback_limit_bytes,
@@ -61,6 +72,7 @@ pub fn restore(
 
 fn restore_workspace(
     snap: &WorkspaceSnapshot,
+    history: Option<&WorkspaceHistorySnapshot>,
     rows: u16,
     cols: u16,
     scrollback_limit_bytes: usize,
@@ -80,17 +92,21 @@ fn restore_workspace(
     let mut terminal_runtimes = HashMap::new();
     let mut public_pane_numbers = HashMap::new();
     let mut next_public_pane_number = 1;
+    let mut agent_restore = AgentRestoreState {
+        enabled: resume_agents_on_restore,
+        resumed_sessions: resumed_agent_sessions,
+    };
 
     for (idx, tab_snap) in snap.tabs.iter().enumerate() {
         let (tab, restored_terminals, restored_runtimes) = restore_tab(
             tab_snap,
+            history.and_then(|history| history.tabs.get(idx)),
             idx + 1,
             rows,
             cols,
             scrollback_limit_bytes,
             default_shell,
-            resume_agents_on_restore,
-            resumed_agent_sessions,
+            &mut agent_restore,
             events.clone(),
             render_notify.clone(),
             render_dirty.clone(),
@@ -146,13 +162,13 @@ fn restored_worktree_space_membership(
 
 fn restore_tab(
     snap: &TabSnapshot,
+    history: Option<&TabHistorySnapshot>,
     number: usize,
     rows: u16,
     cols: u16,
     scrollback_limit_bytes: usize,
     default_shell: &str,
-    resume_agents_on_restore: bool,
-    resumed_agent_sessions: &mut HashSet<String>,
+    agent_restore: &mut AgentRestoreState<'_>,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<AtomicBool>,
@@ -172,9 +188,9 @@ fn restore_tab(
     let mut terminals = Vec::new();
     let mut terminal_runtimes = HashMap::new();
     for id in &pane_ids {
-        let saved_cwd = reverse_id_map
-            .get(id)
-            .and_then(|old_id| snap.panes.get(old_id))
+        let old_id = reverse_id_map.get(id);
+        let saved_pane = old_id.and_then(|old_id| snap.panes.get(old_id));
+        let saved_cwd = saved_pane
             .map(|p| p.cwd.clone())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
 
@@ -195,26 +211,19 @@ fn restore_tab(
             }
         };
 
-        let saved_label = reverse_id_map
-            .get(id)
-            .and_then(|old_id| snap.panes.get(old_id))
-            .and_then(|p| p.label.clone());
-        let saved_agent_name = reverse_id_map
-            .get(id)
-            .and_then(|old_id| snap.panes.get(old_id))
-            .and_then(|p| p.agent_name.clone());
-        let saved_agent_session = reverse_id_map
-            .get(id)
-            .and_then(|old_id| snap.panes.get(old_id))
-            .and_then(|p| p.agent_session.as_ref());
-        let mut restore_plan = reverse_id_map
-            .get(id)
-            .and_then(|old_id| snap.panes.get(old_id))
-            .and_then(|p| p.agent_session.as_ref())
-            .and_then(|session| restore_plan_for_snapshot(session, resume_agents_on_restore));
-        let duplicate_agent_session = restore_plan
-            .as_ref()
-            .is_some_and(|plan| !resumed_agent_sessions.insert(plan.dedupe_key.clone()));
+        let saved_label = saved_pane.and_then(|p| p.label.clone());
+        let saved_agent_name = saved_pane.and_then(|p| p.agent_name.clone());
+        let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
+        let saved_history =
+            old_id.and_then(|old_id| history.and_then(|history| history.panes.get(old_id)));
+        let initial_history_ansi = saved_history.map(|history| history.ansi.as_str());
+        let mut restore_plan = saved_agent_session
+            .and_then(|session| restore_plan_for_snapshot(session, agent_restore.enabled));
+        let duplicate_agent_session = restore_plan.as_ref().is_some_and(|plan| {
+            !agent_restore
+                .resumed_sessions
+                .insert(plan.dedupe_key.clone())
+        });
         if duplicate_agent_session {
             restore_plan = None;
         }
@@ -223,12 +232,16 @@ fn restore_tab(
             .and_then(|plan| crate::detect::parse_agent_label(&plan.agent));
 
         let runtime_result = if let Some(plan) = restore_plan {
+            let launch = crate::agent_resume::AgentResumeLaunch {
+                plan: &plan,
+                initial_history_ansi,
+            };
             TerminalRuntime::spawn_agent_restore(
                 *id,
                 rows,
                 cols,
                 cwd.clone(),
-                &plan,
+                launch,
                 scrollback_limit_bytes,
                 crate::terminal_theme::TerminalTheme::default(),
                 default_shell,
@@ -237,7 +250,7 @@ fn restore_tab(
                 render_dirty.clone(),
             )
         } else {
-            TerminalRuntime::spawn(
+            TerminalRuntime::spawn_with_initial_history(
                 *id,
                 rows,
                 cols,
@@ -245,6 +258,7 @@ fn restore_tab(
                 scrollback_limit_bytes,
                 crate::terminal_theme::TerminalTheme::default(),
                 default_shell,
+                initial_history_ansi,
                 events.clone(),
                 render_notify.clone(),
                 render_dirty.clone(),
@@ -660,6 +674,7 @@ mod tests {
 
         let (_workspaces, terminals, _runtimes) = restore(
             &snapshot,
+            None,
             24,
             80,
             0,
@@ -678,5 +693,134 @@ mod tests {
         assert_eq!(session.source, "herdr:opencode");
         assert_eq!(session.agent, "opencode");
         assert_eq!(session.session_ref.value, "opencode-session");
+    }
+
+    #[tokio::test]
+    async fn restore_seeds_saved_pane_history_into_runtime() {
+        let (snapshot, history) = snapshot_with_saved_pane_history();
+        let (events, _events_rx) = mpsc::channel(8);
+        let render_notify = Arc::new(Notify::new());
+        let render_dirty = Arc::new(AtomicBool::new(false));
+
+        let (_workspaces, _terminals, runtimes) = restore(
+            &snapshot,
+            Some(&history),
+            5,
+            40,
+            4096,
+            "/bin/sh",
+            false,
+            events,
+            render_notify,
+            render_dirty,
+        );
+        let runtime = runtimes
+            .values()
+            .next()
+            .expect("restored runtime should exist");
+
+        assert!(
+            runtime
+                .recent_unwrapped_text(10)
+                .contains("RESTORED_HISTORY"),
+            "saved history should be visible in the restored terminal backend"
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while runtime.cwd().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = runtime.try_send_bytes(bytes::Bytes::from_static(b"exit\n"));
+    }
+
+    #[tokio::test]
+    async fn restore_without_history_snapshot_keeps_pane_contents_empty() {
+        let (snapshot, _history) = snapshot_with_saved_pane_history();
+        let (events, _events_rx) = mpsc::channel(8);
+        let render_notify = Arc::new(Notify::new());
+        let render_dirty = Arc::new(AtomicBool::new(false));
+
+        let (_workspaces, _terminals, runtimes) = restore(
+            &snapshot,
+            None,
+            5,
+            40,
+            4096,
+            "/bin/sh",
+            false,
+            events,
+            render_notify,
+            render_dirty,
+        );
+        let runtime = runtimes
+            .values()
+            .next()
+            .expect("restored runtime should exist");
+
+        assert!(
+            !runtime
+                .recent_unwrapped_text(10)
+                .contains("RESTORED_HISTORY"),
+            "pane history should not restore unless a history snapshot is supplied"
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while runtime.cwd().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = runtime.try_send_bytes(bytes::Bytes::from_static(b"exit\n"));
+    }
+
+    fn snapshot_with_saved_pane_history() -> (SessionSnapshot, SessionHistorySnapshot) {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        let mut panes = HashMap::new();
+        panes.insert(
+            0,
+            super::super::snapshot::PaneSnapshot {
+                cwd: cwd.clone(),
+                label: None,
+                agent_name: None,
+                agent_session: None,
+            },
+        );
+        let history = SessionHistorySnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceHistorySnapshot {
+                tabs: vec![super::super::snapshot::TabHistorySnapshot {
+                    panes: HashMap::from([(
+                        0,
+                        super::super::snapshot::PaneHistorySnapshot {
+                            ansi: "RESTORED_HISTORY\r\n".to_string(),
+                            lines: 1,
+                        },
+                    )]),
+                }],
+            }],
+        };
+        let snapshot = SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("workspace".into()),
+                custom_name: None,
+                identity_cwd: cwd,
+                worktree_space: None,
+                tabs: vec![TabSnapshot {
+                    custom_name: None,
+                    layout: LayoutSnapshot::Pane(0),
+                    panes,
+                    zoomed: false,
+                    focused: Some(0),
+                    root_pane: Some(0),
+                }],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            agent_panel_scope: crate::app::state::AgentPanelScope::CurrentWorkspace,
+            sidebar_width: Some(26),
+            sidebar_section_split: Some(0.5),
+            collapsed_space_keys: Default::default(),
+        };
+        (snapshot, history)
     }
 }

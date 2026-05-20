@@ -131,6 +131,9 @@ pub(super) fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: R
                 app.settings.list.selected,
             );
         }
+        SettingsSection::Experiments => {
+            render_settings_experiments(app, frame, content_area);
+        }
         SettingsSection::Integrations => {
             render_settings_integrations(app, frame, content_area);
         }
@@ -374,4 +377,98 @@ fn render_settings_toggle(
         p,
         1,
     );
+}
+
+fn render_settings_experiments(app: &AppState, frame: &mut Frame, area: Rect) {
+    let p = &app.palette;
+    let [desc_area, _, list_area] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Min(1),
+    ])
+    .areas::<3>(area);
+
+    super::widgets::render_modal_description(
+        frame,
+        desc_area,
+        "optional features that are off by default",
+        Style::default().fg(p.overlay1),
+    );
+
+    let marker = if app.pane_history_persistence_enabled() {
+        "[✓]"
+    } else {
+        "[ ]"
+    };
+    let style = if app.settings.list.selected == 0 {
+        Style::default()
+            .bg(p.surface0)
+            .fg(p.text)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(p.subtext0)
+    };
+    let row = Rect::new(list_area.x, list_area.y, list_area.width, 1);
+    frame.render_widget(
+        Paragraph::new(format!(" pane screen history {marker}")).style(style),
+        row,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{state::SettingsSection, Mode};
+    use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn experiments_pane_history_uses_settings_checkmark_marker() {
+        let mut app = AppState::test_new();
+        app.pane_history_persistence = true;
+        app.settings.section = SettingsSection::Experiments;
+        app.settings.list.selected = 0;
+        app.mode = Mode::Settings;
+
+        let mut terminal =
+            Terminal::new(TestBackend::new(80, 24)).expect("test terminal should initialize");
+        terminal
+            .draw(|frame| render_settings_overlay(&app, frame, Rect::new(0, 0, 80, 24)))
+            .expect("settings overlay should render");
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("pane screen history [✓]"));
+        assert!(!rendered.contains("[x]"));
+    }
+
+    #[test]
+    fn experiments_pane_history_keeps_empty_checkbox_marker_when_disabled() {
+        let mut app = AppState::test_new();
+        app.pane_history_persistence = false;
+        app.settings.section = SettingsSection::Experiments;
+        app.settings.list.selected = 0;
+        app.mode = Mode::Settings;
+
+        let mut terminal =
+            Terminal::new(TestBackend::new(80, 24)).expect("test terminal should initialize");
+        terminal
+            .draw(|frame| render_settings_overlay(&app, frame, Rect::new(0, 0, 80, 24)))
+            .expect("settings overlay should render");
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("pane screen history [ ]"));
+    }
 }

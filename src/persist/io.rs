@@ -2,10 +2,17 @@ use std::path::{Path, PathBuf};
 
 use tracing::warn;
 
-use super::snapshot::{parse_snapshot, snapshot_file_version, SessionSnapshot, SNAPSHOT_VERSION};
+use super::snapshot::{
+    parse_history_snapshot, parse_snapshot, snapshot_file_version, SessionHistorySnapshot,
+    SessionSnapshot, SNAPSHOT_VERSION,
+};
 
 fn session_path() -> PathBuf {
     crate::session::data_dir().join("session.json")
+}
+
+fn session_history_path() -> PathBuf {
+    crate::session::data_dir().join("session-history.json")
 }
 
 // Follow symlinks manually so a write through a (possibly dangling) symlink
@@ -35,6 +42,10 @@ fn resolve_write_target(path: &Path) -> std::io::Result<PathBuf> {
 }
 
 pub(super) fn save_to_path(path: &Path, snapshot: &SessionSnapshot) -> std::io::Result<()> {
+    save_json_to_path(path, snapshot)
+}
+
+fn save_json_to_path<T: serde::Serialize>(path: &Path, snapshot: &T) -> std::io::Result<()> {
     let target = resolve_write_target(path)?;
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
@@ -49,6 +60,21 @@ pub(super) fn save_to_path(path: &Path, snapshot: &SessionSnapshot) -> std::io::
     Ok(())
 }
 
+pub(super) fn save_to_paths(
+    session_path: &Path,
+    history_path: &Path,
+    snapshot: &SessionSnapshot,
+    history: Option<&SessionHistorySnapshot>,
+) -> std::io::Result<()> {
+    save_to_path(session_path, snapshot)?;
+    if let Some(history) = history {
+        save_json_to_path(history_path, history)?;
+    } else {
+        clear_path(history_path)?;
+    }
+    Ok(())
+}
+
 pub(super) fn clear_path(path: &Path) -> std::io::Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -57,9 +83,10 @@ pub(super) fn clear_path(path: &Path) -> std::io::Result<()> {
     }
 }
 
-pub fn save(snapshot: &SessionSnapshot) {
+pub fn save(snapshot: &SessionSnapshot, history: Option<&SessionHistorySnapshot>) {
     let path = session_path();
-    if let Err(err) = save_to_path(&path, snapshot) {
+    let history_path = session_history_path();
+    if let Err(err) = save_to_paths(&path, &history_path, snapshot, history) {
         crate::logging::session_save_failed(&path, &err.to_string());
         return;
     }
@@ -72,7 +99,15 @@ pub fn clear() {
         crate::logging::session_clear_failed(&path, &err.to_string());
         return;
     }
+    clear_history();
     crate::logging::session_cleared(&path);
+}
+
+pub fn clear_history() {
+    let path = session_history_path();
+    if let Err(err) = clear_path(&path) {
+        crate::logging::session_clear_failed(&path, &err.to_string());
+    }
 }
 
 pub fn load() -> Option<SessionSnapshot> {
@@ -106,10 +141,44 @@ pub fn load() -> Option<SessionSnapshot> {
     }
 }
 
+pub fn load_history() -> Option<SessionHistorySnapshot> {
+    let path = session_history_path();
+    if !path.exists() {
+        return None;
+    }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(err) => {
+            warn!(err = %err, "failed to read session history file");
+            return None;
+        }
+    };
+    match parse_history_snapshot(&content) {
+        Ok(snapshot) => Some(snapshot),
+        Err(err) => {
+            if let Some(version) = snapshot_file_version(&content) {
+                if version > SNAPSHOT_VERSION {
+                    warn!(
+                        file_version = version,
+                        supported = SNAPSHOT_VERSION,
+                        "session history file is from a newer herdr version, ignoring"
+                    );
+                    return None;
+                }
+            }
+            warn!(err = %err, "failed to parse session history file, ignoring");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::state::AgentPanelScope;
+    use crate::persist::snapshot::{
+        PaneHistorySnapshot, TabHistorySnapshot, WorkspaceHistorySnapshot,
+    };
 
     fn temp_session_path(name: &str) -> PathBuf {
         let unique = format!(
@@ -124,6 +193,12 @@ mod tests {
         std::env::temp_dir().join(unique).join("session.json")
     }
 
+    fn temp_session_paths(name: &str) -> (PathBuf, PathBuf) {
+        let session = temp_session_path(name);
+        let history = session.with_file_name("session-history.json");
+        (session, history)
+    }
+
     fn empty_snapshot() -> SessionSnapshot {
         SessionSnapshot {
             version: SNAPSHOT_VERSION,
@@ -135,6 +210,59 @@ mod tests {
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
         }
+    }
+
+    fn history_snapshot(secret: &str) -> SessionHistorySnapshot {
+        SessionHistorySnapshot {
+            version: SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceHistorySnapshot {
+                tabs: vec![TabHistorySnapshot {
+                    panes: std::collections::HashMap::from([(
+                        0,
+                        PaneHistorySnapshot {
+                            ansi: secret.to_string(),
+                            lines: 1,
+                        },
+                    )]),
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn save_to_paths_writes_pane_history_only_to_history_file() {
+        let (session_path, history_path) = temp_session_paths("split-history");
+
+        save_to_paths(
+            &session_path,
+            &history_path,
+            &empty_snapshot(),
+            Some(&history_snapshot("split-secret")),
+        )
+        .unwrap();
+
+        let session = std::fs::read_to_string(&session_path).unwrap();
+        let history = std::fs::read_to_string(&history_path).unwrap();
+        assert!(!session.contains("split-secret"));
+        assert!(!session.contains("history"));
+        assert!(history.contains("split-secret"));
+    }
+
+    #[test]
+    fn save_to_paths_removes_stale_history_when_history_is_disabled() {
+        let (session_path, history_path) = temp_session_paths("clear-history");
+        save_to_paths(
+            &session_path,
+            &history_path,
+            &empty_snapshot(),
+            Some(&history_snapshot("stale-secret")),
+        )
+        .unwrap();
+
+        save_to_paths(&session_path, &history_path, &empty_snapshot(), None).unwrap();
+
+        assert!(session_path.exists());
+        assert!(!history_path.exists());
     }
 
     #[test]

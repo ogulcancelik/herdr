@@ -106,7 +106,27 @@ fn wait_for_socket(path: &Path, timeout: Duration) {
 }
 
 fn spawn_herdr(config_home: &Path, runtime_dir: &Path, socket_path: &Path) -> SpawnedHerdr {
-    spawn_herdr_with_path(config_home, runtime_dir, socket_path, None)
+    spawn_herdr_with_config(
+        config_home,
+        runtime_dir,
+        socket_path,
+        None,
+        "onboarding = false\n",
+    )
+}
+
+fn spawn_herdr_with_pane_history(
+    config_home: &Path,
+    runtime_dir: &Path,
+    socket_path: &Path,
+) -> SpawnedHerdr {
+    spawn_herdr_with_config(
+        config_home,
+        runtime_dir,
+        socket_path,
+        None,
+        "onboarding = false\n[experimental]\npane_history = true\n",
+    )
 }
 
 fn app_dir_name() -> &'static str {
@@ -200,12 +220,28 @@ fn spawn_herdr_with_path(
     socket_path: &Path,
     path_override: Option<&Path>,
 ) -> SpawnedHerdr {
-    fs::create_dir_all(config_home.join("herdr")).unwrap();
+    spawn_herdr_with_config(
+        config_home,
+        runtime_dir,
+        socket_path,
+        path_override,
+        "onboarding = false\n",
+    )
+}
+
+fn spawn_herdr_with_config(
+    config_home: &Path,
+    runtime_dir: &Path,
+    socket_path: &Path,
+    path_override: Option<&Path>,
+    config_toml: &str,
+) -> SpawnedHerdr {
+    fs::create_dir_all(config_home.join(app_dir_name())).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     register_runtime_dir(runtime_dir);
     fs::write(
-        config_home.join("herdr/config.toml"),
-        "onboarding = false\n",
+        config_home.join(app_dir_name()).join("config.toml"),
+        config_toml,
     )
     .unwrap();
 
@@ -282,6 +318,28 @@ fn parse_cli_json_output(args: &[&str], output: std::process::Output) -> serde_j
             String::from_utf8_lossy(&output.stderr)
         )
     })
+}
+
+fn wait_until(timeout: Duration, interval: Duration, mut condition: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if condition() {
+            return true;
+        }
+        thread::sleep(interval);
+    }
+    false
+}
+
+fn pane_read_recent_contains(socket_path: &Path, pane_id: &str, expected: &str) -> bool {
+    let output = run_cli(
+        socket_path,
+        &["pane", "read", pane_id, "--source", "recent"],
+    );
+    if !output.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&output.stdout).contains(expected)
 }
 
 fn process_exists(pid: u32) -> bool {
@@ -1208,6 +1266,98 @@ fn server_stop_command_shuts_down_running_server() {
     );
 
     cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
+fn server_stop_then_restart_restores_pane_history() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+    let marker = "PERSISTED_HISTORY_AFTER_STOP";
+
+    let mut herdr = spawn_herdr_with_pane_history(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    wait_for_socket(&client_socket, Duration::from_secs(5));
+
+    let created = run_cli_json(
+        &socket_path,
+        &[
+            "workspace",
+            "create",
+            "--cwd",
+            base.to_str().expect("test path should be utf-8"),
+            "--label",
+            "history-restart",
+        ],
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("workspace create should return root pane id")
+        .to_string();
+    let sent = run_cli(
+        &socket_path,
+        &["pane", "send-text", &pane_id, &format!("echo {marker}\n")],
+    );
+    assert!(
+        sent.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&sent.stderr)
+    );
+    assert!(
+        wait_until(Duration::from_secs(3), Duration::from_millis(25), || {
+            pane_read_recent_contains(&socket_path, &pane_id, marker)
+        }),
+        "pane should contain marker before server stop"
+    );
+
+    let stopped = run_cli(&socket_path, &["server", "stop"]);
+    assert!(
+        stopped.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+
+    let pid = herdr.child.process_id();
+    let exit_status = herdr.child.wait().unwrap();
+    unregister_spawned_herdr_pid(pid);
+    assert!(exit_status.success(), "server stop should exit cleanly");
+    drop(herdr);
+
+    let restarted = spawn_herdr_with_pane_history(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    wait_for_socket(&client_socket, Duration::from_secs(5));
+
+    let workspaces = run_cli_json(&socket_path, &["workspace", "list"]);
+    let workspace_id = workspaces["result"]["workspaces"]
+        .as_array()
+        .expect("workspace.list should return workspaces")
+        .iter()
+        .find(|workspace| workspace["label"] == "history-restart")
+        .and_then(|workspace| workspace["workspace_id"].as_str())
+        .expect("restored workspace should exist")
+        .to_string();
+    let panes = run_cli_json(
+        &socket_path,
+        &["pane", "list", "--workspace", &workspace_id],
+    );
+    let restored_pane_id = panes["result"]["panes"]
+        .as_array()
+        .expect("pane.list should return panes")
+        .first()
+        .and_then(|pane| pane["pane_id"].as_str())
+        .expect("restored pane should exist")
+        .to_string();
+
+    assert!(
+        wait_until(Duration::from_secs(3), Duration::from_millis(25), || {
+            pane_read_recent_contains(&socket_path, &restored_pane_id, marker)
+        }),
+        "restarted server should restore saved pane history"
+    );
+
+    cleanup_spawned_herdr(restarted, base);
 }
 
 #[test]

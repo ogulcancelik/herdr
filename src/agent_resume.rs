@@ -25,6 +25,12 @@ pub struct AgentResumePlan {
     pub dedupe_key: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct AgentResumeLaunch<'a> {
+    pub plan: &'a AgentResumePlan,
+    pub initial_history_ansi: Option<&'a str>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistedAgentSession {
     pub source: String,

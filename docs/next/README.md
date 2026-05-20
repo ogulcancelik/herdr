@@ -79,7 +79,9 @@ tmux gives you persistence and panes, but it was built before agents existed. gu
 
 ## persistence
 
-start herdr where the work lives. locally, run `herdr`. it starts or attaches to the background session automatically, with no socket setup. run your agents, split panes, do your work. press `ctrl+b q` to detach. close your terminal, close your laptop; your agents keep running. open a new terminal, run `herdr`, you're back. same session, same panes, same agents.
+start herdr where the work lives. locally, run `herdr`. it starts or attaches to the background session automatically, with no socket setup. run your agents, split panes, do your work. press `ctrl+b q` to detach. close your terminal, close your laptop; your agents keep running. open a new terminal, run `herdr`, you're back. same session, same panes, same agents. if you stop the server and later start herdr again, restored panes bring back workspaces, tabs, cwd, layout, and focus.
+
+pane screen history is off by default because pane output can include secrets, tokens, prompts, and command output. enable it with `[experimental] pane_history = true` or settings > experiments > pane screen history. when enabled, herdr writes saved pane history to `session-history.json` next to `session.json`; treat the herdr config/session directory like terminal history.
 
 ### from anywhere
 
@@ -138,7 +140,7 @@ not a gui window, not a web dashboard, not electron. herdr runs inside whatever 
 - **mouse-native** — click panes/tabs/workspaces/agents, drag borders, select text to copy, right-click menus; not keyboard-only
 - **notifications** — sounds and toasts for background events; tab-aware suppression
 - **18 built-in themes** — catppuccin, terminal, tokyo night, gruvbox, one, solarized, kanagawa, rosé pine, vesper, and light variants for the main palettes
-- **session persistence** — pane processes survive client detach; sessions restore after full restart
+- **session persistence** — pane processes survive client detach; sessions restore panes after full restart, with opt-in recent screen history
 
 ## agents can use herdr too
 

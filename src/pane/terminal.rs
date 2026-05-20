@@ -420,6 +420,19 @@ impl GhosttyPaneTerminal {
         }
     }
 
+    pub fn seed_history_ansi(&self, ansi: &str) {
+        if ansi.is_empty() {
+            return;
+        }
+        let Ok(mut core) = self.core.lock() else {
+            return;
+        };
+        core.terminal.write(ansi.as_bytes());
+        if let Ok(mut key_encoder) = self.key_encoder.lock() {
+            key_encoder.set_from_terminal(&core.terminal);
+        }
+    }
+
     pub fn resize(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
         if let Ok(mut core) = self.core.lock() {
             let _ = core
@@ -1845,6 +1858,24 @@ mod tests {
 
         let end = pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026l", &tx);
         assert!(end.request_render);
+    }
+
+    #[test]
+    fn seeded_history_is_rendered_on_next_draw() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 100).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        pane.seed_history_ansi("restored history");
+
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let row = (0..16).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
+        assert_eq!(row, "restored history");
     }
 
     #[test]

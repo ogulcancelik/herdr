@@ -320,6 +320,8 @@ pub struct ExperimentalConfig {
     pub allow_nested: bool,
     /// Experimental local Kitty graphics rendering for attached clients. Default: false.
     pub kitty_graphics: bool,
+    /// Persist pane screen history to session-history.json. Default: false.
+    pub pane_history: bool,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
     /// the pane requested `?25l`, so macOS native input methods keep tracking
     /// the candidate window when TUIs paint their own cursor (Claude Code, pi,
@@ -765,6 +767,19 @@ delivery = "terminal"
     }
 
     #[test]
+    fn pane_history_persistence_is_opt_in() {
+        assert!(!Config::default().experimental.pane_history);
+
+        let toml = r#"
+[experimental]
+pane_history = true
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+
+        assert!(config.experimental.pane_history);
+    }
+
+    #[test]
     fn kitty_graphics_default_off_and_parse() {
         let config = Config::default();
         assert!(!config.experimental.kitty_graphics);
@@ -783,10 +798,12 @@ kitty_graphics = true
 [experimental]
 allow_nested = true
 kitty_graphics = true
+pane_history = true
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.experimental.allow_nested);
         assert!(config.experimental.kitty_graphics);
+        assert!(config.experimental.pane_history);
     }
 
     #[test]

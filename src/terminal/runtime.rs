@@ -46,6 +46,35 @@ impl TerminalRuntime {
         .map(Self)
     }
 
+    pub fn spawn_with_initial_history(
+        pane_id: PaneId,
+        rows: u16,
+        cols: u16,
+        cwd: std::path::PathBuf,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        default_shell: &str,
+        initial_history_ansi: Option<&str>,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+    ) -> std::io::Result<Self> {
+        crate::pane::PaneRuntime::spawn_with_initial_history(
+            pane_id,
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            default_shell,
+            initial_history_ansi,
+            events,
+            render_notify,
+            render_dirty,
+        )
+        .map(Self)
+    }
+
     pub fn spawn_shell_command(
         pane_id: PaneId,
         rows: u16,
@@ -107,7 +136,7 @@ impl TerminalRuntime {
         rows: u16,
         cols: u16,
         cwd: std::path::PathBuf,
-        restore_plan: &crate::agent_resume::AgentResumePlan,
+        launch: crate::agent_resume::AgentResumeLaunch<'_>,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         default_shell: &str,
@@ -120,7 +149,7 @@ impl TerminalRuntime {
             rows,
             cols,
             cwd,
-            restore_plan,
+            launch,
             scrollback_limit_bytes,
             host_terminal_theme,
             default_shell,
@@ -197,6 +226,10 @@ impl TerminalRuntime {
 
     pub fn recent_unwrapped_ansi(&self, lines: usize) -> String {
         self.0.recent_unwrapped_ansi(lines)
+    }
+
+    pub fn snapshot_history(&self) -> Option<String> {
+        self.0.snapshot_history()
     }
 
     pub fn extract_selection(&self, selection: &crate::selection::Selection) -> Option<String> {

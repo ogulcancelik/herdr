@@ -31,6 +31,24 @@ pub struct SessionSnapshot {
 }
 
 #[derive(Serialize, Deserialize)]
+pub struct SessionHistorySnapshot {
+    /// Format version follows the matching session snapshot version.
+    #[serde(default)]
+    pub version: u32,
+    pub workspaces: Vec<WorkspaceHistorySnapshot>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct WorkspaceHistorySnapshot {
+    pub tabs: Vec<TabHistorySnapshot>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TabHistorySnapshot {
+    pub panes: HashMap<u32, PaneHistorySnapshot>,
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct WorkspaceSnapshot {
     #[serde(default)]
     pub id: Option<String>,
@@ -87,6 +105,12 @@ pub struct PaneAgentSessionSnapshot {
     pub agent: String,
     pub kind: crate::agent_resume::AgentSessionRefKind,
     pub value: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PaneHistorySnapshot {
+    pub ansi: String,
+    pub lines: usize,
 }
 
 /// Serializable BSP tree.
@@ -334,6 +358,52 @@ fn capture_tab(
     }
 }
 
+/// Capture pane screen history separately from the structural session snapshot.
+pub fn capture_history(
+    workspaces: &[Workspace],
+    terminal_runtimes: &TerminalRuntimeRegistry,
+) -> SessionHistorySnapshot {
+    SessionHistorySnapshot {
+        version: SNAPSHOT_VERSION,
+        workspaces: workspaces
+            .iter()
+            .map(|workspace| WorkspaceHistorySnapshot {
+                tabs: workspace
+                    .tabs
+                    .iter()
+                    .map(|tab| TabHistorySnapshot {
+                        panes: capture_tab_history(tab, terminal_runtimes),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+fn capture_tab_history(
+    tab: &crate::workspace::Tab,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+) -> HashMap<u32, PaneHistorySnapshot> {
+    let mut panes = HashMap::new();
+    for (id, pane) in &tab.panes {
+        if let Some(history) = capture_pane_history(Some(pane), terminal_runtimes) {
+            panes.insert(id.raw(), history);
+        }
+    }
+    panes
+}
+
+fn capture_pane_history(
+    pane: Option<&crate::pane::PaneState>,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+) -> Option<PaneHistorySnapshot> {
+    let ansi = terminal_runtimes
+        .get(&pane?.attached_terminal_id)?
+        .snapshot_history()?;
+    let lines = ansi.lines().count();
+    Some(PaneHistorySnapshot { ansi, lines })
+}
+
 pub(super) fn capture_node(node: &Node) -> LayoutSnapshot {
     match node {
         Node::Pane(id) => LayoutSnapshot::Pane(id.raw()),
@@ -363,6 +433,18 @@ pub(super) fn parse_snapshot(content: &str) -> Result<SessionSnapshot, String> {
         ));
     }
     migrate_snapshot(raw)
+}
+
+pub(super) fn parse_history_snapshot(content: &str) -> Result<SessionHistorySnapshot, String> {
+    let snapshot =
+        serde_json::from_str::<SessionHistorySnapshot>(content).map_err(|e| e.to_string())?;
+    if snapshot.version > SNAPSHOT_VERSION {
+        return Err(format!(
+            "history snapshot version {} is newer than supported {}",
+            snapshot.version, SNAPSHOT_VERSION
+        ));
+    }
+    Ok(snapshot)
 }
 
 pub(super) fn snapshot_file_version(content: &str) -> Option<u32> {
@@ -412,10 +494,17 @@ mod tests {
 
     fn capture_from_state(state: &AppState) -> SessionSnapshot {
         let terminal_runtimes = TerminalRuntimeRegistry::new();
+        capture_from_state_with_runtimes(state, &terminal_runtimes)
+    }
+
+    fn capture_from_state_with_runtimes(
+        state: &AppState,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) -> SessionSnapshot {
         capture(
             &state.workspaces,
             &state.terminals,
-            &terminal_runtimes,
+            terminal_runtimes,
             state.active,
             state.selected,
             state.agent_panel_scope,
@@ -423,6 +512,13 @@ mod tests {
             state.sidebar_section_split,
             state.collapsed_space_keys.clone(),
         )
+    }
+
+    fn capture_history_from_state_with_runtimes(
+        state: &AppState,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) -> SessionHistorySnapshot {
+        capture_history(&state.workspaces, terminal_runtimes)
     }
 
     fn root_split_ratio(tab: &TabSnapshot) -> Option<f32> {
@@ -598,6 +694,42 @@ mod tests {
         assert_eq!(restored.agent_panel_scope, AgentPanelScope::AllWorkspaces);
         assert_eq!(restored.sidebar_width, None);
         assert_eq!(restored.sidebar_section_split, None);
+    }
+
+    #[test]
+    fn old_pane_snapshot_with_embedded_history_is_ignored() {
+        let json = serde_json::json!({
+            "version": SNAPSHOT_VERSION,
+            "workspaces": [{
+                "id": "wtest",
+                "identity_cwd": "/tmp",
+                "tabs": [{
+                    "layout": { "Pane": 0 },
+                    "panes": {
+                        "0": {
+                            "cwd": "/tmp",
+                            "history": {
+                                "ansi": "legacy-secret",
+                                "lines": 1
+                            }
+                        }
+                    },
+                    "zoomed": false,
+                    "focused": 0,
+                    "root_pane": 0
+                }],
+                "active_tab": 0
+            }],
+            "active": 0,
+            "selected": 0
+        })
+        .to_string();
+
+        let restored = parse_snapshot(&json).unwrap();
+
+        let encoded = serde_json::to_string(&restored).unwrap();
+        assert!(!encoded.contains("legacy-secret"));
+        assert!(!encoded.contains("\"history\""));
     }
 
     #[test]
@@ -799,6 +931,82 @@ mod tests {
         assert_eq!(workspace.identity_cwd, PathBuf::from("/tmp/pion"));
         assert_eq!(tab.panes[&root.raw()].cwd, PathBuf::from("/tmp/pion"));
         assert_eq!(tab.panes[&second.raw()].cwd, PathBuf::from("/tmp/herdr"));
+    }
+
+    #[tokio::test]
+    async fn capture_contract_tracks_pane_history_from_runtime() {
+        let state = state_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        terminal_runtimes.insert(
+            terminal_id,
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+                20,
+                3,
+                4096,
+                b"alpha\r\nbeta\r\ngamma\r\n",
+            ),
+        );
+
+        let snapshot = capture_from_state_with_runtimes(&state, &terminal_runtimes);
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        assert!(!encoded.contains("alpha"));
+        assert!(!encoded.contains("\"history\""));
+
+        let history_snapshot = capture_history_from_state_with_runtimes(&state, &terminal_runtimes);
+        let history = &history_snapshot.workspaces[0].tabs[0].panes[&root.raw()];
+
+        assert!(history.ansi.contains("alpha"));
+        assert!(history.ansi.contains("gamma"));
+        assert!(history.lines >= 3);
+    }
+
+    #[tokio::test]
+    async fn capture_contract_tracks_history_for_each_pane() {
+        let mut state = state_with_workspaces(&["one"]);
+        let first = state.workspaces[0].tabs[0].root_pane;
+        let second = state.workspaces[0].test_split(Direction::Horizontal);
+        let first_terminal_id = state.workspaces[0].tabs[0].panes[&first]
+            .attached_terminal_id
+            .clone();
+        let second_terminal_id = state.workspaces[0].tabs[0].panes[&second]
+            .attached_terminal_id
+            .clone();
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        terminal_runtimes.insert(
+            first_terminal_id,
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+                20,
+                3,
+                4096,
+                b"first-pane-history\r\n",
+            ),
+        );
+        terminal_runtimes.insert(
+            second_terminal_id,
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+                20,
+                3,
+                4096,
+                b"second-pane-history\r\n",
+            ),
+        );
+
+        let snapshot = capture_from_state_with_runtimes(&state, &terminal_runtimes);
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        assert!(!encoded.contains("first-pane-history"));
+        assert!(!encoded.contains("second-pane-history"));
+
+        let history_snapshot = capture_history_from_state_with_runtimes(&state, &terminal_runtimes);
+        let tab = &history_snapshot.workspaces[0].tabs[0];
+        let first_history = &tab.panes[&first.raw()];
+        let second_history = &tab.panes[&second.raw()];
+
+        assert!(first_history.ansi.contains("first-pane-history"));
+        assert!(second_history.ansi.contains("second-pane-history"));
     }
 
     #[test]

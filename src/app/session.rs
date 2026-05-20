@@ -36,7 +36,10 @@ impl App {
                 self.state.sidebar_section_split,
                 self.state.collapsed_space_keys.clone(),
             );
-            crate::persist::save(&snap);
+            let history = self.persist_pane_history.then(|| {
+                crate::persist::capture_history(&self.state.workspaces, &self.terminal_runtimes)
+            });
+            crate::persist::save(&snap, history.as_ref());
         }
 
         self.session_save_deadline = None;

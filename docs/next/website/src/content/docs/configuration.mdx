@@ -304,6 +304,21 @@ scrollback_limit_bytes = 10485760
 
 Existing panes keep their current buffer until they are recreated.
 
+## Pane screen history
+
+By default, full session restart restores workspaces, tabs, panes, cwd, layout, and focus without saving pane contents.
+
+Pane screen history is off by default. Pane output can include secrets, tokens, prompts, and command output, so enable it only when you want Herdr to save recent pane contents across full server restarts:
+
+```toml
+[experimental]
+pane_history = true
+```
+
+You can also toggle it from Settings > Experiments > pane screen history.
+
+When enabled, Herdr stores saved pane history in `session-history.json` next to `session.json`.
+
 ## Nested launches
 
 Herdr normally protects you from launching Herdr inside Herdr.

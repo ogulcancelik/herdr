@@ -86,6 +86,14 @@ impl App {
         }
     }
 
+    pub(super) fn save_pane_history_persistence(&mut self, enabled: bool) {
+        if self.update_config_file("pane screen history", |content| {
+            crate::config::upsert_section_bool(content, "experimental", "pane_history", enabled)
+        }) {
+            self.apply_config_from_disk(false);
+        }
+    }
+
     pub(super) fn save_agent_panel_scope(&mut self, scope: crate::app::state::AgentPanelScope) {
         let value = match scope {
             crate::app::state::AgentPanelScope::CurrentWorkspace => {
