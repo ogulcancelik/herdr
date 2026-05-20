@@ -284,6 +284,29 @@ kitty_graphics = false
 
 Leave this off unless you are testing terminal image behavior.
 
+## IME cursor tracking
+
+When the focused pane hides its cursor and paints its own — common in AI-agent TUIs like Claude Code, pi, and codex — macOS native input methods stop tracking the candidate window position because the outer terminal stops reporting the cursor.
+
+Set `reveal_hidden_cursor_for_cjk_ime = true` to expose the focused pane's cursor anchor to the outer terminal regardless of the pane's `?25l` request:
+
+```toml
+[experimental]
+reveal_hidden_cursor_for_cjk_ime = false
+cjk_ime_agents = []
+cjk_ime_cursor_shape = "steady_block"
+```
+
+When enabled, the cursor stays visible at the focused pane's reported position. If the pane reports no cursor position, the anchor falls back to the pane's top-left so a stable IME hint is always available.
+
+`cjk_ime_agents` is an optional allow-list. When empty, the reveal applies to any focused pane. When non-empty, the reveal only applies if the focused pane's detected agent matches one of the listed names — useful to enable the reveal only for AI-agent TUIs that paint their own cursor while leaving plain shells untouched. Accepted names: `pi`, `claude`, `codex`, `gemini`, `cursor`, `cline`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`. Unknown names are ignored.
+
+`cjk_ime_cursor_shape` controls the DECSCUSR shape rendered for the IME anchor. Accepted values: `block`, `steady_block` (default), `underline`, `steady_underline`, `bar`, `steady_bar`.
+
+Hot-reloads through the existing `[experimental]` block.
+
+The trade-off when enabled: an extra hardware cursor is visible in the outer terminal for apps that hide the cursor without painting a replacement (vim normal mode, etc.). Pair the reveal with `cjk_ime_agents` to scope it to specific TUIs.
+
 ## Environment variables
 
 | Variable | Purpose |

@@ -202,6 +202,19 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Experimental local Kitty graphics rendering for attached clients.
 # Requires a Kitty graphics-compatible outer terminal.
 # kitty_graphics = false
+# Expose the focused pane's cursor to the outer terminal so macOS input
+# methods keep tracking the candidate window when TUIs paint their own
+# cursor (Claude Code, pi, codex). Trade-off: extra cursor visible for
+# apps that hide it without painting a replacement (vim normal mode, etc.).
+# reveal_hidden_cursor_for_cjk_ime = false
+# Optional allow-list: only reveal for focused panes whose detected agent
+# matches one of these names. Empty means apply to any focused pane.
+# Accepted: pi, claude, codex, gemini, cursor, cline, opencode, copilot,
+# kimi, kiro, droid, amp, grok, hermes.
+# cjk_ime_agents = []
+# Cursor shape rendered when reveal_hidden_cursor_for_cjk_ime is true.
+# Values: block, steady_block (default), underline, steady_underline, bar, steady_bar.
+# cjk_ime_cursor_shape = "steady_block"
 
 [advanced]
 # Maximum scrollback buffer size in bytes retained per pane terminal.

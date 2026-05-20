@@ -965,6 +965,14 @@ pub struct AppState {
     pub confirm_close: bool,
     pub prompt_new_tab_name: bool,
     pub show_agent_labels_on_pane_borders: bool,
+    /// Expose the focused pane's cursor anchor to the outer terminal even when
+    /// the pane requested `?25l`. See `[experimental] reveal_hidden_cursor_for_cjk_ime`.
+    pub reveal_hidden_cursor_for_cjk_ime: bool,
+    /// Restrict cursor reveal to focused panes whose detected agent matches
+    /// one of these. Empty means apply to any focused pane.
+    pub cjk_ime_agents: Vec<crate::detect::Agent>,
+    /// DECSCUSR shape parameter (1–6) for the IME anchor cursor.
+    pub cjk_ime_cursor_shape: u8,
     pub kitty_graphics_enabled: bool,
     pub default_shell: String,
     pub pane_scrollback_limit_bytes: usize,
@@ -1224,6 +1232,9 @@ impl AppState {
             confirm_close: true,
             prompt_new_tab_name: true,
             show_agent_labels_on_pane_borders: false,
+            reveal_hidden_cursor_for_cjk_ime: false,
+            cjk_ime_agents: Vec::new(),
+            cjk_ime_cursor_shape: 2, // steady_block
             kitty_graphics_enabled: false,
             default_shell: String::new(),
             pane_scrollback_limit_bytes: crate::config::DEFAULT_SCROLLBACK_LIMIT_BYTES,

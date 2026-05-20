@@ -322,11 +322,54 @@ fn focused_terminal_cursor(app_state: &AppState) -> Option<CursorState> {
         .iter()
         .find(|info| info.is_focused)?;
     let rt = app_state.runtime_for_pane_in_workspace(ws_idx, info.id)?;
-    let cursor = rt.cursor_state(info.inner_rect, true)?;
-    Some(CursorState {
-        x: cursor.x,
-        y: cursor.y,
-        visible: cursor.visible && !crate::ui::pane_is_scrolled_back(rt),
-        shape: cursor.shape,
-    })
+    let scrolled_back = crate::ui::pane_is_scrolled_back(rt);
+
+    // Determine whether the IME-anchor reveal applies to this focused pane.
+    // The master switch must be on, and either no agent filter is configured
+    // (apply to any pane) or the focused pane's detected agent matches the
+    // allow-list.
+    let reveal = app_state.reveal_hidden_cursor_for_cjk_ime
+        && (app_state.cjk_ime_agents.is_empty() || {
+            let detected = app_state
+                .workspaces
+                .get(ws_idx)
+                .and_then(|ws| ws.terminal_id(info.id))
+                .and_then(|tid| app_state.terminals.get(tid))
+                .and_then(|t| t.detected_agent);
+            detected.is_some_and(|agent| app_state.cjk_ime_agents.contains(&agent))
+        });
+
+    if let Some(cursor) = rt.cursor_state(info.inner_rect, true) {
+        // When the reveal applies, expose the cursor anchor regardless of the
+        // pane's `?25l` request so macOS IMEs keep tracking the candidate
+        // window when TUIs paint their own cursor. Scrollback suppression
+        // still applies.
+        let visible = if reveal {
+            !scrolled_back
+        } else {
+            cursor.visible && !scrolled_back
+        };
+        Some(CursorState {
+            x: cursor.x,
+            y: cursor.y,
+            visible,
+            shape: if reveal && visible {
+                app_state.cjk_ime_cursor_shape
+            } else {
+                cursor.shape
+            },
+        })
+    } else if reveal && !scrolled_back {
+        // cursor_state() returned None — the viewport has no cursor position
+        // (can happen with complex TUIs). Fall back to the pane's top-left so
+        // the outer terminal still exposes a cursor anchor for IME tracking.
+        Some(CursorState {
+            x: info.inner_rect.x,
+            y: info.inner_rect.y,
+            visible: true,
+            shape: app_state.cjk_ime_cursor_shape,
+        })
+    } else {
+        None
+    }
 }
