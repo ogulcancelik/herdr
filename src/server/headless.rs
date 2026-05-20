@@ -2685,6 +2685,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn virtual_render_exposes_hidden_pane_cursor_when_force_ime_enabled() {
+        let mut state = AppState::test_new();
+        state.force_ime_cursor_visibility = true;
+        let mut ws = crate::workspace::Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        ws.insert_test_runtime(
+            pane_id,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(20, 5, b"left\x1b[?25l"),
+        );
+
+        state.workspaces = vec![ws];
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = crate::app::Mode::Terminal;
+
+        let area = Rect::new(0, 0, 80, 24);
+        let (_buffer, cursor) =
+            crate::server::render_stream::render_virtual(&mut state, area, true);
+        let pane = state
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == pane_id)
+            .expect("focused pane info");
+
+        assert_eq!(
+            cursor,
+            Some(CursorState {
+                x: pane.inner_rect.x + 4,
+                y: pane.inner_rect.y,
+                visible: true,
+                shape: cursor.as_ref().map(|c| c.shape).unwrap_or(0),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn virtual_render_keeps_cursor_hidden_when_scrolled_back_even_with_force_ime() {
+        let mut state = AppState::test_new();
+        state.force_ime_cursor_visibility = true;
+        let mut ws = crate::workspace::Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let mut bytes = Vec::new();
+        for line in 0..80 {
+            bytes.extend_from_slice(format!("line {line:02}\r\n").as_bytes());
+        }
+        let runtime =
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(20, 5, 4096, &bytes);
+        ws.insert_test_runtime(pane_id, runtime);
+
+        state.workspaces = vec![ws];
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = crate::app::Mode::Terminal;
+
+        let area = Rect::new(0, 0, 80, 24);
+        let _ = crate::server::render_stream::render_virtual(&mut state, area, true);
+        let runtime = state
+            .runtime_for_pane(pane_id)
+            .expect("pane runtime after initial render");
+        runtime.scroll_up(6);
+        assert!(crate::ui::pane_is_scrolled_back(runtime));
+
+        let (_buffer, cursor) =
+            crate::server::render_stream::render_virtual(&mut state, area, true);
+
+        assert!(
+            cursor.as_ref().is_none_or(|cursor| !cursor.visible),
+            "scrolled-back focused pane should keep the cursor hidden even when force_ime_cursor_visibility is true; got {cursor:?}",
+        );
+    }
+
+    #[tokio::test]
     async fn virtual_render_omits_focused_pane_cursor_while_mobile_switcher_open() {
         let mut state = AppState::test_new();
         let mut ws = crate::workspace::Workspace::test_new("test");

@@ -276,6 +276,21 @@ kitty_graphics = false
 
 Leave this off unless you are testing terminal image behavior.
 
+## IME cursor tracking
+
+When the focused pane hides its cursor and paints its own — common in AI-agent TUIs like Claude Code, codex, and pi — macOS native input methods stop tracking the candidate window position because the outer terminal stops reporting the cursor.
+
+Set `force_ime_cursor_visibility = true` to expose the focused pane's cursor anchor to the outer terminal regardless of the pane's `?25l` request:
+
+```toml
+[experimental]
+force_ime_cursor_visibility = false
+```
+
+Hot-reloads through the existing `[experimental]` block.
+
+The trade-off when enabled: an extra hardware cursor is visible in the outer terminal for apps that hide the cursor without painting a replacement (vim normal mode, etc.). Leave this off if you primarily use such apps.
+
 ## Environment variables
 
 | Variable | Purpose |

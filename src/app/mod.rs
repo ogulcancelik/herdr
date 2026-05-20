@@ -413,6 +413,7 @@ impl App {
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
             kitty_graphics_enabled: config.experimental.kitty_graphics,
+            force_ime_cursor_visibility: config.experimental.force_ime_cursor_visibility,
             default_shell: config.terminal.default_shell.clone(),
             pane_scrollback_limit_bytes: config.advanced.scrollback_limit_bytes,
             accent: crate::config::parse_color(&config.ui.accent),
@@ -890,6 +891,8 @@ impl App {
             if was_kitty_graphics_enabled && !config.experimental.kitty_graphics {
                 let _ = crate::kitty_graphics::clear_all_host_graphics();
             }
+            self.state.force_ime_cursor_visibility =
+                config.experimental.force_ime_cursor_visibility;
         }
 
         if !invalid_section("advanced") {

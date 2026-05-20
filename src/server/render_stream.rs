@@ -323,10 +323,20 @@ fn focused_terminal_cursor(app_state: &AppState) -> Option<CursorState> {
         .find(|info| info.is_focused)?;
     let rt = app_state.runtime_for_pane_in_workspace(ws_idx, info.id)?;
     let cursor = rt.cursor_state(info.inner_rect, true)?;
+    let scrolled_back = crate::ui::pane_is_scrolled_back(rt);
+    // When `force_ime_cursor_visibility` is set, expose the cursor anchor to the
+    // outer terminal regardless of the pane's `?25l` request, so macOS IMEs keep
+    // tracking the candidate window when TUIs paint their own cursor. Scrollback
+    // suppression still applies — there is no useful anchor while scrolled back.
+    let visible = if app_state.force_ime_cursor_visibility {
+        !scrolled_back
+    } else {
+        cursor.visible && !scrolled_back
+    };
     Some(CursorState {
         x: cursor.x,
         y: cursor.y,
-        visible: cursor.visible && !crate::ui::pane_is_scrolled_back(rt),
+        visible,
         shape: cursor.shape,
     })
 }

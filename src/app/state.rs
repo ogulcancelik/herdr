@@ -965,6 +965,9 @@ pub struct AppState {
     pub prompt_new_tab_name: bool,
     pub show_agent_labels_on_pane_borders: bool,
     pub kitty_graphics_enabled: bool,
+    /// Force the focused pane's cursor anchor to be visible to the outer terminal
+    /// even when the pane requested `?25l`. See `[experimental] force_ime_cursor_visibility`.
+    pub force_ime_cursor_visibility: bool,
     pub default_shell: String,
     pub pane_scrollback_limit_bytes: usize,
     #[allow(dead_code)] // kept for backward compat; palette.accent is the source of truth
@@ -1212,6 +1215,7 @@ impl AppState {
             prompt_new_tab_name: true,
             show_agent_labels_on_pane_borders: false,
             kitty_graphics_enabled: false,
+            force_ime_cursor_visibility: false,
             default_shell: String::new(),
             pane_scrollback_limit_bytes: crate::config::DEFAULT_SCROLLBACK_LIMIT_BYTES,
             accent: Color::Cyan,

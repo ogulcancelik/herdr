@@ -206,6 +206,13 @@ pub struct ExperimentalConfig {
     pub allow_nested: bool,
     /// Experimental local Kitty graphics rendering for attached clients. Default: false.
     pub kitty_graphics: bool,
+    /// Expose the focused pane's cursor anchor to the outer terminal even when
+    /// the pane requested `?25l`, so macOS native input methods keep tracking
+    /// the candidate window when TUIs paint their own cursor. Default: false.
+    /// Trade-off when enabled: an extra hardware cursor will be visible in the
+    /// outer terminal for apps that hide the cursor without painting a
+    /// replacement (vim normal mode, etc.). See #149.
+    pub force_ime_cursor_visibility: bool,
 }
 
 impl Default for KeysConfig {
@@ -487,6 +494,19 @@ kitty_graphics = true
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.experimental.allow_nested);
         assert!(config.experimental.kitty_graphics);
+    }
+
+    #[test]
+    fn force_ime_cursor_visibility_default_off_and_parse() {
+        let default_config = Config::default();
+        assert!(!default_config.experimental.force_ime_cursor_visibility);
+
+        let toml = r#"
+[experimental]
+force_ime_cursor_visibility = true
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.experimental.force_ime_cursor_visibility);
     }
 
     #[test]

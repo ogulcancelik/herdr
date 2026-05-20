@@ -191,6 +191,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Experimental local Kitty graphics rendering for attached clients.
 # Requires a Kitty graphics-compatible outer terminal.
 # kitty_graphics = false
+# Expose the focused pane's cursor anchor to the outer terminal even when the
+# pane requested `?25l`, so macOS input methods keep tracking the candidate
+# window when TUIs paint their own cursor (Claude Code, codex, pi).
+# Trade-off: an extra hardware cursor will be visible in the outer terminal for
+# apps that hide the cursor without painting a replacement (vim normal mode).
+# force_ime_cursor_visibility = false
 
 [advanced]
 # Maximum scrollback buffer size in bytes retained per pane terminal.
