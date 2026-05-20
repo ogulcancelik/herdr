@@ -968,6 +968,8 @@ pub struct AppState {
     /// Force the focused pane's cursor anchor to be visible to the outer terminal
     /// even when the pane requested `?25l`. See `[experimental] force_ime_cursor_visibility`.
     pub force_ime_cursor_visibility: bool,
+    /// DECSCUSR shape parameter for the forced IME cursor (1–6).
+    pub force_ime_cursor_shape: u8,
     pub default_shell: String,
     pub pane_scrollback_limit_bytes: usize,
     #[allow(dead_code)] // kept for backward compat; palette.accent is the source of truth
@@ -1216,6 +1218,7 @@ impl AppState {
             show_agent_labels_on_pane_borders: false,
             kitty_graphics_enabled: false,
             force_ime_cursor_visibility: false,
+            force_ime_cursor_shape: 2, // steady_block (default)
             default_shell: String::new(),
             pane_scrollback_limit_bytes: crate::config::DEFAULT_SCROLLBACK_LIMIT_BYTES,
             accent: Color::Cyan,

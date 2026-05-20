@@ -213,6 +213,41 @@ pub struct ExperimentalConfig {
     /// outer terminal for apps that hide the cursor without painting a
     /// replacement (vim normal mode, etc.). See #149.
     pub force_ime_cursor_visibility: bool,
+    /// Cursor shape used when `force_ime_cursor_visibility` overrides the
+    /// pane's hidden cursor. Default: "bar" (least obtrusive for IME input).
+    pub force_ime_cursor_shape: ImeCursorShape,
+}
+
+/// Cursor shape for the forced IME cursor anchor (DECSCUSR values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImeCursorShape {
+    Block,
+    SteadyBlock,
+    Underline,
+    SteadyUnderline,
+    Bar,
+    SteadyBar,
+}
+
+impl Default for ImeCursorShape {
+    fn default() -> Self {
+        Self::SteadyBlock
+    }
+}
+
+impl ImeCursorShape {
+    /// Convert to DECSCUSR parameter (1–6).
+    pub fn to_decscusr(self) -> u8 {
+        match self {
+            Self::Block => 1,
+            Self::SteadyBlock => 2,
+            Self::Underline => 3,
+            Self::SteadyUnderline => 4,
+            Self::Bar => 5,
+            Self::SteadyBar => 6,
+        }
+    }
 }
 
 impl Default for KeysConfig {

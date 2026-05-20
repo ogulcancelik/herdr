@@ -338,7 +338,11 @@ fn focused_terminal_cursor(app_state: &AppState) -> Option<CursorState> {
             x: cursor.x,
             y: cursor.y,
             visible,
-            shape: cursor.shape,
+            shape: if app_state.force_ime_cursor_visibility && visible {
+                app_state.force_ime_cursor_shape
+            } else {
+                cursor.shape
+            },
         })
     } else if app_state.force_ime_cursor_visibility && !scrolled_back {
         // cursor_state() returned None — the viewport has no cursor position
@@ -348,7 +352,7 @@ fn focused_terminal_cursor(app_state: &AppState) -> Option<CursorState> {
             x: info.inner_rect.x,
             y: info.inner_rect.y,
             visible: true,
-            shape: 0,
+            shape: app_state.force_ime_cursor_shape,
         })
     } else {
         None

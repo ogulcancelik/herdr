@@ -414,6 +414,7 @@ impl App {
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
             kitty_graphics_enabled: config.experimental.kitty_graphics,
             force_ime_cursor_visibility: config.experimental.force_ime_cursor_visibility,
+            force_ime_cursor_shape: config.experimental.force_ime_cursor_shape.to_decscusr(),
             default_shell: config.terminal.default_shell.clone(),
             pane_scrollback_limit_bytes: config.advanced.scrollback_limit_bytes,
             accent: crate::config::parse_color(&config.ui.accent),
@@ -893,6 +894,8 @@ impl App {
             }
             self.state.force_ime_cursor_visibility =
                 config.experimental.force_ime_cursor_visibility;
+            self.state.force_ime_cursor_shape =
+                config.experimental.force_ime_cursor_shape.to_decscusr();
         }
 
         if !invalid_section("advanced") {
