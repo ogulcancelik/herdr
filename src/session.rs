@@ -92,6 +92,20 @@ pub fn active_name() -> Option<String> {
         .filter(|name| validate_name(name).is_ok())
 }
 
+pub fn local_attach_command() -> String {
+    match active_name() {
+        Some(name) => format!("herdr session attach {name}"),
+        None => "herdr".to_string(),
+    }
+}
+
+pub fn local_stop_command() -> String {
+    match active_name() {
+        Some(name) => format!("herdr session stop {name}"),
+        None => "herdr server stop".to_string(),
+    }
+}
+
 pub fn explicit_session_requested() -> bool {
     EXPLICIT_SESSION_REQUESTED.load(Ordering::Relaxed)
 }
@@ -473,6 +487,46 @@ mod tests {
         std::env::remove_var(SESSION_ENV_VAR);
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
         clear_explicit_session_for_test();
+    }
+
+    #[test]
+    fn local_attach_command_uses_default_launch_for_default_session() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::remove_var(SESSION_ENV_VAR);
+
+        assert_eq!(local_attach_command(), "herdr");
+
+        std::env::remove_var(SESSION_ENV_VAR);
+    }
+
+    #[test]
+    fn local_attach_command_uses_session_attach_for_named_session() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var(SESSION_ENV_VAR, "work");
+
+        assert_eq!(local_attach_command(), "herdr session attach work");
+
+        std::env::remove_var(SESSION_ENV_VAR);
+    }
+
+    #[test]
+    fn local_stop_command_uses_server_stop_for_default_session() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::remove_var(SESSION_ENV_VAR);
+
+        assert_eq!(local_stop_command(), "herdr server stop");
+
+        std::env::remove_var(SESSION_ENV_VAR);
+    }
+
+    #[test]
+    fn local_stop_command_uses_session_stop_for_named_session() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var(SESSION_ENV_VAR, "work");
+
+        assert_eq!(local_stop_command(), "herdr session stop work");
+
+        std::env::remove_var(SESSION_ENV_VAR);
     }
 
     #[test]

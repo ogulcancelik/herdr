@@ -85,10 +85,12 @@ fn read_server_status() -> io::Result<Option<crate::api::RuntimeStatus>> {
 }
 
 fn validate_running_server_compatibility() -> io::Result<()> {
+    let stop_command = crate::session::local_stop_command();
+    let attach_command = crate::session::local_attach_command();
     let Some(status) = read_server_status()? else {
-        return Err(io::Error::other(
-            "a herdr server is listening, but its status API is unavailable. Try `herdr server stop`; if that fails, stop the old server process manually, then run `herdr` again.",
-        ));
+        return Err(io::Error::other(format!(
+            "a herdr server is listening, but its status API is unavailable. Try `{stop_command}`; if that fails, stop the old server process manually, then run `{attach_command}` again."
+        )));
     };
 
     if status.protocol == Some(crate::server::protocol::PROTOCOL_VERSION) {
@@ -96,7 +98,7 @@ fn validate_running_server_compatibility() -> io::Result<()> {
     }
 
     Err(io::Error::other(format!(
-        "herdr server is running from v{} / protocol {}, but this client is v{} / protocol {}.\nStop the old server with `herdr server stop`, then run `herdr` again.",
+        "herdr server is running from v{} / protocol {}, but this client is v{} / protocol {}.\nStop the old server with `{stop_command}`, then run `{attach_command}` again.",
         status.version.as_deref().unwrap_or("unknown"),
         status
             .protocol
@@ -423,6 +425,49 @@ mod tests {
             "unexpected error: {err}"
         );
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn validate_running_server_compatibility_names_session_commands_for_protocol_mismatch() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = unique_test_dir("named-protocol");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("api.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, &path);
+        std::env::set_var(crate::session::SESSION_ENV_VAR, "work");
+        crate::session::clear_explicit_session_for_test();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            assert!(request.contains("ping"));
+            let body = format!(
+                "{{\"id\":\"autodetect:server:status\",\"result\":{{\"type\":\"pong\",\"version\":\"0.5.5\",\"protocol\":{}}}}}\n",
+                crate::server::protocol::PROTOCOL_VERSION + 1
+            );
+            stream.write_all(body.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let err = validate_running_server_compatibility().unwrap_err();
+        let message = err.to_string();
+
+        let _ = handle.join();
+        assert!(
+            message.contains("Stop the old server with `herdr session stop work`"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("then run `herdr session attach work` again"),
+            "unexpected error: {message}"
+        );
+        std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        crate::session::clear_explicit_session_for_test();
         let _ = std::fs::remove_dir_all(dir);
     }
 }
