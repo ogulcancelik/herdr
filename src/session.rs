@@ -495,8 +495,6 @@ mod tests {
         std::env::remove_var(SESSION_ENV_VAR);
 
         assert_eq!(local_attach_command(), "herdr");
-
-        std::env::remove_var(SESSION_ENV_VAR);
     }
 
     #[test]

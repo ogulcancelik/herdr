@@ -1186,7 +1186,13 @@ mod tests {
         atomic::{AtomicBool, Ordering},
         Arc,
     };
+    use std::sync::{Mutex, OnceLock};
     use std::thread;
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn unique_test_socket_path(name: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -1358,6 +1364,7 @@ mod tests {
 
     #[test]
     fn noninteractive_update_requires_stop_names_session_stop_command() {
+        let _guard = env_lock().lock().unwrap();
         assert!(
             !io::stdin().is_terminal(),
             "this test relies on noninteractive test stdin"
