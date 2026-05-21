@@ -25,6 +25,13 @@ const UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
 const REMOTE_BINARY_ENV_VAR: &str = "HERDR_REMOTE_BINARY";
 pub(crate) const REATTACH_COMMAND_ENV_VAR: &str = "HERDR_REATTACH_COMMAND";
 
+/// `remote-client-bridge` exit codes that let the launching process (SSH or
+/// Slurm attach) classify why the bridge failed. `srun --ntasks=1` propagates
+/// the single task's exit code cleanly, including through Pyxis.
+pub(crate) const BRIDGE_EXIT_SOCKET_UNREACHABLE: i32 = 10;
+pub(crate) const BRIDGE_EXIT_PROTOCOL_MISMATCH: i32 = 11;
+pub(crate) const BRIDGE_EXIT_SERVER_SPAWN_FAILED: i32 = 12;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemoteLaunch {
     pub(crate) target: String,
@@ -108,19 +115,38 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
     run_client_process(&local_socket, &reattach_command)
 }
 
+/// A `remote-client-bridge` startup failure, mapped to a distinct exit code so
+/// the launching process can report an actionable error.
+enum BridgeStartupError {
+    ProtocolMismatch(String),
+    ServerUnavailable(io::Error),
+}
+
 pub(crate) fn run_remote_client_bridge() -> io::Result<()> {
-    ensure_remote_server_running()?;
+    if let Err(err) = ensure_remote_server_running() {
+        let (code, message) = match err {
+            BridgeStartupError::ProtocolMismatch(message) => {
+                (BRIDGE_EXIT_PROTOCOL_MISMATCH, message)
+            }
+            BridgeStartupError::ServerUnavailable(err) => {
+                (BRIDGE_EXIT_SERVER_SPAWN_FAILED, err.to_string())
+            }
+        };
+        eprintln!("herdr remote-client-bridge: {message}");
+        std::process::exit(code);
+    }
 
     let socket_path = crate::server::headless::client_socket_path();
-    let stream = UnixStream::connect(&socket_path).map_err(|err| {
-        io::Error::new(
-            err.kind(),
-            format!(
-                "failed to connect to remote Herdr client socket {}: {err}",
+    let stream = match UnixStream::connect(&socket_path) {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!(
+                "herdr remote-client-bridge: failed to connect to client socket {}: {err}",
                 socket_path.display()
-            ),
-        )
-    })?;
+            );
+            std::process::exit(BRIDGE_EXIT_SOCKET_UNREACHABLE);
+        }
+    };
 
     let mut stdout = io::stdout().lock();
     let mut socket_to_stdout = stream.try_clone()?;
@@ -135,25 +161,32 @@ pub(crate) fn run_remote_client_bridge() -> io::Result<()> {
     copy_flush(&mut socket_to_stdout, &mut stdout).map(|_| ())
 }
 
-fn ensure_remote_server_running() -> io::Result<()> {
+fn ensure_remote_server_running() -> Result<(), BridgeStartupError> {
     let socket_path = crate::server::headless::client_socket_path();
     if crate::server::autodetect::is_server_listening() {
         let status = crate::api::read_runtime_status_at(
             &crate::api::socket_path(),
             Duration::from_millis(500),
-        )?
-        .ok_or_else(|| io::Error::other("remote server status API is unavailable"))?;
+        )
+        .map_err(BridgeStartupError::ServerUnavailable)?
+        .ok_or_else(|| {
+            BridgeStartupError::ServerUnavailable(io::Error::other(
+                "remote server status API is unavailable",
+            ))
+        })?;
         if status.protocol == Some(CURRENT_PROTOCOL) {
             return Ok(());
         }
-        return Err(io::Error::other(format!(
-            "remote herdr server is running with protocol {}, but this bridge needs protocol {CURRENT_PROTOCOL}; rerun `herdr --remote` from an interactive terminal to approve stopping it",
+        return Err(BridgeStartupError::ProtocolMismatch(format!(
+            "remote herdr server is running with protocol {}, but this bridge needs protocol {CURRENT_PROTOCOL}",
             protocol_label(status.protocol)
         )));
     }
 
-    crate::server::autodetect::spawn_server_daemon()?;
+    crate::server::autodetect::spawn_server_daemon()
+        .map_err(BridgeStartupError::ServerUnavailable)?;
     crate::server::autodetect::wait_for_server_socket(&socket_path, Duration::from_secs(5))
+        .map_err(BridgeStartupError::ServerUnavailable)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1131,7 +1164,10 @@ fn bridge_connection(
     }
 }
 
-fn copy_flush<R: io::Read, W: io::Write>(reader: &mut R, writer: &mut W) -> io::Result<u64> {
+pub(crate) fn copy_flush<R: io::Read, W: io::Write>(
+    reader: &mut R,
+    writer: &mut W,
+) -> io::Result<u64> {
     let mut buffer = [0_u8; 16 * 1024];
     let mut total = 0;
 
@@ -1149,7 +1185,7 @@ fn copy_flush<R: io::Read, W: io::Write>(reader: &mut R, writer: &mut W) -> io::
     }
 }
 
-fn run_client_process(local_socket: &Path, reattach_command: &str) -> io::Result<()> {
+pub(crate) fn run_client_process(local_socket: &Path, reattach_command: &str) -> io::Result<()> {
     let exe = std::env::current_exe()?;
     let status = Command::new(exe)
         .arg("client")

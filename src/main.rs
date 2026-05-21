@@ -42,6 +42,7 @@ mod remote;
 mod selection;
 mod server;
 mod session;
+mod slurm;
 mod sound;
 mod terminal;
 mod terminal_notify;
@@ -285,6 +286,25 @@ fn main() -> io::Result<()> {
         std::process::exit(2);
     }
 
+    let (args, slurm_launch) = match slurm::extract_slurm_args(&args) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            eprintln!("error: {err}");
+            eprintln!("run 'herdr --help' for usage");
+            std::process::exit(2);
+        }
+    };
+
+    if remote_launch.is_some() && slurm_launch.is_some() {
+        eprintln!("error: --remote and Slurm attach cannot be used together");
+        eprintln!("run 'herdr --help' for usage");
+        std::process::exit(2);
+    }
+
+    if let Some(slurm_launch) = slurm_launch {
+        return slurm::run_slurm(slurm_launch);
+    }
+
     if let cli::CommandOutcome::Handled(code) = cli::maybe_run(&args)? {
         std::process::exit(code);
     }
@@ -325,6 +345,7 @@ fn main() -> io::Result<()> {
         println!("Usage: herdr [options]");
         println!("       herdr --session <name> [options]");
         println!("       herdr --remote <ssh-target> [--session <name>]");
+        println!("       herdr slurm attach <job_id> [options]");
         println!("       herdr session attach <name>");
         println!("       herdr update");
         println!("       herdr server stop");
