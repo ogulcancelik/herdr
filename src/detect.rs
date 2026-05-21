@@ -341,15 +341,22 @@ fn detect_github_copilot(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
     // Blocked
-    if lower.contains("│ do you want") {
-        return AgentState::Blocked;
-    }
-    if lower.contains("confirm with") && lower.contains("enter") {
+    if lower.contains("│ do you want")
+        || (lower.contains("confirm with") && lower.contains("enter"))
+        || lower.contains("select an option")
+        || lower.contains("use arrows to move")
+        || lower.contains("type to filter")
+        || lower.contains("explain this command")
+        || lower.contains("execute this command")
+        || lower.contains("copy command to clipboard")
+        || lower.contains("revise query")
+        || lower.contains("are you sure you want to execute")
+    {
         return AgentState::Blocked;
     }
 
     // Working
-    if lower.contains("esc to cancel") {
+    if lower.contains("esc to cancel") || lower.contains("generating") {
         return AgentState::Working;
     }
 
@@ -1552,9 +1559,33 @@ mod tests {
     }
 
     #[test]
+    fn copilot_waiting_menu_options() {
+        assert_eq!(
+            detect_github_copilot("? Select an option  [Use arrows to move, type to filter]\n> Explain this command\n  Execute this command"),
+            AgentState::Blocked
+        );
+    }
+
+    #[test]
+    fn copilot_waiting_execute_confirm() {
+        assert_eq!(
+            detect_github_copilot("Are you sure you want to execute the suggested command?"),
+            AgentState::Blocked
+        );
+    }
+
+    #[test]
     fn copilot_working() {
         assert_eq!(
             detect_github_copilot("generating\nesc to cancel"),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn copilot_working_generating() {
+        assert_eq!(
+            detect_github_copilot("Generating suggestions..."),
             AgentState::Working
         );
     }

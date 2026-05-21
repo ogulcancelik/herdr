@@ -182,8 +182,9 @@ automatic detection works out of the box. process name matching plus terminal ou
 | cursor agent | ✓ | ✓ | ✓ |
 | antigravity cli | ✓ | ✓ | ✓ |
 | [kiro cli](https://kiro.dev/docs/cli/) | ✓ | ✓ | — |
+| [github copilot cli](https://github.com/features/copilot) | ✓ | ✓ | ✓ |
 
-detected but not fully tested: gemini cli, cline, kimi, github copilot cli.
+detected but not fully tested: gemini cli, cline, kimi.
 
 for agents outside the built-in list, herdr still works as a terminal multiplexer with workspaces, panes, and tiling. custom integrations can report agent labels over the socket api. see the [socket api docs](https://herdr.dev/docs/socket-api/).
 
