@@ -344,12 +344,6 @@ fn detect_github_copilot(content: &str) -> AgentState {
     if lower.contains("│ do you want")
         || (lower.contains("confirm with") && lower.contains("enter"))
         || lower.contains("select an option")
-        || lower.contains("use arrows to move")
-        || lower.contains("type to filter")
-        || lower.contains("explain this command")
-        || lower.contains("execute this command")
-        || lower.contains("copy command to clipboard")
-        || lower.contains("revise query")
         || lower.contains("are you sure you want to execute")
     {
         return AgentState::Blocked;
