@@ -968,17 +968,15 @@ impl AppState {
                         .selection
                         .as_ref()
                         .is_some_and(|s| s.pane_id == info.id && s.is_visible());
-                    let kind = ContextMenuKind::Pane {
-                        pane_id: info.id,
-                        has_manual_label,
-                        has_selection,
-                    };
-                    let initial_idx = {
-                        let tmp = ContextMenuState { kind: kind.clone(), x: 0, y: 0, list: MenuListState::new(0) };
-                        tmp.items().iter().position(|i| i.enabled).unwrap_or(0)
-                    };
+                    // Copy is always at index 0, Paste is at index 1. If Copy is disabled (no selection),
+                    // start highlighting at Paste (index 1).
+                    let initial_idx = if has_selection { 0 } else { 1 };
                     self.context_menu = Some(ContextMenuState {
-                        kind,
+                        kind: ContextMenuKind::Pane {
+                            pane_id: info.id,
+                            has_manual_label,
+                            has_selection,
+                        },
                         x: mouse.column,
                         y: mouse.row,
                         list: MenuListState::new(initial_idx),
