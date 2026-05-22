@@ -123,8 +123,10 @@ impl App {
         if self.state.request_clipboard_paste {
             self.state.request_clipboard_paste = false;
             if let Some(text) = crate::platform::read_clipboard_text() {
-                self.handle_paste(text).await;
-                changed = true;
+                if !text.is_empty() {
+                    self.handle_paste(text).await;
+                    changed = true;
+                }
             }
         }
 
