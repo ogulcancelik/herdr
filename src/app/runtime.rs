@@ -63,7 +63,7 @@ impl App {
         &mut self,
         event: crate::raw_input::RawInputEvent,
     ) -> bool {
-        let changed = match event {
+        let mut changed = match event {
             crate::raw_input::RawInputEvent::Key(key) => {
                 let key_id = repeat_key_identity(&key);
                 match key.kind {
@@ -124,6 +124,7 @@ impl App {
             self.state.request_clipboard_paste = false;
             if let Some(text) = crate::platform::read_clipboard_text() {
                 self.handle_paste(text).await;
+                changed = true;
             }
         }
 
