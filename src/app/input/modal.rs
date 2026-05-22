@@ -638,12 +638,21 @@ pub(crate) fn handle_context_menu_key(
         }
         KeyCode::Up => {
             if let Some(menu) = &mut state.context_menu {
-                menu.list.move_prev();
+                let items = menu.items();
+                let start = menu.list.highlighted;
+                if let Some(idx) = (0..start).rev().find(|&i| items.get(i).is_some_and(|it| it.enabled)) {
+                    menu.list.highlighted = idx;
+                }
             }
         }
         KeyCode::Down => {
             if let Some(menu) = &mut state.context_menu {
-                menu.list.move_next(menu.items().len());
+                let items = menu.items();
+                let start = menu.list.highlighted;
+                let count = items.len();
+                if let Some(idx) = (start + 1..count).find(|&i| items.get(i).is_some_and(|it| it.enabled)) {
+                    menu.list.highlighted = idx;
+                }
             }
         }
         KeyCode::Enter => {
@@ -1143,5 +1152,57 @@ mod tests {
 
         assert!(state.workspaces.is_empty());
         assert_eq!(state.mode, Mode::Navigate);
+    }
+
+    #[test]
+    fn down_key_skips_disabled_context_menu_item() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::ContextMenu;
+        state.context_menu = Some(ContextMenuState {
+            kind: ContextMenuKind::Pane {
+                pane_id: crate::layout::PaneId::from_raw(0),
+                has_manual_label: false,
+                has_selection: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        });
+        handle_context_menu_key(
+            &mut state,
+            &mut crate::terminal::TerminalRuntimeRegistry::new(),
+            KeyEvent::new(
+                KeyCode::Down,
+                KeyModifiers::empty(),
+            ),
+        );
+        // Copy(0) is disabled; Down from 0 should land on Paste(1)
+        assert_eq!(state.context_menu.as_ref().unwrap().list.highlighted, 1);
+    }
+
+    #[test]
+    fn up_key_from_paste_skips_disabled_copy() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::ContextMenu;
+        state.context_menu = Some(ContextMenuState {
+            kind: ContextMenuKind::Pane {
+                pane_id: crate::layout::PaneId::from_raw(0),
+                has_manual_label: false,
+                has_selection: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(1), // start at Paste
+        });
+        handle_context_menu_key(
+            &mut state,
+            &mut crate::terminal::TerminalRuntimeRegistry::new(),
+            KeyEvent::new(
+                KeyCode::Up,
+                KeyModifiers::empty(),
+            ),
+        );
+        // Up from Paste(1) → Copy(0) is disabled → stay at 1
+        assert_eq!(state.context_menu.as_ref().unwrap().list.highlighted, 1);
     }
 }

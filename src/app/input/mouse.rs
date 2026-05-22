@@ -875,7 +875,12 @@ impl AppState {
             MouseEventKind::Moved if self.mode == Mode::ContextMenu => {
                 let hovered = self.context_menu_item_at(mouse.column, mouse.row);
                 if let Some(menu) = &mut self.context_menu {
-                    menu.list.hover(hovered);
+                    if let Some(idx) = hovered {
+                        let items = menu.items();
+                        if items.get(idx).is_some_and(|i| i.enabled) {
+                            menu.list.hover(Some(idx));
+                        }
+                    }
                 }
             }
 
