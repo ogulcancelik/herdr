@@ -867,6 +867,7 @@ pub enum ContextMenuKind {
     Pane {
         pane_id: PaneId,
         has_manual_label: bool,
+        has_selection: bool,
     },
 }
 
@@ -934,8 +935,11 @@ impl ContextMenuState {
             ],
             ContextMenuKind::Pane {
                 has_manual_label: true,
+                has_selection,
                 ..
             } => vec![
+                if has_selection { MenuItem::active("Copy") } else { MenuItem::disabled("Copy") },
+                MenuItem::active("Paste"),
                 MenuItem::active("Rename pane"),
                 MenuItem::active("Clear pane name"),
                 MenuItem::active("Split vertical"),
@@ -945,8 +949,11 @@ impl ContextMenuState {
             ],
             ContextMenuKind::Pane {
                 has_manual_label: false,
+                has_selection,
                 ..
             } => vec![
+                if has_selection { MenuItem::active("Copy") } else { MenuItem::disabled("Copy") },
+                MenuItem::active("Paste"),
                 MenuItem::active("Rename pane"),
                 MenuItem::active("Split vertical"),
                 MenuItem::active("Split horizontal"),
@@ -1583,5 +1590,40 @@ mod tests {
         let items = menu.items();
         assert!(items.iter().all(|i| i.enabled), "tab menu items should all be enabled");
         assert!(items.iter().any(|i| i.label == "New tab"));
+    }
+
+    #[test]
+    fn pane_menu_has_copy_enabled_when_selection_exists() {
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Pane {
+                pane_id: crate::layout::PaneId::from_raw(0),
+                has_manual_label: false,
+                has_selection: true,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        let items = menu.items();
+        let copy = items.iter().find(|i| i.label == "Copy").expect("Copy item missing");
+        let paste = items.iter().find(|i| i.label == "Paste").expect("Paste item missing");
+        assert!(copy.enabled, "Copy should be enabled when has_selection=true");
+        assert!(paste.enabled, "Paste should always be enabled");
+    }
+
+    #[test]
+    fn pane_menu_has_copy_disabled_when_no_selection() {
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Pane {
+                pane_id: crate::layout::PaneId::from_raw(0),
+                has_manual_label: false,
+                has_selection: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        let copy = menu.items().into_iter().find(|i| i.label == "Copy").expect("Copy item missing");
+        assert!(!copy.enabled, "Copy should be disabled when has_selection=false");
     }
 }

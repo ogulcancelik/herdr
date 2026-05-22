@@ -963,6 +963,7 @@ impl AppState {
                         kind: ContextMenuKind::Pane {
                             pane_id: info.id,
                             has_manual_label,
+                            has_selection: false,
                         },
                         x: mouse.column,
                         y: mouse.row,
@@ -1998,10 +1999,11 @@ mod tests {
             kind: ContextMenuKind::Pane {
                 pane_id,
                 has_manual_label: false,
+                has_selection: false,
             },
             x: 2,
             y: 2,
-            list: MenuListState::new(1),
+            list: MenuListState::new(3),
         });
         app.state.mode = Mode::ContextMenu;
 
