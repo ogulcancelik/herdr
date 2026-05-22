@@ -798,6 +798,28 @@ impl AppState {
         self.selection = None;
         self.selection_autoscroll = None;
     }
+
+    pub fn copy_visible_selection(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) {
+        let sel = match &self.selection {
+            Some(sel) if sel.is_visible() => sel.clone(),
+            _ => return,
+        };
+        let ws_idx = match self.active {
+            Some(i) if self.workspaces.get(i).is_some() => i,
+            _ => return,
+        };
+        let text = self
+            .runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, sel.pane_id)
+            .and_then(|rt| rt.extract_selection(&sel));
+        if let Some(text) = text {
+            if !text.is_empty() {
+                self.request_clipboard_write = Some(text.into_bytes());
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2221,5 +2243,14 @@ mod tests {
         assert_eq!(state.request_remove_linked_worktree, None);
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "selected");
+    }
+
+    #[test]
+    fn copy_visible_selection_is_noop_when_no_selection() {
+        let mut state = app_with_workspaces(&["test"]);
+        state.selection = None;
+        let runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.copy_visible_selection(&runtimes);
+        assert!(state.request_clipboard_write.is_none(), "no-op when no selection");
     }
 }
