@@ -613,9 +613,29 @@ pub const Handler = struct {
                     mask.* = .initEmpty();
                 },
 
-                .query,
-                .reset_special,
-                => {},
+                .reset_special => {},
+
+                .query => |target| switch (target) {
+                    .dynamic => |dynamic| {
+                        const rgb_opt = switch (dynamic) {
+                            .foreground => self.terminal.colors.foreground.get(),
+                            .background => self.terminal.colors.background.get(),
+                            .cursor => self.terminal.colors.cursor.get(),
+                            else => null,
+                        };
+                        if (rgb_opt) |rgb| {
+                            const osc_num = @intFromEnum(dynamic);
+                            var buf: [64]u8 = undefined;
+                            const resp = std.fmt.bufPrintZ(
+                                &buf,
+                                "\x1b]{d};rgb:{x:0>4}/{x:0>4}/{x:0>4}\x1b\\",
+                                .{ osc_num, @as(u16, rgb.r) * 257, @as(u16, rgb.g) * 257, @as(u16, rgb.b) * 257 },
+                            ) catch return;
+                            self.writePty(resp);
+                        }
+                    },
+                    .palette, .special => {},
+                },
             }
         }
     }
@@ -1037,6 +1057,60 @@ test "OSC 12 set and reset cursor color" {
     // Reset cursor
     s.nextSlice("\x1b]112\x1b\\");
     // After reset, cursor might be null (using default)
+}
+
+test "OSC 10/11 query responds with current color" {
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 10, .rows = 10 });
+    defer t.deinit(testing.allocator);
+
+    // Without callback, query should not crash
+    {
+        var s: Stream = .initAlloc(testing.allocator, .init(&t));
+        defer s.deinit();
+        s.nextSlice("\x1b]11;?\x1b\\");
+    }
+
+    t.fullReset();
+
+    // With callback, query should produce a response
+    {
+        const S = struct {
+            var last_response: ?[:0]const u8 = null;
+            fn writePty(_: *Handler, data: [:0]const u8) void {
+                if (last_response) |old| testing.allocator.free(old);
+                last_response = testing.allocator.dupeZ(u8, data) catch @panic("OOM");
+            }
+        };
+        S.last_response = null;
+        defer if (S.last_response) |old| testing.allocator.free(old);
+
+        var handler: Handler = .init(&t);
+        handler.effects.write_pty = &S.writePty;
+
+        var s: Stream = .initAlloc(testing.allocator, handler);
+        defer s.deinit();
+
+        // Query unset color — no response expected
+        s.nextSlice("\x1b]11;?\x1b\\");
+        try testing.expect(S.last_response == null);
+
+        // Set background to solarized light base3 and query
+        s.nextSlice("\x1b]11;rgb:fd/f6/e3\x1b\\");
+        s.nextSlice("\x1b]11;?\x1b\\");
+        try testing.expectEqualStrings(
+            "\x1b]11;rgb:fdfd/f6f6/e3e3\x1b\\",
+            S.last_response.?,
+        );
+
+        // Set foreground and query
+        S.last_response = null;
+        s.nextSlice("\x1b]10;rgb:65/7b/83\x1b\\");
+        s.nextSlice("\x1b]10;?\x1b\\");
+        try testing.expectEqualStrings(
+            "\x1b]10;rgb:6565/7b7b/8383\x1b\\",
+            S.last_response.?,
+        );
+    }
 }
 
 test "kitty color protocol set palette" {
