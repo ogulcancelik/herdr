@@ -160,6 +160,37 @@ pub fn write_clipboard(bytes: &[u8]) -> bool {
     false
 }
 
+pub fn read_clipboard_text() -> Option<String> {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        if let Some(text) = run_read_command("wl-paste", &["--no-newline"]) {
+            return Some(text);
+        }
+    }
+    if std::env::var_os("DISPLAY").is_some() {
+        if let Some(text) = run_read_command("xclip", &["-selection", "clipboard", "-o"]) {
+            return Some(text);
+        }
+        if let Some(text) = run_read_command("xsel", &["--clipboard", "--output"]) {
+            return Some(text);
+        }
+    }
+    None
+}
+
+fn run_read_command(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if output.status.success() {
+        String::from_utf8(output.stdout).ok()
+    } else {
+        None
+    }
+}
+
 pub fn read_clipboard_image() -> Option<ClipboardImage> {
     for (mime, extension) in [
         ("image/png", "png"),
@@ -417,5 +448,16 @@ mod tests {
         let args = std::fs::read_to_string(&path).expect("args file");
         let _ = std::fs::remove_file(&path);
         assert_eq!(args, "--\n-danger\nbody\n");
+    }
+
+    #[test]
+    fn read_clipboard_text_returns_none_when_no_display() {
+        let _guard = env_lock().lock().unwrap();
+        unsafe {
+            std::env::remove_var("WAYLAND_DISPLAY");
+            std::env::remove_var("DISPLAY");
+        }
+        let result = read_clipboard_text();
+        assert!(result.is_none());
     }
 }

@@ -207,6 +207,19 @@ pub fn write_clipboard(bytes: &[u8]) -> bool {
     )
 }
 
+pub fn read_clipboard_text() -> Option<String> {
+    let output = Command::new("pbpaste")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if output.status.success() {
+        String::from_utf8(output.stdout).ok()
+    } else {
+        None
+    }
+}
+
 pub fn read_clipboard_image() -> Option<ClipboardImage> {
     let path = std::env::temp_dir().join(format!(
         "herdr-clipboard-image-{}-{}.png",
