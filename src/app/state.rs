@@ -834,7 +834,22 @@ pub(crate) struct TabPressState {
     pub start_row: u16,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MenuItem {
+    pub label: &'static str,
+    pub enabled: bool,
+}
+
+impl MenuItem {
+    pub fn active(label: &'static str) -> Self {
+        Self { label, enabled: true }
+    }
+
+    pub fn disabled(label: &'static str) -> Self {
+        Self { label, enabled: false }
+    }
+}
+
 pub enum ContextMenuKind {
     Workspace {
         ws_idx: usize,
@@ -864,63 +879,79 @@ pub struct ContextMenuState {
 }
 
 impl ContextMenuState {
-    pub fn items(&self) -> &'static [&'static str] {
+    pub fn items(&self) -> Vec<MenuItem> {
         match self.kind {
-            ContextMenuKind::Workspace { .. } => &["Rename", "Close"],
+            ContextMenuKind::Workspace { .. } => vec![
+                MenuItem::active("Rename"),
+                MenuItem::active("Close"),
+            ],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: false,
                 ..
-            } => &["Rename", "Close", "New worktree", "Open worktree..."],
+            } => vec![
+                MenuItem::active("Rename"),
+                MenuItem::active("Close"),
+                MenuItem::active("New worktree"),
+                MenuItem::active("Open worktree..."),
+            ],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: true,
                 ..
-            } => &["Rename", "Close", "Delete worktree checkout..."],
+            } => vec![
+                MenuItem::active("Rename"),
+                MenuItem::active("Close"),
+                MenuItem::active("Delete worktree checkout..."),
+            ],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: true,
                 collapsed: true,
                 ..
-            } => &[
-                "Rename",
-                "Close group",
-                "New worktree",
-                "Open worktree...",
-                "Expand",
+            } => vec![
+                MenuItem::active("Rename"),
+                MenuItem::active("Close group"),
+                MenuItem::active("New worktree"),
+                MenuItem::active("Open worktree..."),
+                MenuItem::active("Expand"),
             ],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: true,
                 collapsed: false,
                 ..
-            } => &[
-                "Rename",
-                "Close group",
-                "New worktree",
-                "Open worktree...",
-                "Collapse",
+            } => vec![
+                MenuItem::active("Rename"),
+                MenuItem::active("Close group"),
+                MenuItem::active("New worktree"),
+                MenuItem::active("Open worktree..."),
+                MenuItem::active("Collapse"),
             ],
-            ContextMenuKind::Tab { .. } => &["New tab", "Rename", "Close"],
+            ContextMenuKind::Tab { .. } => vec![
+                MenuItem::active("New tab"),
+                MenuItem::active("Rename"),
+                MenuItem::active("Close"),
+            ],
             ContextMenuKind::Pane {
                 has_manual_label: true,
                 ..
-            } => &[
-                "Rename pane",
-                "Clear pane name",
-                "Split vertical",
-                "Split horizontal",
-                "Zoom",
-                "Close pane",
+            } => vec![
+                MenuItem::active("Rename pane"),
+                MenuItem::active("Clear pane name"),
+                MenuItem::active("Split vertical"),
+                MenuItem::active("Split horizontal"),
+                MenuItem::active("Zoom"),
+                MenuItem::active("Close pane"),
             ],
             ContextMenuKind::Pane {
                 has_manual_label: false,
                 ..
-            } => &[
-                "Rename pane",
-                "Split vertical",
-                "Split horizontal",
-                "Zoom",
-                "Close pane",
+            } => vec![
+                MenuItem::active("Rename pane"),
+                MenuItem::active("Split vertical"),
+                MenuItem::active("Split horizontal"),
+                MenuItem::active("Zoom"),
+                MenuItem::active("Close pane"),
             ],
         }
     }
@@ -1490,8 +1521,8 @@ mod tests {
         };
 
         assert_eq!(
-            menu.items(),
-            &["Rename", "Close", "Delete worktree checkout..."]
+            menu.items().iter().map(|i| i.label).collect::<Vec<_>>(),
+            vec!["Rename", "Close", "Delete worktree checkout..."]
         );
     }
 
@@ -1510,8 +1541,8 @@ mod tests {
         };
 
         assert_eq!(
-            menu.items(),
-            &["Rename", "Close", "New worktree", "Open worktree..."]
+            menu.items().iter().map(|i| i.label).collect::<Vec<_>>(),
+            vec!["Rename", "Close", "New worktree", "Open worktree..."]
         );
     }
 
@@ -1530,8 +1561,8 @@ mod tests {
         };
 
         assert_eq!(
-            menu.items(),
-            &[
+            menu.items().iter().map(|i| i.label).collect::<Vec<_>>(),
+            vec![
                 "Rename",
                 "Close group",
                 "New worktree",
@@ -1539,5 +1570,18 @@ mod tests {
                 "Collapse"
             ]
         );
+    }
+
+    #[test]
+    fn context_menu_items_returns_menu_items() {
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Tab { ws_idx: 0, tab_idx: 0 },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        let items = menu.items();
+        assert!(items.iter().all(|i| i.enabled), "tab menu items should all be enabled");
+        assert!(items.iter().any(|i| i.label == "New tab"));
     }
 }

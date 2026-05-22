@@ -505,7 +505,12 @@ pub(super) fn apply_context_menu_action(
     idx: usize,
 ) {
     let item = menu.items().get(idx).copied();
-    match (menu.kind, item) {
+    if item.as_ref().is_some_and(|i| !i.enabled) {
+        leave_modal(state);
+        return;
+    }
+    let label = item.map(|i| i.label);
+    match (menu.kind, label) {
         (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("New worktree")) => {
             state.request_new_linked_worktree = Some(ws_idx);
             leave_modal(state);

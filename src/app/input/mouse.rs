@@ -1076,7 +1076,7 @@ impl AppState {
         let max_item_w = menu
             .items()
             .iter()
-            .map(|item| item.len() as u16)
+            .map(|item| item.label.len() as u16)
             .max()
             .unwrap_or(0);
         let menu_w = (max_item_w + 4).max(14).min(screen.width.max(1));

@@ -220,10 +220,16 @@ pub(super) fn render_context_menu(app: &AppState, frame: &mut Frame) {
     let items: Vec<ListItem> = menu
         .items()
         .iter()
-        .map(|item| ListItem::new(Line::from(*item)))
+        .map(|item| {
+            let style = if item.enabled {
+                Style::default().fg(p.text)
+            } else {
+                Style::default().fg(p.overlay0)
+            };
+            ListItem::new(Line::from(Span::styled(item.label, style)))
+        })
         .collect();
     let list = List::new(items)
-        .style(Style::default().fg(p.text))
         .highlight_style(
             Style::default()
                 .bg(p.accent)
