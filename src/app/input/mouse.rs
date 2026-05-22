@@ -964,15 +964,24 @@ impl AppState {
                         .and_then(|pane| self.terminals.get(&pane.attached_terminal_id))
                         .and_then(|terminal| terminal.manual_label.as_ref())
                         .is_some();
+                    let has_selection = self
+                        .selection
+                        .as_ref()
+                        .is_some_and(|s| s.pane_id == info.id && s.is_visible());
+                    let kind = ContextMenuKind::Pane {
+                        pane_id: info.id,
+                        has_manual_label,
+                        has_selection,
+                    };
+                    let initial_idx = {
+                        let tmp = ContextMenuState { kind: kind.clone(), x: 0, y: 0, list: MenuListState::new(0) };
+                        tmp.items().iter().position(|i| i.enabled).unwrap_or(0)
+                    };
                     self.context_menu = Some(ContextMenuState {
-                        kind: ContextMenuKind::Pane {
-                            pane_id: info.id,
-                            has_manual_label,
-                            has_selection: false,
-                        },
+                        kind,
                         x: mouse.column,
                         y: mouse.row,
-                        list: MenuListState::new(0),
+                        list: MenuListState::new(initial_idx),
                     });
                     self.mode = Mode::ContextMenu;
                 }
