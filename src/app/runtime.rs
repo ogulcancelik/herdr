@@ -120,6 +120,13 @@ impl App {
             }
             crate::raw_input::RawInputEvent::Unsupported => false,
         };
+        if self.state.request_clipboard_paste {
+            self.state.request_clipboard_paste = false;
+            if let Some(text) = crate::platform::read_clipboard_text() {
+                self.handle_paste(text).await;
+            }
+        }
+
         self.shutdown_detached_terminal_runtimes();
         changed
     }

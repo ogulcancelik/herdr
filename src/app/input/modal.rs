@@ -626,6 +626,10 @@ pub(super) fn apply_context_menu_action(
             state.copy_visible_selection(terminal_runtimes);
             state.mode = Mode::Terminal;
         }
+        (ContextMenuKind::Pane { .. }, Some("Paste")) => {
+            state.request_clipboard_paste = true;
+            state.mode = Mode::Terminal;
+        }
         _ => leave_modal(state),
     }
 }

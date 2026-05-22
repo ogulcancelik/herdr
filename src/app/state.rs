@@ -1045,6 +1045,7 @@ pub struct AppState {
     /// Set when UI interaction requested a clipboard write that must be
     /// handled by the outer App/event loop instead of directly from AppState.
     pub request_clipboard_write: Option<Vec<u8>>,
+    pub request_clipboard_paste: bool,
     pub creating_new_tab: bool,
     pub requested_new_tab_name: Option<String>,
     pub rename_pane_target: Option<PaneId>,
@@ -1330,6 +1331,7 @@ impl AppState {
             request_reload_config: false,
             request_client_sound_config_reload: false,
             request_clipboard_write: None,
+            request_clipboard_paste: false,
             creating_new_tab: false,
             requested_new_tab_name: None,
             rename_pane_target: None,
