@@ -222,17 +222,8 @@ pub struct IndexedKeysConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct WorktreesConfig {
-    /// Template for the root directory under which Herdr creates worktree
-    /// checkouts. Supports `~` and the placeholders `{repo_root}`,
-    /// `{repo_parent}`, and `{repo_name}` (substituted per source repo at
-    /// worktree-creation time).
-    ///
-    /// Layout:
-    /// * Default (no placeholders): `<directory>/<repo_name>/<branch-slug>`
-    /// * Templates containing `{repo_name}` or `{repo_root}` drop the implicit
-    ///   `<repo_name>/` segment, so e.g.
-    ///   `directory = "{repo_parent}/{repo_name}.worktrees"` produces a
-    ///   sibling-folder layout: `<parent>/<repo>.worktrees/<branch-slug>`.
+    /// Root directory for worktree checkouts. Supports `~` and the
+    /// `{repo_root}`, `{repo_parent}`, `{repo_name}` placeholders.
     pub directory: String,
 }
 

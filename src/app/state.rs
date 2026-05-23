@@ -1013,9 +1013,8 @@ pub struct AppState {
     pub worktree_create: Option<WorktreeCreateState>,
     pub worktree_open: Option<WorktreeOpenState>,
     pub worktree_remove: Option<WorktreeRemoveState>,
-    /// Raw `[worktrees].directory` template from config. Per-repo placeholder
-    /// resolution happens at worktree-creation time via
-    /// `crate::worktree::default_checkout_path`.
+    /// Raw `[worktrees].directory` template. Per-repo placeholders are resolved
+    /// at worktree-creation time, not here.
     pub worktree_directory: String,
     pub collapsed_space_keys: std::collections::HashSet<String>,
     pub request_complete_onboarding: bool,

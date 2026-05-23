@@ -72,20 +72,9 @@ pub(crate) fn canonical_or_original(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// Resolve the `[worktrees].directory` template into a concrete root path for
-/// a specific source repo.
-///
-/// Supported placeholders:
-///   `{repo_root}`   — absolute path of the source repo (e.g. `/home/me/foo/bar`)
-///   `{repo_parent}` — parent directory of the source repo (e.g. `/home/me/foo`)
-///   `{repo_name}`   — basename of the source repo (e.g. `bar`)
-///
-/// Returns the resolved root and whether the template referenced `{repo_name}`
-/// or `{repo_root}` — when it did, [`default_checkout_path`] skips the implicit
-/// `<repo_name>/` segment so paths don't double up (e.g. a template of
-/// `{repo_parent}/{repo_name}.worktrees` resolves to
-/// `<parent>/<repo>.worktrees/<branch-slug>`, not
-/// `<parent>/<repo>.worktrees/<repo>/<branch-slug>`).
+/// Expands `~` and `{repo_root}`/`{repo_parent}`/`{repo_name}` in `template`.
+/// The bool is true when the template already encodes the repo name (via
+/// `{repo_name}` or `{repo_root}`) so callers can skip appending it again.
 pub(crate) fn resolve_worktree_root(
     template: &str,
     repo_root: &Path,
@@ -99,11 +88,7 @@ pub(crate) fn resolve_worktree_root(
         return (expand_tilde_path(template), false);
     }
 
-    // `Path::parent()` returns paths without a trailing `/` for normal paths,
-    // but returns `Some("/")` for paths like "/foo" and `None` for "/" itself.
-    // For the "/" case (whether falling back from `None` or returned as the
-    // parent of a top-level repo), substitute "" so `{repo_parent}/wt` becomes
-    // `/wt` rather than `//wt` in user-visible logs.
+    // Avoid "//wt" when {repo_parent} resolves to the filesystem root.
     let repo_parent = repo_root.parent().unwrap_or_else(|| Path::new("/"));
     let repo_parent_str = if repo_parent == Path::new("/") {
         String::new()
@@ -119,10 +104,8 @@ pub(crate) fn resolve_worktree_root(
     (expand_tilde_path(&expanded), has_repo_name || has_repo_root)
 }
 
-/// Validate a `[worktrees].directory` template, returning user-facing
-/// diagnostics for problems Herdr can detect without knowing a specific repo:
-/// an empty/whitespace value, or `{...}` tokens that aren't one of the
-/// supported placeholders (`{repo_root}`, `{repo_parent}`, `{repo_name}`).
+/// Static diagnostics for `[worktrees].directory`: empty value or unknown
+/// `{...}` placeholders. Per-repo errors are not detectable here.
 pub(crate) fn template_diagnostics(template: &str) -> Vec<String> {
     let mut diagnostics = Vec::new();
 
@@ -491,9 +474,7 @@ prunable stale
 
     #[test]
     fn default_checkout_path_with_repo_parent_and_name_creates_sibling_layout() {
-        // Sibling layout: {repo_parent}/{repo_name}.worktrees lives next to the source repo.
-        // Because the template references {repo_name}, the implicit <repo>/ segment is
-        // dropped to avoid `.../bar.worktrees/bar/<branch>`.
+        // {repo_name} in template ⇒ implicit <repo>/ segment is dropped.
         assert_eq!(
             default_checkout_path(
                 "{repo_parent}/{repo_name}.worktrees",
@@ -561,8 +542,6 @@ prunable stale
 
     #[test]
     fn resolve_worktree_root_substitutes_empty_for_root_parent_to_avoid_double_slash() {
-        // /foo has parent /, which would naively yield "//wt". {repo_parent}
-        // substitutes to "" in that case so the result displays as "/wt".
         let (root, _) = resolve_worktree_root("{repo_parent}/wt", Path::new("/foo"), "foo");
         assert_eq!(root.display().to_string(), "/wt");
     }
