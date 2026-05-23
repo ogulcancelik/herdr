@@ -74,7 +74,20 @@ Set the root directory Herdr uses for Git worktree checkouts created from the si
 directory = "~/.herdr/worktrees"
 ```
 
-Herdr creates checkouts under `<directory>/<repo>/<branch-slug>`. For sibling-style checkouts, set this to a directory such as `~/Projects/herdr-worktrees`.
+By default Herdr creates checkouts under `<directory>/<repo>/<branch-slug>`. The `directory` value also accepts the following placeholders, substituted per source repo:
+
+- `{repo_root}` — absolute path of the source repo, e.g. `/home/me/foo/bar`
+- `{repo_parent}` — parent directory of the source repo, e.g. `/home/me/foo`
+- `{repo_name}` — basename of the source repo, e.g. `bar`
+
+For a true sibling-folder layout next to each repo, use `{repo_name}` in the template:
+
+```toml
+[worktrees]
+directory = "{repo_parent}/{repo_name}.worktrees"
+```
+
+With this config, a repo at `~/foo/bar` gets worktrees at `~/foo/bar.worktrees/<branch-slug>`. When the template contains `{repo_name}` or `{repo_root}`, Herdr drops the implicit `<repo>/` segment so the path doesn't double up.
 
 Worktree actions are available from Git workspace rows. `New worktree` creates a branch and checkout, opens it as a new Herdr workspace, and groups it under the source workspace. `Open worktree...` lists existing Git worktree checkouts for that repo; choosing an already-open checkout focuses it, and choosing a closed checkout opens it in the same group.
 

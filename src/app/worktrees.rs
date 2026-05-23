@@ -94,6 +94,7 @@ impl App {
         let branch = crate::worktree::generated_branch_slug(seed);
         let checkout_path = crate::worktree::default_checkout_path(
             &self.state.worktree_directory,
+            &space.repo_root,
             &repo_name,
             &branch,
         );
@@ -420,6 +421,7 @@ impl App {
         create.branch = self.state.name_input.clone();
         create.checkout_path = crate::worktree::default_checkout_path(
             &self.state.worktree_directory,
+            &create.source_repo_root,
             &create.repo_name,
             &create.branch,
         );
@@ -444,6 +446,7 @@ impl App {
         self.state.name_input = branch.clone();
         create.checkout_path = crate::worktree::default_checkout_path(
             &self.state.worktree_directory,
+            &create.source_repo_root,
             &create.repo_name,
             &branch,
         );
@@ -833,7 +836,7 @@ mod tests {
     #[test]
     fn sync_worktree_branch_updates_derived_path() {
         let mut app = app_for_worktree_tests();
-        app.state.worktree_directory = std::path::PathBuf::from("/w");
+        app.state.worktree_directory = "/w".to_string();
         app.state.name_input = "issue/137".into();
         app.state.worktree_create = Some(WorktreeCreateState {
             source_workspace_id: "source".into(),
@@ -864,9 +867,11 @@ mod tests {
         let repo = create_committed_repo("app-worktree-add-repo");
         let worktree_root = unique_temp_path("app-worktree-add-root");
         let branch = "worktree/app-worker";
-        let checkout = crate::worktree::default_checkout_path(&worktree_root, "herdr", branch);
+        let worktree_root_str = worktree_root.display().to_string();
+        let checkout =
+            crate::worktree::default_checkout_path(&worktree_root_str, &repo, "herdr", branch);
         let mut app = app_for_worktree_tests();
-        app.state.worktree_directory = worktree_root.clone();
+        app.state.worktree_directory = worktree_root_str.clone();
         app.state.name_input = branch.into();
         app.state.worktree_create = Some(WorktreeCreateState {
             source_workspace_id: "source".into(),
@@ -926,9 +931,11 @@ mod tests {
 
         let worktree_root = unique_temp_path("app-worktree-add-from-source-root");
         let branch = "worktree/from-source";
-        let checkout = crate::worktree::default_checkout_path(&worktree_root, "herdr", branch);
+        let worktree_root_str = worktree_root.display().to_string();
+        let checkout =
+            crate::worktree::default_checkout_path(&worktree_root_str, &repo, "herdr", branch);
         let mut app = app_for_worktree_tests();
-        app.state.worktree_directory = worktree_root.clone();
+        app.state.worktree_directory = worktree_root_str.clone();
         app.state.name_input = branch.into();
         app.state.worktree_create = Some(WorktreeCreateState {
             source_workspace_id: "source".into(),

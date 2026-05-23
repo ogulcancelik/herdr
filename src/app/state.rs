@@ -1013,7 +1013,10 @@ pub struct AppState {
     pub worktree_create: Option<WorktreeCreateState>,
     pub worktree_open: Option<WorktreeOpenState>,
     pub worktree_remove: Option<WorktreeRemoveState>,
-    pub worktree_directory: std::path::PathBuf,
+    /// Raw `[worktrees].directory` template from config. Per-repo placeholder
+    /// resolution happens at worktree-creation time via
+    /// `crate::worktree::default_checkout_path`.
+    pub worktree_directory: String,
     pub collapsed_space_keys: std::collections::HashSet<String>,
     pub request_complete_onboarding: bool,
     pub name_input: String,
@@ -1299,7 +1302,7 @@ impl AppState {
             worktree_create: None,
             worktree_open: None,
             worktree_remove: None,
-            worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
+            worktree_directory: "/tmp/herdr-worktrees".to_string(),
             collapsed_space_keys: std::collections::HashSet::new(),
             request_complete_onboarding: false,
             name_input: String::new(),

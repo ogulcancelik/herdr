@@ -72,8 +72,59 @@ pub(crate) fn canonical_or_original(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-pub(crate) fn default_checkout_path(root: &Path, repo_name: &str, branch: &str) -> PathBuf {
-    root.join(repo_name).join(branch_to_path_slug(branch))
+/// Resolve the `[worktrees].directory` template into a concrete root path for
+/// a specific source repo.
+///
+/// Supported placeholders:
+///   `{repo_root}`   — absolute path of the source repo (e.g. `/home/me/foo/bar`)
+///   `{repo_parent}` — parent directory of the source repo (e.g. `/home/me/foo`)
+///   `{repo_name}`   — basename of the source repo (e.g. `bar`)
+///
+/// Returns the resolved root and whether the template referenced `{repo_name}`
+/// or `{repo_root}` — when it did, [`default_checkout_path`] skips the implicit
+/// `<repo_name>/` segment so paths don't double up (e.g. a template of
+/// `{repo_parent}/{repo_name}.worktrees` resolves to
+/// `<parent>/<repo>.worktrees/<branch-slug>`, not
+/// `<parent>/<repo>.worktrees/<repo>/<branch-slug>`).
+pub(crate) fn resolve_worktree_root(
+    template: &str,
+    repo_root: &Path,
+    repo_name: &str,
+) -> (PathBuf, bool) {
+    let has_repo_name = template.contains("{repo_name}");
+    let has_repo_root = template.contains("{repo_root}");
+    let has_repo_parent = template.contains("{repo_parent}");
+
+    if !has_repo_name && !has_repo_root && !has_repo_parent {
+        return (expand_tilde_path(template), false);
+    }
+
+    let repo_parent = repo_root
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("/"));
+
+    let expanded = template
+        .replace("{repo_root}", &repo_root.display().to_string())
+        .replace("{repo_parent}", &repo_parent.display().to_string())
+        .replace("{repo_name}", repo_name);
+
+    (expand_tilde_path(&expanded), has_repo_name || has_repo_root)
+}
+
+pub(crate) fn default_checkout_path(
+    template: &str,
+    repo_root: &Path,
+    repo_name: &str,
+    branch: &str,
+) -> PathBuf {
+    let (root, repo_already_in_root) = resolve_worktree_root(template, repo_root, repo_name);
+    let base = if repo_already_in_root {
+        root
+    } else {
+        root.join(repo_name)
+    };
+    base.join(branch_to_path_slug(branch))
 }
 
 pub(crate) fn build_worktree_remove_command(
@@ -362,12 +413,101 @@ prunable stale
     fn default_checkout_path_appends_repo_and_branch_slug() {
         assert_eq!(
             default_checkout_path(
-                Path::new("/home/me/.herdr/worktrees"),
+                "/home/me/.herdr/worktrees",
+                Path::new("/home/me/code/herdr"),
                 "herdr",
                 "worktree/brave-river",
             ),
             PathBuf::from("/home/me/.herdr/worktrees/herdr/worktree-brave-river")
         );
+    }
+
+    #[test]
+    fn default_checkout_path_expands_tilde_in_legacy_template() {
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", "/home/me");
+        assert_eq!(
+            default_checkout_path(
+                "~/.herdr/worktrees",
+                Path::new("/home/me/code/herdr"),
+                "herdr",
+                "main",
+            ),
+            PathBuf::from("/home/me/.herdr/worktrees/herdr/main")
+        );
+        if let Some(home) = old_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    fn default_checkout_path_with_repo_parent_and_name_creates_sibling_layout() {
+        // Sibling layout: {repo_parent}/{repo_name}.worktrees lives next to the source repo.
+        // Because the template references {repo_name}, the implicit <repo>/ segment is
+        // dropped to avoid `.../bar.worktrees/bar/<branch>`.
+        assert_eq!(
+            default_checkout_path(
+                "{repo_parent}/{repo_name}.worktrees",
+                Path::new("/home/me/foo/bar"),
+                "bar",
+                "issue/137",
+            ),
+            PathBuf::from("/home/me/foo/bar.worktrees/issue-137")
+        );
+    }
+
+    #[test]
+    fn default_checkout_path_with_repo_root_nests_inside_repo() {
+        // {repo_root} also drops the implicit <repo>/ segment.
+        assert_eq!(
+            default_checkout_path(
+                "{repo_root}/.worktrees",
+                Path::new("/home/me/foo/bar"),
+                "bar",
+                "feature/x",
+            ),
+            PathBuf::from("/home/me/foo/bar/.worktrees/feature-x")
+        );
+    }
+
+    #[test]
+    fn default_checkout_path_with_only_repo_parent_keeps_repo_segment() {
+        // {repo_parent} alone does NOT include the repo name, so the implicit
+        // <repo>/ segment is preserved (matches legacy <root>/<repo>/<branch> shape).
+        assert_eq!(
+            default_checkout_path(
+                "{repo_parent}/shared-worktrees",
+                Path::new("/home/me/foo/bar"),
+                "bar",
+                "feature/x",
+            ),
+            PathBuf::from("/home/me/foo/shared-worktrees/bar/feature-x")
+        );
+    }
+
+    #[test]
+    fn resolve_worktree_root_signals_when_repo_name_is_in_template() {
+        let (root, repo_already_in_root) = resolve_worktree_root(
+            "{repo_parent}/{repo_name}.worktrees",
+            Path::new("/home/me/foo/bar"),
+            "bar",
+        );
+        assert_eq!(root, PathBuf::from("/home/me/foo/bar.worktrees"));
+        assert!(repo_already_in_root);
+
+        let (root, repo_already_in_root) =
+            resolve_worktree_root("/w", Path::new("/home/me/foo/bar"), "bar");
+        assert_eq!(root, PathBuf::from("/w"));
+        assert!(!repo_already_in_root);
+    }
+
+    #[test]
+    fn resolve_worktree_root_handles_repo_at_filesystem_root() {
+        // `parent()` returns None for /, but we should still produce something sane.
+        let (root, _) = resolve_worktree_root("{repo_parent}/wt", Path::new("/"), "");
+        assert_eq!(root, PathBuf::from("//wt"));
     }
 
     #[test]
