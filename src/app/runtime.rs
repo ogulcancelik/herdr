@@ -120,9 +120,21 @@ impl App {
             }
             crate::raw_input::RawInputEvent::Unsupported => false,
         };
+        if let Some(content) = self.state.request_clipboard_write.take() {
+            if self
+                .event_tx
+                .try_send(crate::events::AppEvent::ClipboardWrite { content })
+                .is_err()
+            {
+                tracing::warn!("failed to queue clipboard write event");
+            }
+        }
         if self.state.request_clipboard_paste {
             self.state.request_clipboard_paste = false;
-            if let Some(text) = crate::platform::read_clipboard_text() {
+            let text = tokio::task::spawn_blocking(crate::platform::read_clipboard_text)
+                .await
+                .unwrap_or(None);
+            if let Some(text) = text {
                 if !text.is_empty() {
                     self.handle_paste(text).await;
                     changed = true;

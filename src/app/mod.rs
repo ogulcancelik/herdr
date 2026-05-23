@@ -1154,6 +1154,45 @@ impl App {
                 crate::raw_input::RawInputEvent::Unsupported => {}
             }
         }
+
+        if let Some(content) = self.state.request_clipboard_write.take() {
+            if self
+                .event_tx
+                .try_send(AppEvent::ClipboardWrite { content })
+                .is_err()
+            {
+                tracing::warn!("failed to queue clipboard write event");
+            }
+        }
+        if self.state.request_clipboard_paste {
+            self.state.request_clipboard_paste = false;
+            if let Some(text) = crate::platform::read_clipboard_text() {
+                if !text.is_empty() {
+                    if let Some(active) = self.state.active {
+                        if let Some(ws) = self.state.workspaces.get(active) {
+                            if let Some(focused) = ws.focused_pane_id() {
+                                if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
+                                    &self.terminal_runtimes,
+                                    active,
+                                    focused,
+                                ) {
+                                    let bytes = if runtime
+                                        .input_state()
+                                        .map(|s| s.bracketed_paste)
+                                        .unwrap_or(false)
+                                    {
+                                        format!("\x1b[200~{text}\x1b[201~")
+                                    } else {
+                                        text
+                                    };
+                                    let _ = runtime.try_send_bytes(bytes::Bytes::from(bytes));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Handles a key event in non-terminal mode for the headless server.
