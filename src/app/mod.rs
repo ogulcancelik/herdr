@@ -1018,6 +1018,7 @@ impl App {
         }
 
         if !invalid_section("worktrees") {
+            diagnostics.extend(config.worktrees.diagnostics());
             self.state.worktree_directory = config.worktrees.directory.clone();
         }
 

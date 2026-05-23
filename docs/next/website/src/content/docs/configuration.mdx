@@ -89,6 +89,12 @@ directory = "{repo_parent}/{repo_name}.worktrees"
 
 With this config, a repo at `~/foo/bar` gets worktrees at `~/foo/bar.worktrees/<branch-slug>`. When the template contains `{repo_name}` or `{repo_root}`, Herdr drops the implicit `<repo>/` segment so the path doesn't double up.
 
+A few caveats:
+
+- `{repo_root}` and `{repo_parent}` are the paths Git reports for the source repo, with symlinks resolved. If you open a symlink such as `~/foo/bar` that points at `~/work/projects/bar`, `{repo_parent}` will be `~/work/projects`, not `~/foo`.
+- `directory = "{repo_root}/.worktrees"` places checkouts inside the source repo's working tree. Add the chosen folder (e.g. `.worktrees/`) to `.gitignore` or `.git/info/exclude` so Git doesn't show the worktrees as untracked changes.
+- Unknown placeholders (e.g. `{repo_nam}` typos) and an empty `directory` are surfaced as config diagnostics on startup.
+
 Worktree actions are available from Git workspace rows. `New worktree` creates a branch and checkout, opens it as a new Herdr workspace, and groups it under the source workspace. `Open worktree...` lists existing Git worktree checkouts for that repo; choosing an already-open checkout focuses it, and choosing a closed checkout opens it in the same group.
 
 Grouped worktrees still behave like normal Herdr workspaces: they can be focused, renamed, closed, and contain their own tabs and panes. The parent row is the original workspace. Closing the parent row closes the whole Herdr group, but it does not delete checkout folders or branches.

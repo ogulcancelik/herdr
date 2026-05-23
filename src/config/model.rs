@@ -236,6 +236,12 @@ pub struct WorktreesConfig {
     pub directory: String,
 }
 
+impl WorktreesConfig {
+    pub fn diagnostics(&self) -> Vec<String> {
+        crate::worktree::template_diagnostics(&self.directory)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
@@ -533,6 +539,22 @@ directory = "~/Projects/herdr-worktrees"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.worktrees.directory, "~/Projects/herdr-worktrees");
+    }
+
+    #[test]
+    fn collect_diagnostics_surfaces_worktrees_template_problems() {
+        // Guards the chain wiring in Config::collect_diagnostics; a future refactor
+        // that drops `self.worktrees.diagnostics()` would otherwise silently regress.
+        let toml = r#"
+[worktrees]
+directory = "~/wt/{repo_nam}"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let diagnostics = config.collect_diagnostics();
+        assert!(
+            diagnostics.iter().any(|d| d.contains("{repo_nam}")),
+            "expected worktrees diagnostic in {diagnostics:?}",
+        );
     }
 
     #[test]

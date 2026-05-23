@@ -99,17 +99,64 @@ pub(crate) fn resolve_worktree_root(
         return (expand_tilde_path(template), false);
     }
 
-    let repo_parent = repo_root
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("/"));
+    // `Path::parent()` returns paths without a trailing `/` for normal paths,
+    // but returns `Some("/")` for paths like "/foo" and `None` for "/" itself.
+    // For the "/" case (whether falling back from `None` or returned as the
+    // parent of a top-level repo), substitute "" so `{repo_parent}/wt` becomes
+    // `/wt` rather than `//wt` in user-visible logs.
+    let repo_parent = repo_root.parent().unwrap_or_else(|| Path::new("/"));
+    let repo_parent_str = if repo_parent == Path::new("/") {
+        String::new()
+    } else {
+        repo_parent.display().to_string()
+    };
 
     let expanded = template
         .replace("{repo_root}", &repo_root.display().to_string())
-        .replace("{repo_parent}", &repo_parent.display().to_string())
+        .replace("{repo_parent}", &repo_parent_str)
         .replace("{repo_name}", repo_name);
 
     (expand_tilde_path(&expanded), has_repo_name || has_repo_root)
+}
+
+/// Validate a `[worktrees].directory` template, returning user-facing
+/// diagnostics for problems Herdr can detect without knowing a specific repo:
+/// an empty/whitespace value, or `{...}` tokens that aren't one of the
+/// supported placeholders (`{repo_root}`, `{repo_parent}`, `{repo_name}`).
+pub(crate) fn template_diagnostics(template: &str) -> Vec<String> {
+    let mut diagnostics = Vec::new();
+
+    if template.trim().is_empty() {
+        diagnostics.push(
+            "worktrees.directory is empty; worktree checkouts will be created relative to \
+             Herdr's working directory. Set a path such as `~/.herdr/worktrees`."
+                .to_string(),
+        );
+        return diagnostics;
+    }
+
+    const KNOWN: &[&str] = &["{repo_root}", "{repo_parent}", "{repo_name}"];
+    let mut cursor = template;
+    while let Some(open) = cursor.find('{') {
+        let rest = &cursor[open..];
+        let Some(close_offset) = rest.find('}') else {
+            diagnostics.push(format!(
+                "worktrees.directory contains an unclosed `{{` near `{rest}`; supported \
+                 placeholders are `{{repo_root}}`, `{{repo_parent}}`, `{{repo_name}}`."
+            ));
+            break;
+        };
+        let token = &rest[..=close_offset];
+        if !KNOWN.contains(&token) {
+            diagnostics.push(format!(
+                "worktrees.directory contains unknown placeholder `{token}`; supported \
+                 placeholders are `{{repo_root}}`, `{{repo_parent}}`, `{{repo_name}}`."
+            ));
+        }
+        cursor = &rest[close_offset + 1..];
+    }
+
+    diagnostics
 }
 
 pub(crate) fn default_checkout_path(
@@ -505,9 +552,45 @@ prunable stale
 
     #[test]
     fn resolve_worktree_root_handles_repo_at_filesystem_root() {
-        // `parent()` returns None for /, but we should still produce something sane.
+        // `parent()` returns None for /, so {repo_parent} substitutes to "".
+        // Asserting on display().to_string() (not PathBuf equality, which would
+        // silently normalize //wt == /wt) ensures user-visible logs are clean.
         let (root, _) = resolve_worktree_root("{repo_parent}/wt", Path::new("/"), "");
-        assert_eq!(root, PathBuf::from("//wt"));
+        assert_eq!(root.display().to_string(), "/wt");
+    }
+
+    #[test]
+    fn resolve_worktree_root_substitutes_empty_for_root_parent_to_avoid_double_slash() {
+        // /foo has parent /, which would naively yield "//wt". {repo_parent}
+        // substitutes to "" in that case so the result displays as "/wt".
+        let (root, _) = resolve_worktree_root("{repo_parent}/wt", Path::new("/foo"), "foo");
+        assert_eq!(root.display().to_string(), "/wt");
+    }
+
+    #[test]
+    fn template_diagnostics_flags_empty_and_whitespace_templates() {
+        assert!(!template_diagnostics("").is_empty());
+        assert!(!template_diagnostics("   ").is_empty());
+    }
+
+    #[test]
+    fn template_diagnostics_flags_unknown_placeholders() {
+        let diagnostics = template_diagnostics("~/wt/{repo_nam}");
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].contains("{repo_nam}"));
+    }
+
+    #[test]
+    fn template_diagnostics_accepts_all_known_placeholders() {
+        assert!(template_diagnostics("{repo_parent}/{repo_name}.worktrees/{repo_root}").is_empty());
+        assert!(template_diagnostics("~/.herdr/worktrees").is_empty());
+    }
+
+    #[test]
+    fn template_diagnostics_flags_unclosed_open_brace() {
+        let diagnostics = template_diagnostics("~/wt/{repo_name");
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].contains("unclosed"));
     }
 
     #[test]

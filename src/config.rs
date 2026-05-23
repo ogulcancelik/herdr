@@ -62,6 +62,7 @@ impl Config {
             .into_iter()
             .chain(keybind_diags)
             .chain(self.ui.sound.diagnostics())
+            .chain(self.worktrees.diagnostics())
             .collect()
     }
 
