@@ -470,10 +470,39 @@ fn split_rect(area: Rect, direction: Direction, ratio: f32) -> (Rect, Rect) {
         Direction::Vertical => {
             let first_h = ((area.height as f32) * ratio).round() as u16;
             let second_h = area.height.saturating_sub(first_h);
+            let second_y = if first_h > 0 && second_h > 0 {
+                area.y + first_h - 1
+            } else {
+                area.y + first_h
+            };
             (
                 Rect::new(area.x, area.y, area.width, first_h),
-                Rect::new(area.x, area.y + first_h, area.width, second_h),
+                Rect::new(area.x, second_y, area.width, second_h),
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vertical_split_shares_one_border_row() {
+        let area = Rect::new(0, 0, 80, 20);
+        let (top, bottom) = split_rect(area, Direction::Vertical, 0.5);
+
+        assert_eq!(top, Rect::new(0, 0, 80, 10));
+        assert_eq!(bottom, Rect::new(0, 9, 80, 10));
+        assert_eq!(top.y + top.height - 1, bottom.y);
+    }
+
+    #[test]
+    fn vertical_split_does_not_underflow_empty_first_rect() {
+        let area = Rect::new(0, 0, 80, 0);
+        let (top, bottom) = split_rect(area, Direction::Vertical, 0.5);
+
+        assert_eq!(top, Rect::new(0, 0, 80, 0));
+        assert_eq!(bottom, Rect::new(0, 0, 80, 0));
     }
 }
