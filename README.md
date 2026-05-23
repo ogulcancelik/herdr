@@ -293,6 +293,60 @@ cargo build --release
 ./target/release/herdr
 ```
 
+### nix
+
+build or run directly:
+
+```bash
+nix run github:ogulcancelik/herdr
+nix build github:ogulcancelik/herdr
+./result/bin/herdr
+```
+
+dev shell with all dependencies (rust, zig, cargo-nextest, just):
+
+```bash
+nix develop github:ogulcancelik/herdr
+```
+
+install to your profile:
+
+```bash
+nix profile install github:ogulcancelik/herdr
+```
+
+#### home manager
+
+add the flake input and import the module:
+
+```nix
+# flake.nix
+inputs.herdr.url = "github:ogulcancelik/herdr";
+```
+
+```nix
+# home.nix
+imports = [ inputs.herdr.homeManagerModules.herdr ];
+
+programs.herdr = {
+  enable = true;
+
+  # default: installs the latest GitHub release binary
+  # to build from source instead, override the package:
+  # package = inputs.herdr.packages.''${pkgs.system}.default;
+
+  # optional: configure herdr via nix (generates ~/.config/herdr/config.toml)
+  settings = {
+    theme.name = "catppuccin";
+    terminal.default_shell = "${pkgs.zsh}/bin/zsh";
+    ui.sidebar_width = 26;
+  };
+
+  # shell integration for zsh, bash, fish (enabled by default when the shell is enabled)
+  shellIntegration.enable = true;
+};
+```
+
 ## testing
 
 ```bash
