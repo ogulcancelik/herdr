@@ -516,19 +516,50 @@ prunable stale
     }
 
     #[test]
-    fn resolve_worktree_root_signals_when_repo_name_is_in_template() {
-        let (root, repo_already_in_root) = resolve_worktree_root(
-            "{repo_parent}/{repo_name}.worktrees",
-            Path::new("/home/me/foo/bar"),
-            "bar",
+    fn default_checkout_path_expands_tilde_after_substituting_placeholders() {
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", "/home/me");
+        // ~ in the template, {repo_name} present (so implicit segment is dropped).
+        assert_eq!(
+            default_checkout_path(
+                "~/wt/{repo_name}",
+                Path::new("/home/me/code/herdr"),
+                "herdr",
+                "feature/x",
+            ),
+            PathBuf::from("/home/me/wt/herdr/feature-x"),
         );
-        assert_eq!(root, PathBuf::from("/home/me/foo/bar.worktrees"));
-        assert!(repo_already_in_root);
+        if let Some(home) = old_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
 
-        let (root, repo_already_in_root) =
-            resolve_worktree_root("/w", Path::new("/home/me/foo/bar"), "bar");
-        assert_eq!(root, PathBuf::from("/w"));
-        assert!(!repo_already_in_root);
+    #[test]
+    fn default_checkout_path_handles_placeholder_inside_literal_segment() {
+        assert_eq!(
+            default_checkout_path(
+                "/wt/prefix-{repo_name}-suffix",
+                Path::new("/home/me/code/herdr"),
+                "herdr",
+                "main",
+            ),
+            PathBuf::from("/wt/prefix-herdr-suffix/main"),
+        );
+    }
+
+    #[test]
+    fn default_checkout_path_replaces_every_occurrence_of_a_placeholder() {
+        assert_eq!(
+            default_checkout_path(
+                "/wt/{repo_name}/old/{repo_name}",
+                Path::new("/home/me/code/herdr"),
+                "herdr",
+                "main",
+            ),
+            PathBuf::from("/wt/herdr/old/herdr/main"),
+        );
     }
 
     #[test]
@@ -560,9 +591,47 @@ prunable stale
     }
 
     #[test]
+    fn template_diagnostics_reports_every_unknown_placeholder() {
+        let diagnostics = template_diagnostics("{repo_nam}/{repo_par}/{repo_root}");
+        assert_eq!(diagnostics.len(), 2);
+        assert!(diagnostics.iter().any(|d| d.contains("{repo_nam}")));
+        assert!(diagnostics.iter().any(|d| d.contains("{repo_par}")));
+    }
+
+    #[test]
+    fn template_diagnostics_flags_doubled_braces_as_unknown_placeholder() {
+        // Greedy `}` matching means `{{repo_name}}` parses as `{{repo_name}` and
+        // is flagged as unknown. Pin the behavior so a future fix is intentional.
+        let diagnostics = template_diagnostics("/wt/{{repo_name}}");
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].contains("{{repo_name}"));
+    }
+
+    #[test]
+    fn template_diagnostics_flags_empty_and_whitespace_braces() {
+        assert_eq!(template_diagnostics("/wt/{}/x").len(), 1);
+        assert_eq!(template_diagnostics("/wt/{ }/x").len(), 1);
+    }
+
+    #[test]
     fn template_diagnostics_accepts_all_known_placeholders() {
         assert!(template_diagnostics("{repo_parent}/{repo_name}.worktrees/{repo_root}").is_empty());
         assert!(template_diagnostics("~/.herdr/worktrees").is_empty());
+        // Lock in that every accepted placeholder is also substituted by
+        // resolve_worktree_root: a rename in one without the other would
+        // pass the diagnostic check but leave `{...}` literally on disk.
+        let (root, _) = resolve_worktree_root(
+            "{repo_parent}|{repo_name}|{repo_root}",
+            Path::new("/home/me/code/herdr"),
+            "herdr",
+        );
+        let rendered = root.display().to_string();
+        assert!(
+            !rendered.contains('{'),
+            "unsubstituted placeholder in {rendered:?}"
+        );
+        assert!(rendered.contains("/home/me/code"));
+        assert!(rendered.contains("herdr"));
     }
 
     #[test]

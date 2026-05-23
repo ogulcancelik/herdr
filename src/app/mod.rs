@@ -1731,6 +1731,31 @@ mod tests {
     }
 
     #[test]
+    fn reload_config_surfaces_worktree_template_diagnostic_and_still_applies_value() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-worktree-template-diag");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[worktrees]\ndirectory = \"~/wt/{repo_nam}\"\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        // Warn-only: the (typo'd) template still gets applied. The diagnostic is
+        // surfaced separately so the user can see and fix it.
+        assert_eq!(app.state.worktree_directory, "~/wt/{repo_nam}");
+        assert!(app
+            .state
+            .config_diagnostic
+            .as_deref()
+            .is_some_and(|message| message.contains("{repo_nam}")));
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn settings_save_toast_delivery_persists_then_applies_live_config() {
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("settings-save-toast-delivery");
