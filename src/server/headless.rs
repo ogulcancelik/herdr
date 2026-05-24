@@ -213,7 +213,8 @@ impl HeadlessServer {
                 needs_render = true;
             }
 
-            // 2. Drain internal events.
+            // 2. Drain a bounded internal-event batch. API handlers perform an
+            // exhaustive forwarding-aware drain before reading pane/runtime state.
             if self.drain_internal_events_with_forwarding() {
                 needs_render = true;
             }
@@ -974,11 +975,34 @@ impl HeadlessServer {
     /// - Detect when a toast is set on AppState and forward as
     ///   `ServerMessage::Notify` to the foreground client for terminal/system delivery.
     fn drain_internal_events_with_forwarding(&mut self) -> bool {
+        self.drain_internal_events_with_forwarding_up_to(crate::app::APP_EVENT_DRAIN_LIMIT)
+            .1
+    }
+
+    fn drain_all_internal_events_with_forwarding(&mut self) -> bool {
         let mut changed = false;
-        while let Ok(ev) = self.app.event_rx.try_recv() {
-            changed |= self.handle_internal_event_with_forwarding(ev);
+        loop {
+            let (had_event, batch_changed) =
+                self.drain_internal_events_with_forwarding_up_to(crate::app::APP_EVENT_DRAIN_LIMIT);
+            changed |= batch_changed;
+            if !had_event {
+                break;
+            }
         }
         changed
+    }
+
+    fn drain_internal_events_with_forwarding_up_to(&mut self, limit: usize) -> (bool, bool) {
+        let mut had_event = false;
+        let mut changed = false;
+        for _ in 0..limit {
+            let Ok(ev) = self.app.event_rx.try_recv() else {
+                break;
+            };
+            had_event = true;
+            changed |= self.handle_internal_event_with_forwarding(ev);
+        }
+        (had_event, changed)
     }
 
     fn drain_client_sound_config_reload_request(&mut self) {
@@ -1440,6 +1464,7 @@ impl HeadlessServer {
         }
 
         let changed = api::request_changes_ui(&msg.request);
+        let changed = self.drain_all_internal_events_with_forwarding() || changed;
 
         // Capture toast and effective pane states before the API call so we can
         // forward resulting client-local notifications. API requests like
@@ -1490,7 +1515,8 @@ impl HeadlessServer {
                 .unwrap_or_else(|_| "{}".to_string())
             })
         } else {
-            self.app.handle_api_request(msg.request)
+            self.app
+                .handle_api_request_after_internal_events_drained(msg.request)
         };
         let _ = msg.respond_to.send(response);
 
@@ -2239,6 +2265,44 @@ mod tests {
             ServerMessage::ServerShutdown { reason } => reason,
             other => panic!("expected shutdown, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn headless_api_request_drains_all_pending_internal_events_before_reading_state() {
+        let mut server = test_headless_server();
+        for i in 0..=crate::app::APP_EVENT_DRAIN_LIMIT {
+            server
+                .app
+                .event_tx
+                .try_send(AppEvent::UpdateReady {
+                    version: format!("4.0.{i}"),
+                    install_command: "herdr install".into(),
+                })
+                .unwrap();
+        }
+
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        assert!(
+            server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                request: api::schema::Request {
+                    id: "headless_stop_after_events".into(),
+                    method: api::schema::Method::ServerStop(api::schema::EmptyParams::default()),
+                },
+                respond_to,
+            })
+        );
+        let response = response_rx
+            .recv_timeout(Duration::from_millis(100))
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["result"]["type"], "ok");
+        let expected_version = format!("4.0.{}", crate::app::APP_EVENT_DRAIN_LIMIT);
+        assert_eq!(
+            server.app.state.update_available.as_deref(),
+            Some(expected_version.as_str())
+        );
+        assert!(server.app.event_rx.try_recv().is_err());
     }
 
     fn test_client_writer() -> (

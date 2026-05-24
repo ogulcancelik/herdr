@@ -322,7 +322,14 @@ impl App {
     }
 
     pub(crate) fn handle_api_request(&mut self, request: crate::api::schema::Request) -> String {
-        self.drain_internal_events();
+        self.drain_all_internal_events();
+        self.handle_api_request_after_internal_events_drained(request)
+    }
+
+    pub(crate) fn handle_api_request_after_internal_events_drained(
+        &mut self,
+        request: crate::api::schema::Request,
+    ) -> String {
         use crate::api::schema::{Method, ResponseResult, SuccessResponse};
 
         let response = match request.method {

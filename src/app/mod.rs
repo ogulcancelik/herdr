@@ -94,6 +94,9 @@ pub struct App {
     pub(crate) config_reloaded_from_disk: bool,
 }
 
+pub(crate) const APP_EVENT_CHANNEL_CAPACITY: usize = 256;
+pub(crate) const APP_EVENT_DRAIN_LIMIT: usize = 64;
+
 pub(crate) enum LoopEvent {
     Timer,
     Internal(AppEvent),
@@ -222,7 +225,7 @@ impl App {
     ) -> Self {
         let (prefix_code, prefix_mods) = config.prefix_key();
         crate::kitty_graphics::set_enabled(config.experimental.kitty_graphics);
-        let (event_tx, event_rx) = mpsc::channel::<AppEvent>(64);
+        let (event_tx, event_rx) = mpsc::channel::<AppEvent>(APP_EVENT_CHANNEL_CAPACITY);
         let render_notify = Arc::new(Notify::new());
         let render_dirty = Arc::new(AtomicBool::new(false));
 
@@ -570,7 +573,8 @@ impl App {
                 needs_render = true;
             }
 
-            // Drain internal events first so API reads observe fresh pane state.
+            // Drain a bounded internal-event batch for responsiveness. API handlers
+            // perform an exhaustive drain before reading pane/runtime state.
             if self.drain_internal_events() {
                 needs_render = true;
             }
@@ -1365,6 +1369,57 @@ mod tests {
         });
 
         assert!(app.render_dirty.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn internal_event_drain_limits_work_per_tick() {
+        let mut app = test_app();
+        for i in 0..=APP_EVENT_DRAIN_LIMIT {
+            app.event_tx
+                .try_send(AppEvent::UpdateReady {
+                    version: format!("2.0.{i}"),
+                    install_command: "herdr install".into(),
+                })
+                .unwrap();
+        }
+
+        assert!(app.drain_internal_events());
+
+        let expected_version = format!("2.0.{}", APP_EVENT_DRAIN_LIMIT - 1);
+        assert_eq!(
+            app.state.update_available.as_deref(),
+            Some(expected_version.as_str())
+        );
+        assert!(app.event_rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn api_request_drains_all_pending_internal_events_before_reading_state() {
+        let mut app = test_app();
+        for i in 0..=APP_EVENT_DRAIN_LIMIT {
+            app.event_tx
+                .try_send(AppEvent::UpdateReady {
+                    version: format!("3.0.{i}"),
+                    install_command: "herdr install".into(),
+                })
+                .unwrap();
+        }
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_server_stop_after_events".into(),
+            method: crate::api::schema::Method::ServerStop(
+                crate::api::schema::EmptyParams::default(),
+            ),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["result"]["type"], "ok");
+        let expected_version = format!("3.0.{APP_EVENT_DRAIN_LIMIT}");
+        assert_eq!(
+            app.state.update_available.as_deref(),
+            Some(expected_version.as_str())
+        );
+        assert!(app.event_rx.try_recv().is_err());
     }
 
     #[test]
@@ -2670,7 +2725,7 @@ mod tests {
             AgentState::Working
         );
 
-        for i in 0..64 {
+        for i in 0..APP_EVENT_CHANNEL_CAPACITY {
             app.event_tx
                 .try_send(AppEvent::UpdateReady {
                     version: format!("9.9.{i}"),
@@ -2706,7 +2761,13 @@ mod tests {
             .expect("state change should enqueue once queue space is available")
             .expect("app event receiver should still be alive");
 
-        app.drain_internal_events();
+        let max_drains = (APP_EVENT_CHANNEL_CAPACITY / APP_EVENT_DRAIN_LIMIT) + 2;
+        for _ in 0..max_drains {
+            if app.state.terminals.get(&terminal_id).unwrap().state == AgentState::Idle {
+                break;
+            }
+            app.drain_internal_events();
+        }
 
         assert_eq!(
             app.state.terminals.get(&terminal_id).unwrap().state,
