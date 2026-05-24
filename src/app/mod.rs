@@ -221,7 +221,7 @@ impl App {
     ) -> Self {
         let (prefix_code, prefix_mods) = config.prefix_key();
         crate::kitty_graphics::set_enabled(config.experimental.kitty_graphics);
-        let (event_tx, event_rx) = mpsc::channel::<AppEvent>(64);
+        let (event_tx, event_rx) = mpsc::channel::<AppEvent>(4096);
         let render_notify = Arc::new(Notify::new());
         let render_dirty = Arc::new(AtomicBool::new(false));
 
@@ -2627,7 +2627,7 @@ mod tests {
             AgentState::Working
         );
 
-        for i in 0..64 {
+        for i in 0..4096 {
             app.event_tx
                 .try_send(AppEvent::UpdateReady {
                     version: format!("9.9.{i}"),
