@@ -443,12 +443,12 @@ impl AppState {
                 }
 
                 if in_sidebar {
-                    if self.sidebar_collapsed {
-                        if self.on_collapsed_sidebar_toggle(mouse.column, mouse.row) {
-                            self.sidebar_collapsed = false;
-                            return None;
-                        }
+                    if self.on_sidebar_toggle(mouse.column, mouse.row) {
+                        self.sidebar_collapsed = !self.sidebar_collapsed;
+                        return None;
+                    }
 
+                    if self.sidebar_collapsed {
                         if let Some(idx) = self.collapsed_workspace_at_row(mouse.row) {
                             self.switch_workspace(idx);
                             self.mode = Mode::Terminal;
