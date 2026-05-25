@@ -179,6 +179,8 @@ impl App {
             changed = true;
         }
 
+        changed |= self.clear_due_selection_highlight(now);
+
         self.start_git_status_refresh_if_due(now);
 
         if self
@@ -197,6 +199,28 @@ impl App {
 
         self.sync_animation_timer(now);
         changed
+    }
+
+    /// Clears temporary copied-token highlights, such as after double-click copy.
+    pub(crate) fn clear_due_selection_highlight(&mut self, now: Instant) -> bool {
+        if self
+            .selection_highlight_clear_deadline
+            .is_none_or(|deadline| now < deadline)
+        {
+            return false;
+        }
+
+        self.selection_highlight_clear_deadline = None;
+        if self
+            .state
+            .selection
+            .as_ref()
+            .is_some_and(|selection| !selection.is_in_progress())
+        {
+            self.state.clear_selection();
+            return true;
+        }
+        false
     }
 
     pub(crate) fn sync_animation_timer(&mut self, now: Instant) {
@@ -412,6 +436,7 @@ impl App {
             self.next_auto_update_check,
             self.session_save_deadline,
             self.selection_autoscroll_deadline,
+            self.selection_highlight_clear_deadline,
             render_deadline,
         ]
         .into_iter()

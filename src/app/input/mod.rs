@@ -2,6 +2,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 
+use crate::app::PaneClickState;
 use crate::input::TerminalKey;
 use ratatui::layout::Direction;
 
@@ -194,21 +195,27 @@ impl App {
             }
         }
 
+        let handled_pane_double_click = self.handle_pane_double_click(mouse);
+
         let previous_agent_panel_scope = self.state.agent_panel_scope;
         let previous_settings_section = self.state.settings.section;
-        if let Some(action) = self.state.handle_mouse(&mut self.terminal_runtimes, mouse) {
-            match action {
-                SettingsAction::SaveTheme(name) => self.save_theme(&name),
-                SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
-                SettingsAction::SaveToastDelivery(delivery) => self.save_toast_delivery(delivery),
-                SettingsAction::SaveAgentBorderLabels(enabled) => {
-                    self.save_agent_border_labels(enabled)
-                }
-                SettingsAction::SavePaneHistory(enabled) => {
-                    self.save_pane_history_persistence(enabled)
-                }
-                SettingsAction::InstallRecommendedIntegrations => {
-                    self.install_recommended_integrations()
+        if !handled_pane_double_click {
+            if let Some(action) = self.state.handle_mouse(&mut self.terminal_runtimes, mouse) {
+                match action {
+                    SettingsAction::SaveTheme(name) => self.save_theme(&name),
+                    SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
+                    SettingsAction::SaveToastDelivery(delivery) => {
+                        self.save_toast_delivery(delivery)
+                    }
+                    SettingsAction::SaveAgentBorderLabels(enabled) => {
+                        self.save_agent_border_labels(enabled)
+                    }
+                    SettingsAction::SavePaneHistory(enabled) => {
+                        self.save_pane_history_persistence(enabled)
+                    }
+                    SettingsAction::InstallRecommendedIntegrations => {
+                        self.install_recommended_integrations()
+                    }
                 }
             }
         }
@@ -239,6 +246,74 @@ impl App {
             self.selection_autoscroll_deadline =
                 Some(std::time::Instant::now() + super::SELECTION_AUTOSCROLL_INTERVAL);
         }
+    }
+
+    fn handle_pane_double_click(&mut self, mouse: MouseEvent) -> bool {
+        // Only terminal-pane left-clicks can start this gesture; other clicks
+        // should keep their existing mouse behavior and clear stale candidates.
+        let Some(click) = self.pane_click_candidate(mouse) else {
+            return false;
+        };
+
+        // Require the second click to land near the first click in the same pane
+        // and within the double-click window so adjacent interactions do not copy.
+        if !self.take_pane_double_click(click) {
+            return false;
+        }
+
+        // Preserve a short highlight after copying so the user gets visible
+        // confirmation without leaving a persistent selection behind.
+        self.copy_double_clicked_word(click)
+    }
+
+    fn pane_click_candidate(&mut self, mouse: MouseEvent) -> Option<PaneClickState> {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return None;
+        }
+
+        if self.state.mode != Mode::Terminal {
+            self.last_pane_click = None;
+            return None;
+        }
+
+        let Some(info) = self.state.pane_at(mouse.column, mouse.row).cloned() else {
+            self.last_pane_click = None;
+            return None;
+        };
+
+        Some(PaneClickState {
+            pane_id: info.id,
+            viewport_row: mouse.row - info.inner_rect.y,
+            col: mouse.column - info.inner_rect.x,
+            at: std::time::Instant::now(),
+        })
+    }
+
+    fn take_pane_double_click(&mut self, click: PaneClickState) -> bool {
+        if !self
+            .last_pane_click
+            .is_some_and(|last| last.is_double_click_for(click))
+        {
+            self.last_pane_click = Some(click);
+            return false;
+        }
+
+        self.last_pane_click = None;
+        true
+    }
+
+    fn copy_double_clicked_word(&mut self, click: PaneClickState) -> bool {
+        let copied = self.state.copy_word_at_pane_cell(
+            &self.terminal_runtimes,
+            click.pane_id,
+            click.viewport_row,
+            click.col,
+        );
+        if copied {
+            self.selection_highlight_clear_deadline =
+                Some(std::time::Instant::now() + super::PANE_COPY_HIGHLIGHT_DURATION);
+        }
+        copied
     }
 }
 

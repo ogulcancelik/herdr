@@ -7,6 +7,8 @@
 //!   MouseUp           → Text extracted, copied via OSC 52, highlight stays
 //!   Next click / key  → Selection cleared
 //!
+//! Double-click copy also briefly highlights the selected word.
+//!
 //! Rows are stored in screen-buffer coordinates instead of viewport-relative
 //! coordinates. That keeps selection stable while the pane scrolls.
 
@@ -56,6 +58,23 @@ impl Selection {
             anchor,
             cursor: anchor,
             phase: Phase::Anchored,
+        }
+    }
+
+    /// Create an active selection from an explicit viewport-row range.
+    pub(crate) fn range(
+        pane_id: PaneId,
+        viewport_row: u16,
+        start_col: u16,
+        end_col: u16,
+        metrics: Option<ScrollMetrics>,
+    ) -> Self {
+        let row = absolute_row_for_viewport_row(viewport_row, metrics);
+        Self {
+            pane_id,
+            anchor: (row, start_col),
+            cursor: (row, end_col),
+            phase: Phase::Dragging,
         }
     }
 
@@ -112,6 +131,11 @@ impl Selection {
     /// Whether this selection should be rendered (highlight visible).
     pub fn is_visible(&self) -> bool {
         self.phase == Phase::Dragging || self.phase == Phase::Done
+    }
+
+    /// Whether this selection was already finalized and copied.
+    pub fn is_done(&self) -> bool {
+        self.phase == Phase::Done
     }
 
     /// Whether the user just clicked without dragging (not a selection).

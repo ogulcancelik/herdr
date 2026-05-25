@@ -2449,6 +2449,8 @@ impl HeadlessServer {
             changed = true;
         }
 
+        changed |= self.app.clear_due_selection_highlight(now);
+
         self.app.start_git_status_refresh_if_due(now);
 
         if self

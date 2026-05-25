@@ -6,8 +6,10 @@ use tracing::{info, warn};
 use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::{find_in_direction, NavDirection, PaneId};
+use crate::selection::Selection;
 use crate::terminal::{EffectiveStateChange, TerminalStateMutation};
 use crate::workspace::WorkspaceGitStatus;
+use unicode_width::UnicodeWidthChar;
 
 use super::state::{
     AppState, Mode, NavigatorRow, NavigatorStateFilter, NavigatorTarget, ToastKind,
@@ -1256,6 +1258,76 @@ impl AppState {
         self.selection_autoscroll = None;
     }
 
+    pub(crate) fn copy_word_at_pane_cell(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        pane_id: crate::layout::PaneId,
+        viewport_row: u16,
+        col: u16,
+    ) -> bool {
+        // Resolve the active pane cell the double-click landed on.
+        let Some(ws_idx) = self
+            .active
+            .filter(|idx| self.workspaces.get(*idx).is_some())
+        else {
+            return false;
+        };
+
+        let Some(info) = self.pane_info_by_id(pane_id) else {
+            return false;
+        };
+        if viewport_row >= info.inner_rect.height || col >= info.inner_rect.width {
+            return false;
+        }
+
+        // Leave mouse input to terminal apps that requested it.
+        let Some(rt) = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, pane_id)
+        else {
+            return false;
+        };
+        if rt
+            .input_state()
+            .is_some_and(crate::pane::InputState::mouse_reporting_enabled)
+        {
+            return false;
+        }
+
+        // Read the visible row and identify the clicked token bounds.
+        let metrics = self.pane_scroll_metrics(terminal_runtimes, pane_id);
+        let row_selection = Selection::range(
+            pane_id,
+            viewport_row,
+            0,
+            info.inner_rect.width.saturating_sub(1),
+            metrics,
+        );
+        let Some(row_text) = rt.extract_selection(&row_selection) else {
+            return false;
+        };
+        let Some((start_col, end_col)) = word_bounds_at_column(&row_text, col) else {
+            return false;
+        };
+
+        // Copy the token and keep its selection visible as short-lived feedback.
+        let mut selection = Selection::range(pane_id, viewport_row, start_col, end_col, metrics);
+        if !selection.finish() {
+            return false;
+        }
+
+        let Some(text) = rt
+            .extract_selection(&selection)
+            .filter(|text| !text.is_empty())
+        else {
+            self.clear_selection();
+            return false;
+        };
+        self.request_clipboard_write = Some(text.into_bytes());
+        self.selection = Some(selection);
+        self.selection_autoscroll = None;
+        info!("copied double-clicked token to clipboard");
+        true
+    }
+
     pub fn copy_selection(&mut self, terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry) {
         let mut sel = match self.selection.take() {
             Some(sel) => sel,
@@ -1273,7 +1345,6 @@ impl AppState {
         let text = self
             .runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, sel.pane_id)
             .and_then(|rt| rt.extract_selection(&sel));
-
         if let Some(text) = text {
             if !text.is_empty() {
                 self.request_clipboard_write = Some(text.into_bytes());
@@ -1281,9 +1352,222 @@ impl AppState {
             }
         }
 
-        self.selection = None;
-        self.selection_autoscroll = None;
+        self.clear_selection();
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TextCell {
+    ch: char,
+    start_col: u16,
+    end_col: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CellSpan {
+    start: usize,
+    end: usize,
+}
+
+impl CellSpan {
+    fn contains(self, idx: usize) -> bool {
+        idx >= self.start && idx <= self.end
+    }
+
+    fn columns(self, cells: &[TextCell]) -> (u16, u16) {
+        (cells[self.start].start_col, cells[self.end].end_col)
+    }
+}
+
+/// Finds the terminal display-column bounds for the token under a double-click.
+///
+/// The algorithm first maps text to terminal cells so wide characters and
+/// zero-width marks use display columns, then prefers structured spans that
+/// users expect to copy whole (URLs and quoted paths), and finally falls back
+/// to a separator-delimited token.
+fn word_bounds_at_column(row: &str, col: u16) -> Option<(u16, u16)> {
+    // Map the row into display cells before doing any word-boundary work.
+    let cells = text_cells(row);
+    let clicked_idx = cell_index_at_column(&cells, col)?;
+
+    // Prefer spans that can legally include punctuation or spaces.
+    let span = url_span_at_column(&cells, clicked_idx)
+        .or_else(|| quoted_path_span_at_column(&cells, clicked_idx))
+        .or_else(|| token_span_at_column(&cells, clicked_idx))?;
+
+    // Convert the internal cell span back to inclusive terminal columns.
+    Some(span.columns(&cells))
+}
+
+fn token_span_at_column(cells: &[TextCell], clicked_idx: usize) -> Option<CellSpan> {
+    if is_word_separator(cells[clicked_idx].ch) {
+        return None;
+    }
+
+    let mut start = clicked_idx;
+    while start > 0 && !is_word_separator(cells[start - 1].ch) {
+        start -= 1;
+    }
+
+    let mut end = clicked_idx;
+    while end + 1 < cells.len() && !is_word_separator(cells[end + 1].ch) {
+        end += 1;
+    }
+
+    trim_token_edges(cells, CellSpan { start, end }).filter(|span| span.contains(clicked_idx))
+}
+
+fn text_cells(row: &str) -> Vec<TextCell> {
+    let mut next_col = 0u16;
+    row.chars()
+        .map(|ch| {
+            let width = UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+            let start_col = if width == 0 {
+                next_col.saturating_sub(1)
+            } else {
+                next_col
+            };
+            if width > 0 {
+                next_col = next_col.saturating_add(width);
+            }
+            TextCell {
+                ch,
+                start_col,
+                end_col: next_col.saturating_sub(1),
+            }
+        })
+        .collect()
+}
+
+fn cell_index_at_column(cells: &[TextCell], col: u16) -> Option<usize> {
+    cells
+        .iter()
+        .position(|cell| cell.start_col <= col && col <= cell.end_col)
+}
+
+fn url_span_at_column(cells: &[TextCell], clicked_idx: usize) -> Option<CellSpan> {
+    let mut start = 0;
+    while start < cells.len() {
+        if starts_with_chars(&cells[start..], "http://")
+            || starts_with_chars(&cells[start..], "https://")
+        {
+            let mut end = start;
+            while end + 1 < cells.len() && !cells[end + 1].ch.is_whitespace() {
+                end += 1;
+            }
+            if clicked_idx >= start && clicked_idx <= end {
+                let span = trim_url_edges(cells, CellSpan { start, end })?;
+                return span.contains(clicked_idx).then_some(span);
+            }
+            start = end + 1;
+        } else {
+            start += 1;
+        }
+    }
+    None
+}
+
+fn trim_url_edges(cells: &[TextCell], span: CellSpan) -> Option<CellSpan> {
+    let start = span.start;
+    let mut end = span.end;
+    while start <= end
+        && matches!(
+            cells[end].ch,
+            '"' | '\'' | '`' | '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}'
+        )
+    {
+        if end == 0 {
+            return None;
+        }
+        end -= 1;
+    }
+    (start <= end).then_some(CellSpan { start, end })
+}
+
+fn quoted_path_span_at_column(cells: &[TextCell], clicked_idx: usize) -> Option<CellSpan> {
+    let clicked = cells.get(clicked_idx)?.ch;
+    if clicked == '"' || clicked == '\'' || clicked == '`' {
+        return None;
+    }
+
+    for quote in ['"', '\'', '`'] {
+        let mut start = None;
+        for (idx, cell) in cells.iter().copied().enumerate() {
+            let ch = cell.ch;
+            if ch != quote || is_escaped(cells, idx) {
+                continue;
+            }
+            if let Some(open) = start {
+                if clicked_idx > open
+                    && clicked_idx < idx
+                    && cells[open + 1..idx].iter().any(|cell| cell.ch == '/')
+                {
+                    return Some(CellSpan {
+                        start: open + 1,
+                        end: idx - 1,
+                    });
+                }
+                start = None;
+            } else {
+                start = Some(idx);
+            }
+        }
+    }
+    None
+}
+
+fn is_escaped(cells: &[TextCell], idx: usize) -> bool {
+    let mut slashes = 0;
+    let mut cursor = idx;
+    while cursor > 0 && cells[cursor - 1].ch == '\\' {
+        slashes += 1;
+        cursor -= 1;
+    }
+    slashes % 2 == 1
+}
+
+fn starts_with_chars(cells: &[TextCell], prefix: &str) -> bool {
+    prefix
+        .chars()
+        .enumerate()
+        .all(|(idx, expected)| cells.get(idx).is_some_and(|cell| cell.ch == expected))
+}
+
+fn is_word_separator(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '|' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | '!'
+        )
+}
+
+fn trim_token_edges(cells: &[TextCell], span: CellSpan) -> Option<CellSpan> {
+    let mut start = span.start;
+    let mut end = span.end;
+    while start <= end && is_leading_token_wrapper(cells[start].ch) {
+        start += 1;
+    }
+    if start < end && cells[end].ch == '$' && is_trailing_token_wrapper(cells[end - 1].ch) {
+        end -= 1;
+    }
+    while start <= end && is_trailing_token_wrapper(cells[end].ch) {
+        if end == 0 {
+            return None;
+        }
+        end -= 1;
+    }
+    (start <= end).then_some(CellSpan { start, end })
+}
+
+fn is_leading_token_wrapper(ch: char) -> bool {
+    matches!(ch, '(' | '[' | '{' | '<' | '"' | '\'' | '`')
+}
+
+fn is_trailing_token_wrapper(ch: char) -> bool {
+    matches!(
+        ch,
+        ')' | ']' | '}' | '>' | '"' | '\'' | '`' | '.' | ',' | ';' | ':' | '!' | '?'
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1623,6 +1907,174 @@ mod tests {
             checkout_path: format!("/repo/worktree-{ws_idx}").into(),
             is_linked_worktree: true,
         });
+    }
+
+    fn selected_word(row: &str, col: u16) -> Option<String> {
+        let (start, end) = word_bounds_at_column(row, col)?;
+        Some(text_in_cell_range(row, start, end))
+    }
+
+    fn text_in_cell_range(row: &str, start_col: u16, end_col: u16) -> String {
+        text_cells(row)
+            .into_iter()
+            .filter(|cell| cell.start_col >= start_col && cell.end_col <= end_col)
+            .map(|cell| cell.ch)
+            .collect()
+    }
+
+    fn col_of(row: &str, needle: &str) -> u16 {
+        let byte_idx = row
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} not found in {row:?}"));
+        let prefix = &row[..byte_idx];
+        prefix
+            .chars()
+            .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0) as u16)
+            .sum()
+    }
+
+    fn assert_selects(row: &str, click: &str, expected: &str) {
+        assert_eq!(
+            selected_word(row, col_of(row, click)).as_deref(),
+            Some(expected),
+            "row={row:?}, click={click:?}"
+        );
+    }
+
+    fn assert_selects_nothing(row: &str, click: &str) {
+        assert_eq!(
+            selected_word(row, col_of(row, click)),
+            None,
+            "row={row:?}, click={click:?}"
+        );
+    }
+
+    #[test]
+    fn double_click_word_bounds_cover_terminal_text() {
+        let cases = [
+            (
+                "see https://example.com/a-b_c?q=x@y.",
+                "example.com",
+                "https://example.com/a-b_c?q=x@y",
+            ),
+            (
+                "open \"https://example.com/a,b;c?q=x\";",
+                "example.com",
+                "https://example.com/a,b;c?q=x",
+            ),
+            (
+                "see https://example.com/a,b;c!(x)",
+                "example.com",
+                "https://example.com/a,b;c!(x",
+            ),
+            (
+                "see (https://example.com/path)",
+                "example.com",
+                "https://example.com/path",
+            ),
+            (
+                "open /tmp/foo-bar/baz_qux/",
+                "foo-bar",
+                "/tmp/foo-bar/baz_qux/",
+            ),
+            (
+                "open ./src/app/actions.rs:795",
+                "actions",
+                "./src/app/actions.rs:795",
+            ),
+            (
+                "open ../herdr-worktrees/issue-1",
+                "herdr",
+                "../herdr-worktrees/issue-1",
+            ),
+            (
+                "edit src/app/actions.rs,then",
+                "actions",
+                "src/app/actions.rs",
+            ),
+            (
+                "cat \"/tmp/build output/log.txt\"",
+                "output",
+                "/tmp/build output/log.txt",
+            ),
+            (
+                "cat '/Users/me/Library/Application Support/app/config.json'",
+                "Support",
+                "/Users/me/Library/Application Support/app/config.json",
+            ),
+            ("echo 你好-world done", "好", "你好-world"),
+            ("先跑 cargo test", "cargo", "cargo"),
+            (
+                "export PATH=$HOME/.cargo/bin:$PATH",
+                "$HOME",
+                "PATH=$HOME/.cargo/bin:$PATH",
+            ),
+            (
+                "git checkout feature/foo-bar_baz",
+                "foo",
+                "feature/foo-bar_baz",
+            ),
+            ("refs #123 and @owner/name", "#123", "#123"),
+            ("refs #123 and @owner/name", "owner", "@owner/name"),
+            ("cargo test --package=herdr", "--package", "--package=herdr"),
+            (
+                "cargo test app::actions::tests",
+                "app::",
+                "app::actions::tests",
+            ),
+            (
+                "image ghcr.io/org/app:latest",
+                "ghcr",
+                "ghcr.io/org/app:latest",
+            ),
+            ("ERROR [worker-1] request_id=abc-123", "worker", "worker-1"),
+            (
+                "tmux|newhoo|fixhoo|newmoo|notification|window_bell|herdr",
+                "newhoo",
+                "newhoo",
+            ),
+            (
+                "render_status_line(app, area)",
+                "render",
+                "render_status_line",
+            ),
+            ("render_status_line(app, area)", "app", "app"),
+            ("render_status_line(app, area)", "area", "area"),
+            ("if !enabled {", "enabled", "enabled"),
+            ("println!(\"hi\")", "println", "println"),
+            ("( master)$", "master", "master"),
+            ("regex foo$", "foo", "foo$"),
+        ];
+
+        for (row, click, expected) in cases {
+            assert_selects(row, click, expected);
+        }
+
+        let row = "echo 你好-world done";
+        assert_eq!(
+            selected_word(row, col_of(row, "好") + 1).as_deref(),
+            Some("你好-world")
+        );
+    }
+
+    #[test]
+    fn double_click_word_bounds_ignore_delimiters() {
+        for (row, click) in [
+            (
+                "tmux|newhoo|fixhoo|newmoo|notification|window_bell|herdr",
+                "|",
+            ),
+            ("alpha,beta;gamma", ","),
+            ("alpha,beta;gamma", ";"),
+            ("render_status_line(app, area)", "("),
+            ("render_status_line(app, area)", ")"),
+            ("if !enabled {", "!"),
+            ("if !enabled {", "{"),
+            ("(done).", "("),
+            ("(done).", "."),
+        ] {
+            assert_selects_nothing(row, click);
+        }
     }
 
     #[test]
