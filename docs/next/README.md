@@ -25,6 +25,12 @@ workspaces, tabs, panes. mouse-native: click, drag, split. every agent at a glan
 curl -fsSL https://herdr.dev/install.sh | sh
 ```
 
+or install with homebrew:
+
+```bash
+brew install herdr
+```
+
 or download the binary from [releases](https://github.com/ogulcancelik/herdr/releases). requires linux or macos.
 
 ### update
