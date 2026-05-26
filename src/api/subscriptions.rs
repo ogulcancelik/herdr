@@ -49,6 +49,7 @@ pub(super) struct ActiveAgentStatusChangedSubscription {
     pane_id: String,
     status_filter: Option<crate::api::schema::AgentStatus>,
     last_status: Option<crate::api::schema::AgentStatus>,
+    emit_initial_match: bool,
     request_prefix: String,
 }
 
@@ -177,12 +178,15 @@ impl ActiveSubscription {
                 agent_status,
             } => {
                 let probe = pane_get(format!("{request_id}:sub:{index}:probe"), &pane_id, api_tx)?;
+                let emit_initial_match =
+                    agent_status.is_some_and(|wanted| wanted == probe.agent_status);
 
                 Ok(Self::AgentStatusChanged(
                     ActiveAgentStatusChangedSubscription {
                         pane_id,
                         status_filter: agent_status,
                         last_status: Some(probe.agent_status),
+                        emit_initial_match,
                         request_prefix: format!("{request_id}:sub:{index}"),
                     },
                 ))
@@ -265,13 +269,17 @@ impl ActiveAgentStatusChangedSubscription {
         .ok()?;
         let current_status = pane.agent_status;
         let previous_status = self.last_status.replace(current_status);
-        if previous_status.is_none() || previous_status == Some(current_status) {
-            return None;
-        }
-        if self
-            .status_filter
-            .is_some_and(|wanted| wanted != current_status)
-        {
+        let should_emit = if self.emit_initial_match {
+            self.emit_initial_match = false;
+            self.status_filter
+                .is_some_and(|wanted| wanted == current_status)
+        } else {
+            previous_status.is_some_and(|previous| previous != current_status)
+                && !self
+                    .status_filter
+                    .is_some_and(|wanted| wanted != current_status)
+        };
+        if !should_emit {
             return None;
         }
 

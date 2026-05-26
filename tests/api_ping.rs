@@ -1760,6 +1760,23 @@ fn pane_info_and_subscriptions_expose_done_agent_status() {
     );
     assert_eq!(pane["result"]["pane"]["agent_status"], "done");
 
+    let mut already_done_reader = open_subscription(
+        &socket_path,
+        &format!(
+            r#"{{"id":"sub_status_already_done","method":"events.subscribe","params":{{"subscriptions":[{{"type":"pane.agent_status_changed","pane_id":"{}","agent_status":"done"}}]}}}}"#,
+            background_pane_id,
+        ),
+    );
+    let ack = already_done_reader.read_json_line(Duration::from_secs(2));
+    assert_eq!(ack["id"], "sub_status_already_done");
+    assert_eq!(ack["result"]["type"], "subscription_started");
+
+    let initial_status_event = already_done_reader.read_json_line(Duration::from_secs(2));
+    assert_eq!(initial_status_event["event"], "pane.agent_status_changed");
+    assert_eq!(initial_status_event["data"]["pane_id"], background_pane_id);
+    assert_eq!(initial_status_event["data"]["agent_status"], "done");
+    assert_eq!(initial_status_event["data"]["agent"], "pi");
+
     let focused_tab_id = created["result"]["workspace"]["active_tab_id"]
         .as_str()
         .unwrap()
