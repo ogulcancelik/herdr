@@ -644,23 +644,45 @@ fn detect_qodercli(content: &str) -> AgentState {
         return AgentState::Blocked;
     }
 
-    // Working: spinner active or processing
-    if lower.contains("working")
-        || content.contains('\u{280B}')
-        || content.contains('\u{2819}')
-        || content.contains('\u{2839}')
-        || content.contains('\u{2838}')
-        || content.contains('\u{283C}')
-        || content.contains('\u{2834}')
-        || content.contains('\u{2826}')
-        || content.contains('\u{2827}')
-        || content.contains('\u{2807}')
-        || content.contains('\u{280F}')
-    {
+    // Working: explicit "(esc to cancel, …)" hint or an active spinner row.
+    if has_qodercli_working_hint(&lower) || has_qodercli_spinner_row(content) {
         return AgentState::Working;
     }
 
     AgentState::Idle
+}
+
+/// Working hints qodercli prints alongside the spinner while the model is
+/// responding. The "(esc to cancel, …)" suffix is unique to qodercli's loading
+/// indicator and survives even when the spinner glyph is masked (e.g. by
+/// a hook icon).
+fn has_qodercli_working_hint(lower_content: &str) -> bool {
+    lower_content.contains("(esc to cancel,")
+}
+
+/// Strict spinner-row detection for qodercli.
+///
+/// Matches a line whose first non-whitespace glyph is a braille pattern
+/// (U+2800–U+28FF, the cli-spinners "dots" set qodercli renders), followed by
+/// a space and at least one alphabetic character on the same line. This avoids
+/// flagging the pane as Working when the scrollback merely contains a stale
+/// braille glyph from an earlier frame.
+fn has_qodercli_spinner_row(content: &str) -> bool {
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        let mut chars = trimmed.chars();
+        let Some(first) = chars.next() else {
+            continue;
+        };
+        if !('\u{2800}'..='\u{28FF}').contains(&first) {
+            continue;
+        }
+        let rest: String = chars.collect();
+        if rest.starts_with(' ') && rest.chars().any(|c| c.is_alphabetic()) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Blocked patterns specific to qodercli.
@@ -2628,6 +2650,46 @@ mod tests {
     #[test]
     fn qodercli_idle_on_prompt() {
         assert_eq!(detect_qodercli("> "), AgentState::Idle);
+    }
+
+    #[test]
+    fn qodercli_idle_when_only_stale_braille_glyph_in_scrollback() {
+        // A single stray braille character in a previous output line must not
+        // flip the pane to Working — only an actual spinner *row* should.
+        let screen = "\
+agent finished a previous task.\n\
+\u{280B}\n\
+> \n";
+        assert_eq!(detect_qodercli(screen), AgentState::Idle);
+    }
+
+    #[test]
+    fn qodercli_working_on_full_spinner_row() {
+        // Real spinner row: braille glyph + space + alphabetic phrase.
+        let screen = "\u{280B} Thinking...\n";
+        assert_eq!(detect_qodercli(screen), AgentState::Working);
+    }
+
+    #[test]
+    fn qodercli_working_on_esc_to_cancel_hint() {
+        // The "(esc to cancel, …)" suffix is qodercli's explicit working
+        // marker. It must trigger Working even if a hook icon replaced the
+        // spinner glyph in this frame.
+        let screen = "Thinking... (esc to cancel, 5s)\n";
+        assert_eq!(detect_qodercli(screen), AgentState::Working);
+    }
+
+    #[test]
+    fn qodercli_idle_when_text_mentions_working_in_prose() {
+        // The previous heuristic treated the bare word "working" as Working,
+        // which produced false positives for narrative output (commits, logs,
+        // Markdown). The pane should remain Idle until a real working signal
+        // appears.
+        let screen = "\
+fix: keep working set warm across reloads\n\
+\n\
+> \n";
+        assert_eq!(detect_qodercli(screen), AgentState::Idle);
     }
 
     #[test]
