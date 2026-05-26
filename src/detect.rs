@@ -642,11 +642,15 @@ fn detect_qodercli(content: &str) -> AgentState {
 
     // Blocked: waiting for user confirmation or tool approval.
     // Also covers the "Permission Required / Allow once or always?" dialog
-    // qodercli renders for tool-call approval (mkdir/edit/etc.).
+    // qodercli renders for tool-call approval (mkdir/edit/etc.), and the
+    // ask-user tool's interactive prompt ("Enter your response" placeholder
+    // and the "Review your answers:" multi-question review tab).
     if lower.contains("waiting for user confirmation")
         || lower.contains("awaiting approval")
         || lower.contains("permission required")
         || lower.contains("allow once or always?")
+        || lower.contains("enter your response")
+        || lower.contains("review your answers:")
     {
         return AgentState::Blocked;
     }
@@ -2632,6 +2636,29 @@ Allow once or always?\n\
         // Even when the prompt copy gets truncated by the viewport, the title
         // alone should be enough to flip the pane to blocked.
         assert_eq!(detect_qodercli("Permission Required"), AgentState::Blocked,);
+    }
+
+    #[test]
+    fn qodercli_blocked_on_askuser_enter_response_placeholder() {
+        // qodercli's ask-user tool renders an input box with this placeholder
+        // when waiting for the user to type a response.
+        let screen = "\
+What kind of project are you working on?\n\
+> \n\
+  Enter your response\n";
+        assert_eq!(detect_qodercli(screen), AgentState::Blocked);
+    }
+
+    #[test]
+    fn qodercli_blocked_on_askuser_review_tab() {
+        // The multi-question/multi-select review tab heading is unique to the
+        // ask-user dialog and means the agent is parked waiting on user input.
+        let screen = "\
+Review your answers:\n\
+\n\
+Project type \u{2192} Web app\n\
+Stack        \u{2192} (not answered)\n";
+        assert_eq!(detect_qodercli(screen), AgentState::Blocked);
     }
 
     // ---- Helpers ----
