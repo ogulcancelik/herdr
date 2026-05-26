@@ -16,7 +16,7 @@ use serde_json::Value;
 use support::{
     cleanup_test_base, client_handshake, drain_messages, read_server_message, register_runtime_dir,
     register_spawned_herdr_pid, send_detach, send_input, unregister_spawned_herdr_pid,
-    wait_for_disconnect, wait_for_file, wait_for_message_variant, wait_for_socket, wait_until,
+    wait_for_disconnect, wait_for_message_variant, wait_for_socket, wait_until,
 };
 
 fn unique_test_dir() -> PathBuf {
@@ -271,7 +271,7 @@ fn navigate_q_detaches_client_and_server_persists() {
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
 
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
@@ -333,7 +333,7 @@ fn explicit_detach_message_causes_clean_disconnect() {
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
 
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect");
@@ -392,7 +392,7 @@ fn reattach_after_detach_shows_current_state() {
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
 
     // --- Client A ---
     let mut stream_a = UnixStream::connect(&client_socket).expect("client A should connect");
@@ -504,7 +504,7 @@ fn processes_survive_during_and_after_detach() {
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
 
     // Verify server starts with a workspace (session restore or fresh state).
     let response = ping_socket(&api_socket);
@@ -599,7 +599,7 @@ fn server_persists_after_client_connection_drop() {
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
 
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect");
@@ -649,7 +649,7 @@ fn detached_output_preserves_last_attached_pty_size() {
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
 
     let mut stream = UnixStream::connect(&client_socket).expect("client should connect");
     let (version, error) =
@@ -717,7 +717,7 @@ fn output_accumulated_while_detached_visible_on_reattach() {
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
 
     // Connect and handshake client A.
     let mut stream_a = UnixStream::connect(&client_socket).expect("client A should connect");

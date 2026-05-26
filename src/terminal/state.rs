@@ -42,6 +42,12 @@ pub struct TerminalStateMutation {
     pub session_ref_changed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkingDuration {
+    pub elapsed: Duration,
+    pub is_live: bool,
+}
+
 /// Pure state for a server-owned terminal.
 ///
 /// During the migration this is still one-to-one with a pane-backed PTY, but
@@ -63,6 +69,8 @@ pub struct TerminalState {
     pub agent_name: Option<String>,
     hook_report_sequences: HashMap<String, u64>,
     pub state: AgentState,
+    working_since: Option<Instant>,
+    last_working_duration: Option<Duration>,
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
 }
@@ -85,6 +93,8 @@ impl TerminalState {
             agent_name: None,
             hook_report_sequences: HashMap::new(),
             state: AgentState::Unknown,
+            working_since: None,
+            last_working_duration: None,
             revision: 0,
             launch_argv: None,
         }
@@ -559,6 +569,26 @@ impl TerminalState {
             .and_then(|authority| authority.custom_status.as_deref())
     }
 
+    pub fn working_duration_at(&self, now: Instant) -> Option<WorkingDuration> {
+        if self.state == AgentState::Working {
+            let since = self.working_since?;
+            let elapsed = now.checked_duration_since(since).unwrap_or_default();
+            return Some(WorkingDuration {
+                elapsed,
+                is_live: true,
+            });
+        }
+
+        if self.state == AgentState::Unknown {
+            return None;
+        }
+
+        self.last_working_duration.map(|elapsed| WorkingDuration {
+            elapsed,
+            is_live: false,
+        })
+    }
+
     fn visible_blocker_overrides_hook(&self) -> bool {
         self.fallback_visible_blocker
             && self.fallback_not_older_than_hook()
@@ -683,6 +713,27 @@ impl TerminalState {
 
         if previous_agent_label == agent_label && previous_state == state {
             return None;
+        }
+
+        if previous_state != AgentState::Working && state == AgentState::Working {
+            self.working_since = if previous_state == AgentState::Blocked {
+                self.last_working_duration
+                    .and_then(|elapsed| now.checked_sub(elapsed))
+                    .or(Some(now))
+            } else {
+                Some(now)
+            };
+            self.last_working_duration = None;
+        } else if previous_state == AgentState::Working && state != AgentState::Working {
+            let elapsed = self
+                .working_since
+                .and_then(|since| now.checked_duration_since(since))
+                .unwrap_or_default();
+            self.working_since = None;
+            self.last_working_duration = (state != AgentState::Unknown).then_some(elapsed);
+        } else if state == AgentState::Unknown {
+            self.working_since = None;
+            self.last_working_duration = None;
         }
 
         self.state = state;
@@ -854,6 +905,231 @@ mod tests {
             &mut last_working,
         );
         assert_eq!(state, AgentState::Idle);
+    }
+
+    #[test]
+    fn working_duration_starts_when_effective_state_enters_working() {
+        let mut terminal = test_terminal();
+        let start = std::time::Instant::now();
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            start,
+        );
+
+        let duration = terminal
+            .working_duration_at(start + std::time::Duration::from_secs(12))
+            .unwrap();
+        assert_eq!(duration.elapsed, std::time::Duration::from_secs(12));
+        assert!(duration.is_live);
+    }
+
+    #[test]
+    fn repeated_working_reports_do_not_reset_working_duration() {
+        let mut terminal = test_terminal();
+        let start = std::time::Instant::now();
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            start,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            start + std::time::Duration::from_secs(5),
+        );
+
+        let duration = terminal
+            .working_duration_at(start + std::time::Duration::from_secs(8))
+            .unwrap();
+        assert_eq!(duration.elapsed, std::time::Duration::from_secs(8));
+        assert!(duration.is_live);
+    }
+
+    #[test]
+    fn leaving_working_freezes_last_working_duration() {
+        let mut terminal = test_terminal();
+        let start = std::time::Instant::now();
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            start,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            start + std::time::Duration::from_secs(7),
+        );
+
+        let duration = terminal
+            .working_duration_at(start + std::time::Duration::from_secs(20))
+            .unwrap();
+        assert_eq!(duration.elapsed, std::time::Duration::from_secs(7));
+        assert!(!duration.is_live);
+    }
+
+    #[test]
+    fn new_working_transition_clears_stale_duration_and_restarts_timer() {
+        let mut terminal = test_terminal();
+        let start = std::time::Instant::now();
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            start,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            start + std::time::Duration::from_secs(7),
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            start + std::time::Duration::from_secs(20),
+        );
+
+        let duration = terminal
+            .working_duration_at(start + std::time::Duration::from_secs(22))
+            .unwrap();
+        assert_eq!(duration.elapsed, std::time::Duration::from_secs(2));
+        assert!(duration.is_live);
+    }
+
+    #[test]
+    fn blocked_to_working_transition_resumes_previous_working_duration() {
+        let mut terminal = test_terminal();
+        let start = std::time::Instant::now();
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            start,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Blocked,
+            true,
+            false,
+            false,
+            false,
+            start + std::time::Duration::from_secs(10),
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            start + std::time::Duration::from_secs(12),
+        );
+
+        let duration = terminal
+            .working_duration_at(start + std::time::Duration::from_secs(15))
+            .unwrap();
+        assert_eq!(duration.elapsed, std::time::Duration::from_secs(13));
+        assert!(duration.is_live);
+    }
+
+    #[test]
+    fn blocked_without_resuming_working_keeps_frozen_duration() {
+        let mut terminal = test_terminal();
+        let start = std::time::Instant::now();
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            start,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Blocked,
+            true,
+            false,
+            false,
+            false,
+            start + std::time::Duration::from_secs(10),
+        );
+
+        let duration = terminal
+            .working_duration_at(start + std::time::Duration::from_secs(30))
+            .unwrap();
+        assert_eq!(duration.elapsed, std::time::Duration::from_secs(10));
+        assert!(!duration.is_live);
+    }
+
+    #[test]
+    fn unknown_state_hides_stale_working_duration() {
+        let mut terminal = test_terminal();
+        let start = std::time::Instant::now();
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            start,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            None,
+            AgentState::Unknown,
+            false,
+            false,
+            false,
+            false,
+            start + std::time::Duration::from_secs(3),
+        );
+
+        assert_eq!(
+            terminal.working_duration_at(start + std::time::Duration::from_secs(5)),
+            None
+        );
     }
 
     #[test]

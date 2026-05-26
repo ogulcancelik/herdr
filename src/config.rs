@@ -9,8 +9,8 @@ mod theme;
 pub use self::{
     io::{
         config_diagnostic_summary, config_dir, config_path, load_live_config,
-        remove_keybinding_config_sections, remove_section_key, state_dir, upsert_section_bool,
-        upsert_section_value,
+        remove_keybinding_config_sections, remove_section_key, state_dir, upsert_section_body,
+        upsert_section_bool, upsert_section_value,
     },
     keybinds::{
         format_key_combo, normalize_key_combo, terminal_key_matches_combo, ActionKeybinds,
@@ -18,8 +18,9 @@ pub use self::{
         IndexedKeybind, Keybinds, LiveKeybindConfig,
     },
     model::{
-        validated_sidebar_bounds, AgentPanelScopeConfig, Config, ConfigReloadReport,
-        ConfigReloadStatus, KeysConfig, NewTerminalCwdConfig, ToastConfig, ToastDelivery,
+        validated_sidebar_bounds, AgentPanelScopeConfig, AgentViewField, AgentsViewConfig, Config,
+        ConfigReloadReport, ConfigReloadStatus, KeysConfig, NewTerminalCwdConfig, SpaceViewField,
+        SpacesViewConfig, ToastConfig, ToastDelivery, ViewColorPreset, ViewItem,
     },
     sound::SoundConfig,
     theme::{parse_color, CustomThemeColors, ThemeConfig},

@@ -1,6 +1,8 @@
+use std::time::Duration;
+
 use ratatui::{
     layout::{Alignment, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
     Frame,
@@ -8,10 +10,15 @@ use ratatui::{
 
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::status::{agent_icon, state_dot, state_label, state_label_color};
-use crate::app::state::{AgentPanelScope, Palette};
+use crate::app::state::{
+    ordered_agent_view_items, ordered_space_view_items, AgentPanelScope, AgentViewItem, Palette,
+    SpaceViewItem, ViewLine,
+};
 use crate::app::{AppState, Mode};
+use crate::config::ViewColorPreset;
 use crate::detect::AgentState;
-use crate::terminal::TerminalRuntimeRegistry;
+use crate::terminal::{TerminalRuntimeRegistry, WorkingDuration};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
 const AGENT_PANEL_HEADER_ROWS: u16 = 3;
@@ -20,12 +27,14 @@ pub(crate) struct AgentPanelEntry {
     pub ws_idx: usize,
     pub tab_idx: usize,
     pub pane_id: crate::layout::PaneId,
+    pub pane_label: Option<String>,
     pub primary_label: String,
     pub primary_tab_label: Option<String>,
     pub agent_label: Option<String>,
     pub state: AgentState,
     pub seen: bool,
     pub custom_status: Option<String>,
+    pub working_duration: Option<WorkingDuration>,
 }
 
 fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
@@ -141,18 +150,30 @@ fn agent_panel_entries_with_runtimes(
             let Some(ws) = app.workspaces.get(ws_idx) else {
                 return Vec::new();
             };
+            let multi_tab = ws.tabs.len() > 1;
+            let workspace_label = ws.display_name_from(&app.terminals, terminal_runtimes);
             ws.pane_details(&app.terminals)
                 .into_iter()
-                .map(|detail| AgentPanelEntry {
-                    ws_idx,
-                    tab_idx: detail.tab_idx,
-                    pane_id: detail.pane_id,
-                    primary_label: detail.label,
-                    primary_tab_label: None,
-                    agent_label: None,
-                    state: detail.state,
-                    seen: detail.seen,
-                    custom_status: detail.custom_status,
+                .map(|detail| {
+                    let has_pane_label = detail.pane_label.is_some();
+                    AgentPanelEntry {
+                        ws_idx,
+                        tab_idx: detail.tab_idx,
+                        pane_id: detail.pane_id,
+                        pane_label: detail.pane_label,
+                        primary_label: if has_pane_label {
+                            workspace_label.clone()
+                        } else {
+                            detail.label
+                        },
+                        primary_tab_label: (has_pane_label && multi_tab)
+                            .then_some(detail.tab_label),
+                        agent_label: Some(detail.agent_label),
+                        state: detail.state,
+                        seen: detail.seen,
+                        custom_status: detail.custom_status,
+                        working_duration: detail.working_duration,
+                    }
                 })
                 .collect()
         }
@@ -169,12 +190,14 @@ fn agent_panel_entries_with_runtimes(
                         ws_idx,
                         tab_idx: detail.tab_idx,
                         pane_id: detail.pane_id,
+                        pane_label: detail.pane_label,
                         primary_label: workspace_label.clone(),
                         primary_tab_label: multi_tab.then_some(detail.tab_label),
                         agent_label: Some(detail.agent_label),
                         state: detail.state,
                         seen: detail.seen,
                         custom_status: detail.custom_status,
+                        working_duration: detail.working_duration,
                     })
             })
             .collect(),
@@ -196,56 +219,394 @@ fn truncate_text(text: &str, max_width: usize) -> String {
     format!("{prefix}…")
 }
 
-fn format_agent_panel_primary_label(entry: &AgentPanelEntry, max_width: usize) -> String {
-    let Some(tab_label) = entry.primary_tab_label.as_deref() else {
-        return truncate_text(&entry.primary_label, max_width);
-    };
-
-    let separator = " · ";
-    let separator_width = separator.chars().count();
-    if max_width <= separator_width + 2 {
-        return truncate_text(
-            &format!("{}{}{}", entry.primary_label, separator, tab_label),
-            max_width,
-        );
-    }
-
-    let available = max_width.saturating_sub(separator_width);
-    let min_tab = 4.min(available.saturating_sub(1)).max(1);
-    let preferred_workspace = ((available * 2) / 3).max(1);
-    let mut workspace_budget = preferred_workspace
-        .min(available.saturating_sub(min_tab))
-        .max(1);
-    let mut tab_budget = available.saturating_sub(workspace_budget);
-
-    let workspace_len = entry.primary_label.chars().count();
-    let tab_len = tab_label.chars().count();
-
-    if workspace_len < workspace_budget {
-        let spare = workspace_budget - workspace_len;
-        workspace_budget = workspace_len;
-        tab_budget = (tab_budget + spare).min(available.saturating_sub(workspace_budget));
-    }
-    if tab_len < tab_budget {
-        let spare = tab_budget - tab_len;
-        tab_budget = tab_len;
-        workspace_budget = (workspace_budget + spare).min(available.saturating_sub(tab_budget));
-    }
-
-    format!(
-        "{}{}{}",
-        truncate_text(&entry.primary_label, workspace_budget),
-        separator,
-        truncate_text(tab_label, tab_budget)
-    )
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentPanelPrimarySegmentKind {
+    Pane,
+    Tab,
+    Workspace,
+    Separator,
 }
 
-fn workspace_row_height(ws: &crate::workspace::Workspace) -> u16 {
-    if ws.branch().is_some() {
-        2
-    } else {
-        1
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentPanelPrimarySegment {
+    text: String,
+    kind: AgentPanelPrimarySegmentKind,
+}
+
+impl AgentPanelPrimarySegment {
+    fn new(text: impl Into<String>, kind: AgentPanelPrimarySegmentKind) -> Self {
+        Self {
+            text: text.into(),
+            kind,
+        }
     }
+}
+
+fn push_full_primary_segments(
+    segments: &mut Vec<AgentPanelPrimarySegment>,
+    pane_label: &str,
+    tab_label: Option<&str>,
+    workspace_label: &str,
+) {
+    let separator = " · ";
+    segments.push(AgentPanelPrimarySegment::new(
+        pane_label,
+        AgentPanelPrimarySegmentKind::Pane,
+    ));
+    if let Some(tab_label) = tab_label {
+        segments.push(AgentPanelPrimarySegment::new(
+            separator,
+            AgentPanelPrimarySegmentKind::Separator,
+        ));
+        segments.push(AgentPanelPrimarySegment::new(
+            tab_label,
+            AgentPanelPrimarySegmentKind::Tab,
+        ));
+    }
+    segments.push(AgentPanelPrimarySegment::new(
+        separator,
+        AgentPanelPrimarySegmentKind::Separator,
+    ));
+    segments.push(AgentPanelPrimarySegment::new(
+        workspace_label,
+        AgentPanelPrimarySegmentKind::Workspace,
+    ));
+}
+
+fn truncated_pane_side_segments(
+    pane_label: &str,
+    tab_label: Option<&str>,
+    max_width: usize,
+) -> Vec<AgentPanelPrimarySegment> {
+    let separator = " · ";
+    let separator_width = separator.chars().count();
+    let Some(tab_label) = tab_label else {
+        return vec![AgentPanelPrimarySegment::new(
+            truncate_text(pane_label, max_width),
+            AgentPanelPrimarySegmentKind::Pane,
+        )];
+    };
+
+    let tab_width = tab_label.chars().count();
+    let full_side = format!("{pane_label}{separator}{tab_label}");
+    if full_side.chars().count() <= max_width {
+        return vec![
+            AgentPanelPrimarySegment::new(pane_label, AgentPanelPrimarySegmentKind::Pane),
+            AgentPanelPrimarySegment::new(separator, AgentPanelPrimarySegmentKind::Separator),
+            AgentPanelPrimarySegment::new(tab_label, AgentPanelPrimarySegmentKind::Tab),
+        ];
+    }
+
+    if max_width > separator_width + tab_width {
+        let pane_width = max_width - separator_width - tab_width;
+        return vec![
+            AgentPanelPrimarySegment::new(
+                truncate_text(pane_label, pane_width),
+                AgentPanelPrimarySegmentKind::Pane,
+            ),
+            AgentPanelPrimarySegment::new(separator, AgentPanelPrimarySegmentKind::Separator),
+            AgentPanelPrimarySegment::new(tab_label, AgentPanelPrimarySegmentKind::Tab),
+        ];
+    }
+
+    vec![AgentPanelPrimarySegment::new(
+        truncate_text(&full_side, max_width),
+        AgentPanelPrimarySegmentKind::Pane,
+    )]
+}
+
+fn agent_panel_primary_label_segments_with_options(
+    entry: &AgentPanelEntry,
+    max_width: usize,
+    show_pane_name: bool,
+    show_tab_name: bool,
+) -> Vec<AgentPanelPrimarySegment> {
+    let separator = " · ";
+    let separator_width = separator.chars().count();
+    let pane_label = show_pane_name
+        .then_some(entry.pane_label.as_deref())
+        .flatten();
+    let tab_label = show_tab_name
+        .then_some(entry.primary_tab_label.as_deref())
+        .flatten();
+    let Some(pane_label) = pane_label else {
+        let Some(tab_label) = tab_label else {
+            return vec![AgentPanelPrimarySegment::new(
+                truncate_text(&entry.primary_label, max_width),
+                AgentPanelPrimarySegmentKind::Workspace,
+            )];
+        };
+
+        let full = format!("{tab_label}{separator}{}", entry.primary_label);
+        if full.chars().count() <= max_width {
+            return vec![
+                AgentPanelPrimarySegment::new(tab_label, AgentPanelPrimarySegmentKind::Tab),
+                AgentPanelPrimarySegment::new(separator, AgentPanelPrimarySegmentKind::Separator),
+                AgentPanelPrimarySegment::new(
+                    entry.primary_label.clone(),
+                    AgentPanelPrimarySegmentKind::Workspace,
+                ),
+            ];
+        }
+
+        let workspace_width = entry.primary_label.chars().count();
+        if max_width > workspace_width + separator_width {
+            let tab_width = max_width - workspace_width - separator_width;
+            return vec![
+                AgentPanelPrimarySegment::new(
+                    truncate_text(tab_label, tab_width),
+                    AgentPanelPrimarySegmentKind::Tab,
+                ),
+                AgentPanelPrimarySegment::new(separator, AgentPanelPrimarySegmentKind::Separator),
+                AgentPanelPrimarySegment::new(
+                    entry.primary_label.clone(),
+                    AgentPanelPrimarySegmentKind::Workspace,
+                ),
+            ];
+        }
+
+        return vec![AgentPanelPrimarySegment::new(
+            truncate_text(&full, max_width),
+            AgentPanelPrimarySegmentKind::Workspace,
+        )];
+    };
+
+    let side = match tab_label {
+        Some(tab_label) => format!("{pane_label}{separator}{tab_label}"),
+        None => pane_label.to_string(),
+    };
+    let full = format!("{side}{separator}{}", entry.primary_label);
+    if full.chars().count() <= max_width {
+        let mut segments = Vec::new();
+        push_full_primary_segments(&mut segments, pane_label, tab_label, &entry.primary_label);
+        return segments;
+    }
+
+    let workspace_width = entry.primary_label.chars().count();
+    let min_named_side_width = 1;
+    if max_width >= workspace_width + separator_width + min_named_side_width {
+        let side_width = max_width - workspace_width - separator_width;
+        let mut segments = truncated_pane_side_segments(pane_label, tab_label, side_width);
+        segments.push(AgentPanelPrimarySegment::new(
+            separator,
+            AgentPanelPrimarySegmentKind::Separator,
+        ));
+        segments.push(AgentPanelPrimarySegment::new(
+            entry.primary_label.clone(),
+            AgentPanelPrimarySegmentKind::Workspace,
+        ));
+        return segments;
+    }
+
+    vec![AgentPanelPrimarySegment::new(
+        truncate_text(&full, max_width),
+        AgentPanelPrimarySegmentKind::Workspace,
+    )]
+}
+
+pub(super) fn format_agent_panel_primary_label(
+    entry: &AgentPanelEntry,
+    max_width: usize,
+) -> String {
+    format_agent_panel_primary_label_with_options(entry, max_width, true, true)
+}
+
+fn format_agent_panel_primary_label_with_options(
+    entry: &AgentPanelEntry,
+    max_width: usize,
+    show_pane_name: bool,
+    show_tab_name: bool,
+) -> String {
+    agent_panel_primary_label_segments_with_options(entry, max_width, show_pane_name, show_tab_name)
+        .into_iter()
+        .map(|segment| segment.text)
+        .collect()
+}
+
+fn agent_panel_primary_label_spans(
+    entry: &AgentPanelEntry,
+    max_width: usize,
+    show_pane_name: bool,
+    show_tab_name: bool,
+    pane_style: Style,
+    tab_style: Style,
+    workspace_style: Style,
+    p: &Palette,
+) -> Vec<Span<'static>> {
+    agent_panel_primary_label_segments_with_options(entry, max_width, show_pane_name, show_tab_name)
+        .into_iter()
+        .map(|segment| {
+            let style = match segment.kind {
+                AgentPanelPrimarySegmentKind::Pane => pane_style,
+                AgentPanelPrimarySegmentKind::Tab => tab_style,
+                AgentPanelPrimarySegmentKind::Workspace => workspace_style,
+                AgentPanelPrimarySegmentKind::Separator => Style::default().fg(p.overlay0),
+            };
+            Span::styled(segment.text, style)
+        })
+        .collect()
+}
+
+fn compact_duration_parts(duration: Duration) -> Vec<(String, &'static str)> {
+    let total_seconds = duration.as_secs().max(1);
+    if total_seconds < 60 {
+        return vec![(total_seconds.to_string(), "s")];
+    }
+
+    let total_minutes = total_seconds / 60;
+    if total_minutes < 60 {
+        return vec![
+            (total_minutes.to_string(), "m"),
+            ((total_seconds % 60).to_string(), "s"),
+        ];
+    }
+
+    vec![
+        ((total_minutes / 60).to_string(), "h"),
+        ((total_minutes % 60).to_string(), "m"),
+    ]
+}
+
+fn duration_number_style(duration: WorkingDuration, p: &Palette) -> Style {
+    if duration.is_live {
+        Style::default().fg(p.subtext0)
+    } else {
+        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
+    }
+}
+
+fn duration_unit_style(unit: &str, duration: WorkingDuration, p: &Palette) -> Style {
+    if !duration.is_live {
+        return duration_number_style(duration, p);
+    }
+    if unit == "s" {
+        return duration_number_style(duration, p);
+    }
+
+    let color = match unit {
+        "h" => p.subtext0,
+        "m" => p.overlay1,
+        "s" => p.overlay0,
+        _ => p.overlay0,
+    };
+    Style::default().fg(color)
+}
+
+fn duration_value_spans(duration: WorkingDuration, p: &Palette) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (value, unit) in compact_duration_parts(duration.elapsed) {
+        spans.push(Span::styled(value, duration_number_style(duration, p)));
+        spans.push(Span::styled(unit, duration_unit_style(unit, duration, p)));
+    }
+    spans
+}
+
+fn style_with_view_color(
+    style: Style,
+    preset: ViewColorPreset,
+    default: Color,
+    p: &Palette,
+) -> Style {
+    if preset == ViewColorPreset::Default {
+        style
+    } else {
+        style.fg(p.view_color(preset, default))
+    }
+}
+
+fn spans_with_view_color(
+    spans: Vec<Span<'static>>,
+    preset: ViewColorPreset,
+    p: &Palette,
+) -> Vec<Span<'static>> {
+    if preset == ViewColorPreset::Default {
+        return spans;
+    }
+
+    spans
+        .into_iter()
+        .map(|span| {
+            let Span { content, style } = span;
+            let default = style.fg.unwrap_or(p.text);
+            Span::styled(content, style_with_view_color(style, preset, default, p))
+        })
+        .collect()
+}
+
+fn push_separator(spans: &mut Vec<Span<'static>>, style: Style) {
+    if !spans.is_empty() {
+        spans.push(Span::styled(" · ", style));
+    }
+}
+
+fn push_space_separator(
+    spans: &mut Vec<Span<'static>>,
+    previous_was_status: &mut bool,
+    style: Style,
+) {
+    if !spans.is_empty() {
+        let separator = if *previous_was_status { " " } else { " · " };
+        spans.push(Span::styled(separator, style));
+    }
+    *previous_was_status = false;
+}
+
+fn branch_status_parts(
+    ahead_behind: Option<(usize, usize)>,
+    p: &Palette,
+) -> Option<Vec<(String, ratatui::style::Color)>> {
+    let (ahead, behind) = ahead_behind?;
+    let mut parts = Vec::new();
+    if ahead > 0 {
+        parts.push((format!("↑{}", ahead), p.green));
+    }
+    if behind > 0 {
+        parts.push((format!("↓{}", behind), p.red));
+    }
+    (!parts.is_empty()).then_some(parts)
+}
+
+fn space_item_has_content(
+    app: &AppState,
+    ws: &crate::workspace::Workspace,
+    item: SpaceViewItem,
+) -> bool {
+    if !item.enabled(&app.space_view) {
+        return false;
+    }
+    match item {
+        SpaceViewItem::Status | SpaceViewItem::Name => true,
+        SpaceViewItem::Branch => ws.branch().is_some(),
+        SpaceViewItem::BranchStatus => ws.branch().is_some() && ws.git_ahead_behind().is_some(),
+    }
+}
+
+fn workspace_line_has_content(
+    app: &AppState,
+    ws: &crate::workspace::Workspace,
+    line: ViewLine,
+) -> bool {
+    ordered_space_view_items(&app.space_view)
+        .into_iter()
+        .filter(|item| item.line(&app.space_view) == line)
+        .any(|item| space_item_has_content(app, ws, item))
+}
+
+fn workspace_render_lines(app: &AppState, ws: &crate::workspace::Workspace) -> Vec<ViewLine> {
+    let mut lines = Vec::new();
+    for line in (0..app.space_view.lines.len().max(1)).map(ViewLine::from_index) {
+        if workspace_line_has_content(app, ws, line) {
+            lines.push(line);
+        }
+    }
+    if lines.is_empty() {
+        lines.push(ViewLine::First);
+    }
+    lines
+}
+
+fn workspace_row_height(app: &AppState, ws: &crate::workspace::Workspace) -> u16 {
+    workspace_render_lines(app, ws).len() as u16
 }
 
 fn workspace_attention_priority(state: AgentState, seen: bool) -> u8 {
@@ -466,7 +827,7 @@ fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> us
                 let row_height = if *indented {
                     1
                 } else {
-                    workspace_row_height(ws)
+                    workspace_row_height(app, ws)
                 };
                 let gap = u16::from(
                     !(*indented && next_entry_is_indented_workspace(&entries, entry_idx)),
@@ -525,16 +886,36 @@ pub(crate) fn agent_panel_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
     Rect::new(area.x, body_y, body_width, body_height)
 }
 
-fn agent_panel_visible_count(area: Rect) -> usize {
+fn agent_view_render_lines(app: &AppState) -> Vec<ViewLine> {
+    let mut lines: Vec<_> = app
+        .agent_view
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.iter().any(|item| item.show))
+        .map(|(idx, _)| ViewLine::from_index(idx))
+        .collect();
+    if lines.is_empty() {
+        lines.push(ViewLine::First);
+    }
+    lines
+}
+
+fn agent_panel_entry_row_count(app: &AppState) -> u16 {
+    agent_view_render_lines(app).len() as u16
+}
+
+fn agent_panel_visible_count(app: &AppState, area: Rect) -> usize {
     let body = agent_panel_body_rect(area, false);
-    if body.width == 0 || body.height < 2 {
+    let entry_rows = agent_panel_entry_row_count(app);
+    if body.width == 0 || entry_rows == 0 || body.height < entry_rows {
         return 0;
     }
 
     let mut used_rows = 0u16;
     let mut visible = 0usize;
-    while used_rows.saturating_add(2) <= body.height {
-        used_rows = used_rows.saturating_add(2);
+    while used_rows.saturating_add(entry_rows) <= body.height {
+        used_rows = used_rows.saturating_add(entry_rows);
         visible += 1;
         if used_rows < body.height {
             used_rows = used_rows.saturating_add(1);
@@ -544,7 +925,7 @@ fn agent_panel_visible_count(area: Rect) -> usize {
 }
 
 pub(crate) fn agent_panel_scroll_metrics(app: &AppState, area: Rect) -> crate::pane::ScrollMetrics {
-    let viewport_rows = agent_panel_visible_count(area);
+    let viewport_rows = agent_panel_visible_count(app, area);
     let total_rows = agent_panel_entries(app).len();
     let max_offset_from_bottom = total_rows.saturating_sub(viewport_rows);
     let offset_from_bottom = total_rows
@@ -600,7 +981,7 @@ pub(crate) fn compute_workspace_list_areas(
                 let row_height = if *indented {
                     1
                 } else {
-                    workspace_row_height(ws)
+                    workspace_row_height(app, ws)
                 };
                 let gap = u16::from(
                     !(*indented && next_entry_is_indented_workspace(&entries, entry_idx)),
@@ -899,96 +1280,137 @@ fn render_workspace_list(
 
         let (icon, icon_style) = state_dot(agg_state, agg_seen, p);
         let label = ws.display_name_from(&app.terminals, terminal_runtimes);
-        let mut line1 = Vec::new();
-        let mut show_workspace_icon = true;
-        if card.indented {
-            line1.push(Span::styled("   ", Style::default()));
-        } else if let Some((key, collapsed)) = workspace_parent_group_state(app, i) {
-            let icon = if collapsed { "▸" } else { "▾" };
-            let (state_icon, state_style) = if collapsed {
-                let (state, seen) = space_aggregate_state(app, &key);
-                state_dot(state, seen, p)
-            } else {
-                (icon, Style::default().fg(p.accent))
-            };
-            line1.push(Span::styled(icon, Style::default().fg(p.accent)));
-            if collapsed {
-                line1.push(Span::styled(" ", Style::default()));
-                line1.push(Span::styled(state_icon, state_style));
-                show_workspace_icon = false;
+        let parent_group = (!card.indented)
+            .then(|| workspace_parent_group_state(app, i))
+            .flatten();
+        let status_dot = if let Some((key, true)) = parent_group.as_ref() {
+            let (state, seen) = space_aggregate_state(app, key);
+            state_dot(state, seen, p)
+        } else {
+            (icon, icon_style)
+        };
+        let branch_color = if selected || is_active {
+            p.mauve
+        } else {
+            p.overlay0
+        };
+        let branch_style = Style::default().fg(branch_color);
+        let separator_style = Style::default().fg(p.overlay0);
+        let ordered_items = ordered_space_view_items(&app.space_view);
+        let render_lines = workspace_render_lines(app, ws);
+
+        for (render_idx, line) in render_lines.into_iter().enumerate() {
+            let y = row_y + render_idx as u16;
+            if y >= list_bottom || render_idx as u16 >= row_height {
+                continue;
             }
-            line1.push(Span::styled(" ", Style::default()));
-        } else {
-            line1.push(Span::styled(" ", Style::default()));
-        }
-        if show_workspace_icon {
-            line1.push(Span::styled(icon, icon_style));
-            line1.push(Span::styled(" ", Style::default()));
-        }
-        if card.indented {
-            let display_label = grouped_child_display_label(
-                &label,
-                ws.branch().as_deref(),
-                ws.custom_name.is_some(),
-            );
-            line1.push(Span::styled(display_label, name_style));
-        } else {
-            line1.push(Span::styled(label, name_style));
-        }
 
-        frame.render_widget(
-            Paragraph::new(Line::from(line1)),
-            Rect::new(card.rect.x, row_y, card.rect.width, 1),
-        );
+            let mut prefix = Vec::new();
+            if render_idx == 0 {
+                if card.indented {
+                    prefix.push(Span::styled("   ", Style::default()));
+                } else if let Some((_, collapsed)) = parent_group.as_ref() {
+                    let icon = if *collapsed { "▸" } else { "▾" };
+                    prefix.push(Span::styled(icon, Style::default().fg(p.accent)));
+                    prefix.push(Span::styled(" ", Style::default()));
+                } else {
+                    prefix.push(Span::styled(" ", Style::default()));
+                }
+            } else {
+                prefix.push(Span::styled(
+                    if card.indented { "     " } else { "   " },
+                    Style::default(),
+                ));
+            }
 
-        if row_height > 1 && row_y + 1 < list_bottom {
-            if let Some(branch) = ws.branch() {
-                let upstream_label = ws.git_ahead_behind().and_then(|(ahead, behind)| {
-                    let mut parts = Vec::new();
-                    if ahead > 0 {
-                        parts.push((format!("↑{}", ahead), p.green));
+            let mut content = Vec::new();
+            let mut previous_was_status = false;
+            for item in ordered_items
+                .iter()
+                .copied()
+                .filter(|item| item.line(&app.space_view) == line)
+                .filter(|item| item.enabled(&app.space_view))
+            {
+                match item {
+                    SpaceViewItem::Status => {
+                        push_separator(&mut content, separator_style);
+                        let icon_style = style_with_view_color(
+                            status_dot.1,
+                            item.color(&app.space_view),
+                            status_dot.1.fg.unwrap_or(p.accent),
+                            p,
+                        );
+                        content.push(Span::styled(status_dot.0, icon_style));
+                        previous_was_status = true;
                     }
-                    if behind > 0 {
-                        parts.push((format!("↓{}", behind), p.red));
+                    SpaceViewItem::Name => {
+                        push_space_separator(
+                            &mut content,
+                            &mut previous_was_status,
+                            separator_style,
+                        );
+                        let display_label = if card.indented {
+                            grouped_child_display_label(
+                                &label,
+                                ws.branch().as_deref(),
+                                ws.custom_name.is_some(),
+                            )
+                        } else {
+                            label.clone()
+                        };
+                        let item_style = style_with_view_color(
+                            name_style,
+                            item.color(&app.space_view),
+                            name_style.fg.unwrap_or(p.subtext0),
+                            p,
+                        );
+                        content.push(Span::styled(display_label, item_style));
                     }
-                    (!parts.is_empty()).then_some(parts)
-                });
-                let reserved = upstream_label
-                    .as_ref()
-                    .map(|parts| {
-                        parts.iter().map(|(label, _)| label.len()).sum::<usize>() + parts.len()
-                    })
-                    .unwrap_or(0);
-                let max_branch_len = (card.rect.width as usize).saturating_sub(5 + reserved);
-                let branch_display = if branch.len() > max_branch_len {
-                    format!("{}…", &branch[..max_branch_len.saturating_sub(1)])
-                } else {
-                    branch
-                };
-                let branch_color = if selected || is_active {
-                    p.mauve
-                } else {
-                    p.overlay0
-                };
-                let branch_indent = if card.indented { "     " } else { "   " };
-                let mut spans = vec![
-                    Span::styled(branch_indent, Style::default()),
-                    Span::styled(branch_display, Style::default().fg(branch_color)),
-                ];
-                if let Some(parts) = upstream_label {
-                    spans.push(Span::styled(" ", Style::default()));
-                    for (idx, (label, color)) in parts.into_iter().enumerate() {
-                        if idx > 0 {
-                            spans.push(Span::styled(" ", Style::default()));
+                    SpaceViewItem::Branch => {
+                        if let Some(branch) = ws.branch() {
+                            push_space_separator(
+                                &mut content,
+                                &mut previous_was_status,
+                                separator_style,
+                            );
+                            let item_style = style_with_view_color(
+                                branch_style,
+                                item.color(&app.space_view),
+                                branch_style.fg.unwrap_or(p.overlay0),
+                                p,
+                            );
+                            content.push(Span::styled(branch, item_style));
                         }
-                        spans.push(Span::styled(label, Style::default().fg(color)));
+                    }
+                    SpaceViewItem::BranchStatus => {
+                        if ws.branch().is_some() {
+                            if let Some(parts) = branch_status_parts(ws.git_ahead_behind(), p) {
+                                push_space_separator(
+                                    &mut content,
+                                    &mut previous_was_status,
+                                    separator_style,
+                                );
+                                for (idx, (label, color)) in parts.into_iter().enumerate() {
+                                    if idx > 0 {
+                                        content.push(Span::styled(" ", Style::default()));
+                                    }
+                                    content.push(Span::styled(
+                                        label,
+                                        Style::default()
+                                            .fg(p.view_color(item.color(&app.space_view), color)),
+                                    ));
+                                }
+                            }
+                        }
                     }
                 }
-                frame.render_widget(
-                    Paragraph::new(Line::from(spans)),
-                    Rect::new(card.rect.x, row_y + 1, card.rect.width, 1),
-                );
             }
+
+            prefix.extend(content);
+            frame.render_widget(
+                Paragraph::new(Line::from(prefix)),
+                Rect::new(card.rect.x, y, card.rect.width, 1),
+            );
         }
     }
 
@@ -1031,6 +1453,521 @@ fn render_workspace_list(
             menu_rect,
         );
     }
+}
+
+fn agent_item_spans(
+    entry: &AgentPanelEntry,
+    app: &AppState,
+    item: AgentViewItem,
+    name_style: Style,
+    status_style: Style,
+    agent_style: Style,
+    p: &Palette,
+) -> Option<Vec<Span<'static>>> {
+    if !item.enabled(&app.agent_view) {
+        return None;
+    }
+    let spans = match item {
+        AgentViewItem::AgentStatus => {
+            let (icon, icon_style) = agent_icon(entry.state, entry.seen, app.spinner_tick, p);
+            Some(vec![Span::styled(icon, icon_style)])
+        }
+        AgentViewItem::PaneName => entry
+            .pane_label
+            .as_ref()
+            .map(|label| vec![Span::styled(label.clone(), Style::default().fg(p.green))]),
+        AgentViewItem::TabName => entry
+            .primary_tab_label
+            .as_ref()
+            .map(|label| vec![Span::styled(label.clone(), Style::default().fg(p.mauve))]),
+        AgentViewItem::SpaceName => {
+            Some(vec![Span::styled(entry.primary_label.clone(), name_style)])
+        }
+        AgentViewItem::Status => Some(vec![Span::styled(
+            state_label(entry.state, entry.seen),
+            status_style,
+        )]),
+        AgentViewItem::Time => entry
+            .working_duration
+            .map(|duration| duration_value_spans(duration, p)),
+        AgentViewItem::CustomStatus => entry
+            .custom_status
+            .as_ref()
+            .map(|status| vec![Span::styled(status.clone(), agent_style)]),
+        AgentViewItem::AgentName => entry
+            .agent_label
+            .as_ref()
+            .map(|label| vec![Span::styled(label.clone(), agent_style)]),
+        AgentViewItem::RightAlignment => None,
+    }?;
+    Some(spans_with_view_color(spans, item.color(&app.agent_view), p))
+}
+
+fn is_agent_identity_item(item: AgentViewItem) -> bool {
+    matches!(
+        item,
+        AgentViewItem::PaneName | AgentViewItem::TabName | AgentViewItem::SpaceName
+    )
+}
+
+fn identity_items_keep_default_order(items: &[AgentViewItem]) -> bool {
+    let mut next_default_idx = 0;
+    for item in items {
+        let Some(default_idx) = [
+            AgentViewItem::PaneName,
+            AgentViewItem::TabName,
+            AgentViewItem::SpaceName,
+        ]
+        .iter()
+        .position(|candidate| candidate == item) else {
+            return false;
+        };
+        if default_idx < next_default_idx {
+            return false;
+        }
+        next_default_idx = default_idx + 1;
+    }
+    items.contains(&AgentViewItem::SpaceName)
+}
+
+#[derive(Default)]
+struct AgentLineContent {
+    left: Vec<Span<'static>>,
+    right: Vec<Span<'static>>,
+}
+
+fn push_agent_line_spans(
+    spans: &mut Vec<Span<'static>>,
+    previous_was_agent_status: &mut bool,
+    item_spans: Vec<Span<'static>>,
+    item: AgentViewItem,
+    separator_style: Style,
+) {
+    push_space_separator(spans, previous_was_agent_status, separator_style);
+    spans.extend(item_spans);
+    *previous_was_agent_status = item == AgentViewItem::AgentStatus;
+}
+
+fn agent_line_content(
+    entry: &AgentPanelEntry,
+    app: &AppState,
+    line: ViewLine,
+    ordered_items: &[AgentViewItem],
+    max_width: usize,
+    name_style: Style,
+    status_style: Style,
+    agent_style: Style,
+    p: &Palette,
+) -> AgentLineContent {
+    let mut content = AgentLineContent::default();
+    let line_items: Vec<_> = ordered_items
+        .iter()
+        .copied()
+        .filter(|item| item.line(&app.agent_view) == Some(line))
+        .collect();
+    let mut idx = 0;
+    let mut right_aligned = false;
+    let mut previous_left_was_agent_status = false;
+    let mut previous_right_was_agent_status = false;
+    while idx < line_items.len() {
+        let item = line_items[idx];
+        if item == AgentViewItem::RightAlignment {
+            if item.enabled(&app.agent_view) {
+                right_aligned = true;
+            }
+            idx += 1;
+            continue;
+        }
+        if is_agent_identity_item(item) {
+            let end = line_items[idx..]
+                .iter()
+                .position(|candidate| !is_agent_identity_item(*candidate))
+                .map_or(line_items.len(), |offset| idx + offset);
+            let sequence = &line_items[idx..end];
+            if AgentViewItem::SpaceName.enabled(&app.agent_view)
+                && identity_items_keep_default_order(sequence)
+            {
+                let show_pane_name = sequence.contains(&AgentViewItem::PaneName)
+                    && AgentViewItem::PaneName.enabled(&app.agent_view);
+                let show_tab_name = sequence.contains(&AgentViewItem::TabName)
+                    && AgentViewItem::TabName.enabled(&app.agent_view);
+                let pane_style = style_with_view_color(
+                    Style::default().fg(p.green),
+                    AgentViewItem::PaneName.color(&app.agent_view),
+                    p.green,
+                    p,
+                );
+                let tab_style = style_with_view_color(
+                    Style::default().fg(p.mauve),
+                    AgentViewItem::TabName.color(&app.agent_view),
+                    p.mauve,
+                    p,
+                );
+                let workspace_style = style_with_view_color(
+                    name_style,
+                    AgentViewItem::SpaceName.color(&app.agent_view),
+                    name_style.fg.unwrap_or(p.subtext0),
+                    p,
+                );
+                if right_aligned {
+                    let separator_width = if content.right.is_empty() {
+                        0
+                    } else if previous_right_was_agent_status {
+                        1
+                    } else {
+                        3
+                    };
+                    let available_width =
+                        max_width.saturating_sub(spans_width(&content.right) + separator_width);
+                    let item_spans = agent_panel_primary_label_spans(
+                        entry,
+                        available_width,
+                        show_pane_name,
+                        show_tab_name,
+                        pane_style,
+                        tab_style,
+                        workspace_style,
+                        p,
+                    );
+                    push_agent_line_spans(
+                        &mut content.right,
+                        &mut previous_right_was_agent_status,
+                        item_spans,
+                        AgentViewItem::SpaceName,
+                        agent_style,
+                    );
+                } else {
+                    let separator_width = if content.left.is_empty() {
+                        0
+                    } else if previous_left_was_agent_status {
+                        1
+                    } else {
+                        3
+                    };
+                    let available_width =
+                        max_width.saturating_sub(spans_width(&content.left) + separator_width);
+                    let item_spans = agent_panel_primary_label_spans(
+                        entry,
+                        available_width,
+                        show_pane_name,
+                        show_tab_name,
+                        pane_style,
+                        tab_style,
+                        workspace_style,
+                        p,
+                    );
+                    push_agent_line_spans(
+                        &mut content.left,
+                        &mut previous_left_was_agent_status,
+                        item_spans,
+                        AgentViewItem::SpaceName,
+                        agent_style,
+                    );
+                }
+                idx = end;
+                continue;
+            }
+        }
+        if let Some(item_spans) =
+            agent_item_spans(entry, app, item, name_style, status_style, agent_style, p)
+        {
+            if right_aligned {
+                push_agent_line_spans(
+                    &mut content.right,
+                    &mut previous_right_was_agent_status,
+                    item_spans,
+                    item,
+                    agent_style,
+                );
+            } else {
+                push_agent_line_spans(
+                    &mut content.left,
+                    &mut previous_left_was_agent_status,
+                    item_spans,
+                    item,
+                    agent_style,
+                );
+            }
+        }
+        idx += 1;
+    }
+    content
+}
+
+fn spans_width(spans: &[Span<'_>]) -> usize {
+    spans
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum()
+}
+
+fn truncate_spans_to_width(spans: &[Span<'static>], max_width: usize) -> Vec<Span<'static>> {
+    let mut width = 0;
+    let mut truncated = Vec::new();
+    for span in spans {
+        if width >= max_width {
+            break;
+        }
+        let mut content = String::new();
+        for ch in span.content.chars() {
+            let ch_width = ch.width().unwrap_or(0);
+            if width + ch_width > max_width {
+                break;
+            }
+            content.push(ch);
+            width += ch_width;
+        }
+        if !content.is_empty() {
+            truncated.push(Span::styled(content, span.style));
+        }
+    }
+    truncated
+}
+
+fn fixed_width_agent_line_spans(
+    mut content: AgentLineContent,
+    width: u16,
+    fill_style: Style,
+) -> Vec<Span<'static>> {
+    let width = width as usize;
+    if width == 0 {
+        return Vec::new();
+    }
+    if content.right.is_empty() {
+        return truncate_spans_to_width(&content.left, width);
+    }
+
+    let mut right = content.right;
+    let right_width = spans_width(&right).min(width);
+    if right_width < spans_width(&right) {
+        right = truncate_spans_to_width(&right, right_width);
+    }
+    let gap = usize::from(!content.left.is_empty() && right_width < width);
+    let left_width = width.saturating_sub(right_width + gap);
+    content.left = truncate_spans_to_width(&content.left, left_width);
+    let left_width = spans_width(&content.left);
+    let pad_width = width.saturating_sub(left_width + right_width);
+    let mut spans = content.left;
+    if pad_width > 0 {
+        spans.push(Span::styled(" ".repeat(pad_width), fill_style));
+    }
+    spans.extend(right);
+    spans
+}
+
+fn render_agent_line(
+    frame: &mut Frame,
+    rect: Rect,
+    content: AgentLineContent,
+    row_style: Style,
+    right_style: Style,
+) {
+    if rect.width == 0 {
+        return;
+    }
+    if content.right.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(content.left)).style(row_style),
+            rect,
+        );
+        return;
+    }
+
+    {
+        let buf = frame.buffer_mut();
+        for x in rect.x..rect.x + rect.width {
+            buf[(x, rect.y)].set_style(row_style);
+        }
+    }
+    let right_width = spans_width(&content.right).min(rect.width as usize) as u16;
+    let gap = u16::from(!content.left.is_empty() && right_width < rect.width);
+    let left_width = rect.width.saturating_sub(right_width.saturating_add(gap));
+    if left_width > 0 {
+        frame.render_widget(
+            Paragraph::new(Line::from(content.left)).style(row_style),
+            Rect::new(rect.x, rect.y, left_width, 1),
+        );
+    }
+    if right_width > 0 {
+        frame.render_widget(
+            Paragraph::new(Line::from(content.right))
+                .style(row_style)
+                .alignment(Alignment::Right),
+            Rect::new(
+                rect.x + rect.width.saturating_sub(right_width),
+                rect.y,
+                right_width,
+                1,
+            ),
+        );
+        if gap > 0 {
+            let gap_x = rect.x + rect.width.saturating_sub(right_width + gap);
+            frame.buffer_mut()[(gap_x, rect.y)].set_style(right_style);
+        }
+    }
+}
+
+pub(crate) fn settings_space_view_demo_lines(app: &AppState) -> Vec<Line<'static>> {
+    let p = &app.palette;
+    let (status, status_style) = state_dot(AgentState::Working, true, p);
+    let branch = "feature/sidebar";
+    let branch_status = branch_status_parts(Some((2, 1)), p);
+    let separator_style = Style::default().fg(p.overlay0);
+    let name_style = Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD);
+    let branch_style = Style::default().fg(p.mauve);
+    let mut lines = Vec::new();
+
+    for line in (0..app.space_view.lines.len().max(1)).map(ViewLine::from_index) {
+        let mut content = Vec::new();
+        let mut previous_was_status = false;
+        for item in ordered_space_view_items(&app.space_view)
+            .into_iter()
+            .filter(|item| item.line(&app.space_view) == line)
+            .filter(|item| item.enabled(&app.space_view))
+        {
+            match item {
+                SpaceViewItem::Status => {
+                    push_separator(&mut content, separator_style);
+                    let item_style = style_with_view_color(
+                        status_style,
+                        item.color(&app.space_view),
+                        status_style.fg.unwrap_or(p.accent),
+                        p,
+                    );
+                    content.push(Span::styled(status, item_style));
+                    previous_was_status = true;
+                }
+                SpaceViewItem::Name => {
+                    push_space_separator(&mut content, &mut previous_was_status, separator_style);
+                    let item_style = style_with_view_color(
+                        name_style,
+                        item.color(&app.space_view),
+                        name_style.fg.unwrap_or(p.subtext0),
+                        p,
+                    );
+                    content.push(Span::styled("demo-space", item_style));
+                }
+                SpaceViewItem::Branch => {
+                    push_space_separator(&mut content, &mut previous_was_status, separator_style);
+                    let item_style = style_with_view_color(
+                        branch_style,
+                        item.color(&app.space_view),
+                        branch_style.fg.unwrap_or(p.mauve),
+                        p,
+                    );
+                    content.push(Span::styled(branch, item_style));
+                }
+                SpaceViewItem::BranchStatus => {
+                    if let Some(parts) = branch_status.clone() {
+                        push_space_separator(
+                            &mut content,
+                            &mut previous_was_status,
+                            separator_style,
+                        );
+                        for (idx, (label, color)) in parts.into_iter().enumerate() {
+                            if idx > 0 {
+                                content.push(Span::styled(" ", Style::default()));
+                            }
+                            content.push(Span::styled(
+                                label,
+                                Style::default()
+                                    .fg(p.view_color(item.color(&app.space_view), color)),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if !content.is_empty() {
+            let mut spans = vec![Span::styled("  ", Style::default())];
+            spans.extend(content);
+            lines.push(Line::from(spans));
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  all demo space fields hidden",
+            Style::default().fg(p.overlay1),
+        )));
+    }
+    lines
+}
+
+pub(crate) fn settings_agent_view_demo_width(app: &AppState) -> u16 {
+    app.view.sidebar_rect.width.max(app.sidebar_width).max(1)
+}
+
+pub(crate) fn settings_agent_view_demo_lines(app: &AppState, width: u16) -> Vec<Line<'static>> {
+    let p = &app.palette;
+    let demos = [
+        AgentPanelEntry {
+            ws_idx: 0,
+            tab_idx: 0,
+            pane_id: crate::layout::PaneId::from_raw(1),
+            pane_label: Some("pane-alpha".into()),
+            primary_label: "workspace-app".into(),
+            primary_tab_label: Some("main".into()),
+            agent_label: Some("claude".into()),
+            state: AgentState::Working,
+            seen: true,
+            custom_status: Some("planning".into()),
+            working_duration: Some(WorkingDuration {
+                elapsed: Duration::from_secs(92),
+                is_live: true,
+            }),
+        },
+        AgentPanelEntry {
+            ws_idx: 0,
+            tab_idx: 1,
+            pane_id: crate::layout::PaneId::from_raw(2),
+            pane_label: Some("pane-beta".into()),
+            primary_label: "workspace-tests".into(),
+            primary_tab_label: Some("review".into()),
+            agent_label: Some("codex".into()),
+            state: AgentState::Idle,
+            seen: true,
+            custom_status: Some("ready".into()),
+            working_duration: Some(WorkingDuration {
+                elapsed: Duration::from_secs(8),
+                is_live: false,
+            }),
+        },
+    ];
+    let ordered_items = ordered_agent_view_items(&app.agent_view);
+    let render_lines = agent_view_render_lines(app);
+    let mut lines = Vec::new();
+
+    for entry in demos {
+        let label_color = state_label_color(entry.state, entry.seen, p);
+        let name_style = Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD);
+        let status_style = Style::default().fg(label_color);
+        let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
+        for (render_idx, line) in render_lines.iter().copied().enumerate() {
+            let prefix = if render_idx == 0 { " " } else { "   " };
+            let mut content = agent_line_content(
+                &entry,
+                app,
+                line,
+                &ordered_items,
+                width.saturating_sub(prefix.len() as u16) as usize,
+                name_style,
+                status_style,
+                agent_style,
+                p,
+            );
+            content
+                .left
+                .insert(0, Span::styled(prefix, Style::default()));
+            lines.push(Line::from(fixed_width_agent_line_spans(
+                content,
+                width,
+                agent_style,
+            )));
+        }
+    }
+
+    lines
 }
 
 fn render_agent_detail(
@@ -1080,17 +2017,17 @@ fn render_agent_detail(
 
     let mut row_y = body.y;
     let body_bottom = body.y + body.height;
+    let render_lines = agent_view_render_lines(app);
     for detail in details.iter().skip(app.agent_panel_scroll) {
-        if row_y.saturating_add(1) >= body_bottom {
+        let entry_rows = render_lines.len() as u16;
+        if row_y.saturating_add(entry_rows) > body_bottom {
             break;
         }
 
         // Check if this agent entry corresponds to the active session
         let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
 
-        let (icon, icon_style) = agent_icon(detail.state, detail.seen, app.spinner_tick, p);
         let label_color = state_label_color(detail.state, detail.seen, p);
-        let label = state_label(detail.state, detail.seen);
 
         let row_style = if is_active {
             Style::default().bg(p.surface_dim)
@@ -1110,37 +2047,33 @@ fn render_agent_detail(
         };
         let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
 
-        let primary_label =
-            format_agent_panel_primary_label(detail, body.width.saturating_sub(3) as usize);
-        let name_line = Line::from(vec![
-            Span::styled(" ", Style::default()),
-            Span::styled(icon, icon_style),
-            Span::styled(" ", Style::default()),
-            Span::styled(primary_label, name_style),
-        ]);
-        frame.render_widget(
-            Paragraph::new(name_line).style(row_style),
-            Rect::new(body.x, row_y, body.width, 1),
-        );
-        row_y += 1;
+        let ordered_items = ordered_agent_view_items(&app.agent_view);
+        for (render_idx, line) in render_lines.iter().copied().enumerate() {
+            let prefix = if render_idx == 0 { " " } else { "   " };
+            let mut content = agent_line_content(
+                detail,
+                app,
+                line,
+                &ordered_items,
+                body.width.saturating_sub(prefix.len() as u16) as usize,
+                name_style,
+                status_style,
+                agent_style,
+                p,
+            );
+            content
+                .left
+                .insert(0, Span::styled(prefix, Style::default()));
 
-        let mut status_spans = vec![
-            Span::styled("   ", Style::default()),
-            Span::styled(label, status_style),
-        ];
-        if let Some(agent_label) = &detail.agent_label {
-            status_spans.push(Span::styled(" · ", agent_style));
-            status_spans.push(Span::styled(agent_label, agent_style));
+            render_agent_line(
+                frame,
+                Rect::new(body.x, row_y, body.width, 1),
+                content,
+                row_style,
+                agent_style,
+            );
+            row_y += 1;
         }
-        if let Some(custom_status) = &detail.custom_status {
-            status_spans.push(Span::styled(" · ", agent_style));
-            status_spans.push(Span::styled(custom_status.clone(), agent_style));
-        }
-        frame.render_widget(
-            Paragraph::new(Line::from(status_spans)).style(row_style),
-            Rect::new(body.x, row_y, body.width, 1),
-        );
-        row_y += 1;
 
         if row_y < body_bottom {
             row_y += 1;
@@ -1188,6 +2121,32 @@ fn render_sidebar_toggle(
 mod tests {
     use super::*;
     use crate::{detect::Agent, workspace::Workspace};
+
+    fn agent_entry_row_text(buffer: &ratatui::buffer::Buffer, y: u16, width: u16) -> String {
+        (0..width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>()
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    fn compact_duration_text(duration: Duration) -> String {
+        compact_duration_parts(duration)
+            .into_iter()
+            .map(|(value, unit)| format!("{value}{unit}"))
+            .collect()
+    }
+
+    fn cell_col_for_substr(row: &str, needle: &str) -> u16 {
+        row.find(needle)
+            .map(|byte_idx| row[..byte_idx].chars().count() as u16)
+            .expect("substring should render")
+    }
 
     #[test]
     fn all_workspaces_agent_panel_entries_use_workspace_and_optional_tab_labels() {
@@ -1323,22 +2282,1182 @@ mod tests {
     }
 
     #[test]
-    fn all_workspaces_primary_label_truncates_workspace_and_tab() {
+    fn settings_agent_demo_does_not_render_custom_status_outside_configured_fields() {
+        let mut app = crate::app::state::AppState::test_new();
+        for item in crate::app::state::AGENT_VIEW_PLACEMENT_ITEMS {
+            item.set_enabled(&mut app.agent_view, false);
+        }
+        crate::app::state::AgentViewItem::Status.set_enabled(&mut app.agent_view, true);
+        crate::app::state::AgentViewItem::AgentName.set_enabled(&mut app.agent_view, true);
+        crate::app::state::AgentViewItem::RightAlignment.set_enabled(&mut app.agent_view, false);
+
+        let rendered = settings_agent_view_demo_lines(&app, 32)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("working · claude"), "{rendered:?}");
+        assert!(rendered.contains("idle · codex"), "{rendered:?}");
+        assert!(!rendered.contains("planning"), "{rendered:?}");
+        assert!(!rendered.contains("ready"), "{rendered:?}");
+    }
+
+    #[test]
+    fn agent_view_custom_status_follows_right_alignment_marker() {
+        let mut app = crate::app::state::AppState::test_new();
+        let config: crate::config::Config = toml::from_str(
+            r#"
+[ui.sidebar.agents]
+lines = [
+  [
+    { field = "agent_status", show = false },
+    { field = "pane_name", show = false },
+    { field = "tab_name", show = false },
+    { field = "space_name", show = false },
+    { field = "status", show = true },
+    { field = "time", show = false },
+    { field = "right_alignment", show = true },
+    { field = "custom_status", show = true },
+    { field = "agent_name", show = true },
+  ],
+]
+"#,
+        )
+        .unwrap();
+        app.agent_view = config.ui.sidebar.agents;
+        let workspace = Workspace::test_new("herdr");
+        let pane = workspace.tabs[0].root_pane;
+
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_hook_authority_with_custom_status(
+                "test".into(),
+                "codex".into(),
+                AgentState::Working,
+                None,
+                Some("planning".into()),
+                None,
+            );
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let backend = ratatui::backend::TestBackend::new(42, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_agent_detail(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 42, 8),
+                )
+            })
+            .unwrap();
+        let row = agent_entry_row_text(terminal.backend().buffer(), 3, 42);
+
+        assert!(row.contains(" working"), "row: {row:?}");
+        assert!(row.ends_with("planning · codex"), "row: {row:?}");
+    }
+
+    #[test]
+    fn agent_view_color_preset_overrides_configured_item_color() {
+        let mut app = crate::app::state::AppState::test_new();
+        crate::app::state::AgentViewItem::AgentName
+            .set_color(&mut app.agent_view, crate::config::ViewColorPreset::Cool);
+        let workspace = Workspace::test_new("herdr");
+        let pane = workspace.tabs[0].root_pane;
+
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_hook_authority_with_custom_status(
+                "test".into(),
+                "codex".into(),
+                AgentState::Idle,
+                None,
+                None,
+                None,
+            );
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let backend = ratatui::backend::TestBackend::new(42, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_agent_detail(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 42, 8),
+                )
+            })
+            .unwrap();
+        let row = agent_entry_row_text(terminal.backend().buffer(), 4, 42);
+        let codex_col = row
+            .find("codex")
+            .unwrap_or_else(|| panic!("codex should render in row: {row:?}"))
+            as u16;
+
+        assert_eq!(
+            terminal.backend().buffer()[(codex_col, 4)].fg,
+            app.palette.teal
+        );
+    }
+
+    #[test]
+    fn all_workspaces_primary_label_without_pane_label_uses_tab_and_workspace_when_tab_exists() {
         let entry = AgentPanelEntry {
             ws_idx: 0,
             tab_idx: 0,
             pane_id: crate::layout::PaneId::from_raw(1),
+            pane_label: None,
             primary_label: "agent-browser".into(),
             primary_tab_label: Some("test-escalation".into()),
             agent_label: Some("claude".into()),
             state: AgentState::Idle,
             seen: true,
             custom_status: None,
+            working_duration: None,
         };
 
-        let label = format_agent_panel_primary_label(&entry, 18);
+        let label = format_agent_panel_primary_label(&entry, 23);
 
-        assert_eq!(label, "agent-bro… · test…");
+        assert_eq!(label, "test-e… · agent-browser");
+    }
+
+    #[test]
+    fn named_pane_primary_label_uses_pane_and_workspace_for_single_tab_workspace() {
+        let mut app = crate::app::state::AppState::test_new();
+        let workspace = Workspace::test_new("herdr");
+        let pane = workspace.tabs[0].root_pane;
+
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Codex);
+        terminal.set_manual_label("Echo".into());
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let entries = agent_panel_entries(&app);
+        let label = format_agent_panel_primary_label(&entries[0], 30);
+
+        assert_eq!(label, "Echo · herdr");
+    }
+
+    #[test]
+    fn named_pane_primary_label_includes_tab_context_for_multi_tab_workspace() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("herdr");
+        workspace.tabs[0].custom_name = Some("main".into());
+        let pane = workspace.tabs[0].root_pane;
+        workspace.test_add_tab(Some("2"));
+
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Codex);
+        terminal.set_manual_label("Echo".into());
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let entries = agent_panel_entries(&app);
+        let label = format_agent_panel_primary_label(&entries[0], 30);
+
+        assert_eq!(label, "Echo · main · herdr");
+    }
+
+    #[test]
+    fn agent_primary_label_can_hide_pane_and_tab_segments_independently() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("herdr");
+        workspace.tabs[0].custom_name = Some("main".into());
+        let pane = workspace.tabs[0].root_pane;
+        workspace.test_add_tab(Some("2"));
+
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Codex);
+        terminal.set_manual_label("Echo".into());
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let entries = agent_panel_entries(&app);
+
+        assert_eq!(
+            format_agent_panel_primary_label_with_options(&entries[0], 30, false, true),
+            "main · herdr"
+        );
+        assert_eq!(
+            format_agent_panel_primary_label_with_options(&entries[0], 30, true, false),
+            "Echo · herdr"
+        );
+        assert_eq!(
+            format_agent_panel_primary_label_with_options(&entries[0], 30, false, false),
+            "herdr"
+        );
+    }
+
+    #[test]
+    fn primary_label_truncates_pane_side_before_workspace_label() {
+        let mut app = crate::app::state::AppState::test_new();
+        let workspace = Workspace::test_new("herdr");
+        let pane = workspace.tabs[0].root_pane;
+
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Codex);
+        terminal.set_manual_label("EchoLongName".into());
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let entries = agent_panel_entries(&app);
+        let label = format_agent_panel_primary_label(&entries[0], 16);
+
+        assert_eq!(label, "EchoLon… · herdr");
+    }
+
+    #[test]
+    fn missing_pane_label_keeps_workspace_only_primary_label() {
+        let mut app = crate::app::state::AppState::test_new();
+        let workspace = Workspace::test_new("herdr");
+        let pane = workspace.tabs[0].root_pane;
+
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Codex);
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let entries = agent_panel_entries(&app);
+        let label = format_agent_panel_primary_label(&entries[0], 30);
+
+        assert_eq!(label, "herdr");
+    }
+
+    #[test]
+    fn missing_pane_label_in_multi_tab_workspace_uses_tab_and_workspace() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("herdr");
+        workspace.tabs[0].custom_name = Some("main".into());
+        let pane = workspace.tabs[0].root_pane;
+        workspace.test_add_tab(Some("2"));
+
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Codex);
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let entries = agent_panel_entries(&app);
+        let label = format_agent_panel_primary_label(&entries[0], 30);
+
+        assert_eq!(label, "main · herdr");
+    }
+
+    #[test]
+    fn named_pane_primary_label_segments_use_pane_tab_and_workspace_colors() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("herdr");
+        workspace.tabs[0].custom_name = Some("main".into());
+        let pane = workspace.tabs[0].root_pane;
+        workspace.test_add_tab(Some("2"));
+
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Codex);
+        terminal.set_manual_label("Echo".into());
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let backend = ratatui::backend::TestBackend::new(40, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_agent_detail(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 8),
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = agent_entry_row_text(buffer, 3, 40);
+
+        assert!(row.contains("Echo · main · herdr"), "row: {row:?}");
+        assert_eq!(buffer[(3, 3)].fg, app.palette.green);
+        assert_eq!(buffer[(10, 3)].fg, app.palette.mauve);
+        assert_eq!(buffer[(17, 3)].fg, app.palette.subtext0);
+    }
+
+    #[test]
+    fn truncated_multi_tab_primary_label_keeps_tab_and_workspace_segment_colors() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("herdr");
+        workspace.tabs[0].custom_name = Some("main".into());
+        let pane = workspace.tabs[0].root_pane;
+        workspace.test_add_tab(Some("2"));
+
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Codex);
+        terminal.set_manual_label("EchoLongName".into());
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let backend = ratatui::backend::TestBackend::new(24, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_agent_detail(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 24, 8),
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = agent_entry_row_text(buffer, 3, 24);
+        let tab_col = cell_col_for_substr(&row, "main");
+        let workspace_col = cell_col_for_substr(&row, "herdr");
+
+        assert!(row.contains("EchoL… · main · herdr"), "row: {row:?}");
+        assert_eq!(buffer[(tab_col, 3)].fg, app.palette.mauve);
+        assert_eq!(buffer[(workspace_col, 3)].fg, app.palette.subtext0);
+    }
+
+    #[test]
+    fn status_duration_formats_compact_seconds_minutes_and_hours() {
+        assert_eq!(compact_duration_text(Duration::ZERO), "1s");
+        assert_eq!(compact_duration_text(Duration::from_secs(10)), "10s");
+        assert_eq!(compact_duration_text(Duration::from_secs(131)), "2m11s");
+        assert_eq!(compact_duration_text(Duration::from_secs(4_800)), "1h20m");
+    }
+
+    #[test]
+    fn duration_unit_styles_keep_seconds_unit_as_visible_as_number() {
+        let palette = Palette::catppuccin();
+        let live = WorkingDuration {
+            elapsed: Duration::from_secs(4_800),
+            is_live: true,
+        };
+        let stale = WorkingDuration {
+            elapsed: Duration::from_secs(4_800),
+            is_live: false,
+        };
+
+        assert_eq!(
+            duration_unit_style("h", live, &palette).fg,
+            Some(palette.subtext0)
+        );
+        assert_eq!(
+            duration_unit_style("m", live, &palette).fg,
+            Some(palette.overlay1)
+        );
+        assert_eq!(
+            duration_unit_style("s", live, &palette).fg,
+            duration_number_style(live, &palette).fg
+        );
+        assert_eq!(
+            duration_unit_style("h", stale, &palette),
+            duration_number_style(stale, &palette)
+        );
+        assert_eq!(
+            duration_unit_style("m", stale, &palette),
+            duration_number_style(stale, &palette)
+        );
+        assert_eq!(
+            duration_unit_style("s", stale, &palette),
+            duration_number_style(stale, &palette)
+        );
+        assert!(duration_unit_style("h", stale, &palette)
+            .add_modifier
+            .contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn status_row_keeps_agent_label_right_aligned_with_working_duration() {
+        let mut app = crate::app::state::AppState::test_new();
+        let workspace = Workspace::test_new("herdr");
+        let pane = workspace.tabs[0].root_pane;
+
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        let start = std::time::Instant::now() - Duration::from_secs(132);
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            start,
+        );
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let backend = ratatui::backend::TestBackend::new(40, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_agent_detail(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 8),
+                )
+            })
+            .unwrap();
+        let row = agent_entry_row_text(terminal.backend().buffer(), 4, 40);
+
+        assert!(row.contains("   working · 2m12s"), "status row: {row:?}");
+        assert!(row.ends_with("codex"), "status row: {row:?}");
+    }
+
+    #[test]
+    fn agent_view_can_hide_time_without_disabling_right_alignment() {
+        let mut app = crate::app::state::AppState::test_new();
+        crate::app::state::AgentViewItem::Time.set_enabled(&mut app.agent_view, false);
+        crate::app::state::AgentViewItem::RightAlignment.set_enabled(&mut app.agent_view, true);
+        let workspace = Workspace::test_new("herdr");
+        let pane = workspace.tabs[0].root_pane;
+
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_manual_label("Echo".into());
+        let start = std::time::Instant::now() - Duration::from_secs(132);
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            start,
+        );
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let backend = ratatui::backend::TestBackend::new(40, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_agent_detail(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 8),
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let status_row = agent_entry_row_text(buffer, 4, 40);
+
+        assert!(
+            status_row.contains("   working"),
+            "status row: {status_row:?}"
+        );
+        assert!(!status_row.contains("2m12s"), "status row: {status_row:?}");
+        assert!(status_row.ends_with("codex"), "status row: {status_row:?}");
+    }
+
+    #[test]
+    fn agent_view_can_disable_right_alignment_without_hiding_time() {
+        let mut app = crate::app::state::AppState::test_new();
+        crate::app::state::AgentViewItem::Time.set_enabled(&mut app.agent_view, true);
+        crate::app::state::AgentViewItem::RightAlignment.set_enabled(&mut app.agent_view, false);
+        let workspace = Workspace::test_new("herdr");
+        let pane = workspace.tabs[0].root_pane;
+
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        let start = std::time::Instant::now() - Duration::from_secs(132);
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            start,
+        );
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let backend = ratatui::backend::TestBackend::new(40, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_agent_detail(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 8),
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let status_row = agent_entry_row_text(buffer, 4, 40);
+
+        assert!(
+            status_row.contains("   working · 2m12s · codex"),
+            "status row: {status_row:?}"
+        );
+    }
+
+    #[test]
+    fn agent_view_right_alignment_marker_aligns_items_after_it() {
+        let mut app = crate::app::state::AppState::test_new();
+        crate::app::state::AgentViewItem::RightAlignment.set_enabled(&mut app.agent_view, true);
+        crate::app::state::AgentViewItem::RightAlignment.set_order(&mut app.agent_view, 1);
+        crate::app::state::AgentViewItem::Time.set_order(&mut app.agent_view, 2);
+        crate::app::state::AgentViewItem::AgentName.set_order(&mut app.agent_view, 3);
+        let workspace = Workspace::test_new("herdr");
+        let pane = workspace.tabs[0].root_pane;
+
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        let start = std::time::Instant::now() - Duration::from_secs(132);
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            start,
+        );
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let backend = ratatui::backend::TestBackend::new(40, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_agent_detail(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 8),
+                )
+            })
+            .unwrap();
+        let status_row = agent_entry_row_text(terminal.backend().buffer(), 4, 40);
+
+        assert!(
+            status_row.contains("   working"),
+            "status row: {status_row:?}"
+        );
+        assert!(
+            status_row.ends_with("2m12s · codex"),
+            "status row: {status_row:?}"
+        );
+    }
+
+    #[test]
+    fn agent_view_line_order_can_move_time_to_first_row() {
+        let mut app = crate::app::state::AppState::test_new();
+        crate::app::state::AgentViewItem::AgentStatus.set_enabled(&mut app.agent_view, false);
+        crate::app::state::AgentViewItem::Time
+            .set_line(&mut app.agent_view, crate::app::state::ViewLine::First);
+        crate::app::state::AgentViewItem::Time.set_order(&mut app.agent_view, 0);
+        crate::app::state::AgentViewItem::PaneName.set_order(&mut app.agent_view, 1);
+        crate::app::state::AgentViewItem::TabName.set_order(&mut app.agent_view, 2);
+        crate::app::state::AgentViewItem::SpaceName.set_order(&mut app.agent_view, 3);
+        let workspace = Workspace::test_new("herdr");
+        let pane = workspace.tabs[0].root_pane;
+
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        let start = std::time::Instant::now() - Duration::from_secs(132);
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            start,
+        );
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let backend = ratatui::backend::TestBackend::new(40, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_agent_detail(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 8),
+                )
+            })
+            .unwrap();
+        let first_row = agent_entry_row_text(terminal.backend().buffer(), 3, 40);
+
+        assert!(first_row.contains("2m12s · herdr"), "row: {first_row:?}");
+    }
+
+    #[test]
+    fn agent_view_reorders_identity_items_in_agents_panel() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("herdr");
+        workspace.tabs[0].custom_name = Some("main".into());
+        let pane = workspace.tabs[0].root_pane;
+        workspace.test_add_tab(Some("2"));
+
+        crate::app::state::AgentViewItem::TabName.set_order(&mut app.agent_view, 1);
+        crate::app::state::AgentViewItem::PaneName.set_order(&mut app.agent_view, 2);
+        crate::app::state::AgentViewItem::SpaceName.set_order(&mut app.agent_view, 3);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Codex);
+        terminal.set_manual_label("Echo".into());
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let backend = ratatui::backend::TestBackend::new(40, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_agent_detail(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 8),
+                )
+            })
+            .unwrap();
+        let first_row = agent_entry_row_text(terminal.backend().buffer(), 3, 40);
+
+        assert!(
+            first_row.contains("main · Echo · herdr"),
+            "row: {first_row:?}"
+        );
+    }
+
+    #[test]
+    fn agent_view_can_move_pane_name_to_second_row() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("herdr");
+        workspace.tabs[0].custom_name = Some("main".into());
+        let pane = workspace.tabs[0].root_pane;
+        workspace.test_add_tab(Some("2"));
+
+        crate::app::state::AgentViewItem::PaneName
+            .set_line(&mut app.agent_view, crate::app::state::ViewLine::Second);
+        crate::app::state::AgentViewItem::PaneName.set_order(&mut app.agent_view, 3);
+        crate::app::state::AgentViewItem::RightAlignment.set_enabled(&mut app.agent_view, false);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Codex);
+        terminal.set_manual_label("Echo".into());
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let backend = ratatui::backend::TestBackend::new(40, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_agent_detail(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 8),
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let first_row = agent_entry_row_text(buffer, 3, 40);
+        let second_row = agent_entry_row_text(buffer, 4, 40);
+
+        assert!(!first_row.contains("Echo"), "row: {first_row:?}");
+        assert!(second_row.contains("Echo"), "row: {second_row:?}");
+    }
+
+    #[test]
+    fn agent_view_can_hide_and_move_agent_status_indicator() {
+        let mut app = crate::app::state::AppState::test_new();
+        let workspace = Workspace::test_new("herdr");
+        let pane = workspace.tabs[0].root_pane;
+
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let backend = ratatui::backend::TestBackend::new(40, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_agent_detail(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 8),
+                )
+            })
+            .unwrap();
+        let first_row = agent_entry_row_text(terminal.backend().buffer(), 3, 40);
+        assert!(first_row.contains("✓ herdr"), "row: {first_row:?}");
+
+        crate::app::state::AgentViewItem::AgentStatus.set_enabled(&mut app.agent_view, false);
+        terminal
+            .draw(|frame| {
+                render_agent_detail(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 8),
+                )
+            })
+            .unwrap();
+        let first_row = agent_entry_row_text(terminal.backend().buffer(), 3, 40);
+        assert!(!first_row.contains("✓"), "row: {first_row:?}");
+
+        crate::app::state::AgentViewItem::AgentStatus.set_enabled(&mut app.agent_view, true);
+        crate::app::state::AgentViewItem::AgentStatus
+            .set_line(&mut app.agent_view, crate::app::state::ViewLine::Second);
+        crate::app::state::AgentViewItem::AgentStatus.set_order(&mut app.agent_view, 0);
+        crate::app::state::AgentViewItem::Status.set_order(&mut app.agent_view, 1);
+        crate::app::state::AgentViewItem::Time.set_order(&mut app.agent_view, 2);
+        crate::app::state::AgentViewItem::AgentName.set_order(&mut app.agent_view, 3);
+        terminal
+            .draw(|frame| {
+                render_agent_detail(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 8),
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let first_row = agent_entry_row_text(buffer, 3, 40);
+        let second_row = agent_entry_row_text(buffer, 4, 40);
+
+        assert!(!first_row.contains("✓"), "row: {first_row:?}");
+        assert!(second_row.contains("✓ idle"), "row: {second_row:?}");
+    }
+
+    #[test]
+    fn agent_view_renders_one_configured_line_from_config_model() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.agent_view.lines = vec![vec![
+            crate::config::ViewItem::visible(crate::app::state::AgentViewItem::AgentStatus),
+            crate::config::ViewItem::visible(crate::app::state::AgentViewItem::SpaceName),
+            crate::config::ViewItem::visible(crate::app::state::AgentViewItem::Status),
+            crate::config::ViewItem::visible(crate::app::state::AgentViewItem::Time),
+            crate::config::ViewItem::visible(crate::app::state::AgentViewItem::RightAlignment),
+            crate::config::ViewItem::visible(crate::app::state::AgentViewItem::AgentName),
+        ]];
+        let workspace = Workspace::test_new("herdr");
+        let pane = workspace.tabs[0].root_pane;
+
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        let start = std::time::Instant::now() - Duration::from_secs(132);
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            start,
+        );
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let backend = ratatui::backend::TestBackend::new(40, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_agent_detail(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 8),
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let first_row = agent_entry_row_text(buffer, 3, 40);
+        let second_row = agent_entry_row_text(buffer, 4, 40);
+
+        assert!(first_row.contains("herdr"), "row: {first_row:?}");
+        assert!(first_row.contains("working"), "row: {first_row:?}");
+        assert!(first_row.ends_with("codex"), "row: {first_row:?}");
+        assert!(!second_row.contains("herdr"), "row: {second_row:?}");
+        assert!(!second_row.contains("working"), "row: {second_row:?}");
+        assert!(!second_row.contains("codex"), "row: {second_row:?}");
+    }
+
+    #[test]
+    fn agent_view_renders_three_configured_lines_from_config_model() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.agent_view.lines = vec![
+            vec![
+                crate::config::ViewItem::visible(crate::app::state::AgentViewItem::AgentStatus),
+                crate::config::ViewItem::visible(crate::app::state::AgentViewItem::SpaceName),
+            ],
+            vec![
+                crate::config::ViewItem::visible(crate::app::state::AgentViewItem::Status),
+                crate::config::ViewItem::visible(crate::app::state::AgentViewItem::Time),
+            ],
+            vec![
+                crate::config::ViewItem::visible(crate::app::state::AgentViewItem::RightAlignment),
+                crate::config::ViewItem::visible(crate::app::state::AgentViewItem::AgentName),
+            ],
+        ];
+        let workspace = Workspace::test_new("herdr");
+        let pane = workspace.tabs[0].root_pane;
+
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        let start = std::time::Instant::now() - Duration::from_secs(132);
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            start,
+        );
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let backend = ratatui::backend::TestBackend::new(40, 9);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_agent_detail(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 9),
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let first_row = agent_entry_row_text(buffer, 3, 40);
+        let second_row = agent_entry_row_text(buffer, 4, 40);
+        let third_row = agent_entry_row_text(buffer, 5, 40);
+
+        assert!(first_row.contains("herdr"), "row: {first_row:?}");
+        assert!(
+            second_row.contains("working · 2m12s"),
+            "row: {second_row:?}"
+        );
+        assert!(third_row.ends_with("codex"), "row: {third_row:?}");
+    }
+
+    #[test]
+    fn spaces_view_can_hide_branch_status_without_hiding_branch() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("herdr");
+        workspace.cached_git_branch = Some("main".into());
+        workspace.cached_git_ahead_behind = Some((2, 1));
+        app.workspaces = vec![workspace];
+        crate::app::state::SpaceViewItem::Branch.set_enabled(&mut app.space_view, true);
+        crate::app::state::SpaceViewItem::BranchStatus.set_enabled(&mut app.space_view, false);
+        app.view.workspace_card_areas = vec![crate::app::state::WorkspaceCardArea {
+            ws_idx: 0,
+            rect: Rect::new(0, 2, 40, 2),
+            indented: false,
+        }];
+
+        let backend = ratatui::backend::TestBackend::new(40, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_workspace_list(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 8),
+                    false,
+                )
+            })
+            .unwrap();
+        let branch_row = agent_entry_row_text(terminal.backend().buffer(), 3, 40);
+
+        assert!(branch_row.contains("main"), "branch row: {branch_row:?}");
+        assert!(!branch_row.contains("↑2"), "branch row: {branch_row:?}");
+        assert!(!branch_row.contains("↓1"), "branch row: {branch_row:?}");
+    }
+
+    #[test]
+    fn spaces_view_renders_one_row_when_config_places_all_items_on_one_line() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("herdr");
+        workspace.cached_git_branch = Some("main".into());
+        workspace.cached_git_ahead_behind = Some((2, 1));
+        app.space_view.lines = vec![vec![
+            crate::config::ViewItem::visible(crate::app::state::SpaceViewItem::Status),
+            crate::config::ViewItem::visible(crate::app::state::SpaceViewItem::Name),
+            crate::config::ViewItem::visible(crate::app::state::SpaceViewItem::Branch),
+            crate::config::ViewItem::visible(crate::app::state::SpaceViewItem::BranchStatus),
+        ]];
+        app.workspaces = vec![workspace];
+        app.view.workspace_card_areas = vec![crate::app::state::WorkspaceCardArea {
+            ws_idx: 0,
+            rect: Rect::new(0, 2, 40, 1),
+            indented: false,
+        }];
+
+        assert_eq!(workspace_row_height(&app, &app.workspaces[0]), 1);
+
+        let backend = ratatui::backend::TestBackend::new(40, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_workspace_list(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 8),
+                    false,
+                )
+            })
+            .unwrap();
+        let row = agent_entry_row_text(terminal.backend().buffer(), 2, 40);
+
+        assert!(row.contains("herdr"), "row: {row:?}");
+        assert!(row.contains("main"), "row: {row:?}");
+        assert!(row.contains("↑2"), "row: {row:?}");
+    }
+
+    #[test]
+    fn spaces_view_line_order_can_move_branch_to_first_row() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("herdr");
+        workspace.cached_git_branch = Some("main".into());
+        app.workspaces = vec![workspace];
+        crate::app::state::SpaceViewItem::Status.set_enabled(&mut app.space_view, false);
+        crate::app::state::SpaceViewItem::Branch
+            .set_line(&mut app.space_view, crate::app::state::ViewLine::First);
+        crate::app::state::SpaceViewItem::Branch.set_order(&mut app.space_view, 0);
+        crate::app::state::SpaceViewItem::Name.set_order(&mut app.space_view, 1);
+        crate::app::state::SpaceViewItem::BranchStatus.set_enabled(&mut app.space_view, false);
+        app.view.workspace_card_areas = vec![crate::app::state::WorkspaceCardArea {
+            ws_idx: 0,
+            rect: Rect::new(0, 2, 40, 1),
+            indented: false,
+        }];
+
+        let backend = ratatui::backend::TestBackend::new(40, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_workspace_list(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 8),
+                    false,
+                )
+            })
+            .unwrap();
+        let row = agent_entry_row_text(terminal.backend().buffer(), 2, 40);
+
+        assert!(row.contains("main · herdr"), "row: {row:?}");
+    }
+
+    #[test]
+    fn spaces_view_can_hide_status_without_hiding_name() {
+        let mut app = crate::app::state::AppState::test_new();
+        let workspace = Workspace::test_new("herdr");
+        let pane = workspace.tabs[0].root_pane;
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Codex);
+        crate::app::state::SpaceViewItem::Status.set_enabled(&mut app.space_view, false);
+        crate::app::state::SpaceViewItem::Name.set_enabled(&mut app.space_view, true);
+        app.view.workspace_card_areas = vec![crate::app::state::WorkspaceCardArea {
+            ws_idx: 0,
+            rect: Rect::new(0, 2, 40, 1),
+            indented: false,
+        }];
+
+        let backend = ratatui::backend::TestBackend::new(40, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_workspace_list(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 8),
+                    false,
+                )
+            })
+            .unwrap();
+        let name_row = agent_entry_row_text(terminal.backend().buffer(), 2, 40);
+
+        assert!(name_row.contains("herdr"), "name row: {name_row:?}");
+        assert!(!name_row.contains("○"), "name row: {name_row:?}");
+    }
+
+    #[test]
+    fn spaces_view_can_hide_space_name_and_branch() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("herdr");
+        workspace.cached_git_branch = Some("main".into());
+        app.workspaces = vec![workspace];
+        crate::app::state::SpaceViewItem::Name.set_enabled(&mut app.space_view, false);
+        crate::app::state::SpaceViewItem::Branch.set_enabled(&mut app.space_view, false);
+        app.view.workspace_card_areas = vec![crate::app::state::WorkspaceCardArea {
+            ws_idx: 0,
+            rect: Rect::new(0, 2, 40, 1),
+            indented: false,
+        }];
+
+        let backend = ratatui::backend::TestBackend::new(40, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_workspace_list(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 8),
+                    false,
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let name_row = agent_entry_row_text(buffer, 2, 40);
+        let branch_row = agent_entry_row_text(buffer, 3, 40);
+
+        assert!(!name_row.contains("herdr"), "name row: {name_row:?}");
+        assert!(!branch_row.contains("main"), "branch row: {branch_row:?}");
+    }
+
+    #[test]
+    fn stale_status_duration_is_dimmed_after_working_finishes() {
+        let mut app = crate::app::state::AppState::test_new();
+        let workspace = Workspace::test_new("herdr");
+        let pane = workspace.tabs[0].root_pane;
+
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        let start = std::time::Instant::now() - Duration::from_secs(132);
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            start,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            start + Duration::from_secs(132),
+        );
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let backend = ratatui::backend::TestBackend::new(40, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_agent_detail(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 8),
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = agent_entry_row_text(buffer, 4, 40);
+        let duration_col = row.find("2m12s").expect("duration should render") as u16;
+
+        assert!(
+            buffer[(duration_col, 4)].modifier.contains(Modifier::DIM),
+            "duration cell should be dimmed in row: {row:?}"
+        );
     }
 
     #[test]

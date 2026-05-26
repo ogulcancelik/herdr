@@ -208,6 +208,37 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"
 
+[ui.sidebar.spaces]
+# Optional per-item color presets: default, muted, accent, cool, warm.
+# lines = [
+#   [
+#     { field = "status", show = true },
+#     { field = "name", show = true },
+#   ],
+#   [
+#     { field = "branch", show = true },
+#     { field = "branch_status", show = true },
+#   ],
+# ]
+
+[ui.sidebar.agents]
+# Optional per-item color presets: default, muted, accent, cool, warm.
+# lines = [
+#   [
+#     { field = "agent_status", show = true },
+#     { field = "pane_name", show = true },
+#     { field = "tab_name", show = true },
+#     { field = "space_name", show = true },
+#   ],
+#   [
+#     { field = "status", show = true },
+#     { field = "time", show = true },
+#     { field = "custom_status", show = true },
+#     { field = "right_alignment", show = true },
+#     { field = "agent_name", show = true },
+#   ],
+# ]
+
 # Background notification popup delivery
 [ui.toast]
 # off = disable pop-up notifications
@@ -240,6 +271,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Experimental local Kitty graphics rendering for attached clients.
 # Requires a Kitty graphics-compatible outer terminal.
 # kitty_graphics = false
+# agent_panel_details was superseded by [ui.sidebar.agents] and is ignored if present.
 # Save recent pane screen history across full server restarts.
 pane_history = false
 # Expose the focused pane's cursor to the outer terminal so macOS input

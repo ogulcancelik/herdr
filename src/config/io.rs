@@ -314,6 +314,48 @@ pub fn remove_section_key(content: &str, section: &str, key: &str) -> String {
     result.join("\n") + "\n"
 }
 
+pub fn upsert_section_body(content: &str, section: &str, body: &str) -> String {
+    let header = format!("[{section}]");
+    let lines: Vec<&str> = content.lines().collect();
+    let mut result = Vec::new();
+    let mut i = 0;
+    let mut replaced = false;
+
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim();
+
+        if trimmed == header {
+            replaced = true;
+            result.push(header.clone());
+            result.extend(body.trim_end().lines().map(str::to_string));
+            i += 1;
+            while i < lines.len() {
+                let current = lines[i];
+                let current_trimmed = current.trim();
+                if current_trimmed.starts_with('[') && current_trimmed.ends_with(']') {
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+
+        result.push(line.to_string());
+        i += 1;
+    }
+
+    if !replaced {
+        if !result.is_empty() && !result.last().is_some_and(|line| line.trim().is_empty()) {
+            result.push(String::new());
+        }
+        result.push(header);
+        result.extend(body.trim_end().lines().map(str::to_string));
+    }
+
+    result.join("\n") + "\n"
+}
+
 pub fn remove_keybinding_config_sections(content: &str) -> (String, bool) {
     let mut result = Vec::new();
     let mut removed = false;

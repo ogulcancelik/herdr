@@ -1,4 +1,6 @@
 use super::App;
+use crate::app::state::{AgentViewItem, AgentViewPreferences, SpaceViewItem, SpaceViewPreferences};
+use crate::config::{AgentViewField, SpaceViewField, ViewColorPreset, ViewItem};
 
 impl App {
     pub(super) fn update_config_file<F>(&mut self, error_context: &str, update: F) -> bool
@@ -94,6 +96,30 @@ impl App {
         }
     }
 
+    pub(super) fn save_space_view_preferences(&mut self, preferences: SpaceViewPreferences) {
+        if self.update_config_file("space sidebar preferences", |content| {
+            crate::config::upsert_section_body(
+                content,
+                "ui.sidebar.spaces",
+                &space_view_config_body(&preferences),
+            )
+        }) {
+            self.apply_config_from_disk(false);
+        }
+    }
+
+    pub(super) fn save_agent_view_preferences(&mut self, preferences: AgentViewPreferences) {
+        if self.update_config_file("agent sidebar preferences", |content| {
+            crate::config::upsert_section_body(
+                content,
+                "ui.sidebar.agents",
+                &agent_view_config_body(&preferences),
+            )
+        }) {
+            self.apply_config_from_disk(false);
+        }
+    }
+
     pub(super) fn save_agent_panel_scope(&mut self, scope: crate::app::state::AgentPanelScope) {
         let value = match scope {
             crate::app::state::AgentPanelScope::CurrentWorkspace => {
@@ -113,5 +139,63 @@ impl App {
         }) {
             self.apply_config_from_disk(false);
         }
+    }
+}
+
+fn space_view_config_body(preferences: &SpaceViewPreferences) -> String {
+    view_item_lines_array(&preferences.lines, space_view_field_name)
+}
+
+fn agent_view_config_body(preferences: &AgentViewPreferences) -> String {
+    view_item_lines_array(&preferences.lines, agent_view_field_name)
+}
+
+fn view_item_lines_array<F: Copy>(
+    lines: &[Vec<ViewItem<F>>],
+    field_name: fn(F) -> &'static str,
+) -> String {
+    let mut body = String::new();
+    body.push_str("lines = [\n");
+    for line in lines {
+        body.push_str("  [\n");
+        for item in line {
+            let color = if ViewColorPreset::is_default(&item.color) {
+                String::new()
+            } else {
+                format!(", color = \"{}\"", item.color.as_str())
+            };
+            body.push_str(&format!(
+                "    {{ field = \"{}\", show = {}{} }},\n",
+                field_name(item.field),
+                item.show,
+                color
+            ));
+        }
+        body.push_str("  ],\n");
+    }
+    body.push_str("]\n");
+    body
+}
+
+fn space_view_field_name(field: SpaceViewItem) -> &'static str {
+    match field {
+        SpaceViewField::Status => "status",
+        SpaceViewField::Name => "name",
+        SpaceViewField::Branch => "branch",
+        SpaceViewField::BranchStatus => "branch_status",
+    }
+}
+
+fn agent_view_field_name(field: AgentViewItem) -> &'static str {
+    match field {
+        AgentViewField::AgentStatus => "agent_status",
+        AgentViewField::PaneName => "pane_name",
+        AgentViewField::TabName => "tab_name",
+        AgentViewField::SpaceName => "space_name",
+        AgentViewField::Status => "status",
+        AgentViewField::Time => "time",
+        AgentViewField::CustomStatus => "custom_status",
+        AgentViewField::AgentName => "agent_name",
+        AgentViewField::RightAlignment => "right_alignment",
     }
 }

@@ -280,6 +280,252 @@ pub struct UiConfig {
     pub toast: ToastConfig,
     /// Play sounds when agents change state in background workspaces.
     pub sound: SoundConfig,
+    /// Sidebar navigation display preferences.
+    pub sidebar: SidebarConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct SidebarConfig {
+    pub spaces: SpacesViewConfig,
+    pub agents: AgentsViewConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpaceViewField {
+    Status,
+    Name,
+    Branch,
+    BranchStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentViewField {
+    AgentStatus,
+    PaneName,
+    TabName,
+    SpaceName,
+    Status,
+    Time,
+    CustomStatus,
+    AgentName,
+    RightAlignment,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewColorPreset {
+    #[default]
+    Default,
+    Muted,
+    Accent,
+    Cool,
+    Warm,
+}
+
+impl ViewColorPreset {
+    pub fn is_default(color: &Self) -> bool {
+        matches!(*color, Self::Default)
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Default => Self::Muted,
+            Self::Muted => Self::Accent,
+            Self::Accent => Self::Cool,
+            Self::Cool => Self::Warm,
+            Self::Warm => Self::Default,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Muted => "muted",
+            Self::Accent => "accent",
+            Self::Cool => "cool",
+            Self::Warm => "warm",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SpacesViewConfig {
+    pub lines: Vec<Vec<ViewItem<SpaceViewField>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgentsViewConfig {
+    pub lines: Vec<Vec<ViewItem<AgentViewField>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ViewItem<F> {
+    pub field: F,
+    #[serde(default = "default_true")]
+    pub show: bool,
+    #[serde(default, skip_serializing_if = "ViewColorPreset::is_default")]
+    pub color: ViewColorPreset,
+}
+
+impl<F> ViewItem<F> {
+    pub const fn new(field: F, show: bool) -> Self {
+        Self {
+            field,
+            show,
+            color: ViewColorPreset::Default,
+        }
+    }
+
+    pub const fn visible(field: F) -> Self {
+        Self::new(field, true)
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct RawSpacesViewConfig {
+    lines: Option<Vec<Vec<ViewItem<SpaceViewField>>>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct RawAgentsViewConfig {
+    lines: Option<Vec<Vec<ViewItem<AgentViewField>>>>,
+}
+
+impl<'de> Deserialize<'de> for SpacesViewConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawSpacesViewConfig::deserialize(deserializer)?;
+        Ok(raw.into_config())
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentsViewConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawAgentsViewConfig::deserialize(deserializer)?;
+        Ok(raw.into_config())
+    }
+}
+
+impl RawSpacesViewConfig {
+    fn into_config(self) -> SpacesViewConfig {
+        let mut config = SpacesViewConfig::default();
+        apply_space_lines_override(&mut config, self.lines);
+        config
+    }
+}
+
+impl RawAgentsViewConfig {
+    fn into_config(self) -> AgentsViewConfig {
+        let mut config = AgentsViewConfig::default();
+        apply_agent_lines_override(&mut config, self.lines);
+        config
+    }
+}
+
+fn apply_space_lines_override(
+    config: &mut SpacesViewConfig,
+    lines: Option<Vec<Vec<ViewItem<SpaceViewField>>>>,
+) {
+    let Some(lines) = lines else {
+        return;
+    };
+    config.lines = normalize_space_lines(lines);
+}
+
+fn apply_agent_lines_override(
+    config: &mut AgentsViewConfig,
+    lines: Option<Vec<Vec<ViewItem<AgentViewField>>>>,
+) {
+    let Some(lines) = lines else {
+        return;
+    };
+    config.lines = normalize_agent_lines(lines);
+}
+
+fn normalize_space_lines(
+    lines: Vec<Vec<ViewItem<SpaceViewField>>>,
+) -> Vec<Vec<ViewItem<SpaceViewField>>> {
+    normalize_view_lines(lines, &SPACE_VIEW_DEFAULT_ITEMS)
+}
+
+fn normalize_agent_lines(
+    lines: Vec<Vec<ViewItem<AgentViewField>>>,
+) -> Vec<Vec<ViewItem<AgentViewField>>> {
+    normalize_view_lines(lines, &AGENT_VIEW_DEFAULT_ITEMS)
+}
+
+fn normalize_view_lines<F: Copy + Eq>(
+    lines: Vec<Vec<ViewItem<F>>>,
+    default_items: &[(usize, F)],
+) -> Vec<Vec<ViewItem<F>>> {
+    let mut seen = Vec::new();
+    let mut normalized = Vec::new();
+    for line in lines {
+        let mut normalized_line = Vec::new();
+        for item in line {
+            if seen.contains(&item.field) {
+                continue;
+            }
+            seen.push(item.field);
+            normalized_line.push(item);
+        }
+        normalized.push(normalized_line);
+    }
+    append_missing_view_items(&mut normalized, &mut seen, default_items);
+    normalized
+}
+
+const SPACE_VIEW_DEFAULT_ITEMS: [(usize, SpaceViewField); 4] = [
+    (0, SpaceViewField::Status),
+    (0, SpaceViewField::Name),
+    (1, SpaceViewField::Branch),
+    (1, SpaceViewField::BranchStatus),
+];
+
+const AGENT_VIEW_DEFAULT_ITEMS: [(usize, AgentViewField); 9] = [
+    (0, AgentViewField::AgentStatus),
+    (0, AgentViewField::PaneName),
+    (0, AgentViewField::TabName),
+    (0, AgentViewField::SpaceName),
+    (1, AgentViewField::Status),
+    (1, AgentViewField::Time),
+    (1, AgentViewField::CustomStatus),
+    (1, AgentViewField::RightAlignment),
+    (1, AgentViewField::AgentName),
+];
+
+fn append_missing_view_items<F: Copy + Eq>(
+    lines: &mut Vec<Vec<ViewItem<F>>>,
+    seen: &mut Vec<F>,
+    default_items: &[(usize, F)],
+) {
+    if lines.is_empty() {
+        lines.push(Vec::new());
+    }
+    for &(line_idx, field) in default_items {
+        if seen.contains(&field) {
+            continue;
+        }
+        while lines.len() <= line_idx {
+            lines.push(Vec::new());
+        }
+        lines[line_idx].push(ViewItem::visible(field));
+        seen.push(field);
+    }
 }
 
 /// Cursor shape (DECSCUSR) used for the forced IME anchor.
@@ -430,6 +676,46 @@ impl Default for UiConfig {
             accent: "cyan".into(),
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
+            sidebar: SidebarConfig::default(),
+        }
+    }
+}
+
+impl Default for SpacesViewConfig {
+    fn default() -> Self {
+        Self {
+            lines: vec![
+                vec![
+                    ViewItem::visible(SpaceViewField::Status),
+                    ViewItem::visible(SpaceViewField::Name),
+                ],
+                vec![
+                    ViewItem::visible(SpaceViewField::Branch),
+                    ViewItem::visible(SpaceViewField::BranchStatus),
+                ],
+            ],
+        }
+    }
+}
+
+impl Default for AgentsViewConfig {
+    fn default() -> Self {
+        Self {
+            lines: vec![
+                vec![
+                    ViewItem::visible(AgentViewField::AgentStatus),
+                    ViewItem::visible(AgentViewField::PaneName),
+                    ViewItem::visible(AgentViewField::TabName),
+                    ViewItem::visible(AgentViewField::SpaceName),
+                ],
+                vec![
+                    ViewItem::visible(AgentViewField::Status),
+                    ViewItem::visible(AgentViewField::Time),
+                    ViewItem::visible(AgentViewField::CustomStatus),
+                    ViewItem::visible(AgentViewField::RightAlignment),
+                    ViewItem::visible(AgentViewField::AgentName),
+                ],
+            ],
         }
     }
 }
@@ -796,6 +1082,252 @@ pane_history = true
         let config: Config = toml::from_str(toml).unwrap();
 
         assert!(config.experimental.pane_history);
+    }
+
+    #[test]
+    fn sidebar_view_config_defaults_to_lines_array_and_parses_variable_line_count() {
+        let default = Config::default();
+        assert_eq!(
+            default.ui.sidebar.spaces.lines,
+            vec![
+                vec![
+                    ViewItem::visible(SpaceViewField::Status),
+                    ViewItem::visible(SpaceViewField::Name),
+                ],
+                vec![
+                    ViewItem::visible(SpaceViewField::Branch),
+                    ViewItem::visible(SpaceViewField::BranchStatus),
+                ],
+            ]
+        );
+        assert_eq!(
+            default.ui.sidebar.agents.lines,
+            vec![
+                vec![
+                    ViewItem::visible(AgentViewField::AgentStatus),
+                    ViewItem::visible(AgentViewField::PaneName),
+                    ViewItem::visible(AgentViewField::TabName),
+                    ViewItem::visible(AgentViewField::SpaceName),
+                ],
+                vec![
+                    ViewItem::visible(AgentViewField::Status),
+                    ViewItem::visible(AgentViewField::Time),
+                    ViewItem::visible(AgentViewField::CustomStatus),
+                    ViewItem::visible(AgentViewField::RightAlignment),
+                    ViewItem::visible(AgentViewField::AgentName),
+                ],
+            ]
+        );
+
+        let toml = r#"
+[ui.sidebar.spaces]
+lines = [
+  [
+    { field = "name", show = false, color = "muted" },
+    { field = "branch", show = true },
+  ],
+  [
+    { field = "status", show = true },
+    { field = "branch_status", show = false },
+  ],
+]
+
+[ui.sidebar.agents]
+lines = [
+  [
+    { field = "agent_status", show = true },
+    { field = "pane_name", show = true },
+    { field = "tab_name", show = true },
+    { field = "space_name", show = true },
+    { field = "status", show = false },
+    { field = "time", show = false },
+    { field = "custom_status", show = false, color = "warm" },
+    { field = "right_alignment", show = true },
+    { field = "agent_name", show = true },
+  ],
+]
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+
+        assert_eq!(
+            config.ui.sidebar.spaces.lines,
+            vec![
+                vec![
+                    ViewItem {
+                        field: SpaceViewField::Name,
+                        show: false,
+                        color: ViewColorPreset::Muted,
+                    },
+                    ViewItem::visible(SpaceViewField::Branch),
+                ],
+                vec![
+                    ViewItem::visible(SpaceViewField::Status),
+                    ViewItem::new(SpaceViewField::BranchStatus, false),
+                ],
+            ]
+        );
+        assert_eq!(
+            config.ui.sidebar.agents.lines,
+            vec![vec![
+                ViewItem::visible(AgentViewField::AgentStatus),
+                ViewItem::visible(AgentViewField::PaneName),
+                ViewItem::visible(AgentViewField::TabName),
+                ViewItem::visible(AgentViewField::SpaceName),
+                ViewItem::new(AgentViewField::Status, false),
+                ViewItem::new(AgentViewField::Time, false),
+                ViewItem {
+                    field: AgentViewField::CustomStatus,
+                    show: false,
+                    color: ViewColorPreset::Warm,
+                },
+                ViewItem::visible(AgentViewField::RightAlignment),
+                ViewItem::visible(AgentViewField::AgentName),
+            ],]
+        );
+    }
+
+    #[test]
+    fn sidebar_view_config_preserves_three_configured_lines() {
+        let toml = r#"
+[ui.sidebar.agents]
+lines = [
+  [
+    { field = "agent_status", show = true },
+    { field = "pane_name", show = true },
+    { field = "tab_name", show = true },
+  ],
+  [
+    { field = "space_name", show = true },
+    { field = "status", show = true },
+    { field = "time", show = true },
+    { field = "custom_status", show = true },
+  ],
+  [
+    { field = "right_alignment", show = true },
+    { field = "agent_name", show = true },
+  ],
+]
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+
+        assert_eq!(config.ui.sidebar.agents.lines.len(), 3);
+        assert_eq!(
+            config.ui.sidebar.agents.lines[2],
+            vec![
+                ViewItem::visible(AgentViewField::RightAlignment),
+                ViewItem::visible(AgentViewField::AgentName),
+            ]
+        );
+    }
+
+    #[test]
+    fn sidebar_view_config_flat_keys_do_not_override_lines_array() {
+        let toml = r#"
+[ui.sidebar.spaces]
+show_status = false
+status_line = "second"
+status_order = 2
+show_name = true
+name_line = "first"
+name_order = 0
+show_branch = false
+branch_line = "first"
+branch_order = 1
+show_branch_status = true
+branch_status_line = "second"
+branch_status_order = 0
+
+[ui.sidebar.agents]
+show_agent_status = false
+agent_status_line = "second"
+agent_status_order = 3
+show_pane_name = false
+pane_name_line = "second"
+pane_name_order = 1
+show_tab_name = true
+tab_name_line = "first"
+tab_name_order = 0
+show_space_name = false
+space_name_line = "first"
+space_name_order = 2
+show_status = false
+status_line = "second"
+status_order = 0
+show_time = false
+time_line = "first"
+time_order = 1
+show_agent_name = true
+agent_name_line = "second"
+agent_name_order = 4
+right_align_agent = true
+right_align_line = "second"
+right_align_order = 3
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+
+        assert_eq!(
+            config.ui.sidebar.spaces.lines,
+            SpacesViewConfig::default().lines
+        );
+        assert_eq!(
+            config.ui.sidebar.agents.lines,
+            AgentsViewConfig::default().lines
+        );
+    }
+
+    #[test]
+    fn sidebar_view_config_accepts_all_fields_on_one_line() {
+        let toml = r#"
+[ui.sidebar.spaces]
+lines = [
+  [
+    { field = "status", show = true },
+    { field = "name", show = true },
+    { field = "branch", show = true },
+    { field = "branch_status", show = true },
+  ],
+]
+
+[ui.sidebar.agents]
+lines = [
+  [
+    { field = "agent_status", show = true },
+    { field = "pane_name", show = true },
+    { field = "tab_name", show = true },
+    { field = "space_name", show = true },
+    { field = "status", show = true },
+    { field = "time", show = true },
+    { field = "custom_status", show = true },
+    { field = "right_alignment", show = true },
+    { field = "agent_name", show = true },
+  ],
+]
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+
+        assert_eq!(
+            config.ui.sidebar.spaces.lines,
+            vec![vec![
+                ViewItem::visible(SpaceViewField::Status),
+                ViewItem::visible(SpaceViewField::Name),
+                ViewItem::visible(SpaceViewField::Branch),
+                ViewItem::visible(SpaceViewField::BranchStatus),
+            ],]
+        );
+        assert_eq!(
+            config.ui.sidebar.agents.lines,
+            vec![vec![
+                ViewItem::visible(AgentViewField::AgentStatus),
+                ViewItem::visible(AgentViewField::PaneName),
+                ViewItem::visible(AgentViewField::TabName),
+                ViewItem::visible(AgentViewField::SpaceName),
+                ViewItem::visible(AgentViewField::Status),
+                ViewItem::visible(AgentViewField::Time),
+                ViewItem::visible(AgentViewField::CustomStatus),
+                ViewItem::visible(AgentViewField::RightAlignment),
+                ViewItem::visible(AgentViewField::AgentName),
+            ],]
+        );
     }
 
     #[test]

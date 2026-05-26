@@ -1,4 +1,7 @@
-use crate::config::{Keybinds, NewTerminalCwdConfig, SoundConfig, ToastConfig, ToastDelivery};
+use crate::config::{
+    AgentViewField, AgentsViewConfig, Keybinds, NewTerminalCwdConfig, SoundConfig, SpaceViewField,
+    SpacesViewConfig, ToastConfig, ToastDelivery, ViewColorPreset, ViewItem,
+};
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Direction, Rect};
 use ratatui::style::Color;
@@ -78,6 +81,16 @@ pub struct Palette {
 }
 
 impl Palette {
+    pub(crate) fn view_color(&self, preset: ViewColorPreset, default: Color) -> Color {
+        match preset {
+            ViewColorPreset::Default => default,
+            ViewColorPreset::Muted => self.overlay1,
+            ViewColorPreset::Accent => self.accent,
+            ViewColorPreset::Cool => self.teal,
+            ViewColorPreset::Warm => self.peach,
+        }
+    }
+
     /// Catppuccin Mocha — the default.
     pub fn catppuccin() -> Self {
         Self {
@@ -710,6 +723,427 @@ pub enum AgentPanelScope {
     AllWorkspaces,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewLine {
+    First,
+    Second,
+    Extra(usize),
+}
+
+impl ViewLine {
+    pub(crate) fn from_index(index: usize) -> Self {
+        match index {
+            0 => Self::First,
+            1 => Self::Second,
+            extra => Self::Extra(extra),
+        }
+    }
+
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Self::First => 0,
+            Self::Second => 1,
+            Self::Extra(index) => index,
+        }
+    }
+
+    pub(crate) fn label(self) -> String {
+        let number = self.index() + 1;
+        let suffix = match number % 100 {
+            11..=13 => "th",
+            _ => match number % 10 {
+                1 => "st",
+                2 => "nd",
+                3 => "rd",
+                _ => "th",
+            },
+        };
+        format!("{number}{suffix} line")
+    }
+}
+
+pub type SpaceViewPreferences = SpacesViewConfig;
+pub type AgentViewPreferences = AgentsViewConfig;
+pub(crate) use crate::config::AgentViewField as AgentViewItem;
+pub(crate) use crate::config::SpaceViewField as SpaceViewItem;
+
+pub(crate) const SPACE_VIEW_ITEMS: [SpaceViewItem; 4] = [
+    SpaceViewItem::Status,
+    SpaceViewItem::Name,
+    SpaceViewItem::Branch,
+    SpaceViewItem::BranchStatus,
+];
+
+impl SpaceViewField {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Status => "space status",
+            Self::Name => "space name",
+            Self::Branch => "space branch",
+            Self::BranchStatus => "space branch status",
+        }
+    }
+
+    pub(crate) fn default_index(self) -> u8 {
+        match self {
+            Self::Status => 0,
+            Self::Name => 1,
+            Self::Branch => 2,
+            Self::BranchStatus => 3,
+        }
+    }
+
+    pub(crate) fn enabled(self, view: &SpaceViewPreferences) -> bool {
+        space_view_entry(view, self).show
+    }
+
+    pub(crate) fn set_enabled(self, view: &mut SpaceViewPreferences, enabled: bool) {
+        if let Some(entry) = space_view_entry_mut(view, self) {
+            entry.show = enabled;
+        } else {
+            let line = self.default_line();
+            let entry = ViewItem::new(self, enabled);
+            space_view_line_mut(view, line).push(entry);
+        }
+    }
+
+    pub(crate) fn color(self, view: &SpaceViewPreferences) -> ViewColorPreset {
+        space_view_entry(view, self).color
+    }
+
+    pub(crate) fn set_color(self, view: &mut SpaceViewPreferences, color: ViewColorPreset) {
+        if let Some(entry) = space_view_entry_mut(view, self) {
+            entry.color = color;
+        } else {
+            let line = self.default_line();
+            let entry = ViewItem {
+                color,
+                ..ViewItem::visible(self)
+            };
+            space_view_line_mut(view, line).push(entry);
+        }
+    }
+
+    pub(crate) fn line(self, view: &SpaceViewPreferences) -> ViewLine {
+        view.lines
+            .iter()
+            .position(|line| line.iter().any(|entry| entry.field == self))
+            .map(ViewLine::from_index)
+            .unwrap_or_else(|| self.default_line())
+    }
+
+    pub(crate) fn set_line(self, view: &mut SpaceViewPreferences, line: ViewLine) {
+        let entry = remove_space_view_item(view, self).unwrap_or_else(|| ViewItem::visible(self));
+        space_view_line_mut(view, line).push(entry);
+    }
+
+    pub(crate) fn order(self, view: &SpaceViewPreferences) -> u8 {
+        space_view_line(view, self.line(view))
+            .iter()
+            .position(|entry| entry.field == self)
+            .map(|idx| idx as u8)
+            .unwrap_or_else(|| self.default_index())
+    }
+
+    pub(crate) fn set_order(self, view: &mut SpaceViewPreferences, order: u8) {
+        let line = self.line(view);
+        let entry = remove_space_view_item(view, self).unwrap_or_else(|| ViewItem::visible(self));
+        let target = space_view_line_mut(view, line);
+        let index = usize::from(order).min(target.len());
+        target.insert(index, entry);
+    }
+
+    fn default_line(self) -> ViewLine {
+        match self {
+            Self::Status | Self::Name => ViewLine::First,
+            Self::Branch | Self::BranchStatus => ViewLine::Second,
+        }
+    }
+}
+
+pub(crate) fn ordered_space_view_items(view: &SpaceViewPreferences) -> Vec<SpaceViewItem> {
+    let mut items = Vec::new();
+    for line in &view.lines {
+        for entry in line {
+            if !items.contains(&entry.field) {
+                items.push(entry.field);
+            }
+        }
+    }
+    for item in SPACE_VIEW_ITEMS {
+        if !items.contains(&item) {
+            items.push(item);
+        }
+    }
+    items
+}
+
+pub(crate) const AGENT_VIEW_PLACEMENT_ITEMS: [AgentViewItem; 9] = [
+    AgentViewItem::AgentStatus,
+    AgentViewItem::PaneName,
+    AgentViewItem::TabName,
+    AgentViewItem::SpaceName,
+    AgentViewItem::Status,
+    AgentViewItem::Time,
+    AgentViewItem::CustomStatus,
+    AgentViewItem::RightAlignment,
+    AgentViewItem::AgentName,
+];
+
+impl AgentViewField {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::AgentStatus => "agent status",
+            Self::PaneName => "agent pane name",
+            Self::TabName => "agent tab name",
+            Self::SpaceName => "space name",
+            Self::Status => "status text",
+            Self::Time => "agent time",
+            Self::CustomStatus => "custom status",
+            Self::AgentName => "agent name",
+            Self::RightAlignment => "right-alignment",
+        }
+    }
+
+    pub(crate) fn default_index(self) -> u8 {
+        match self {
+            Self::AgentStatus => 0,
+            Self::PaneName => 1,
+            Self::TabName => 2,
+            Self::SpaceName => 3,
+            Self::Status => 4,
+            Self::Time => 5,
+            Self::CustomStatus => 6,
+            Self::RightAlignment => 7,
+            Self::AgentName => 8,
+        }
+    }
+
+    pub(crate) fn enabled(self, view: &AgentViewPreferences) -> bool {
+        agent_view_entry(view, self).show
+    }
+
+    pub(crate) fn set_enabled(self, view: &mut AgentViewPreferences, enabled: bool) {
+        if let Some(entry) = agent_view_entry_mut(view, self) {
+            entry.show = enabled;
+        } else {
+            let line = self.default_line();
+            let entry = ViewItem::new(self, enabled);
+            agent_view_line_mut(view, line).push(entry);
+        }
+    }
+
+    pub(crate) fn color(self, view: &AgentViewPreferences) -> ViewColorPreset {
+        agent_view_entry(view, self).color
+    }
+
+    pub(crate) fn set_color(self, view: &mut AgentViewPreferences, color: ViewColorPreset) {
+        if let Some(entry) = agent_view_entry_mut(view, self) {
+            entry.color = color;
+        } else {
+            let line = self.default_line();
+            let entry = ViewItem {
+                color,
+                ..ViewItem::visible(self)
+            };
+            agent_view_line_mut(view, line).push(entry);
+        }
+    }
+
+    pub(crate) fn line(self, view: &AgentViewPreferences) -> Option<ViewLine> {
+        Some(
+            view.lines
+                .iter()
+                .position(|line| line.iter().any(|entry| entry.field == self))
+                .map(ViewLine::from_index)
+                .unwrap_or_else(|| self.default_line()),
+        )
+    }
+
+    pub(crate) fn set_line(self, view: &mut AgentViewPreferences, line: ViewLine) {
+        let entry = remove_agent_view_item(view, self).unwrap_or_else(|| ViewItem::visible(self));
+        agent_view_line_mut(view, line).push(entry);
+    }
+
+    pub(crate) fn order(self, view: &AgentViewPreferences) -> Option<u8> {
+        let line = self.line(view)?;
+        agent_view_line(view, line)
+            .iter()
+            .position(|entry| entry.field == self)
+            .map(|idx| idx as u8)
+            .or_else(|| Some(self.default_index()))
+    }
+
+    pub(crate) fn set_order(self, view: &mut AgentViewPreferences, order: u8) {
+        let line = self.line(view).unwrap_or_else(|| self.default_line());
+        let entry = remove_agent_view_item(view, self).unwrap_or_else(|| ViewItem::visible(self));
+        let target = agent_view_line_mut(view, line);
+        let index = usize::from(order).min(target.len());
+        target.insert(index, entry);
+    }
+
+    fn default_line(self) -> ViewLine {
+        match self {
+            Self::AgentStatus | Self::PaneName | Self::TabName | Self::SpaceName => ViewLine::First,
+            Self::Status
+            | Self::Time
+            | Self::CustomStatus
+            | Self::RightAlignment
+            | Self::AgentName => ViewLine::Second,
+        }
+    }
+}
+
+pub(crate) fn ordered_agent_view_items(view: &AgentViewPreferences) -> Vec<AgentViewItem> {
+    let mut items = Vec::new();
+    for line in &view.lines {
+        for entry in line {
+            if !items.contains(&entry.field) {
+                items.push(entry.field);
+            }
+        }
+    }
+    for item in AGENT_VIEW_PLACEMENT_ITEMS {
+        if !items.contains(&item) {
+            items.push(item);
+        }
+    }
+    items
+}
+
+fn space_view_line(view: &SpaceViewPreferences, line: ViewLine) -> &[ViewItem<SpaceViewField>] {
+    view.lines
+        .get(line.index())
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+fn space_view_line_mut(
+    view: &mut SpaceViewPreferences,
+    line: ViewLine,
+) -> &mut Vec<ViewItem<SpaceViewField>> {
+    while view.lines.len() <= line.index() {
+        view.lines.push(Vec::new());
+    }
+    &mut view.lines[line.index()]
+}
+
+fn space_view_entry(view: &SpaceViewPreferences, item: SpaceViewItem) -> ViewItem<SpaceViewField> {
+    view.lines
+        .iter()
+        .flatten()
+        .find(|entry| entry.field == item)
+        .copied()
+        .unwrap_or_else(|| ViewItem::visible(item))
+}
+
+fn space_view_entry_mut(
+    view: &mut SpaceViewPreferences,
+    item: SpaceViewItem,
+) -> Option<&mut ViewItem<SpaceViewField>> {
+    view.lines
+        .iter_mut()
+        .flatten()
+        .find(|entry| entry.field == item)
+}
+
+fn remove_space_view_item(
+    view: &mut SpaceViewPreferences,
+    item: SpaceViewItem,
+) -> Option<ViewItem<SpaceViewField>> {
+    for line in &mut view.lines {
+        if let Some(index) = line.iter().position(|entry| entry.field == item) {
+            return Some(line.remove(index));
+        }
+    }
+    None
+}
+
+fn agent_view_line(view: &AgentViewPreferences, line: ViewLine) -> &[ViewItem<AgentViewField>] {
+    view.lines
+        .get(line.index())
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+fn agent_view_line_mut(
+    view: &mut AgentViewPreferences,
+    line: ViewLine,
+) -> &mut Vec<ViewItem<AgentViewField>> {
+    while view.lines.len() <= line.index() {
+        view.lines.push(Vec::new());
+    }
+    &mut view.lines[line.index()]
+}
+
+fn agent_view_entry(view: &AgentViewPreferences, item: AgentViewItem) -> ViewItem<AgentViewField> {
+    view.lines
+        .iter()
+        .flatten()
+        .find(|entry| entry.field == item)
+        .copied()
+        .unwrap_or_else(|| ViewItem::visible(item))
+}
+
+fn agent_view_entry_mut(
+    view: &mut AgentViewPreferences,
+    item: AgentViewItem,
+) -> Option<&mut ViewItem<AgentViewField>> {
+    view.lines
+        .iter_mut()
+        .flatten()
+        .find(|entry| entry.field == item)
+}
+
+fn remove_agent_view_item(
+    view: &mut AgentViewPreferences,
+    item: AgentViewItem,
+) -> Option<ViewItem<AgentViewField>> {
+    for line in &mut view.lines {
+        if let Some(index) = line.iter().position(|entry| entry.field == item) {
+            return Some(line.remove(index));
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ViewConfigGroup {
+    #[default]
+    Spaces,
+    Agents,
+}
+
+impl ViewConfigGroup {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Spaces => "spaces",
+            Self::Agents => "agents",
+        }
+    }
+
+    pub(crate) fn settings_line_count(self, configured_line_count: usize) -> usize {
+        configured_line_count.max(match self {
+            Self::Spaces => 2,
+            Self::Agents => 3,
+        })
+    }
+
+    pub fn previous(self) -> Self {
+        match self {
+            Self::Spaces => Self::Agents,
+            Self::Agents => Self::Spaces,
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Spaces => Self::Agents,
+            Self::Agents => Self::Spaces,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Settings UI state
 // ---------------------------------------------------------------------------
@@ -1128,6 +1562,8 @@ pub struct AppState {
     pub prompt_new_tab_name: bool,
     pub show_agent_labels_on_pane_borders: bool,
     pub pane_history_persistence: bool,
+    pub space_view: SpaceViewPreferences,
+    pub agent_view: AgentViewPreferences,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
     /// the pane requested `?25l`. See `[experimental] reveal_hidden_cursor_for_cjk_ime`.
     pub reveal_hidden_cursor_for_cjk_ime: bool,
@@ -1429,6 +1865,8 @@ impl AppState {
             prompt_new_tab_name: true,
             show_agent_labels_on_pane_borders: false,
             pane_history_persistence: false,
+            space_view: SpaceViewPreferences::default(),
+            agent_view: AgentViewPreferences::default(),
             reveal_hidden_cursor_for_cjk_ime: false,
             cjk_ime_agent_filter_configured: false,
             cjk_ime_agents: Vec::new(),
