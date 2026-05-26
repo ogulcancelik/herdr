@@ -249,6 +249,26 @@ impl App {
     }
 
     fn handle_pane_double_click(&mut self, mouse: MouseEvent) -> bool {
+        // A pane press stops being a double-click candidate once it becomes
+        // a drag or completes as a real text selection.
+        match mouse.kind {
+            MouseEventKind::Drag(MouseButton::Left) => {
+                self.last_pane_click = None;
+                return false;
+            }
+            MouseEventKind::Up(MouseButton::Left)
+                if self
+                    .state
+                    .selection
+                    .as_ref()
+                    .is_some_and(|selection| selection.is_visible()) =>
+            {
+                self.last_pane_click = None;
+                return false;
+            }
+            _ => {}
+        }
+
         // Only terminal-pane left-clicks can start this gesture; other clicks
         // should keep their existing mouse behavior and clear stale candidates.
         let Some(click) = self.pane_click_candidate(mouse) else {

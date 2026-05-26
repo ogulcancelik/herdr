@@ -354,6 +354,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drag_copy_then_click_does_not_reuse_double_click_candidate() {
+        let (mut app, info) = app_with_screen_bytes(b"alpha beta");
+        let row = info.inner_rect.y;
+        let start_col = info.inner_rect.x;
+        let end_col = info.inner_rect.x + 4;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            start_col,
+            row,
+        ));
+        assert!(app.last_pane_click.is_some());
+
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), end_col, row));
+        assert!(app.last_pane_click.is_none());
+
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), end_col, row));
+        assert!(app.last_pane_click.is_none());
+        assert_eq!(clipboard_write_content(&mut app), b"alpha");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            start_col,
+            row,
+        ));
+
+        assert!(app.last_pane_click.is_some());
+        assert!(app.event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn double_click_selects_and_copies_word() {
         let (mut app, info) = app_with_screen_bytes(b"alpha beta-gamma_delta@omega");
         let col = info.inner_rect.x + 13;

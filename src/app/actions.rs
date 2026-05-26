@@ -1470,18 +1470,41 @@ fn url_span_at_column(cells: &[TextCell], clicked_idx: usize) -> Option<CellSpan
 fn trim_url_edges(cells: &[TextCell], span: CellSpan) -> Option<CellSpan> {
     let start = span.start;
     let mut end = span.end;
-    while start <= end
-        && matches!(
-            cells[end].ch,
-            '"' | '\'' | '`' | '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}'
-        )
-    {
+    while start <= end && should_trim_trailing_url_cell(cells, start, end) {
         if end == 0 {
             return None;
         }
         end -= 1;
     }
     (start <= end).then_some(CellSpan { start, end })
+}
+
+fn should_trim_trailing_url_cell(cells: &[TextCell], start: usize, end: usize) -> bool {
+    match cells[end].ch {
+        '"' | '\'' | '`' | '.' | ',' | ';' | ':' | '!' | '?' => true,
+        ')' => !trailing_url_closer_is_balanced(cells, start, end, '(', ')'),
+        ']' => !trailing_url_closer_is_balanced(cells, start, end, '[', ']'),
+        '}' => !trailing_url_closer_is_balanced(cells, start, end, '{', '}'),
+        _ => false,
+    }
+}
+
+fn trailing_url_closer_is_balanced(
+    cells: &[TextCell],
+    start: usize,
+    end: usize,
+    open: char,
+    close: char,
+) -> bool {
+    let mut balance = 0i32;
+    for cell in &cells[start..end] {
+        if cell.ch == open {
+            balance += 1;
+        } else if cell.ch == close {
+            balance -= 1;
+        }
+    }
+    balance > 0
 }
 
 fn quoted_path_span_at_column(cells: &[TextCell], clicked_idx: usize) -> Option<CellSpan> {
@@ -1963,14 +1986,19 @@ mod tests {
                 "https://example.com/a,b;c?q=x",
             ),
             (
-                "see https://example.com/a,b;c!(x)",
-                "example.com",
-                "https://example.com/a,b;c!(x",
+                "see https://en.wikipedia.org/wiki/Foo_(bar_(baz)),",
+                "wikipedia",
+                "https://en.wikipedia.org/wiki/Foo_(bar_(baz))",
             ),
             (
-                "see (https://example.com/path)",
+                "see https://example.com/a(b[c{d}e]f),",
                 "example.com",
-                "https://example.com/path",
+                "https://example.com/a(b[c{d}e]f)",
+            ),
+            (
+                "see (https://example.com/a(b(c)d)))",
+                "example.com",
+                "https://example.com/a(b(c)d)",
             ),
             (
                 "open /tmp/foo-bar/baz_qux/",
