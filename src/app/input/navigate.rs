@@ -1,4 +1,4 @@
-.use std::{
+use std::{
     fs, io,
     io::Write,
     process::{Command, Stdio},
@@ -739,13 +739,11 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::NewTab => {
-            if state.active.is_some() {
-                if state.prompt_new_tab_name {
-                    super::modal::open_new_tab_dialog(state);
-                } else {
-                    state.request_new_tab = true;
-                    leave_navigate_mode(state);
-                }
+            if state.active.is_some() && state.prompt_new_tab_name {
+                super::modal::open_new_tab_dialog(state);
+            } else {
+                state.request_new_tab = true;
+                leave_navigate_mode(state);
             }
         }
         NavigateAction::RenameTab => super::modal::open_rename_active_tab(state, false),
