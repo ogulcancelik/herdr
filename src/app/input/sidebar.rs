@@ -455,23 +455,30 @@ impl AppState {
             detail_area,
             crate::ui::should_show_scrollbar(metrics),
         );
-        if body.height < 2 || row < body.y || row >= body.y + body.height {
+        let entry_rows = crate::ui::agent_panel_entry_row_count(self);
+        if entry_rows == 0
+            || body.height < entry_rows
+            || row < body.y
+            || row >= body.y + body.height
+        {
             return None;
         }
 
         let mut row_y = body.y;
+        let body_bottom = body.y.saturating_add(body.height);
         for detail in crate::ui::agent_panel_entries(self)
             .into_iter()
             .skip(self.agent_panel_scroll)
         {
-            if row_y.saturating_add(1) >= body.y + body.height {
+            let row_end = row_y.saturating_add(entry_rows);
+            if row_end > body_bottom {
                 break;
             }
-            if row == row_y || row == row_y + 1 {
+            if row >= row_y && row < row_end {
                 return Some((detail.ws_idx, detail.tab_idx, detail.pane_id));
             }
-            row_y = row_y.saturating_add(2);
-            if row_y < body.y + body.height {
+            row_y = row_end;
+            if row_y < body_bottom {
                 row_y = row_y.saturating_add(1);
             }
         }
@@ -488,7 +495,7 @@ mod tests {
 
     use super::super::{app_for_mouse_test, capture_snapshot, mouse, unique_temp_path};
     use crate::{
-        app::state::{AgentPanelScope, DragTarget, Mode},
+        app::state::{AgentPanelScope, DragTarget, Mode, SidebarAgentItem},
         detect::Agent,
         workspace::Workspace,
     };
@@ -782,6 +789,108 @@ mod tests {
         assert_eq!(
             app.state.workspaces[1].tabs[0].layout.focused(),
             second_pane
+        );
+    }
+
+    #[test]
+    fn agent_detail_hit_test_uses_one_configured_row_per_entry() {
+        let mut app = app_for_mouse_test();
+        let first = Workspace::test_new("one");
+        let first_pane = first.tabs[0].root_pane;
+
+        let second = Workspace::test_new("two");
+        let second_pane = second.tabs[0].root_pane;
+
+        app.state.workspaces = vec![first, second];
+        app.state.ensure_test_terminals();
+        for (ws_idx, pane_id, agent) in
+            [(0, first_pane, Agent::Pi), (1, second_pane, Agent::Claude)]
+        {
+            let terminal_id = app.state.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .detected_agent = Some(agent);
+        }
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+        app.state.sidebar_agent.lines = vec![vec![crate::config::SidebarItem::visible(
+            SidebarAgentItem::AgentStatus,
+        )]];
+
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+            app.state.view.sidebar_rect,
+            app.state.sidebar_section_split,
+        );
+        let body = crate::ui::agent_panel_body_rect(detail_area, false);
+
+        let target = app
+            .state
+            .agent_detail_target_at(body.y + 2)
+            .expect("second one-line entry should be hittable");
+
+        assert_eq!(target, (1, 0, second_pane));
+    }
+
+    #[test]
+    fn agent_detail_hit_test_uses_three_configured_rows_per_entry() {
+        let mut app = app_for_mouse_test();
+        let first = Workspace::test_new("one");
+        let first_pane = first.tabs[0].root_pane;
+
+        let second = Workspace::test_new("two");
+        let second_pane = second.tabs[0].root_pane;
+
+        app.state.workspaces = vec![first, second];
+        app.state.ensure_test_terminals();
+        for (ws_idx, pane_id, agent) in
+            [(0, first_pane, Agent::Pi), (1, second_pane, Agent::Claude)]
+        {
+            let terminal_id = app.state.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .detected_agent = Some(agent);
+        }
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+        app.state.sidebar_agent.lines = vec![
+            vec![crate::config::SidebarItem::visible(
+                SidebarAgentItem::AgentStatus,
+            )],
+            vec![crate::config::SidebarItem::visible(
+                SidebarAgentItem::Status,
+            )],
+            vec![crate::config::SidebarItem::visible(
+                SidebarAgentItem::AgentName,
+            )],
+        ];
+
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+            app.state.view.sidebar_rect,
+            app.state.sidebar_section_split,
+        );
+        let body = crate::ui::agent_panel_body_rect(detail_area, false);
+
+        assert_eq!(
+            app.state
+                .agent_detail_target_at(body.y + 2)
+                .expect("third row of first entry should be hittable"),
+            (0, 0, first_pane)
+        );
+        assert_eq!(
+            app.state
+                .agent_detail_target_at(body.y + 4)
+                .expect("second three-line entry should start after separator"),
+            (1, 0, second_pane)
         );
     }
 

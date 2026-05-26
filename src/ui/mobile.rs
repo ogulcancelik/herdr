@@ -936,10 +936,12 @@ mod tests {
             pane_id: PaneId::from_raw(1),
             primary_label: "herdr".into(),
             primary_tab_label: primary_tab_label.map(str::to_string),
+            pane_label: None,
             agent_label: agent_label.map(str::to_string),
             state: AgentState::Idle,
             seen: true,
             custom_status: None,
+            working_duration: None,
         }
     }
 

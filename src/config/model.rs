@@ -287,13 +287,13 @@ pub struct UiConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct SidebarConfig {
-    pub spaces: SpacesViewConfig,
-    pub agents: AgentsViewConfig,
+    pub spaces: SidebarSpacesConfig,
+    pub agents: SidebarAgentsConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SpaceViewField {
+pub enum SidebarSpaceField {
     Status,
     Name,
     Branch,
@@ -302,7 +302,7 @@ pub enum SpaceViewField {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AgentViewField {
+pub enum SidebarAgentField {
     AgentStatus,
     PaneName,
     TabName,
@@ -316,7 +316,7 @@ pub enum AgentViewField {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ViewColorPreset {
+pub enum SidebarColorPreset {
     #[default]
     Default,
     Muted,
@@ -325,7 +325,7 @@ pub enum ViewColorPreset {
     Warm,
 }
 
-impl ViewColorPreset {
+impl SidebarColorPreset {
     pub fn is_default(color: &Self) -> bool {
         matches!(*color, Self::Default)
     }
@@ -352,30 +352,30 @@ impl ViewColorPreset {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct SpacesViewConfig {
-    pub lines: Vec<Vec<ViewItem<SpaceViewField>>>,
+pub struct SidebarSpacesConfig {
+    pub lines: Vec<Vec<SidebarItem<SidebarSpaceField>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct AgentsViewConfig {
-    pub lines: Vec<Vec<ViewItem<AgentViewField>>>,
+pub struct SidebarAgentsConfig {
+    pub lines: Vec<Vec<SidebarItem<SidebarAgentField>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-pub struct ViewItem<F> {
+pub struct SidebarItem<F> {
     pub field: F,
     #[serde(default = "default_true")]
     pub show: bool,
-    #[serde(default, skip_serializing_if = "ViewColorPreset::is_default")]
-    pub color: ViewColorPreset,
+    #[serde(default, skip_serializing_if = "SidebarColorPreset::is_default")]
+    pub color: SidebarColorPreset,
 }
 
-impl<F> ViewItem<F> {
+impl<F> SidebarItem<F> {
     pub const fn new(field: F, show: bool) -> Self {
         Self {
             field,
             show,
-            color: ViewColorPreset::Default,
+            color: SidebarColorPreset::Default,
         }
     }
 
@@ -388,90 +388,173 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-struct RawSpacesViewConfig {
-    lines: Option<Vec<Vec<ViewItem<SpaceViewField>>>>,
+struct RawSidebarItem {
+    field: Option<String>,
+    show: bool,
+    color: Option<String>,
+}
+
+impl Default for RawSidebarItem {
+    fn default() -> Self {
+        Self {
+            field: None,
+            show: true,
+            color: None,
+        }
+    }
+}
+
+impl RawSidebarItem {
+    fn into_item<F>(self, parse_field: fn(&str) -> Option<F>) -> Option<SidebarItem<F>> {
+        Some(SidebarItem {
+            field: parse_field(self.field.as_deref()?)?,
+            show: self.show,
+            color: parse_sidebar_color(self.color.as_deref()),
+        })
+    }
+}
+
+fn parse_sidebar_color(value: Option<&str>) -> SidebarColorPreset {
+    match value {
+        Some("muted") => SidebarColorPreset::Muted,
+        Some("accent") => SidebarColorPreset::Accent,
+        Some("cool") => SidebarColorPreset::Cool,
+        Some("warm") => SidebarColorPreset::Warm,
+        _ => SidebarColorPreset::Default,
+    }
+}
+
+fn parse_sidebar_space_field(value: &str) -> Option<SidebarSpaceField> {
+    match value {
+        "status" => Some(SidebarSpaceField::Status),
+        "name" => Some(SidebarSpaceField::Name),
+        "branch" => Some(SidebarSpaceField::Branch),
+        "branch_status" => Some(SidebarSpaceField::BranchStatus),
+        _ => None,
+    }
+}
+
+fn parse_sidebar_agent_field(value: &str) -> Option<SidebarAgentField> {
+    match value {
+        "agent_status" => Some(SidebarAgentField::AgentStatus),
+        "pane_name" => Some(SidebarAgentField::PaneName),
+        "tab_name" => Some(SidebarAgentField::TabName),
+        "space_name" => Some(SidebarAgentField::SpaceName),
+        "status" => Some(SidebarAgentField::Status),
+        "time" => Some(SidebarAgentField::Time),
+        "custom_status" => Some(SidebarAgentField::CustomStatus),
+        "agent_name" => Some(SidebarAgentField::AgentName),
+        "right_alignment" => Some(SidebarAgentField::RightAlignment),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
-struct RawAgentsViewConfig {
-    lines: Option<Vec<Vec<ViewItem<AgentViewField>>>>,
+struct RawSidebarSpacesConfig {
+    lines: Option<Vec<Vec<RawSidebarItem>>>,
 }
 
-impl<'de> Deserialize<'de> for SpacesViewConfig {
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct RawSidebarAgentsConfig {
+    lines: Option<Vec<Vec<RawSidebarItem>>>,
+}
+
+impl<'de> Deserialize<'de> for SidebarSpacesConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let raw = RawSpacesViewConfig::deserialize(deserializer)?;
+        let raw = RawSidebarSpacesConfig::deserialize(deserializer)?;
         Ok(raw.into_config())
     }
 }
 
-impl<'de> Deserialize<'de> for AgentsViewConfig {
+impl<'de> Deserialize<'de> for SidebarAgentsConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let raw = RawAgentsViewConfig::deserialize(deserializer)?;
+        let raw = RawSidebarAgentsConfig::deserialize(deserializer)?;
         Ok(raw.into_config())
     }
 }
 
-impl RawSpacesViewConfig {
-    fn into_config(self) -> SpacesViewConfig {
-        let mut config = SpacesViewConfig::default();
-        apply_space_lines_override(&mut config, self.lines);
-        config
+impl RawSidebarSpacesConfig {
+    fn into_config(self) -> SidebarSpacesConfig {
+        self.lines
+            .map(|lines| SidebarSpacesConfig {
+                lines: normalize_sidebar_space_lines(raw_sidebar_lines(
+                    lines,
+                    parse_sidebar_space_field,
+                )),
+            })
+            .unwrap_or_default()
     }
 }
 
-impl RawAgentsViewConfig {
-    fn into_config(self) -> AgentsViewConfig {
-        let mut config = AgentsViewConfig::default();
-        apply_agent_lines_override(&mut config, self.lines);
-        config
+impl RawSidebarAgentsConfig {
+    fn into_config(self) -> SidebarAgentsConfig {
+        self.lines
+            .map(|lines| SidebarAgentsConfig {
+                lines: normalize_sidebar_agent_lines(raw_sidebar_lines(
+                    lines,
+                    parse_sidebar_agent_field,
+                )),
+            })
+            .unwrap_or_default()
     }
 }
 
-fn apply_space_lines_override(
-    config: &mut SpacesViewConfig,
-    lines: Option<Vec<Vec<ViewItem<SpaceViewField>>>>,
-) {
-    let Some(lines) = lines else {
-        return;
-    };
-    config.lines = normalize_space_lines(lines);
+fn raw_sidebar_lines<F>(
+    lines: Vec<Vec<RawSidebarItem>>,
+    parse_field: fn(&str) -> Option<F>,
+) -> Vec<Vec<SidebarItem<F>>> {
+    lines
+        .into_iter()
+        .map(|line| {
+            line.into_iter()
+                .filter_map(|item| item.into_item(parse_field))
+                .collect()
+        })
+        .collect()
 }
 
-fn apply_agent_lines_override(
-    config: &mut AgentsViewConfig,
-    lines: Option<Vec<Vec<ViewItem<AgentViewField>>>>,
-) {
-    let Some(lines) = lines else {
-        return;
-    };
-    config.lines = normalize_agent_lines(lines);
+fn normalize_sidebar_space_lines(
+    lines: Vec<Vec<SidebarItem<SidebarSpaceField>>>,
+) -> Vec<Vec<SidebarItem<SidebarSpaceField>>> {
+    normalize_sidebar_lines(lines)
 }
 
-fn normalize_space_lines(
-    lines: Vec<Vec<ViewItem<SpaceViewField>>>,
-) -> Vec<Vec<ViewItem<SpaceViewField>>> {
-    normalize_view_lines(lines, &SPACE_VIEW_DEFAULT_ITEMS)
+fn normalize_sidebar_agent_lines(
+    lines: Vec<Vec<SidebarItem<SidebarAgentField>>>,
+) -> Vec<Vec<SidebarItem<SidebarAgentField>>> {
+    let mut seen = Vec::new();
+    let mut normalized = Vec::new();
+    for line in lines {
+        let mut normalized_line = Vec::new();
+        for item in line {
+            if item.field == SidebarAgentField::RightAlignment {
+                normalized_line.push(item);
+                continue;
+            }
+            if seen.contains(&item.field) {
+                continue;
+            }
+            seen.push(item.field);
+            normalized_line.push(item);
+        }
+        normalized.push(normalized_line);
+    }
+    normalized
 }
 
-fn normalize_agent_lines(
-    lines: Vec<Vec<ViewItem<AgentViewField>>>,
-) -> Vec<Vec<ViewItem<AgentViewField>>> {
-    normalize_view_lines(lines, &AGENT_VIEW_DEFAULT_ITEMS)
-}
-
-fn normalize_view_lines<F: Copy + Eq>(
-    lines: Vec<Vec<ViewItem<F>>>,
-    default_items: &[(usize, F)],
-) -> Vec<Vec<ViewItem<F>>> {
+fn normalize_sidebar_lines<F: Copy + Eq>(
+    lines: Vec<Vec<SidebarItem<F>>>,
+) -> Vec<Vec<SidebarItem<F>>> {
     let mut seen = Vec::new();
     let mut normalized = Vec::new();
     for line in lines {
@@ -485,47 +568,7 @@ fn normalize_view_lines<F: Copy + Eq>(
         }
         normalized.push(normalized_line);
     }
-    append_missing_view_items(&mut normalized, &mut seen, default_items);
     normalized
-}
-
-const SPACE_VIEW_DEFAULT_ITEMS: [(usize, SpaceViewField); 4] = [
-    (0, SpaceViewField::Status),
-    (0, SpaceViewField::Name),
-    (1, SpaceViewField::Branch),
-    (1, SpaceViewField::BranchStatus),
-];
-
-const AGENT_VIEW_DEFAULT_ITEMS: [(usize, AgentViewField); 9] = [
-    (0, AgentViewField::AgentStatus),
-    (0, AgentViewField::PaneName),
-    (0, AgentViewField::TabName),
-    (0, AgentViewField::SpaceName),
-    (1, AgentViewField::Status),
-    (1, AgentViewField::Time),
-    (1, AgentViewField::CustomStatus),
-    (1, AgentViewField::RightAlignment),
-    (1, AgentViewField::AgentName),
-];
-
-fn append_missing_view_items<F: Copy + Eq>(
-    lines: &mut Vec<Vec<ViewItem<F>>>,
-    seen: &mut Vec<F>,
-    default_items: &[(usize, F)],
-) {
-    if lines.is_empty() {
-        lines.push(Vec::new());
-    }
-    for &(line_idx, field) in default_items {
-        if seen.contains(&field) {
-            continue;
-        }
-        while lines.len() <= line_idx {
-            lines.push(Vec::new());
-        }
-        lines[line_idx].push(ViewItem::visible(field));
-        seen.push(field);
-    }
 }
 
 /// Cursor shape (DECSCUSR) used for the forced IME anchor.
@@ -681,39 +724,39 @@ impl Default for UiConfig {
     }
 }
 
-impl Default for SpacesViewConfig {
+impl Default for SidebarSpacesConfig {
     fn default() -> Self {
         Self {
             lines: vec![
                 vec![
-                    ViewItem::visible(SpaceViewField::Status),
-                    ViewItem::visible(SpaceViewField::Name),
+                    SidebarItem::visible(SidebarSpaceField::Status),
+                    SidebarItem::visible(SidebarSpaceField::Name),
                 ],
                 vec![
-                    ViewItem::visible(SpaceViewField::Branch),
-                    ViewItem::visible(SpaceViewField::BranchStatus),
+                    SidebarItem::visible(SidebarSpaceField::Branch),
+                    SidebarItem::visible(SidebarSpaceField::BranchStatus),
                 ],
             ],
         }
     }
 }
 
-impl Default for AgentsViewConfig {
+impl Default for SidebarAgentsConfig {
     fn default() -> Self {
         Self {
             lines: vec![
                 vec![
-                    ViewItem::visible(AgentViewField::AgentStatus),
-                    ViewItem::visible(AgentViewField::PaneName),
-                    ViewItem::visible(AgentViewField::TabName),
-                    ViewItem::visible(AgentViewField::SpaceName),
+                    SidebarItem::visible(SidebarAgentField::AgentStatus),
+                    SidebarItem::visible(SidebarAgentField::PaneName),
+                    SidebarItem::visible(SidebarAgentField::TabName),
+                    SidebarItem::visible(SidebarAgentField::SpaceName),
                 ],
                 vec![
-                    ViewItem::visible(AgentViewField::Status),
-                    ViewItem::visible(AgentViewField::Time),
-                    ViewItem::visible(AgentViewField::CustomStatus),
-                    ViewItem::visible(AgentViewField::RightAlignment),
-                    ViewItem::visible(AgentViewField::AgentName),
+                    SidebarItem::visible(SidebarAgentField::Status),
+                    SidebarItem::visible(SidebarAgentField::Time),
+                    SidebarItem::visible(SidebarAgentField::CustomStatus),
+                    SidebarItem::visible(SidebarAgentField::RightAlignment),
+                    SidebarItem::visible(SidebarAgentField::AgentName),
                 ],
             ],
         }
@@ -1085,18 +1128,18 @@ pane_history = true
     }
 
     #[test]
-    fn sidebar_view_config_defaults_to_lines_array_and_parses_variable_line_count() {
+    fn sidebar_config_defaults_to_lines_array_and_parses_variable_line_count() {
         let default = Config::default();
         assert_eq!(
             default.ui.sidebar.spaces.lines,
             vec![
                 vec![
-                    ViewItem::visible(SpaceViewField::Status),
-                    ViewItem::visible(SpaceViewField::Name),
+                    SidebarItem::visible(SidebarSpaceField::Status),
+                    SidebarItem::visible(SidebarSpaceField::Name),
                 ],
                 vec![
-                    ViewItem::visible(SpaceViewField::Branch),
-                    ViewItem::visible(SpaceViewField::BranchStatus),
+                    SidebarItem::visible(SidebarSpaceField::Branch),
+                    SidebarItem::visible(SidebarSpaceField::BranchStatus),
                 ],
             ]
         );
@@ -1104,17 +1147,17 @@ pane_history = true
             default.ui.sidebar.agents.lines,
             vec![
                 vec![
-                    ViewItem::visible(AgentViewField::AgentStatus),
-                    ViewItem::visible(AgentViewField::PaneName),
-                    ViewItem::visible(AgentViewField::TabName),
-                    ViewItem::visible(AgentViewField::SpaceName),
+                    SidebarItem::visible(SidebarAgentField::AgentStatus),
+                    SidebarItem::visible(SidebarAgentField::PaneName),
+                    SidebarItem::visible(SidebarAgentField::TabName),
+                    SidebarItem::visible(SidebarAgentField::SpaceName),
                 ],
                 vec![
-                    ViewItem::visible(AgentViewField::Status),
-                    ViewItem::visible(AgentViewField::Time),
-                    ViewItem::visible(AgentViewField::CustomStatus),
-                    ViewItem::visible(AgentViewField::RightAlignment),
-                    ViewItem::visible(AgentViewField::AgentName),
+                    SidebarItem::visible(SidebarAgentField::Status),
+                    SidebarItem::visible(SidebarAgentField::Time),
+                    SidebarItem::visible(SidebarAgentField::CustomStatus),
+                    SidebarItem::visible(SidebarAgentField::RightAlignment),
+                    SidebarItem::visible(SidebarAgentField::AgentName),
                 ],
             ]
         );
@@ -1153,41 +1196,41 @@ lines = [
             config.ui.sidebar.spaces.lines,
             vec![
                 vec![
-                    ViewItem {
-                        field: SpaceViewField::Name,
+                    SidebarItem {
+                        field: SidebarSpaceField::Name,
                         show: false,
-                        color: ViewColorPreset::Muted,
+                        color: SidebarColorPreset::Muted,
                     },
-                    ViewItem::visible(SpaceViewField::Branch),
+                    SidebarItem::visible(SidebarSpaceField::Branch),
                 ],
                 vec![
-                    ViewItem::visible(SpaceViewField::Status),
-                    ViewItem::new(SpaceViewField::BranchStatus, false),
+                    SidebarItem::visible(SidebarSpaceField::Status),
+                    SidebarItem::new(SidebarSpaceField::BranchStatus, false),
                 ],
             ]
         );
         assert_eq!(
             config.ui.sidebar.agents.lines,
             vec![vec![
-                ViewItem::visible(AgentViewField::AgentStatus),
-                ViewItem::visible(AgentViewField::PaneName),
-                ViewItem::visible(AgentViewField::TabName),
-                ViewItem::visible(AgentViewField::SpaceName),
-                ViewItem::new(AgentViewField::Status, false),
-                ViewItem::new(AgentViewField::Time, false),
-                ViewItem {
-                    field: AgentViewField::CustomStatus,
+                SidebarItem::visible(SidebarAgentField::AgentStatus),
+                SidebarItem::visible(SidebarAgentField::PaneName),
+                SidebarItem::visible(SidebarAgentField::TabName),
+                SidebarItem::visible(SidebarAgentField::SpaceName),
+                SidebarItem::new(SidebarAgentField::Status, false),
+                SidebarItem::new(SidebarAgentField::Time, false),
+                SidebarItem {
+                    field: SidebarAgentField::CustomStatus,
                     show: false,
-                    color: ViewColorPreset::Warm,
+                    color: SidebarColorPreset::Warm,
                 },
-                ViewItem::visible(AgentViewField::RightAlignment),
-                ViewItem::visible(AgentViewField::AgentName),
+                SidebarItem::visible(SidebarAgentField::RightAlignment),
+                SidebarItem::visible(SidebarAgentField::AgentName),
             ],]
         );
     }
 
     #[test]
-    fn sidebar_view_config_preserves_three_configured_lines() {
+    fn sidebar_config_preserves_three_configured_lines() {
         let toml = r#"
 [ui.sidebar.agents]
 lines = [
@@ -1214,69 +1257,102 @@ lines = [
         assert_eq!(
             config.ui.sidebar.agents.lines[2],
             vec![
-                ViewItem::visible(AgentViewField::RightAlignment),
-                ViewItem::visible(AgentViewField::AgentName),
+                SidebarItem::visible(SidebarAgentField::RightAlignment),
+                SidebarItem::visible(SidebarAgentField::AgentName),
             ]
         );
     }
 
     #[test]
-    fn sidebar_view_config_flat_keys_do_not_override_lines_array() {
+    fn sidebar_config_ignores_invalid_items_without_rejecting_ui() {
         let toml = r#"
-[ui.sidebar.spaces]
-show_status = false
-status_line = "second"
-status_order = 2
-show_name = true
-name_line = "first"
-name_order = 0
-show_branch = false
-branch_line = "first"
-branch_order = 1
-show_branch_status = true
-branch_status_line = "second"
-branch_status_order = 0
+[ui]
+mouse_capture = false
 
 [ui.sidebar.agents]
-show_agent_status = false
-agent_status_line = "second"
-agent_status_order = 3
-show_pane_name = false
-pane_name_line = "second"
-pane_name_order = 1
-show_tab_name = true
-tab_name_line = "first"
-tab_name_order = 0
-show_space_name = false
-space_name_line = "first"
-space_name_order = 2
-show_status = false
-status_line = "second"
-status_order = 0
-show_time = false
-time_line = "first"
-time_order = 1
-show_agent_name = true
-agent_name_line = "second"
-agent_name_order = 4
-right_align_agent = true
-right_align_line = "second"
-right_align_order = 3
+lines = [
+  [
+    { field = "not_a_field", show = true },
+    { field = "time", show = true, color = "not_a_color" },
+  ],
+]
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+
+        assert!(!config.ui.mouse_capture);
+        let time = config
+            .ui
+            .sidebar
+            .agents
+            .lines
+            .iter()
+            .flatten()
+            .find(|item| item.field == SidebarAgentField::Time)
+            .copied();
+        assert_eq!(time, Some(SidebarItem::visible(SidebarAgentField::Time)));
+    }
+
+    #[test]
+    fn sidebar_config_preserves_omitted_items() {
+        let toml = r#"
+[ui.sidebar.spaces]
+lines = [
+  [
+    { field = "name", show = true },
+  ],
+]
+
+[ui.sidebar.agents]
+lines = [
+  [
+    { field = "status", show = true },
+  ],
+]
 "#;
         let config: Config = toml::from_str(toml).unwrap();
 
         assert_eq!(
             config.ui.sidebar.spaces.lines,
-            SpacesViewConfig::default().lines
+            vec![vec![SidebarItem::visible(SidebarSpaceField::Name)]]
         );
         assert_eq!(
             config.ui.sidebar.agents.lines,
-            AgentsViewConfig::default().lines
+            vec![vec![SidebarItem::visible(SidebarAgentField::Status)]]
         );
     }
 
     #[test]
-    fn sidebar_view_config_accepts_all_fields_on_one_line() {
+    fn sidebar_agent_config_preserves_per_line_right_alignment_markers() {
+        let toml = r#"
+[ui.sidebar.agents]
+lines = [
+  [
+    { field = "right_alignment", show = true },
+    { field = "agent_name", show = true },
+  ],
+  [
+    { field = "status", show = true },
+  ],
+  [
+    { field = "right_alignment", show = true },
+    { field = "time", show = true },
+  ],
+]
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+
+        assert_eq!(
+            config.ui.sidebar.agents.lines[0][0],
+            SidebarItem::visible(SidebarAgentField::RightAlignment)
+        );
+        assert_eq!(
+            config.ui.sidebar.agents.lines[2][0],
+            SidebarItem::visible(SidebarAgentField::RightAlignment)
+        );
+    }
+
+    #[test]
+    fn sidebar_config_accepts_all_fields_on_one_line() {
         let toml = r#"
 [ui.sidebar.spaces]
 lines = [
@@ -1308,24 +1384,24 @@ lines = [
         assert_eq!(
             config.ui.sidebar.spaces.lines,
             vec![vec![
-                ViewItem::visible(SpaceViewField::Status),
-                ViewItem::visible(SpaceViewField::Name),
-                ViewItem::visible(SpaceViewField::Branch),
-                ViewItem::visible(SpaceViewField::BranchStatus),
+                SidebarItem::visible(SidebarSpaceField::Status),
+                SidebarItem::visible(SidebarSpaceField::Name),
+                SidebarItem::visible(SidebarSpaceField::Branch),
+                SidebarItem::visible(SidebarSpaceField::BranchStatus),
             ],]
         );
         assert_eq!(
             config.ui.sidebar.agents.lines,
             vec![vec![
-                ViewItem::visible(AgentViewField::AgentStatus),
-                ViewItem::visible(AgentViewField::PaneName),
-                ViewItem::visible(AgentViewField::TabName),
-                ViewItem::visible(AgentViewField::SpaceName),
-                ViewItem::visible(AgentViewField::Status),
-                ViewItem::visible(AgentViewField::Time),
-                ViewItem::visible(AgentViewField::CustomStatus),
-                ViewItem::visible(AgentViewField::RightAlignment),
-                ViewItem::visible(AgentViewField::AgentName),
+                SidebarItem::visible(SidebarAgentField::AgentStatus),
+                SidebarItem::visible(SidebarAgentField::PaneName),
+                SidebarItem::visible(SidebarAgentField::TabName),
+                SidebarItem::visible(SidebarAgentField::SpaceName),
+                SidebarItem::visible(SidebarAgentField::Status),
+                SidebarItem::visible(SidebarAgentField::Time),
+                SidebarItem::visible(SidebarAgentField::CustomStatus),
+                SidebarItem::visible(SidebarAgentField::RightAlignment),
+                SidebarItem::visible(SidebarAgentField::AgentName),
             ],]
         );
     }
@@ -1375,5 +1451,22 @@ scrollback_lines = 12345
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.advanced.scrollback_limit_bytes, 12345);
+    }
+
+    #[test]
+    fn color_preset_next_cycles_through_all_variants() {
+        let cycle = [
+            SidebarColorPreset::Default,
+            SidebarColorPreset::Muted,
+            SidebarColorPreset::Accent,
+            SidebarColorPreset::Cool,
+            SidebarColorPreset::Warm,
+        ];
+        let mut current = cycle[0];
+        for expected_next in cycle.iter().skip(1).chain(std::iter::once(&cycle[0])) {
+            current = current.next();
+            assert_eq!(&current, expected_next);
+        }
+        assert_eq!(current, SidebarColorPreset::Default);
     }
 }

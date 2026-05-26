@@ -724,4 +724,54 @@ mod tests {
             .iter()
             .all(|message| !message.starts_with("herdr:")));
     }
+
+    /// Every commented `# ...` line inside DEFAULT_CONFIG that parses as a TOML
+    /// statement standalone should remain valid when uncommented.
+    ///
+    /// We strip the `# ` prefix only from lines that parse as a single
+    /// valid TOML statement in isolation (assignment or section header).
+    /// Prose comments and inline-example text like `# Accepts: hex
+    /// (#rrggbb)` or `# type = "shell" runs detached in the background.`
+    /// are left as comments.
+    #[test]
+    fn default_config_template_is_valid_toml_when_uncommented() {
+        fn looks_like_toml_statement(after_strip: &str) -> bool {
+            let trimmed = after_strip.trim();
+            if trimmed.is_empty() {
+                return false;
+            }
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                return toml::from_str::<toml::Value>(trimmed).is_ok();
+            }
+            toml::from_str::<toml::Value>(&format!("{trimmed}\n")).is_ok()
+        }
+
+        let mut uncommented = String::with_capacity(DEFAULT_CONFIG.len());
+        for line in DEFAULT_CONFIG.lines() {
+            let trimmed = line.trim_start();
+            let stripped = trimmed
+                .strip_prefix("# ")
+                .or_else(|| trimmed.strip_prefix("#"));
+            match stripped {
+                Some(rest) if looks_like_toml_statement(rest) => uncommented.push_str(rest),
+                _ => uncommented.push_str(line),
+            }
+            uncommented.push('\n');
+        }
+
+        let parsed: config::Config = toml::from_str(&uncommented).unwrap_or_else(|err| {
+            panic!("uncommented DEFAULT_CONFIG must parse: {err}\n\n{uncommented}")
+        });
+        // Sound examples reference user-supplied files that aren't expected to
+        // exist on the test machine.
+        let schema_diagnostics: Vec<String> = parsed
+            .collect_diagnostics()
+            .into_iter()
+            .filter(|d| !d.contains("missing sound file:"))
+            .collect();
+        assert!(
+            schema_diagnostics.is_empty(),
+            "uncommented DEFAULT_CONFIG must produce no schema diagnostics, got {schema_diagnostics:?}",
+        );
+    }
 }

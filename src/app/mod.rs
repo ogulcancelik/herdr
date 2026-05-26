@@ -486,8 +486,8 @@ impl App {
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
             pane_history_persistence: config.experimental.pane_history,
-            space_view: config.ui.sidebar.spaces.clone(),
-            agent_view: config.ui.sidebar.agents.clone(),
+            sidebar_space: config.ui.sidebar.spaces.clone(),
+            sidebar_agent: config.ui.sidebar.agents.clone(),
             reveal_hidden_cursor_for_cjk_ime: config.experimental.reveal_hidden_cursor_for_cjk_ime,
             cjk_ime_agent_filter_configured: !config.experimental.cjk_ime_agents.is_empty(),
             cjk_ime_agents: parse_cjk_ime_agents(&config.experimental.cjk_ime_agents),
@@ -511,6 +511,8 @@ impl App {
             settings: state::SettingsState {
                 section: state::SettingsSection::Theme,
                 list: state::SelectionListState::new(0),
+                sidebar_config_group: state::SidebarConfigGroup::default(),
+                sidebar_config_editing: false,
                 original_palette: None,
                 original_theme: None,
             },
@@ -1094,8 +1096,8 @@ impl App {
                 self.state.agent_panel_scope =
                     agent_panel_scope_from_config(config.ui.agent_panel_scope);
                 self.state.agent_panel_scroll = 0;
-                self.state.space_view = config.ui.sidebar.spaces.clone();
-                self.state.agent_view = config.ui.sidebar.agents.clone();
+                self.state.sidebar_space = config.ui.sidebar.spaces.clone();
+                self.state.sidebar_agent = config.ui.sidebar.agents.clone();
                 self.state.accent = crate::config::parse_color(&config.ui.accent);
                 if !self.state.local_sound_playback && self.state.sound != config.ui.sound {
                     self.state.request_client_config_reload = true;
@@ -1997,40 +1999,142 @@ mod tests {
     }
 
     #[test]
-    fn settings_save_sidebar_view_config_persists_then_applies_live_config() {
+    fn settings_save_sidebar_config_persists_then_applies_live_config() {
         let _guard = config_env_lock().lock().unwrap();
-        let path = temp_config_path("settings-save-sidebar-view-config");
+        let path = temp_config_path("settings-save-sidebar-config");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "onboarding = false\n").unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
 
         let mut app = test_app();
-        assert!(state::SpaceViewItem::BranchStatus.enabled(&app.state.space_view));
-        assert!(state::AgentViewItem::Time.enabled(&app.state.agent_view));
+        assert!(state::SidebarSpaceItem::BranchStatus.enabled(&app.state.sidebar_space));
+        assert!(state::SidebarAgentItem::Time.enabled(&app.state.sidebar_agent));
 
-        let mut space_view = app.state.space_view.clone();
-        state::SpaceViewItem::BranchStatus.set_enabled(&mut space_view, false);
-        app.save_space_view_preferences(space_view);
-        let mut agent_view = app.state.agent_view.clone();
-        state::AgentViewItem::Time.set_enabled(&mut agent_view, false);
-        state::AgentViewItem::Time.set_color(&mut agent_view, crate::config::ViewColorPreset::Cool);
-        app.save_agent_view_preferences(agent_view);
+        let mut sidebar_space = app.state.sidebar_space.clone();
+        state::SidebarSpaceItem::BranchStatus.set_enabled(&mut sidebar_space, false);
+        app.save_sidebar_space_preferences(sidebar_space);
+        let mut sidebar_agent = app.state.sidebar_agent.clone();
+        state::SidebarAgentItem::Time.set_enabled(&mut sidebar_agent, false);
+        state::SidebarAgentItem::Time
+            .set_color(&mut sidebar_agent, crate::config::SidebarColorPreset::Cool);
+        app.save_sidebar_agent_preferences(sidebar_agent);
 
-        assert!(!state::SpaceViewItem::BranchStatus.enabled(&app.state.space_view));
-        assert!(!state::AgentViewItem::Time.enabled(&app.state.agent_view));
+        assert!(!state::SidebarSpaceItem::BranchStatus.enabled(&app.state.sidebar_space));
+        assert!(!state::SidebarAgentItem::Time.enabled(&app.state.sidebar_agent));
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("[ui.sidebar.spaces]"));
         assert!(content.contains("lines = ["));
         assert!(content.contains(r#"{ field = "branch_status", show = false }"#));
-        assert!(!content.contains("line_first"));
-        assert!(!content.contains("line_second"));
-        assert!(!content.contains("show_branch_status"));
-        assert!(!content.contains("branch_status_line"));
         assert!(content.contains("[ui.sidebar.agents]"));
         assert!(content.contains(r#"{ field = "time", show = false, color = "cool" }"#));
-        assert!(!content.contains("show_time"));
-        assert!(!content.contains("time_line"));
         assert!(app.state.config_diagnostic.is_none());
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn save_sidebar_preferences_round_trips_non_default_layout_structurally() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("sidebar-round-trip-structural");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "onboarding = false\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+
+        // Deliberately non-default: three lines, reordered items, and a
+        // non-default color preset.
+        let original_agent = crate::config::SidebarAgentsConfig {
+            lines: vec![
+                vec![
+                    crate::config::SidebarItem::visible(crate::config::SidebarAgentField::PaneName),
+                    crate::config::SidebarItem::visible(
+                        crate::config::SidebarAgentField::AgentStatus,
+                    ),
+                ],
+                vec![
+                    crate::config::SidebarItem::visible(crate::config::SidebarAgentField::TabName),
+                    crate::config::SidebarItem::visible(
+                        crate::config::SidebarAgentField::SpaceName,
+                    ),
+                    crate::config::SidebarItem {
+                        field: crate::config::SidebarAgentField::CustomStatus,
+                        show: false,
+                        color: crate::config::SidebarColorPreset::Warm,
+                    },
+                ],
+                vec![
+                    crate::config::SidebarItem::visible(crate::config::SidebarAgentField::Status),
+                    crate::config::SidebarItem::visible(crate::config::SidebarAgentField::Time),
+                    crate::config::SidebarItem::visible(
+                        crate::config::SidebarAgentField::RightAlignment,
+                    ),
+                    crate::config::SidebarItem::visible(
+                        crate::config::SidebarAgentField::AgentName,
+                    ),
+                ],
+            ],
+        };
+
+        app.save_sidebar_agent_preferences(original_agent.clone());
+
+        assert_eq!(
+            app.state.sidebar_agent.lines, original_agent.lines,
+            "structural round-trip: lines must match exactly",
+        );
+        assert!(app.state.config_diagnostic.is_none());
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn settings_sidebar_save_failure_rolls_back_live_preview() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("settings-sidebar-save-failure");
+        std::fs::create_dir_all(&path).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        crate::app::input::open_settings_at(&mut app.state, state::SettingsSection::Sidebar);
+        let previous = app.state.sidebar_space.clone();
+
+        app.handle_settings_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty()));
+
+        assert_eq!(app.state.sidebar_space, previous);
+        assert!(app
+            .state
+            .config_diagnostic
+            .as_deref()
+            .is_some_and(|message| message.contains("failed to save space sidebar preferences")));
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn settings_sidebar_reload_failure_rolls_back_live_preview() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("settings-sidebar-reload-failure");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[keys\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        crate::app::input::open_settings_at(&mut app.state, state::SettingsSection::Sidebar);
+        let previous = app.state.sidebar_space.clone();
+
+        app.handle_settings_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty()));
+
+        assert_eq!(app.state.sidebar_space, previous);
+        assert!(app
+            .state
+            .config_diagnostic
+            .as_deref()
+            .is_some_and(|message| message.contains("config parse error")));
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("[ui.sidebar.spaces]"));
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

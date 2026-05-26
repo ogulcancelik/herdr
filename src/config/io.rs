@@ -314,8 +314,14 @@ pub fn remove_section_key(content: &str, section: &str, key: &str) -> String {
     result.join("\n") + "\n"
 }
 
+/// Replace the inline body of `[<section>]` with `body`.
+///
+/// Nested subsections (`[<section>.<child>]`) are preserved verbatim. Duplicate
+/// target section headers are preserved too, with a warning, because removing
+/// malformed user config silently is riskier than surfacing it.
 pub fn upsert_section_body(content: &str, section: &str, body: &str) -> String {
     let header = format!("[{section}]");
+    let nested_prefix = format!("[{section}.");
     let lines: Vec<&str> = content.lines().collect();
     let mut result = Vec::new();
     let mut i = 0;
@@ -326,15 +332,35 @@ pub fn upsert_section_body(content: &str, section: &str, body: &str) -> String {
         let trimmed = line.trim();
 
         if trimmed == header {
+            if replaced {
+                warn!(
+                    section = section,
+                    "upsert_section_body found duplicate [{section}] header; preserving it verbatim",
+                );
+                result.push(line.to_string());
+                i += 1;
+                continue;
+            }
             replaced = true;
             result.push(header.clone());
             result.extend(body.trim_end().lines().map(str::to_string));
             i += 1;
+            let mut copying_nested = false;
             while i < lines.len() {
                 let current = lines[i];
                 let current_trimmed = current.trim();
-                if current_trimmed.starts_with('[') && current_trimmed.ends_with(']') {
+                let is_header = current_trimmed.starts_with('[') && current_trimmed.ends_with(']');
+                if is_header {
+                    if current_trimmed.starts_with(&nested_prefix) {
+                        copying_nested = true;
+                        result.push(current.to_string());
+                        i += 1;
+                        continue;
+                    }
                     break;
+                }
+                if copying_nested {
+                    result.push(current.to_string());
                 }
                 i += 1;
             }
@@ -498,6 +524,37 @@ mod tests {
     }
 
     #[test]
+    fn upsert_section_body_replaces_managed_body_and_preserves_following_sections() {
+        let content = r#"[ui.sidebar.spaces]
+# managed comments are replaced with the generated body
+lines = []
+[ui.sidebar.spaces.colors]
+accent = "cyan"
+[ui.sidebar.agents]
+lines = []
+"#;
+
+        let updated = upsert_section_body(
+            content,
+            "ui.sidebar.spaces",
+            r#"lines = [
+  [{ field = "name", show = true }],
+]"#,
+        );
+
+        assert!(updated.contains(
+            r#"[ui.sidebar.spaces]
+lines = [
+  [{ field = "name", show = true }],
+]
+[ui.sidebar.spaces.colors]
+accent = "cyan""#
+        ));
+        assert!(updated.contains("[ui.sidebar.agents]\nlines = []"));
+        assert!(!updated.contains("managed comments"));
+    }
+
+    #[test]
     fn config_diagnostic_summary_keeps_multiple_warnings_visible() {
         let diagnostics = vec![
             "one".to_string(),
@@ -568,5 +625,108 @@ mouse_capture = false
         let (updated, removed) = remove_keybinding_config_sections(content);
         assert!(!removed);
         assert_eq!(updated, content);
+    }
+
+    #[test]
+    fn upsert_section_body_appends_section_when_missing_in_empty_content() {
+        let updated = upsert_section_body("", "ui.sidebar.spaces", "lines = []\n");
+        let parsed: toml::Value = toml::from_str(&updated).expect("output must parse as TOML");
+        assert!(updated.contains("[ui.sidebar.spaces]"));
+        assert!(updated.contains("lines = []"));
+        assert!(parsed.get("ui").is_some());
+    }
+
+    #[test]
+    fn upsert_section_body_appends_section_when_content_lacks_trailing_newline() {
+        let content = "[ui]\nmouse_capture = true";
+        let updated = upsert_section_body(content, "ui.sidebar.agents", "lines = [[]]\n");
+        assert!(updated.contains("mouse_capture = true"));
+        assert!(updated.contains("[ui.sidebar.agents]"));
+        assert!(toml::from_str::<toml::Value>(&updated).is_ok());
+    }
+
+    #[test]
+    fn upsert_section_body_replaces_existing_section_truncates_old_body() {
+        let content = "\
+[ui.sidebar.agents]
+lines = [[ { field = \"agent_status\", show = true } ]]
+old_extra_key = 42
+
+[ui.toast]
+delivery = \"off\"
+";
+        let new_body = "lines = [[ { field = \"agent_status\", show = false } ]]\n";
+        let updated = upsert_section_body(content, "ui.sidebar.agents", new_body);
+        assert!(!updated.contains("old_extra_key"));
+        assert!(updated.contains(r#"{ field = "agent_status", show = false }"#));
+        assert!(updated.contains("[ui.toast]"));
+        assert!(updated.contains("delivery = \"off\""));
+        assert!(toml::from_str::<toml::Value>(&updated).is_ok());
+    }
+
+    #[test]
+    fn upsert_section_body_replaces_section_that_extends_to_eof() {
+        let content = "[ui]\nmouse_capture = true\n\n[ui.sidebar.spaces]\nlines = []\n";
+        let updated = upsert_section_body(
+            content,
+            "ui.sidebar.spaces",
+            "lines = [[ { field = \"status\", show = false } ]]\n",
+        );
+        assert!(updated.contains("mouse_capture = true"));
+        assert!(updated.contains(r#"{ field = "status", show = false }"#));
+        assert!(toml::from_str::<toml::Value>(&updated).is_ok());
+    }
+
+    #[test]
+    fn upsert_section_body_preserves_following_section_verbatim() {
+        let following = "[ui.toast]\ndelivery = \"terminal\"\n# user comment line\n";
+        let content = format!("[ui.sidebar.spaces]\nlines = []\n{following}");
+        let updated = upsert_section_body(
+            &content,
+            "ui.sidebar.spaces",
+            "lines = [[ { field = \"name\", show = true } ]]\n",
+        );
+        assert!(updated.contains(following.trim_end()));
+    }
+
+    #[test]
+    fn upsert_section_body_is_idempotent_on_repeated_calls() {
+        let body = "lines = [[ { field = \"agent_status\", show = true } ]]\n";
+        let once = upsert_section_body("[ui]\nmouse_capture = true\n", "ui.sidebar.agents", body);
+        let twice = upsert_section_body(&once, "ui.sidebar.agents", body);
+        assert_eq!(
+            once, twice,
+            "upsert_section_body must be idempotent for the same body",
+        );
+    }
+
+    #[test]
+    fn upsert_section_body_preserves_nested_subsections_of_target() {
+        let content = "\
+[ui]
+mouse_capture = true
+sidebar_width = 30
+
+[ui.sidebar.spaces]
+lines = [[ { field = \"status\", show = true } ]]
+
+[ui.sidebar.agents]
+lines = [[ { field = \"agent_status\", show = true } ]]
+
+[ui.toast]
+delivery = \"off\"
+";
+        let updated =
+            upsert_section_body(content, "ui", "mouse_capture = false\naccent = \"blue\"\n");
+        assert!(updated.contains("mouse_capture = false"));
+        assert!(updated.contains("accent = \"blue\""));
+        assert!(!updated.contains("sidebar_width = 30"));
+        assert!(updated.contains("[ui.sidebar.spaces]"));
+        assert!(updated.contains(r#"{ field = "status", show = true }"#));
+        assert!(updated.contains("[ui.sidebar.agents]"));
+        assert!(updated.contains(r#"{ field = "agent_status", show = true }"#));
+        assert!(updated.contains("[ui.toast]"));
+        assert!(updated.contains("delivery = \"off\""));
+        assert!(toml::from_str::<toml::Value>(&updated).is_ok());
     }
 }

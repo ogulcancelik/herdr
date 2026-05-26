@@ -6,4 +6,4 @@ pub mod state;
 pub use id::TerminalId;
 pub use runtime::TerminalRuntime;
 pub(crate) use runtime_registry::TerminalRuntimeRegistry;
-pub use state::{EffectiveStateChange, TerminalState, TerminalStateMutation};
+pub use state::{EffectiveStateChange, TerminalState, TerminalStateMutation, WorkingDuration};

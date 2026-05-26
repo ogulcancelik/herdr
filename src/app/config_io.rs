@@ -1,6 +1,8 @@
 use super::App;
-use crate::app::state::{AgentViewItem, AgentViewPreferences, SpaceViewItem, SpaceViewPreferences};
-use crate::config::{AgentViewField, SpaceViewField, ViewColorPreset, ViewItem};
+use crate::app::state::{
+    SidebarAgentItem, SidebarAgentPreferences, SidebarSpaceItem, SidebarSpacePreferences,
+};
+use crate::config::{SidebarAgentField, SidebarColorPreset, SidebarItem, SidebarSpaceField};
 
 impl App {
     pub(super) fn update_config_file<F>(&mut self, error_context: &str, update: F) -> bool
@@ -24,7 +26,18 @@ impl App {
             }
         }
 
-        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(err) => {
+                crate::logging::config_write_failed(&path, error_context, &err.to_string());
+                self.state.config_diagnostic =
+                    Some(format!("failed to save {error_context}: {err}"));
+                self.config_diagnostic_deadline =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+                return false;
+            }
+        };
         let new_content = update(&content);
         if let Err(err) = std::fs::write(&path, new_content) {
             crate::logging::config_write_failed(&path, error_context, &err.to_string());
@@ -96,28 +109,40 @@ impl App {
         }
     }
 
-    pub(super) fn save_space_view_preferences(&mut self, preferences: SpaceViewPreferences) {
-        if self.update_config_file("space sidebar preferences", |content| {
+    pub(super) fn save_sidebar_space_preferences(
+        &mut self,
+        preferences: SidebarSpacePreferences,
+    ) -> bool {
+        let saved = self.update_config_file("space sidebar preferences", |content| {
             crate::config::upsert_section_body(
                 content,
                 "ui.sidebar.spaces",
-                &space_view_config_body(&preferences),
+                &space_sidebar_config_body(&preferences),
             )
-        }) {
-            self.apply_config_from_disk(false);
+        });
+        if saved {
+            let report = self.apply_config_from_disk(false);
+            return report.status == crate::config::ConfigReloadStatus::Applied;
         }
+        false
     }
 
-    pub(super) fn save_agent_view_preferences(&mut self, preferences: AgentViewPreferences) {
-        if self.update_config_file("agent sidebar preferences", |content| {
+    pub(super) fn save_sidebar_agent_preferences(
+        &mut self,
+        preferences: SidebarAgentPreferences,
+    ) -> bool {
+        let saved = self.update_config_file("agent sidebar preferences", |content| {
             crate::config::upsert_section_body(
                 content,
                 "ui.sidebar.agents",
-                &agent_view_config_body(&preferences),
+                &agent_sidebar_config_body(&preferences),
             )
-        }) {
-            self.apply_config_from_disk(false);
+        });
+        if saved {
+            let report = self.apply_config_from_disk(false);
+            return report.status == crate::config::ConfigReloadStatus::Applied;
         }
+        false
     }
 
     pub(super) fn save_agent_panel_scope(&mut self, scope: crate::app::state::AgentPanelScope) {
@@ -142,16 +167,16 @@ impl App {
     }
 }
 
-fn space_view_config_body(preferences: &SpaceViewPreferences) -> String {
-    view_item_lines_array(&preferences.lines, space_view_field_name)
+fn space_sidebar_config_body(preferences: &SidebarSpacePreferences) -> String {
+    sidebar_item_lines_array(&preferences.lines, sidebar_space_field_name)
 }
 
-fn agent_view_config_body(preferences: &AgentViewPreferences) -> String {
-    view_item_lines_array(&preferences.lines, agent_view_field_name)
+fn agent_sidebar_config_body(preferences: &SidebarAgentPreferences) -> String {
+    sidebar_item_lines_array(&preferences.lines, sidebar_agent_field_name)
 }
 
-fn view_item_lines_array<F: Copy>(
-    lines: &[Vec<ViewItem<F>>],
+fn sidebar_item_lines_array<F: Copy>(
+    lines: &[Vec<SidebarItem<F>>],
     field_name: fn(F) -> &'static str,
 ) -> String {
     let mut body = String::new();
@@ -159,7 +184,7 @@ fn view_item_lines_array<F: Copy>(
     for line in lines {
         body.push_str("  [\n");
         for item in line {
-            let color = if ViewColorPreset::is_default(&item.color) {
+            let color = if SidebarColorPreset::is_default(&item.color) {
                 String::new()
             } else {
                 format!(", color = \"{}\"", item.color.as_str())
@@ -177,25 +202,25 @@ fn view_item_lines_array<F: Copy>(
     body
 }
 
-fn space_view_field_name(field: SpaceViewItem) -> &'static str {
+fn sidebar_space_field_name(field: SidebarSpaceItem) -> &'static str {
     match field {
-        SpaceViewField::Status => "status",
-        SpaceViewField::Name => "name",
-        SpaceViewField::Branch => "branch",
-        SpaceViewField::BranchStatus => "branch_status",
+        SidebarSpaceField::Status => "status",
+        SidebarSpaceField::Name => "name",
+        SidebarSpaceField::Branch => "branch",
+        SidebarSpaceField::BranchStatus => "branch_status",
     }
 }
 
-fn agent_view_field_name(field: AgentViewItem) -> &'static str {
+fn sidebar_agent_field_name(field: SidebarAgentItem) -> &'static str {
     match field {
-        AgentViewField::AgentStatus => "agent_status",
-        AgentViewField::PaneName => "pane_name",
-        AgentViewField::TabName => "tab_name",
-        AgentViewField::SpaceName => "space_name",
-        AgentViewField::Status => "status",
-        AgentViewField::Time => "time",
-        AgentViewField::CustomStatus => "custom_status",
-        AgentViewField::AgentName => "agent_name",
-        AgentViewField::RightAlignment => "right_alignment",
+        SidebarAgentField::AgentStatus => "agent_status",
+        SidebarAgentField::PaneName => "pane_name",
+        SidebarAgentField::TabName => "tab_name",
+        SidebarAgentField::SpaceName => "space_name",
+        SidebarAgentField::Status => "status",
+        SidebarAgentField::Time => "time",
+        SidebarAgentField::CustomStatus => "custom_status",
+        SidebarAgentField::AgentName => "agent_name",
+        SidebarAgentField::RightAlignment => "right_alignment",
     }
 }

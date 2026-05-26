@@ -11,11 +11,11 @@ use ratatui::{
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::status::{agent_icon, state_dot, state_label, state_label_color};
 use crate::app::state::{
-    ordered_agent_view_items, ordered_space_view_items, AgentPanelScope, AgentViewItem, Palette,
-    SpaceViewItem, ViewLine,
+    ordered_sidebar_space_items, AgentPanelScope, Palette, SidebarAgentItem, SidebarLine,
+    SidebarSpaceItem,
 };
 use crate::app::{AppState, Mode};
-use crate::config::ViewColorPreset;
+use crate::config::{SidebarColorPreset, SidebarItem};
 use crate::detect::AgentState;
 use crate::terminal::{TerminalRuntimeRegistry, WorkingDuration};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -205,8 +205,7 @@ fn agent_panel_entries_with_runtimes(
 }
 
 fn truncate_text(text: &str, max_width: usize) -> String {
-    let len = text.chars().count();
-    if len <= max_width {
+    if UnicodeWidthStr::width(text) <= max_width {
         return text.to_string();
     }
     if max_width == 0 {
@@ -215,7 +214,17 @@ fn truncate_text(text: &str, max_width: usize) -> String {
     if max_width == 1 {
         return "…".to_string();
     }
-    let prefix: String = text.chars().take(max_width.saturating_sub(1)).collect();
+    let prefix_width = max_width.saturating_sub(1);
+    let mut width = 0;
+    let mut prefix = String::new();
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width > prefix_width {
+            break;
+        }
+        prefix.push(ch);
+        width += ch_width;
+    }
     format!("{prefix}…")
 }
 
@@ -279,7 +288,7 @@ fn truncated_pane_side_segments(
     max_width: usize,
 ) -> Vec<AgentPanelPrimarySegment> {
     let separator = " · ";
-    let separator_width = separator.chars().count();
+    let separator_width = UnicodeWidthStr::width(separator);
     let Some(tab_label) = tab_label else {
         return vec![AgentPanelPrimarySegment::new(
             truncate_text(pane_label, max_width),
@@ -287,9 +296,9 @@ fn truncated_pane_side_segments(
         )];
     };
 
-    let tab_width = tab_label.chars().count();
+    let tab_width = UnicodeWidthStr::width(tab_label);
     let full_side = format!("{pane_label}{separator}{tab_label}");
-    if full_side.chars().count() <= max_width {
+    if UnicodeWidthStr::width(full_side.as_str()) <= max_width {
         return vec![
             AgentPanelPrimarySegment::new(pane_label, AgentPanelPrimarySegmentKind::Pane),
             AgentPanelPrimarySegment::new(separator, AgentPanelPrimarySegmentKind::Separator),
@@ -322,7 +331,7 @@ fn agent_panel_primary_label_segments_with_options(
     show_tab_name: bool,
 ) -> Vec<AgentPanelPrimarySegment> {
     let separator = " · ";
-    let separator_width = separator.chars().count();
+    let separator_width = UnicodeWidthStr::width(separator);
     let pane_label = show_pane_name
         .then_some(entry.pane_label.as_deref())
         .flatten();
@@ -338,7 +347,7 @@ fn agent_panel_primary_label_segments_with_options(
         };
 
         let full = format!("{tab_label}{separator}{}", entry.primary_label);
-        if full.chars().count() <= max_width {
+        if UnicodeWidthStr::width(full.as_str()) <= max_width {
             return vec![
                 AgentPanelPrimarySegment::new(tab_label, AgentPanelPrimarySegmentKind::Tab),
                 AgentPanelPrimarySegment::new(separator, AgentPanelPrimarySegmentKind::Separator),
@@ -349,7 +358,7 @@ fn agent_panel_primary_label_segments_with_options(
             ];
         }
 
-        let workspace_width = entry.primary_label.chars().count();
+        let workspace_width = UnicodeWidthStr::width(entry.primary_label.as_str());
         if max_width > workspace_width + separator_width {
             let tab_width = max_width - workspace_width - separator_width;
             return vec![
@@ -376,13 +385,13 @@ fn agent_panel_primary_label_segments_with_options(
         None => pane_label.to_string(),
     };
     let full = format!("{side}{separator}{}", entry.primary_label);
-    if full.chars().count() <= max_width {
+    if UnicodeWidthStr::width(full.as_str()) <= max_width {
         let mut segments = Vec::new();
         push_full_primary_segments(&mut segments, pane_label, tab_label, &entry.primary_label);
         return segments;
     }
 
-    let workspace_width = entry.primary_label.chars().count();
+    let workspace_width = UnicodeWidthStr::width(entry.primary_label.as_str());
     let min_named_side_width = 1;
     if max_width >= workspace_width + separator_width + min_named_side_width {
         let side_width = max_width - workspace_width - separator_width;
@@ -404,6 +413,7 @@ fn agent_panel_primary_label_segments_with_options(
     )]
 }
 
+#[cfg(test)]
 pub(super) fn format_agent_panel_primary_label(
     entry: &AgentPanelEntry,
     max_width: usize,
@@ -411,6 +421,7 @@ pub(super) fn format_agent_panel_primary_label(
     format_agent_panel_primary_label_with_options(entry, max_width, true, true)
 }
 
+#[cfg(test)]
 fn format_agent_panel_primary_label_with_options(
     entry: &AgentPanelEntry,
     max_width: usize,
@@ -486,7 +497,6 @@ fn duration_unit_style(unit: &str, duration: WorkingDuration, p: &Palette) -> St
     let color = match unit {
         "h" => p.subtext0,
         "m" => p.overlay1,
-        "s" => p.overlay0,
         _ => p.overlay0,
     };
     Style::default().fg(color)
@@ -501,25 +511,25 @@ fn duration_value_spans(duration: WorkingDuration, p: &Palette) -> Vec<Span<'sta
     spans
 }
 
-fn style_with_view_color(
+fn style_with_sidebar_color(
     style: Style,
-    preset: ViewColorPreset,
+    preset: SidebarColorPreset,
     default: Color,
     p: &Palette,
 ) -> Style {
-    if preset == ViewColorPreset::Default {
+    if preset == SidebarColorPreset::Default {
         style
     } else {
-        style.fg(p.view_color(preset, default))
+        style.fg(p.sidebar_color(preset, default))
     }
 }
 
-fn spans_with_view_color(
+fn spans_with_sidebar_color(
     spans: Vec<Span<'static>>,
-    preset: ViewColorPreset,
+    preset: SidebarColorPreset,
     p: &Palette,
 ) -> Vec<Span<'static>> {
-    if preset == ViewColorPreset::Default {
+    if preset == SidebarColorPreset::Default {
         return spans;
     }
 
@@ -528,7 +538,7 @@ fn spans_with_view_color(
         .map(|span| {
             let Span { content, style } = span;
             let default = style.fg.unwrap_or(p.text);
-            Span::styled(content, style_with_view_color(style, preset, default, p))
+            Span::styled(content, style_with_sidebar_color(style, preset, default, p))
         })
         .collect()
 }
@@ -566,41 +576,44 @@ fn branch_status_parts(
     (!parts.is_empty()).then_some(parts)
 }
 
-fn space_item_has_content(
+fn sidebar_space_item_has_content(
     app: &AppState,
     ws: &crate::workspace::Workspace,
-    item: SpaceViewItem,
+    item: SidebarSpaceItem,
 ) -> bool {
-    if !item.enabled(&app.space_view) {
+    if !item.enabled(&app.sidebar_space) {
         return false;
     }
     match item {
-        SpaceViewItem::Status | SpaceViewItem::Name => true,
-        SpaceViewItem::Branch => ws.branch().is_some(),
-        SpaceViewItem::BranchStatus => ws.branch().is_some() && ws.git_ahead_behind().is_some(),
+        SidebarSpaceItem::Status | SidebarSpaceItem::Name => true,
+        SidebarSpaceItem::Branch => ws.branch().is_some(),
+        SidebarSpaceItem::BranchStatus => ws.branch().is_some() && ws.git_ahead_behind().is_some(),
     }
 }
 
 fn workspace_line_has_content(
     app: &AppState,
     ws: &crate::workspace::Workspace,
-    line: ViewLine,
+    line: SidebarLine,
 ) -> bool {
-    ordered_space_view_items(&app.space_view)
+    ordered_sidebar_space_items(&app.sidebar_space)
         .into_iter()
-        .filter(|item| item.line(&app.space_view) == line)
-        .any(|item| space_item_has_content(app, ws, item))
+        .filter(|item| item.line(&app.sidebar_space) == line)
+        .any(|item| sidebar_space_item_has_content(app, ws, item))
 }
 
-fn workspace_render_lines(app: &AppState, ws: &crate::workspace::Workspace) -> Vec<ViewLine> {
+fn workspace_render_lines(app: &AppState, ws: &crate::workspace::Workspace) -> Vec<SidebarLine> {
     let mut lines = Vec::new();
-    for line in (0..app.space_view.lines.len().max(1)).map(ViewLine::from_index) {
+    for line in (0..app.sidebar_space.lines.len().max(1)).map(SidebarLine::from_index) {
         if workspace_line_has_content(app, ws, line) {
             lines.push(line);
         }
     }
+    if !lines.is_empty() && !lines.contains(&SidebarLine::First) {
+        lines.insert(0, SidebarLine::First);
+    }
     if lines.is_empty() {
-        lines.push(ViewLine::First);
+        lines.push(SidebarLine::First);
     }
     lines
 }
@@ -886,23 +899,23 @@ pub(crate) fn agent_panel_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
     Rect::new(area.x, body_y, body_width, body_height)
 }
 
-fn agent_view_render_lines(app: &AppState) -> Vec<ViewLine> {
+fn sidebar_agent_render_lines(app: &AppState) -> Vec<SidebarLine> {
     let mut lines: Vec<_> = app
-        .agent_view
+        .sidebar_agent
         .lines
         .iter()
         .enumerate()
         .filter(|(_, line)| line.iter().any(|item| item.show))
-        .map(|(idx, _)| ViewLine::from_index(idx))
+        .map(|(idx, _)| SidebarLine::from_index(idx))
         .collect();
     if lines.is_empty() {
-        lines.push(ViewLine::First);
+        lines.push(SidebarLine::First);
     }
     lines
 }
 
-fn agent_panel_entry_row_count(app: &AppState) -> u16 {
-    agent_view_render_lines(app).len() as u16
+pub(crate) fn agent_panel_entry_row_count(app: &AppState) -> u16 {
+    sidebar_agent_render_lines(app).len() as u16
 }
 
 fn agent_panel_visible_count(app: &AppState, area: Rect) -> usize {
@@ -1296,7 +1309,7 @@ fn render_workspace_list(
         };
         let branch_style = Style::default().fg(branch_color);
         let separator_style = Style::default().fg(p.overlay0);
-        let ordered_items = ordered_space_view_items(&app.space_view);
+        let ordered_items = ordered_sidebar_space_items(&app.sidebar_space);
         let render_lines = workspace_render_lines(app, ws);
 
         for (render_idx, line) in render_lines.into_iter().enumerate() {
@@ -1328,22 +1341,22 @@ fn render_workspace_list(
             for item in ordered_items
                 .iter()
                 .copied()
-                .filter(|item| item.line(&app.space_view) == line)
-                .filter(|item| item.enabled(&app.space_view))
+                .filter(|item| item.line(&app.sidebar_space) == line)
+                .filter(|item| item.enabled(&app.sidebar_space))
             {
                 match item {
-                    SpaceViewItem::Status => {
+                    SidebarSpaceItem::Status => {
                         push_separator(&mut content, separator_style);
-                        let icon_style = style_with_view_color(
+                        let icon_style = style_with_sidebar_color(
                             status_dot.1,
-                            item.color(&app.space_view),
+                            item.color(&app.sidebar_space),
                             status_dot.1.fg.unwrap_or(p.accent),
                             p,
                         );
                         content.push(Span::styled(status_dot.0, icon_style));
                         previous_was_status = true;
                     }
-                    SpaceViewItem::Name => {
+                    SidebarSpaceItem::Name => {
                         push_space_separator(
                             &mut content,
                             &mut previous_was_status,
@@ -1358,31 +1371,31 @@ fn render_workspace_list(
                         } else {
                             label.clone()
                         };
-                        let item_style = style_with_view_color(
+                        let item_style = style_with_sidebar_color(
                             name_style,
-                            item.color(&app.space_view),
+                            item.color(&app.sidebar_space),
                             name_style.fg.unwrap_or(p.subtext0),
                             p,
                         );
                         content.push(Span::styled(display_label, item_style));
                     }
-                    SpaceViewItem::Branch => {
+                    SidebarSpaceItem::Branch => {
                         if let Some(branch) = ws.branch() {
                             push_space_separator(
                                 &mut content,
                                 &mut previous_was_status,
                                 separator_style,
                             );
-                            let item_style = style_with_view_color(
+                            let item_style = style_with_sidebar_color(
                                 branch_style,
-                                item.color(&app.space_view),
+                                item.color(&app.sidebar_space),
                                 branch_style.fg.unwrap_or(p.overlay0),
                                 p,
                             );
                             content.push(Span::styled(branch, item_style));
                         }
                     }
-                    SpaceViewItem::BranchStatus => {
+                    SidebarSpaceItem::BranchStatus => {
                         if ws.branch().is_some() {
                             if let Some(parts) = branch_status_parts(ws.git_ahead_behind(), p) {
                                 push_space_separator(
@@ -1396,8 +1409,9 @@ fn render_workspace_list(
                                     }
                                     content.push(Span::styled(
                                         label,
-                                        Style::default()
-                                            .fg(p.view_color(item.color(&app.space_view), color)),
+                                        Style::default().fg(
+                                            p.sidebar_color(item.color(&app.sidebar_space), color)
+                                        ),
                                     ));
                                 }
                             }
@@ -1455,68 +1469,72 @@ fn render_workspace_list(
     }
 }
 
-fn agent_item_spans(
+fn sidebar_agent_item_spans(
     entry: &AgentPanelEntry,
     app: &AppState,
-    item: AgentViewItem,
+    item: SidebarAgentItem,
     name_style: Style,
     status_style: Style,
     agent_style: Style,
     p: &Palette,
 ) -> Option<Vec<Span<'static>>> {
-    if !item.enabled(&app.agent_view) {
+    if !item.enabled(&app.sidebar_agent) {
         return None;
     }
     let spans = match item {
-        AgentViewItem::AgentStatus => {
+        SidebarAgentItem::AgentStatus => {
             let (icon, icon_style) = agent_icon(entry.state, entry.seen, app.spinner_tick, p);
             Some(vec![Span::styled(icon, icon_style)])
         }
-        AgentViewItem::PaneName => entry
+        SidebarAgentItem::PaneName => entry
             .pane_label
             .as_ref()
             .map(|label| vec![Span::styled(label.clone(), Style::default().fg(p.green))]),
-        AgentViewItem::TabName => entry
+        SidebarAgentItem::TabName => entry
             .primary_tab_label
             .as_ref()
             .map(|label| vec![Span::styled(label.clone(), Style::default().fg(p.mauve))]),
-        AgentViewItem::SpaceName => {
+        SidebarAgentItem::SpaceName => {
             Some(vec![Span::styled(entry.primary_label.clone(), name_style)])
         }
-        AgentViewItem::Status => Some(vec![Span::styled(
+        SidebarAgentItem::Status => Some(vec![Span::styled(
             state_label(entry.state, entry.seen),
             status_style,
         )]),
-        AgentViewItem::Time => entry
+        SidebarAgentItem::Time => entry
             .working_duration
             .map(|duration| duration_value_spans(duration, p)),
-        AgentViewItem::CustomStatus => entry
+        SidebarAgentItem::CustomStatus => entry
             .custom_status
             .as_ref()
             .map(|status| vec![Span::styled(status.clone(), agent_style)]),
-        AgentViewItem::AgentName => entry
+        SidebarAgentItem::AgentName => entry
             .agent_label
             .as_ref()
             .map(|label| vec![Span::styled(label.clone(), agent_style)]),
-        AgentViewItem::RightAlignment => None,
+        SidebarAgentItem::RightAlignment => None,
     }?;
-    Some(spans_with_view_color(spans, item.color(&app.agent_view), p))
+    Some(spans_with_sidebar_color(
+        spans,
+        item.color(&app.sidebar_agent),
+        p,
+    ))
 }
 
-fn is_agent_identity_item(item: AgentViewItem) -> bool {
+fn is_agent_identity_item(item: SidebarAgentItem) -> bool {
     matches!(
         item,
-        AgentViewItem::PaneName | AgentViewItem::TabName | AgentViewItem::SpaceName
+        SidebarAgentItem::PaneName | SidebarAgentItem::TabName | SidebarAgentItem::SpaceName
     )
 }
 
-fn identity_items_keep_default_order(items: &[AgentViewItem]) -> bool {
+fn identity_items_keep_default_order(items: &[SidebarAgentItem]) -> bool {
     let mut next_default_idx = 0;
     for item in items {
         let Some(default_idx) = [
-            AgentViewItem::PaneName,
-            AgentViewItem::TabName,
-            AgentViewItem::SpaceName,
+            SidebarAgentItem::PaneName,
+            SidebarAgentItem::TabName,
+            SidebarAgentItem::SpaceName,
         ]
         .iter()
         .position(|candidate| candidate == item) else {
@@ -1527,11 +1545,11 @@ fn identity_items_keep_default_order(items: &[AgentViewItem]) -> bool {
         }
         next_default_idx = default_idx + 1;
     }
-    items.contains(&AgentViewItem::SpaceName)
+    items.contains(&SidebarAgentItem::SpaceName)
 }
 
 #[derive(Default)]
-struct AgentLineContent {
+struct SidebarAgentLineContent {
     left: Vec<Span<'static>>,
     right: Vec<Span<'static>>,
 }
@@ -1540,39 +1558,39 @@ fn push_agent_line_spans(
     spans: &mut Vec<Span<'static>>,
     previous_was_agent_status: &mut bool,
     item_spans: Vec<Span<'static>>,
-    item: AgentViewItem,
+    item: SidebarAgentItem,
     separator_style: Style,
 ) {
     push_space_separator(spans, previous_was_agent_status, separator_style);
     spans.extend(item_spans);
-    *previous_was_agent_status = item == AgentViewItem::AgentStatus;
+    *previous_was_agent_status = item == SidebarAgentItem::AgentStatus;
 }
 
-fn agent_line_content(
+fn sidebar_agent_line_content(
     entry: &AgentPanelEntry,
     app: &AppState,
-    line: ViewLine,
-    ordered_items: &[AgentViewItem],
+    line: SidebarLine,
     max_width: usize,
     name_style: Style,
     status_style: Style,
     agent_style: Style,
     p: &Palette,
-) -> AgentLineContent {
-    let mut content = AgentLineContent::default();
-    let line_items: Vec<_> = ordered_items
-        .iter()
-        .copied()
-        .filter(|item| item.line(&app.agent_view) == Some(line))
-        .collect();
+) -> SidebarAgentLineContent {
+    let mut content = SidebarAgentLineContent::default();
+    let line_items: Vec<SidebarItem<SidebarAgentItem>> = app
+        .sidebar_agent
+        .lines
+        .get(line.index())
+        .cloned()
+        .unwrap_or_default();
     let mut idx = 0;
     let mut right_aligned = false;
     let mut previous_left_was_agent_status = false;
     let mut previous_right_was_agent_status = false;
     while idx < line_items.len() {
-        let item = line_items[idx];
-        if item == AgentViewItem::RightAlignment {
-            if item.enabled(&app.agent_view) {
+        let item = line_items[idx].field;
+        if item == SidebarAgentItem::RightAlignment {
+            if line_items[idx].show {
                 right_aligned = true;
             }
             idx += 1;
@@ -1581,31 +1599,34 @@ fn agent_line_content(
         if is_agent_identity_item(item) {
             let end = line_items[idx..]
                 .iter()
-                .position(|candidate| !is_agent_identity_item(*candidate))
+                .position(|candidate| !is_agent_identity_item(candidate.field))
                 .map_or(line_items.len(), |offset| idx + offset);
-            let sequence = &line_items[idx..end];
-            if AgentViewItem::SpaceName.enabled(&app.agent_view)
-                && identity_items_keep_default_order(sequence)
+            let sequence: Vec<_> = line_items[idx..end]
+                .iter()
+                .map(|entry| entry.field)
+                .collect();
+            if SidebarAgentItem::SpaceName.enabled(&app.sidebar_agent)
+                && identity_items_keep_default_order(&sequence)
             {
-                let show_pane_name = sequence.contains(&AgentViewItem::PaneName)
-                    && AgentViewItem::PaneName.enabled(&app.agent_view);
-                let show_tab_name = sequence.contains(&AgentViewItem::TabName)
-                    && AgentViewItem::TabName.enabled(&app.agent_view);
-                let pane_style = style_with_view_color(
+                let show_pane_name = sequence.contains(&SidebarAgentItem::PaneName)
+                    && SidebarAgentItem::PaneName.enabled(&app.sidebar_agent);
+                let show_tab_name = sequence.contains(&SidebarAgentItem::TabName)
+                    && SidebarAgentItem::TabName.enabled(&app.sidebar_agent);
+                let pane_style = style_with_sidebar_color(
                     Style::default().fg(p.green),
-                    AgentViewItem::PaneName.color(&app.agent_view),
+                    SidebarAgentItem::PaneName.color(&app.sidebar_agent),
                     p.green,
                     p,
                 );
-                let tab_style = style_with_view_color(
+                let tab_style = style_with_sidebar_color(
                     Style::default().fg(p.mauve),
-                    AgentViewItem::TabName.color(&app.agent_view),
+                    SidebarAgentItem::TabName.color(&app.sidebar_agent),
                     p.mauve,
                     p,
                 );
-                let workspace_style = style_with_view_color(
+                let workspace_style = style_with_sidebar_color(
                     name_style,
-                    AgentViewItem::SpaceName.color(&app.agent_view),
+                    SidebarAgentItem::SpaceName.color(&app.sidebar_agent),
                     name_style.fg.unwrap_or(p.subtext0),
                     p,
                 );
@@ -1633,7 +1654,7 @@ fn agent_line_content(
                         &mut content.right,
                         &mut previous_right_was_agent_status,
                         item_spans,
-                        AgentViewItem::SpaceName,
+                        SidebarAgentItem::SpaceName,
                         agent_style,
                     );
                 } else {
@@ -1660,7 +1681,7 @@ fn agent_line_content(
                         &mut content.left,
                         &mut previous_left_was_agent_status,
                         item_spans,
-                        AgentViewItem::SpaceName,
+                        SidebarAgentItem::SpaceName,
                         agent_style,
                     );
                 }
@@ -1669,7 +1690,7 @@ fn agent_line_content(
             }
         }
         if let Some(item_spans) =
-            agent_item_spans(entry, app, item, name_style, status_style, agent_style, p)
+            sidebar_agent_item_spans(entry, app, item, name_style, status_style, agent_style, p)
         {
             if right_aligned {
                 push_agent_line_spans(
@@ -1725,7 +1746,7 @@ fn truncate_spans_to_width(spans: &[Span<'static>], max_width: usize) -> Vec<Spa
 }
 
 fn fixed_width_agent_line_spans(
-    mut content: AgentLineContent,
+    mut content: SidebarAgentLineContent,
     width: u16,
     fill_style: Style,
 ) -> Vec<Span<'static>> {
@@ -1758,7 +1779,7 @@ fn fixed_width_agent_line_spans(
 fn render_agent_line(
     frame: &mut Frame,
     rect: Rect,
-    content: AgentLineContent,
+    content: SidebarAgentLineContent,
     row_style: Style,
     right_style: Style,
 ) {
@@ -1807,7 +1828,7 @@ fn render_agent_line(
     }
 }
 
-pub(crate) fn settings_space_view_demo_lines(app: &AppState) -> Vec<Line<'static>> {
+pub(crate) fn settings_sidebar_space_demo_lines(app: &AppState) -> Vec<Line<'static>> {
     let p = &app.palette;
     let (status, status_style) = state_dot(AgentState::Working, true, p);
     let branch = "feature/sidebar";
@@ -1817,47 +1838,47 @@ pub(crate) fn settings_space_view_demo_lines(app: &AppState) -> Vec<Line<'static
     let branch_style = Style::default().fg(p.mauve);
     let mut lines = Vec::new();
 
-    for line in (0..app.space_view.lines.len().max(1)).map(ViewLine::from_index) {
+    for line in (0..app.sidebar_space.lines.len().max(1)).map(SidebarLine::from_index) {
         let mut content = Vec::new();
         let mut previous_was_status = false;
-        for item in ordered_space_view_items(&app.space_view)
+        for item in ordered_sidebar_space_items(&app.sidebar_space)
             .into_iter()
-            .filter(|item| item.line(&app.space_view) == line)
-            .filter(|item| item.enabled(&app.space_view))
+            .filter(|item| item.line(&app.sidebar_space) == line)
+            .filter(|item| item.enabled(&app.sidebar_space))
         {
             match item {
-                SpaceViewItem::Status => {
+                SidebarSpaceItem::Status => {
                     push_separator(&mut content, separator_style);
-                    let item_style = style_with_view_color(
+                    let item_style = style_with_sidebar_color(
                         status_style,
-                        item.color(&app.space_view),
+                        item.color(&app.sidebar_space),
                         status_style.fg.unwrap_or(p.accent),
                         p,
                     );
                     content.push(Span::styled(status, item_style));
                     previous_was_status = true;
                 }
-                SpaceViewItem::Name => {
+                SidebarSpaceItem::Name => {
                     push_space_separator(&mut content, &mut previous_was_status, separator_style);
-                    let item_style = style_with_view_color(
+                    let item_style = style_with_sidebar_color(
                         name_style,
-                        item.color(&app.space_view),
+                        item.color(&app.sidebar_space),
                         name_style.fg.unwrap_or(p.subtext0),
                         p,
                     );
                     content.push(Span::styled("demo-space", item_style));
                 }
-                SpaceViewItem::Branch => {
+                SidebarSpaceItem::Branch => {
                     push_space_separator(&mut content, &mut previous_was_status, separator_style);
-                    let item_style = style_with_view_color(
+                    let item_style = style_with_sidebar_color(
                         branch_style,
-                        item.color(&app.space_view),
+                        item.color(&app.sidebar_space),
                         branch_style.fg.unwrap_or(p.mauve),
                         p,
                     );
                     content.push(Span::styled(branch, item_style));
                 }
-                SpaceViewItem::BranchStatus => {
+                SidebarSpaceItem::BranchStatus => {
                     if let Some(parts) = branch_status.clone() {
                         push_space_separator(
                             &mut content,
@@ -1871,7 +1892,7 @@ pub(crate) fn settings_space_view_demo_lines(app: &AppState) -> Vec<Line<'static
                             content.push(Span::styled(
                                 label,
                                 Style::default()
-                                    .fg(p.view_color(item.color(&app.space_view), color)),
+                                    .fg(p.sidebar_color(item.color(&app.sidebar_space), color)),
                             ));
                         }
                     }
@@ -1894,11 +1915,11 @@ pub(crate) fn settings_space_view_demo_lines(app: &AppState) -> Vec<Line<'static
     lines
 }
 
-pub(crate) fn settings_agent_view_demo_width(app: &AppState) -> u16 {
+pub(crate) fn settings_sidebar_agent_demo_width(app: &AppState) -> u16 {
     app.view.sidebar_rect.width.max(app.sidebar_width).max(1)
 }
 
-pub(crate) fn settings_agent_view_demo_lines(app: &AppState, width: u16) -> Vec<Line<'static>> {
+pub(crate) fn settings_sidebar_agent_demo_lines(app: &AppState, width: u16) -> Vec<Line<'static>> {
     let p = &app.palette;
     let demos = [
         AgentPanelEntry {
@@ -1934,8 +1955,7 @@ pub(crate) fn settings_agent_view_demo_lines(app: &AppState, width: u16) -> Vec<
             }),
         },
     ];
-    let ordered_items = ordered_agent_view_items(&app.agent_view);
-    let render_lines = agent_view_render_lines(app);
+    let render_lines = sidebar_agent_render_lines(app);
     let mut lines = Vec::new();
 
     for entry in demos {
@@ -1945,11 +1965,10 @@ pub(crate) fn settings_agent_view_demo_lines(app: &AppState, width: u16) -> Vec<
         let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
         for (render_idx, line) in render_lines.iter().copied().enumerate() {
             let prefix = if render_idx == 0 { " " } else { "   " };
-            let mut content = agent_line_content(
+            let mut content = sidebar_agent_line_content(
                 &entry,
                 app,
                 line,
-                &ordered_items,
                 width.saturating_sub(prefix.len() as u16) as usize,
                 name_style,
                 status_style,
@@ -2017,14 +2036,13 @@ fn render_agent_detail(
 
     let mut row_y = body.y;
     let body_bottom = body.y + body.height;
-    let render_lines = agent_view_render_lines(app);
+    let render_lines = sidebar_agent_render_lines(app);
     for detail in details.iter().skip(app.agent_panel_scroll) {
         let entry_rows = render_lines.len() as u16;
         if row_y.saturating_add(entry_rows) > body_bottom {
             break;
         }
 
-        // Check if this agent entry corresponds to the active session
         let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
 
         let label_color = state_label_color(detail.state, detail.seen, p);
@@ -2047,14 +2065,12 @@ fn render_agent_detail(
         };
         let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
 
-        let ordered_items = ordered_agent_view_items(&app.agent_view);
         for (render_idx, line) in render_lines.iter().copied().enumerate() {
             let prefix = if render_idx == 0 { " " } else { "   " };
-            let mut content = agent_line_content(
+            let mut content = sidebar_agent_line_content(
                 detail,
                 app,
                 line,
-                &ordered_items,
                 body.width.saturating_sub(prefix.len() as u16) as usize,
                 name_style,
                 status_style,
@@ -2146,6 +2162,81 @@ mod tests {
         row.find(needle)
             .map(|byte_idx| row[..byte_idx].chars().count() as u16)
             .expect("substring should render")
+    }
+
+    fn root_terminal_id(app: &AppState) -> crate::terminal::TerminalId {
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone()
+    }
+
+    fn working_agent_app() -> AppState {
+        working_agent_app_at(std::time::Instant::now() - Duration::from_secs(132))
+    }
+
+    fn working_agent_app_at(start: std::time::Instant) -> AppState {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("herdr")];
+        app.ensure_test_terminals();
+        let terminal_id = root_terminal_id(&app);
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            start,
+        );
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+        app
+    }
+
+    fn render_agent_detail_row(app: &AppState, width: u16, height: u16, row: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_agent_detail(
+                    app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, width, height),
+                )
+            })
+            .unwrap();
+        agent_entry_row_text(terminal.backend().buffer(), row, width)
+    }
+
+    #[test]
+    fn truncate_text_respects_display_width() {
+        assert_eq!(truncate_text("workspace", 6), "works…");
+        assert_eq!(truncate_text("작업중", 5), "작업…");
+        assert!(UnicodeWidthStr::width(truncate_text("작업중", 4).as_str()) <= 4);
+    }
+
+    #[test]
+    fn primary_label_segments_measure_display_width() {
+        let entry = AgentPanelEntry {
+            ws_idx: 0,
+            tab_idx: 0,
+            pane_id: crate::layout::PaneId::from_raw(1),
+            pane_label: Some("작업중".into()),
+            primary_label: "공간".into(),
+            primary_tab_label: Some("검토".into()),
+            agent_label: Some("codex".into()),
+            state: AgentState::Idle,
+            seen: true,
+            custom_status: None,
+            working_duration: None,
+        };
+
+        let label = format_agent_panel_primary_label_with_options(&entry, 10, true, true);
+
+        assert!(UnicodeWidthStr::width(label.as_str()) <= 10);
+        assert!(label.contains("…"));
     }
 
     #[test]
@@ -2284,14 +2375,15 @@ mod tests {
     #[test]
     fn settings_agent_demo_does_not_render_custom_status_outside_configured_fields() {
         let mut app = crate::app::state::AppState::test_new();
-        for item in crate::app::state::AGENT_VIEW_PLACEMENT_ITEMS {
-            item.set_enabled(&mut app.agent_view, false);
+        for item in crate::app::state::SIDEBAR_AGENT_ITEMS {
+            item.set_enabled(&mut app.sidebar_agent, false);
         }
-        crate::app::state::AgentViewItem::Status.set_enabled(&mut app.agent_view, true);
-        crate::app::state::AgentViewItem::AgentName.set_enabled(&mut app.agent_view, true);
-        crate::app::state::AgentViewItem::RightAlignment.set_enabled(&mut app.agent_view, false);
+        crate::app::state::SidebarAgentItem::Status.set_enabled(&mut app.sidebar_agent, true);
+        crate::app::state::SidebarAgentItem::AgentName.set_enabled(&mut app.sidebar_agent, true);
+        crate::app::state::SidebarAgentItem::RightAlignment
+            .set_enabled(&mut app.sidebar_agent, false);
 
-        let rendered = settings_agent_view_demo_lines(&app, 32)
+        let rendered = settings_sidebar_agent_demo_lines(&app, 32)
             .iter()
             .map(line_text)
             .collect::<Vec<_>>()
@@ -2304,7 +2396,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_view_custom_status_follows_right_alignment_marker() {
+    fn sidebar_agent_custom_status_follows_right_alignment_marker() {
         let mut app = crate::app::state::AppState::test_new();
         let config: crate::config::Config = toml::from_str(
             r#"
@@ -2325,7 +2417,7 @@ lines = [
 "#,
         )
         .unwrap();
-        app.agent_view = config.ui.sidebar.agents;
+        app.sidebar_agent = config.ui.sidebar.agents;
         let workspace = Workspace::test_new("herdr");
         let pane = workspace.tabs[0].root_pane;
 
@@ -2366,10 +2458,12 @@ lines = [
     }
 
     #[test]
-    fn agent_view_color_preset_overrides_configured_item_color() {
+    fn sidebar_agent_color_preset_overrides_configured_item_color() {
         let mut app = crate::app::state::AppState::test_new();
-        crate::app::state::AgentViewItem::AgentName
-            .set_color(&mut app.agent_view, crate::config::ViewColorPreset::Cool);
+        crate::app::state::SidebarAgentItem::AgentName.set_color(
+            &mut app.sidebar_agent,
+            crate::config::SidebarColorPreset::Cool,
+        );
         let workspace = Workspace::test_new("herdr");
         let pane = workspace.tabs[0].root_pane;
 
@@ -2710,87 +2804,23 @@ lines = [
 
     #[test]
     fn status_row_keeps_agent_label_right_aligned_with_working_duration() {
-        let mut app = crate::app::state::AppState::test_new();
-        let workspace = Workspace::test_new("herdr");
-        let pane = workspace.tabs[0].root_pane;
-
-        app.workspaces = vec![workspace];
-        app.ensure_test_terminals();
-        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
-            .attached_terminal_id
-            .clone();
-        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
-        let start = std::time::Instant::now() - Duration::from_secs(132);
-        terminal.set_detected_state_with_screen_signals_at(
-            Some(Agent::Codex),
-            AgentState::Working,
-            false,
-            false,
-            true,
-            false,
-            start,
-        );
-        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
-
-        let backend = ratatui::backend::TestBackend::new(40, 8);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                render_agent_detail(
-                    &app,
-                    &TerminalRuntimeRegistry::new(),
-                    frame,
-                    Rect::new(0, 0, 40, 8),
-                )
-            })
-            .unwrap();
-        let row = agent_entry_row_text(terminal.backend().buffer(), 4, 40);
+        let app = working_agent_app();
+        let row = render_agent_detail_row(&app, 40, 8, 4);
 
         assert!(row.contains("   working · 2m12s"), "status row: {row:?}");
         assert!(row.ends_with("codex"), "status row: {row:?}");
     }
 
     #[test]
-    fn agent_view_can_hide_time_without_disabling_right_alignment() {
-        let mut app = crate::app::state::AppState::test_new();
-        crate::app::state::AgentViewItem::Time.set_enabled(&mut app.agent_view, false);
-        crate::app::state::AgentViewItem::RightAlignment.set_enabled(&mut app.agent_view, true);
-        let workspace = Workspace::test_new("herdr");
-        let pane = workspace.tabs[0].root_pane;
-
-        app.workspaces = vec![workspace];
-        app.ensure_test_terminals();
-        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
-            .attached_terminal_id
-            .clone();
+    fn sidebar_agent_can_hide_time_without_disabling_right_alignment() {
+        let mut app = working_agent_app();
+        crate::app::state::SidebarAgentItem::Time.set_enabled(&mut app.sidebar_agent, false);
+        crate::app::state::SidebarAgentItem::RightAlignment
+            .set_enabled(&mut app.sidebar_agent, true);
+        let terminal_id = root_terminal_id(&app);
         let terminal = app.terminals.get_mut(&terminal_id).unwrap();
         terminal.set_manual_label("Echo".into());
-        let start = std::time::Instant::now() - Duration::from_secs(132);
-        terminal.set_detected_state_with_screen_signals_at(
-            Some(Agent::Codex),
-            AgentState::Working,
-            false,
-            false,
-            true,
-            false,
-            start,
-        );
-        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
-
-        let backend = ratatui::backend::TestBackend::new(40, 8);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                render_agent_detail(
-                    &app,
-                    &TerminalRuntimeRegistry::new(),
-                    frame,
-                    Rect::new(0, 0, 40, 8),
-                )
-            })
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let status_row = agent_entry_row_text(buffer, 4, 40);
+        let status_row = render_agent_detail_row(&app, 40, 8, 4);
 
         assert!(
             status_row.contains("   working"),
@@ -2801,45 +2831,12 @@ lines = [
     }
 
     #[test]
-    fn agent_view_can_disable_right_alignment_without_hiding_time() {
-        let mut app = crate::app::state::AppState::test_new();
-        crate::app::state::AgentViewItem::Time.set_enabled(&mut app.agent_view, true);
-        crate::app::state::AgentViewItem::RightAlignment.set_enabled(&mut app.agent_view, false);
-        let workspace = Workspace::test_new("herdr");
-        let pane = workspace.tabs[0].root_pane;
-
-        app.workspaces = vec![workspace];
-        app.ensure_test_terminals();
-        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
-            .attached_terminal_id
-            .clone();
-        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
-        let start = std::time::Instant::now() - Duration::from_secs(132);
-        terminal.set_detected_state_with_screen_signals_at(
-            Some(Agent::Codex),
-            AgentState::Working,
-            false,
-            false,
-            true,
-            false,
-            start,
-        );
-        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
-
-        let backend = ratatui::backend::TestBackend::new(40, 8);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                render_agent_detail(
-                    &app,
-                    &TerminalRuntimeRegistry::new(),
-                    frame,
-                    Rect::new(0, 0, 40, 8),
-                )
-            })
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let status_row = agent_entry_row_text(buffer, 4, 40);
+    fn sidebar_agent_can_disable_right_alignment_without_hiding_time() {
+        let mut app = working_agent_app();
+        crate::app::state::SidebarAgentItem::Time.set_enabled(&mut app.sidebar_agent, true);
+        crate::app::state::SidebarAgentItem::RightAlignment
+            .set_enabled(&mut app.sidebar_agent, false);
+        let status_row = render_agent_detail_row(&app, 40, 8, 4);
 
         assert!(
             status_row.contains("   working · 2m12s · codex"),
@@ -2848,46 +2845,14 @@ lines = [
     }
 
     #[test]
-    fn agent_view_right_alignment_marker_aligns_items_after_it() {
-        let mut app = crate::app::state::AppState::test_new();
-        crate::app::state::AgentViewItem::RightAlignment.set_enabled(&mut app.agent_view, true);
-        crate::app::state::AgentViewItem::RightAlignment.set_order(&mut app.agent_view, 1);
-        crate::app::state::AgentViewItem::Time.set_order(&mut app.agent_view, 2);
-        crate::app::state::AgentViewItem::AgentName.set_order(&mut app.agent_view, 3);
-        let workspace = Workspace::test_new("herdr");
-        let pane = workspace.tabs[0].root_pane;
-
-        app.workspaces = vec![workspace];
-        app.ensure_test_terminals();
-        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
-            .attached_terminal_id
-            .clone();
-        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
-        let start = std::time::Instant::now() - Duration::from_secs(132);
-        terminal.set_detected_state_with_screen_signals_at(
-            Some(Agent::Codex),
-            AgentState::Working,
-            false,
-            false,
-            true,
-            false,
-            start,
-        );
-        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
-
-        let backend = ratatui::backend::TestBackend::new(40, 8);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                render_agent_detail(
-                    &app,
-                    &TerminalRuntimeRegistry::new(),
-                    frame,
-                    Rect::new(0, 0, 40, 8),
-                )
-            })
-            .unwrap();
-        let status_row = agent_entry_row_text(terminal.backend().buffer(), 4, 40);
+    fn sidebar_agent_right_alignment_marker_aligns_items_after_it() {
+        let mut app = working_agent_app();
+        crate::app::state::SidebarAgentItem::RightAlignment
+            .set_enabled(&mut app.sidebar_agent, true);
+        crate::app::state::SidebarAgentItem::RightAlignment.set_order(&mut app.sidebar_agent, 1);
+        crate::app::state::SidebarAgentItem::Time.set_order(&mut app.sidebar_agent, 2);
+        crate::app::state::SidebarAgentItem::AgentName.set_order(&mut app.sidebar_agent, 3);
+        let status_row = render_agent_detail_row(&app, 40, 8, 4);
 
         assert!(
             status_row.contains("   working"),
@@ -2900,64 +2865,33 @@ lines = [
     }
 
     #[test]
-    fn agent_view_line_order_can_move_time_to_first_row() {
-        let mut app = crate::app::state::AppState::test_new();
-        crate::app::state::AgentViewItem::AgentStatus.set_enabled(&mut app.agent_view, false);
-        crate::app::state::AgentViewItem::Time
-            .set_line(&mut app.agent_view, crate::app::state::ViewLine::First);
-        crate::app::state::AgentViewItem::Time.set_order(&mut app.agent_view, 0);
-        crate::app::state::AgentViewItem::PaneName.set_order(&mut app.agent_view, 1);
-        crate::app::state::AgentViewItem::TabName.set_order(&mut app.agent_view, 2);
-        crate::app::state::AgentViewItem::SpaceName.set_order(&mut app.agent_view, 3);
-        let workspace = Workspace::test_new("herdr");
-        let pane = workspace.tabs[0].root_pane;
-
-        app.workspaces = vec![workspace];
-        app.ensure_test_terminals();
-        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
-            .attached_terminal_id
-            .clone();
-        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
-        let start = std::time::Instant::now() - Duration::from_secs(132);
-        terminal.set_detected_state_with_screen_signals_at(
-            Some(Agent::Codex),
-            AgentState::Working,
-            false,
-            false,
-            true,
-            false,
-            start,
+    fn sidebar_agent_line_order_can_move_time_to_first_row() {
+        let mut app = working_agent_app();
+        crate::app::state::SidebarAgentItem::AgentStatus.set_enabled(&mut app.sidebar_agent, false);
+        crate::app::state::SidebarAgentItem::Time.set_line(
+            &mut app.sidebar_agent,
+            crate::app::state::SidebarLine::First,
         );
-        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
-
-        let backend = ratatui::backend::TestBackend::new(40, 8);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                render_agent_detail(
-                    &app,
-                    &TerminalRuntimeRegistry::new(),
-                    frame,
-                    Rect::new(0, 0, 40, 8),
-                )
-            })
-            .unwrap();
-        let first_row = agent_entry_row_text(terminal.backend().buffer(), 3, 40);
+        crate::app::state::SidebarAgentItem::Time.set_order(&mut app.sidebar_agent, 0);
+        crate::app::state::SidebarAgentItem::PaneName.set_order(&mut app.sidebar_agent, 1);
+        crate::app::state::SidebarAgentItem::TabName.set_order(&mut app.sidebar_agent, 2);
+        crate::app::state::SidebarAgentItem::SpaceName.set_order(&mut app.sidebar_agent, 3);
+        let first_row = render_agent_detail_row(&app, 40, 8, 3);
 
         assert!(first_row.contains("2m12s · herdr"), "row: {first_row:?}");
     }
 
     #[test]
-    fn agent_view_reorders_identity_items_in_agents_panel() {
+    fn sidebar_agent_reorders_identity_items_in_agents_panel() {
         let mut app = crate::app::state::AppState::test_new();
         let mut workspace = Workspace::test_new("herdr");
         workspace.tabs[0].custom_name = Some("main".into());
         let pane = workspace.tabs[0].root_pane;
         workspace.test_add_tab(Some("2"));
 
-        crate::app::state::AgentViewItem::TabName.set_order(&mut app.agent_view, 1);
-        crate::app::state::AgentViewItem::PaneName.set_order(&mut app.agent_view, 2);
-        crate::app::state::AgentViewItem::SpaceName.set_order(&mut app.agent_view, 3);
+        crate::app::state::SidebarAgentItem::TabName.set_order(&mut app.sidebar_agent, 1);
+        crate::app::state::SidebarAgentItem::PaneName.set_order(&mut app.sidebar_agent, 2);
+        crate::app::state::SidebarAgentItem::SpaceName.set_order(&mut app.sidebar_agent, 3);
         app.workspaces = vec![workspace];
         app.ensure_test_terminals();
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
@@ -2989,17 +2923,20 @@ lines = [
     }
 
     #[test]
-    fn agent_view_can_move_pane_name_to_second_row() {
+    fn sidebar_agent_can_move_pane_name_to_second_row() {
         let mut app = crate::app::state::AppState::test_new();
         let mut workspace = Workspace::test_new("herdr");
         workspace.tabs[0].custom_name = Some("main".into());
         let pane = workspace.tabs[0].root_pane;
         workspace.test_add_tab(Some("2"));
 
-        crate::app::state::AgentViewItem::PaneName
-            .set_line(&mut app.agent_view, crate::app::state::ViewLine::Second);
-        crate::app::state::AgentViewItem::PaneName.set_order(&mut app.agent_view, 3);
-        crate::app::state::AgentViewItem::RightAlignment.set_enabled(&mut app.agent_view, false);
+        crate::app::state::SidebarAgentItem::PaneName.set_line(
+            &mut app.sidebar_agent,
+            crate::app::state::SidebarLine::Second,
+        );
+        crate::app::state::SidebarAgentItem::PaneName.set_order(&mut app.sidebar_agent, 3);
+        crate::app::state::SidebarAgentItem::RightAlignment
+            .set_enabled(&mut app.sidebar_agent, false);
         app.workspaces = vec![workspace];
         app.ensure_test_terminals();
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
@@ -3031,7 +2968,7 @@ lines = [
     }
 
     #[test]
-    fn agent_view_can_hide_and_move_agent_status_indicator() {
+    fn sidebar_agent_can_hide_and_move_agent_status_indicator() {
         let mut app = crate::app::state::AppState::test_new();
         let workspace = Workspace::test_new("herdr");
         let pane = workspace.tabs[0].root_pane;
@@ -3062,7 +2999,7 @@ lines = [
         let first_row = agent_entry_row_text(terminal.backend().buffer(), 3, 40);
         assert!(first_row.contains("✓ herdr"), "row: {first_row:?}");
 
-        crate::app::state::AgentViewItem::AgentStatus.set_enabled(&mut app.agent_view, false);
+        crate::app::state::SidebarAgentItem::AgentStatus.set_enabled(&mut app.sidebar_agent, false);
         terminal
             .draw(|frame| {
                 render_agent_detail(
@@ -3076,13 +3013,15 @@ lines = [
         let first_row = agent_entry_row_text(terminal.backend().buffer(), 3, 40);
         assert!(!first_row.contains("✓"), "row: {first_row:?}");
 
-        crate::app::state::AgentViewItem::AgentStatus.set_enabled(&mut app.agent_view, true);
-        crate::app::state::AgentViewItem::AgentStatus
-            .set_line(&mut app.agent_view, crate::app::state::ViewLine::Second);
-        crate::app::state::AgentViewItem::AgentStatus.set_order(&mut app.agent_view, 0);
-        crate::app::state::AgentViewItem::Status.set_order(&mut app.agent_view, 1);
-        crate::app::state::AgentViewItem::Time.set_order(&mut app.agent_view, 2);
-        crate::app::state::AgentViewItem::AgentName.set_order(&mut app.agent_view, 3);
+        crate::app::state::SidebarAgentItem::AgentStatus.set_enabled(&mut app.sidebar_agent, true);
+        crate::app::state::SidebarAgentItem::AgentStatus.set_line(
+            &mut app.sidebar_agent,
+            crate::app::state::SidebarLine::Second,
+        );
+        crate::app::state::SidebarAgentItem::AgentStatus.set_order(&mut app.sidebar_agent, 0);
+        crate::app::state::SidebarAgentItem::Status.set_order(&mut app.sidebar_agent, 1);
+        crate::app::state::SidebarAgentItem::Time.set_order(&mut app.sidebar_agent, 2);
+        crate::app::state::SidebarAgentItem::AgentName.set_order(&mut app.sidebar_agent, 3);
         terminal
             .draw(|frame| {
                 render_agent_detail(
@@ -3102,37 +3041,18 @@ lines = [
     }
 
     #[test]
-    fn agent_view_renders_one_configured_line_from_config_model() {
-        let mut app = crate::app::state::AppState::test_new();
-        app.agent_view.lines = vec![vec![
-            crate::config::ViewItem::visible(crate::app::state::AgentViewItem::AgentStatus),
-            crate::config::ViewItem::visible(crate::app::state::AgentViewItem::SpaceName),
-            crate::config::ViewItem::visible(crate::app::state::AgentViewItem::Status),
-            crate::config::ViewItem::visible(crate::app::state::AgentViewItem::Time),
-            crate::config::ViewItem::visible(crate::app::state::AgentViewItem::RightAlignment),
-            crate::config::ViewItem::visible(crate::app::state::AgentViewItem::AgentName),
+    fn sidebar_agent_renders_one_configured_line_from_config_model() {
+        let mut app = working_agent_app();
+        app.sidebar_agent.lines = vec![vec![
+            crate::config::SidebarItem::visible(crate::app::state::SidebarAgentItem::AgentStatus),
+            crate::config::SidebarItem::visible(crate::app::state::SidebarAgentItem::SpaceName),
+            crate::config::SidebarItem::visible(crate::app::state::SidebarAgentItem::Status),
+            crate::config::SidebarItem::visible(crate::app::state::SidebarAgentItem::Time),
+            crate::config::SidebarItem::visible(
+                crate::app::state::SidebarAgentItem::RightAlignment,
+            ),
+            crate::config::SidebarItem::visible(crate::app::state::SidebarAgentItem::AgentName),
         ]];
-        let workspace = Workspace::test_new("herdr");
-        let pane = workspace.tabs[0].root_pane;
-
-        app.workspaces = vec![workspace];
-        app.ensure_test_terminals();
-        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
-            .attached_terminal_id
-            .clone();
-        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
-        let start = std::time::Instant::now() - Duration::from_secs(132);
-        terminal.set_detected_state_with_screen_signals_at(
-            Some(Agent::Codex),
-            AgentState::Working,
-            false,
-            false,
-            true,
-            false,
-            start,
-        );
-        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
-
         let backend = ratatui::backend::TestBackend::new(40, 8);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
@@ -3158,43 +3078,26 @@ lines = [
     }
 
     #[test]
-    fn agent_view_renders_three_configured_lines_from_config_model() {
-        let mut app = crate::app::state::AppState::test_new();
-        app.agent_view.lines = vec![
+    fn sidebar_agent_renders_three_configured_lines_from_config_model() {
+        let mut app = working_agent_app();
+        app.sidebar_agent.lines = vec![
             vec![
-                crate::config::ViewItem::visible(crate::app::state::AgentViewItem::AgentStatus),
-                crate::config::ViewItem::visible(crate::app::state::AgentViewItem::SpaceName),
+                crate::config::SidebarItem::visible(
+                    crate::app::state::SidebarAgentItem::AgentStatus,
+                ),
+                crate::config::SidebarItem::visible(crate::app::state::SidebarAgentItem::SpaceName),
             ],
             vec![
-                crate::config::ViewItem::visible(crate::app::state::AgentViewItem::Status),
-                crate::config::ViewItem::visible(crate::app::state::AgentViewItem::Time),
+                crate::config::SidebarItem::visible(crate::app::state::SidebarAgentItem::Status),
+                crate::config::SidebarItem::visible(crate::app::state::SidebarAgentItem::Time),
             ],
             vec![
-                crate::config::ViewItem::visible(crate::app::state::AgentViewItem::RightAlignment),
-                crate::config::ViewItem::visible(crate::app::state::AgentViewItem::AgentName),
+                crate::config::SidebarItem::visible(
+                    crate::app::state::SidebarAgentItem::RightAlignment,
+                ),
+                crate::config::SidebarItem::visible(crate::app::state::SidebarAgentItem::AgentName),
             ],
         ];
-        let workspace = Workspace::test_new("herdr");
-        let pane = workspace.tabs[0].root_pane;
-
-        app.workspaces = vec![workspace];
-        app.ensure_test_terminals();
-        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
-            .attached_terminal_id
-            .clone();
-        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
-        let start = std::time::Instant::now() - Duration::from_secs(132);
-        terminal.set_detected_state_with_screen_signals_at(
-            Some(Agent::Codex),
-            AgentState::Working,
-            false,
-            false,
-            true,
-            false,
-            start,
-        );
-        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
-
         let backend = ratatui::backend::TestBackend::new(40, 9);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
@@ -3221,14 +3124,15 @@ lines = [
     }
 
     #[test]
-    fn spaces_view_can_hide_branch_status_without_hiding_branch() {
+    fn sidebar_space_can_hide_branch_status_without_hiding_branch() {
         let mut app = crate::app::state::AppState::test_new();
         let mut workspace = Workspace::test_new("herdr");
         workspace.cached_git_branch = Some("main".into());
         workspace.cached_git_ahead_behind = Some((2, 1));
         app.workspaces = vec![workspace];
-        crate::app::state::SpaceViewItem::Branch.set_enabled(&mut app.space_view, true);
-        crate::app::state::SpaceViewItem::BranchStatus.set_enabled(&mut app.space_view, false);
+        crate::app::state::SidebarSpaceItem::Branch.set_enabled(&mut app.sidebar_space, true);
+        crate::app::state::SidebarSpaceItem::BranchStatus
+            .set_enabled(&mut app.sidebar_space, false);
         app.view.workspace_card_areas = vec![crate::app::state::WorkspaceCardArea {
             ws_idx: 0,
             rect: Rect::new(0, 2, 40, 2),
@@ -3256,16 +3160,16 @@ lines = [
     }
 
     #[test]
-    fn spaces_view_renders_one_row_when_config_places_all_items_on_one_line() {
+    fn sidebar_space_renders_one_row_when_config_places_all_items_on_one_line() {
         let mut app = crate::app::state::AppState::test_new();
         let mut workspace = Workspace::test_new("herdr");
         workspace.cached_git_branch = Some("main".into());
         workspace.cached_git_ahead_behind = Some((2, 1));
-        app.space_view.lines = vec![vec![
-            crate::config::ViewItem::visible(crate::app::state::SpaceViewItem::Status),
-            crate::config::ViewItem::visible(crate::app::state::SpaceViewItem::Name),
-            crate::config::ViewItem::visible(crate::app::state::SpaceViewItem::Branch),
-            crate::config::ViewItem::visible(crate::app::state::SpaceViewItem::BranchStatus),
+        app.sidebar_space.lines = vec![vec![
+            crate::config::SidebarItem::visible(crate::app::state::SidebarSpaceItem::Status),
+            crate::config::SidebarItem::visible(crate::app::state::SidebarSpaceItem::Name),
+            crate::config::SidebarItem::visible(crate::app::state::SidebarSpaceItem::Branch),
+            crate::config::SidebarItem::visible(crate::app::state::SidebarSpaceItem::BranchStatus),
         ]];
         app.workspaces = vec![workspace];
         app.view.workspace_card_areas = vec![crate::app::state::WorkspaceCardArea {
@@ -3297,17 +3201,20 @@ lines = [
     }
 
     #[test]
-    fn spaces_view_line_order_can_move_branch_to_first_row() {
+    fn sidebar_space_line_order_can_move_branch_to_first_row() {
         let mut app = crate::app::state::AppState::test_new();
         let mut workspace = Workspace::test_new("herdr");
         workspace.cached_git_branch = Some("main".into());
         app.workspaces = vec![workspace];
-        crate::app::state::SpaceViewItem::Status.set_enabled(&mut app.space_view, false);
-        crate::app::state::SpaceViewItem::Branch
-            .set_line(&mut app.space_view, crate::app::state::ViewLine::First);
-        crate::app::state::SpaceViewItem::Branch.set_order(&mut app.space_view, 0);
-        crate::app::state::SpaceViewItem::Name.set_order(&mut app.space_view, 1);
-        crate::app::state::SpaceViewItem::BranchStatus.set_enabled(&mut app.space_view, false);
+        crate::app::state::SidebarSpaceItem::Status.set_enabled(&mut app.sidebar_space, false);
+        crate::app::state::SidebarSpaceItem::Branch.set_line(
+            &mut app.sidebar_space,
+            crate::app::state::SidebarLine::First,
+        );
+        crate::app::state::SidebarSpaceItem::Branch.set_order(&mut app.sidebar_space, 0);
+        crate::app::state::SidebarSpaceItem::Name.set_order(&mut app.sidebar_space, 1);
+        crate::app::state::SidebarSpaceItem::BranchStatus
+            .set_enabled(&mut app.sidebar_space, false);
         app.view.workspace_card_areas = vec![crate::app::state::WorkspaceCardArea {
             ws_idx: 0,
             rect: Rect::new(0, 2, 40, 1),
@@ -3333,7 +3240,7 @@ lines = [
     }
 
     #[test]
-    fn spaces_view_can_hide_status_without_hiding_name() {
+    fn sidebar_space_can_hide_status_without_hiding_name() {
         let mut app = crate::app::state::AppState::test_new();
         let workspace = Workspace::test_new("herdr");
         let pane = workspace.tabs[0].root_pane;
@@ -3343,8 +3250,8 @@ lines = [
             .attached_terminal_id
             .clone();
         app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Codex);
-        crate::app::state::SpaceViewItem::Status.set_enabled(&mut app.space_view, false);
-        crate::app::state::SpaceViewItem::Name.set_enabled(&mut app.space_view, true);
+        crate::app::state::SidebarSpaceItem::Status.set_enabled(&mut app.sidebar_space, false);
+        crate::app::state::SidebarSpaceItem::Name.set_enabled(&mut app.sidebar_space, true);
         app.view.workspace_card_areas = vec![crate::app::state::WorkspaceCardArea {
             ws_idx: 0,
             rect: Rect::new(0, 2, 40, 1),
@@ -3371,13 +3278,53 @@ lines = [
     }
 
     #[test]
-    fn spaces_view_can_hide_space_name_and_branch() {
+    fn sidebar_space_preserves_blank_first_row_when_first_line_items_hidden() {
         let mut app = crate::app::state::AppState::test_new();
         let mut workspace = Workspace::test_new("herdr");
         workspace.cached_git_branch = Some("main".into());
         app.workspaces = vec![workspace];
-        crate::app::state::SpaceViewItem::Name.set_enabled(&mut app.space_view, false);
-        crate::app::state::SpaceViewItem::Branch.set_enabled(&mut app.space_view, false);
+        crate::app::state::SidebarSpaceItem::Status.set_enabled(&mut app.sidebar_space, false);
+        crate::app::state::SidebarSpaceItem::Name.set_enabled(&mut app.sidebar_space, false);
+        crate::app::state::SidebarSpaceItem::Branch.set_enabled(&mut app.sidebar_space, true);
+        crate::app::state::SidebarSpaceItem::BranchStatus
+            .set_enabled(&mut app.sidebar_space, false);
+        app.view.workspace_card_areas = vec![crate::app::state::WorkspaceCardArea {
+            ws_idx: 0,
+            rect: Rect::new(0, 2, 40, 2),
+            indented: false,
+        }];
+
+        assert_eq!(workspace_row_height(&app, &app.workspaces[0]), 2);
+
+        let backend = ratatui::backend::TestBackend::new(40, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_workspace_list(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 8),
+                    false,
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let first_row = agent_entry_row_text(buffer, 2, 40);
+        let second_row = agent_entry_row_text(buffer, 3, 40);
+
+        assert!(!first_row.contains("main"), "first row: {first_row:?}");
+        assert!(second_row.contains("main"), "second row: {second_row:?}");
+    }
+
+    #[test]
+    fn sidebar_space_can_hide_space_name_and_branch() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("herdr");
+        workspace.cached_git_branch = Some("main".into());
+        app.workspaces = vec![workspace];
+        crate::app::state::SidebarSpaceItem::Name.set_enabled(&mut app.sidebar_space, false);
+        crate::app::state::SidebarSpaceItem::Branch.set_enabled(&mut app.sidebar_space, false);
         app.view.workspace_card_areas = vec![crate::app::state::WorkspaceCardArea {
             ws_idx: 0,
             rect: Rect::new(0, 2, 40, 1),
@@ -3407,26 +3354,10 @@ lines = [
 
     #[test]
     fn stale_status_duration_is_dimmed_after_working_finishes() {
-        let mut app = crate::app::state::AppState::test_new();
-        let workspace = Workspace::test_new("herdr");
-        let pane = workspace.tabs[0].root_pane;
-
-        app.workspaces = vec![workspace];
-        app.ensure_test_terminals();
-        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
-            .attached_terminal_id
-            .clone();
-        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
         let start = std::time::Instant::now() - Duration::from_secs(132);
-        terminal.set_detected_state_with_screen_signals_at(
-            Some(Agent::Codex),
-            AgentState::Working,
-            false,
-            false,
-            true,
-            false,
-            start,
-        );
+        let mut app = working_agent_app_at(start);
+        let terminal_id = root_terminal_id(&app);
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
         terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Codex),
             AgentState::Idle,
@@ -3436,7 +3367,6 @@ lines = [
             false,
             start + Duration::from_secs(132),
         );
-        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
 
         let backend = ratatui::backend::TestBackend::new(40, 8);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();

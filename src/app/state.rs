@@ -1,6 +1,6 @@
 use crate::config::{
-    AgentViewField, AgentsViewConfig, Keybinds, NewTerminalCwdConfig, SoundConfig, SpaceViewField,
-    SpacesViewConfig, ToastConfig, ToastDelivery, ViewColorPreset, ViewItem,
+    Keybinds, NewTerminalCwdConfig, SidebarAgentField, SidebarAgentsConfig, SidebarColorPreset,
+    SidebarItem, SidebarSpaceField, SidebarSpacesConfig, SoundConfig, ToastConfig, ToastDelivery,
 };
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Direction, Rect};
@@ -81,13 +81,13 @@ pub struct Palette {
 }
 
 impl Palette {
-    pub(crate) fn view_color(&self, preset: ViewColorPreset, default: Color) -> Color {
+    pub(crate) fn sidebar_color(&self, preset: SidebarColorPreset, default: Color) -> Color {
         match preset {
-            ViewColorPreset::Default => default,
-            ViewColorPreset::Muted => self.overlay1,
-            ViewColorPreset::Accent => self.accent,
-            ViewColorPreset::Cool => self.teal,
-            ViewColorPreset::Warm => self.peach,
+            SidebarColorPreset::Default => default,
+            SidebarColorPreset::Muted => self.overlay1,
+            SidebarColorPreset::Accent => self.accent,
+            SidebarColorPreset::Cool => self.teal,
+            SidebarColorPreset::Warm => self.peach,
         }
     }
 
@@ -724,13 +724,13 @@ pub enum AgentPanelScope {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ViewLine {
+pub enum SidebarLine {
     First,
     Second,
     Extra(usize),
 }
 
-impl ViewLine {
+impl SidebarLine {
     pub(crate) fn from_index(index: usize) -> Self {
         match index {
             0 => Self::First,
@@ -762,19 +762,19 @@ impl ViewLine {
     }
 }
 
-pub type SpaceViewPreferences = SpacesViewConfig;
-pub type AgentViewPreferences = AgentsViewConfig;
-pub(crate) use crate::config::AgentViewField as AgentViewItem;
-pub(crate) use crate::config::SpaceViewField as SpaceViewItem;
+pub type SidebarSpacePreferences = SidebarSpacesConfig;
+pub type SidebarAgentPreferences = SidebarAgentsConfig;
+pub(crate) use crate::config::SidebarAgentField as SidebarAgentItem;
+pub(crate) use crate::config::SidebarSpaceField as SidebarSpaceItem;
 
-pub(crate) const SPACE_VIEW_ITEMS: [SpaceViewItem; 4] = [
-    SpaceViewItem::Status,
-    SpaceViewItem::Name,
-    SpaceViewItem::Branch,
-    SpaceViewItem::BranchStatus,
+pub(crate) const SIDEBAR_SPACE_ITEMS: [SidebarSpaceItem; 4] = [
+    SidebarSpaceItem::Status,
+    SidebarSpaceItem::Name,
+    SidebarSpaceItem::Branch,
+    SidebarSpaceItem::BranchStatus,
 ];
 
-impl SpaceViewField {
+impl SidebarSpaceField {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Status => "space status",
@@ -793,84 +793,93 @@ impl SpaceViewField {
         }
     }
 
-    pub(crate) fn enabled(self, view: &SpaceViewPreferences) -> bool {
-        space_view_entry(view, self).show
+    pub(crate) fn enabled(self, preferences: &SidebarSpacePreferences) -> bool {
+        sidebar_space_entry(preferences, self).show
     }
 
-    pub(crate) fn set_enabled(self, view: &mut SpaceViewPreferences, enabled: bool) {
-        if let Some(entry) = space_view_entry_mut(view, self) {
+    pub(crate) fn set_enabled(self, preferences: &mut SidebarSpacePreferences, enabled: bool) {
+        if let Some(entry) = sidebar_space_entry_mut(preferences, self) {
             entry.show = enabled;
         } else {
             let line = self.default_line();
-            let entry = ViewItem::new(self, enabled);
-            space_view_line_mut(view, line).push(entry);
+            let entry = SidebarItem::new(self, enabled);
+            sidebar_space_line_mut(preferences, line).push(entry);
         }
     }
 
-    pub(crate) fn color(self, view: &SpaceViewPreferences) -> ViewColorPreset {
-        space_view_entry(view, self).color
+    pub(crate) fn color(self, preferences: &SidebarSpacePreferences) -> SidebarColorPreset {
+        sidebar_space_entry(preferences, self).color
     }
 
-    pub(crate) fn set_color(self, view: &mut SpaceViewPreferences, color: ViewColorPreset) {
-        if let Some(entry) = space_view_entry_mut(view, self) {
+    pub(crate) fn set_color(
+        self,
+        preferences: &mut SidebarSpacePreferences,
+        color: SidebarColorPreset,
+    ) {
+        if let Some(entry) = sidebar_space_entry_mut(preferences, self) {
             entry.color = color;
         } else {
             let line = self.default_line();
-            let entry = ViewItem {
+            let entry = SidebarItem {
                 color,
-                ..ViewItem::visible(self)
+                ..SidebarItem::visible(self)
             };
-            space_view_line_mut(view, line).push(entry);
+            sidebar_space_line_mut(preferences, line).push(entry);
         }
     }
 
-    pub(crate) fn line(self, view: &SpaceViewPreferences) -> ViewLine {
-        view.lines
+    pub(crate) fn line(self, preferences: &SidebarSpacePreferences) -> SidebarLine {
+        preferences
+            .lines
             .iter()
             .position(|line| line.iter().any(|entry| entry.field == self))
-            .map(ViewLine::from_index)
+            .map(SidebarLine::from_index)
             .unwrap_or_else(|| self.default_line())
     }
 
-    pub(crate) fn set_line(self, view: &mut SpaceViewPreferences, line: ViewLine) {
-        let entry = remove_space_view_item(view, self).unwrap_or_else(|| ViewItem::visible(self));
-        space_view_line_mut(view, line).push(entry);
+    pub(crate) fn set_line(self, preferences: &mut SidebarSpacePreferences, line: SidebarLine) {
+        let entry = remove_sidebar_space_item(preferences, self)
+            .unwrap_or_else(|| SidebarItem::visible(self));
+        sidebar_space_line_mut(preferences, line).push(entry);
     }
 
-    pub(crate) fn order(self, view: &SpaceViewPreferences) -> u8 {
-        space_view_line(view, self.line(view))
+    pub(crate) fn order(self, preferences: &SidebarSpacePreferences) -> u8 {
+        sidebar_space_line(preferences, self.line(preferences))
             .iter()
             .position(|entry| entry.field == self)
             .map(|idx| idx as u8)
             .unwrap_or_else(|| self.default_index())
     }
 
-    pub(crate) fn set_order(self, view: &mut SpaceViewPreferences, order: u8) {
-        let line = self.line(view);
-        let entry = remove_space_view_item(view, self).unwrap_or_else(|| ViewItem::visible(self));
-        let target = space_view_line_mut(view, line);
+    pub(crate) fn set_order(self, preferences: &mut SidebarSpacePreferences, order: u8) {
+        let line = self.line(preferences);
+        let entry = remove_sidebar_space_item(preferences, self)
+            .unwrap_or_else(|| SidebarItem::visible(self));
+        let target = sidebar_space_line_mut(preferences, line);
         let index = usize::from(order).min(target.len());
         target.insert(index, entry);
     }
 
-    fn default_line(self) -> ViewLine {
+    fn default_line(self) -> SidebarLine {
         match self {
-            Self::Status | Self::Name => ViewLine::First,
-            Self::Branch | Self::BranchStatus => ViewLine::Second,
+            Self::Status | Self::Name => SidebarLine::First,
+            Self::Branch | Self::BranchStatus => SidebarLine::Second,
         }
     }
 }
 
-pub(crate) fn ordered_space_view_items(view: &SpaceViewPreferences) -> Vec<SpaceViewItem> {
+pub(crate) fn ordered_sidebar_space_items(
+    preferences: &SidebarSpacePreferences,
+) -> Vec<SidebarSpaceItem> {
     let mut items = Vec::new();
-    for line in &view.lines {
+    for line in &preferences.lines {
         for entry in line {
             if !items.contains(&entry.field) {
                 items.push(entry.field);
             }
         }
     }
-    for item in SPACE_VIEW_ITEMS {
+    for item in SIDEBAR_SPACE_ITEMS {
         if !items.contains(&item) {
             items.push(item);
         }
@@ -878,19 +887,19 @@ pub(crate) fn ordered_space_view_items(view: &SpaceViewPreferences) -> Vec<Space
     items
 }
 
-pub(crate) const AGENT_VIEW_PLACEMENT_ITEMS: [AgentViewItem; 9] = [
-    AgentViewItem::AgentStatus,
-    AgentViewItem::PaneName,
-    AgentViewItem::TabName,
-    AgentViewItem::SpaceName,
-    AgentViewItem::Status,
-    AgentViewItem::Time,
-    AgentViewItem::CustomStatus,
-    AgentViewItem::RightAlignment,
-    AgentViewItem::AgentName,
+pub(crate) const SIDEBAR_AGENT_ITEMS: [SidebarAgentItem; 9] = [
+    SidebarAgentItem::AgentStatus,
+    SidebarAgentItem::PaneName,
+    SidebarAgentItem::TabName,
+    SidebarAgentItem::SpaceName,
+    SidebarAgentItem::Status,
+    SidebarAgentItem::Time,
+    SidebarAgentItem::CustomStatus,
+    SidebarAgentItem::RightAlignment,
+    SidebarAgentItem::AgentName,
 ];
 
-impl AgentViewField {
+impl SidebarAgentField {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::AgentStatus => "agent status",
@@ -919,91 +928,100 @@ impl AgentViewField {
         }
     }
 
-    pub(crate) fn enabled(self, view: &AgentViewPreferences) -> bool {
-        agent_view_entry(view, self).show
+    pub(crate) fn enabled(self, preferences: &SidebarAgentPreferences) -> bool {
+        sidebar_agent_entry(preferences, self).show
     }
 
-    pub(crate) fn set_enabled(self, view: &mut AgentViewPreferences, enabled: bool) {
-        if let Some(entry) = agent_view_entry_mut(view, self) {
+    pub(crate) fn set_enabled(self, preferences: &mut SidebarAgentPreferences, enabled: bool) {
+        if let Some(entry) = sidebar_agent_entry_mut(preferences, self) {
             entry.show = enabled;
         } else {
             let line = self.default_line();
-            let entry = ViewItem::new(self, enabled);
-            agent_view_line_mut(view, line).push(entry);
+            let entry = SidebarItem::new(self, enabled);
+            sidebar_agent_line_mut(preferences, line).push(entry);
         }
     }
 
-    pub(crate) fn color(self, view: &AgentViewPreferences) -> ViewColorPreset {
-        agent_view_entry(view, self).color
+    pub(crate) fn color(self, preferences: &SidebarAgentPreferences) -> SidebarColorPreset {
+        sidebar_agent_entry(preferences, self).color
     }
 
-    pub(crate) fn set_color(self, view: &mut AgentViewPreferences, color: ViewColorPreset) {
-        if let Some(entry) = agent_view_entry_mut(view, self) {
+    pub(crate) fn set_color(
+        self,
+        preferences: &mut SidebarAgentPreferences,
+        color: SidebarColorPreset,
+    ) {
+        if let Some(entry) = sidebar_agent_entry_mut(preferences, self) {
             entry.color = color;
         } else {
             let line = self.default_line();
-            let entry = ViewItem {
+            let entry = SidebarItem {
                 color,
-                ..ViewItem::visible(self)
+                ..SidebarItem::visible(self)
             };
-            agent_view_line_mut(view, line).push(entry);
+            sidebar_agent_line_mut(preferences, line).push(entry);
         }
     }
 
-    pub(crate) fn line(self, view: &AgentViewPreferences) -> Option<ViewLine> {
-        Some(
-            view.lines
-                .iter()
-                .position(|line| line.iter().any(|entry| entry.field == self))
-                .map(ViewLine::from_index)
-                .unwrap_or_else(|| self.default_line()),
-        )
+    pub(crate) fn line(self, preferences: &SidebarAgentPreferences) -> SidebarLine {
+        preferences
+            .lines
+            .iter()
+            .position(|line| line.iter().any(|entry| entry.field == self))
+            .map(SidebarLine::from_index)
+            .unwrap_or_else(|| self.default_line())
     }
 
-    pub(crate) fn set_line(self, view: &mut AgentViewPreferences, line: ViewLine) {
-        let entry = remove_agent_view_item(view, self).unwrap_or_else(|| ViewItem::visible(self));
-        agent_view_line_mut(view, line).push(entry);
+    pub(crate) fn set_line(self, preferences: &mut SidebarAgentPreferences, line: SidebarLine) {
+        let entry = remove_sidebar_agent_item(preferences, self)
+            .unwrap_or_else(|| SidebarItem::visible(self));
+        sidebar_agent_line_mut(preferences, line).push(entry);
     }
 
-    pub(crate) fn order(self, view: &AgentViewPreferences) -> Option<u8> {
-        let line = self.line(view)?;
-        agent_view_line(view, line)
+    pub(crate) fn order(self, preferences: &SidebarAgentPreferences) -> u8 {
+        let line = self.line(preferences);
+        sidebar_agent_line(preferences, line)
             .iter()
             .position(|entry| entry.field == self)
             .map(|idx| idx as u8)
-            .or_else(|| Some(self.default_index()))
+            .unwrap_or_else(|| self.default_index())
     }
 
-    pub(crate) fn set_order(self, view: &mut AgentViewPreferences, order: u8) {
-        let line = self.line(view).unwrap_or_else(|| self.default_line());
-        let entry = remove_agent_view_item(view, self).unwrap_or_else(|| ViewItem::visible(self));
-        let target = agent_view_line_mut(view, line);
+    pub(crate) fn set_order(self, preferences: &mut SidebarAgentPreferences, order: u8) {
+        let line = self.line(preferences);
+        let entry = remove_sidebar_agent_item(preferences, self)
+            .unwrap_or_else(|| SidebarItem::visible(self));
+        let target = sidebar_agent_line_mut(preferences, line);
         let index = usize::from(order).min(target.len());
         target.insert(index, entry);
     }
 
-    fn default_line(self) -> ViewLine {
+    fn default_line(self) -> SidebarLine {
         match self {
-            Self::AgentStatus | Self::PaneName | Self::TabName | Self::SpaceName => ViewLine::First,
+            Self::AgentStatus | Self::PaneName | Self::TabName | Self::SpaceName => {
+                SidebarLine::First
+            }
             Self::Status
             | Self::Time
             | Self::CustomStatus
             | Self::RightAlignment
-            | Self::AgentName => ViewLine::Second,
+            | Self::AgentName => SidebarLine::Second,
         }
     }
 }
 
-pub(crate) fn ordered_agent_view_items(view: &AgentViewPreferences) -> Vec<AgentViewItem> {
+pub(crate) fn ordered_sidebar_agent_items(
+    preferences: &SidebarAgentPreferences,
+) -> Vec<SidebarAgentItem> {
     let mut items = Vec::new();
-    for line in &view.lines {
+    for line in &preferences.lines {
         for entry in line {
             if !items.contains(&entry.field) {
                 items.push(entry.field);
             }
         }
     }
-    for item in AGENT_VIEW_PLACEMENT_ITEMS {
+    for item in SIDEBAR_AGENT_ITEMS {
         if !items.contains(&item) {
             items.push(item);
         }
@@ -1011,47 +1029,56 @@ pub(crate) fn ordered_agent_view_items(view: &AgentViewPreferences) -> Vec<Agent
     items
 }
 
-fn space_view_line(view: &SpaceViewPreferences, line: ViewLine) -> &[ViewItem<SpaceViewField>] {
-    view.lines
+fn sidebar_space_line(
+    preferences: &SidebarSpacePreferences,
+    line: SidebarLine,
+) -> &[SidebarItem<SidebarSpaceField>] {
+    preferences
+        .lines
         .get(line.index())
         .map(Vec::as_slice)
         .unwrap_or(&[])
 }
 
-fn space_view_line_mut(
-    view: &mut SpaceViewPreferences,
-    line: ViewLine,
-) -> &mut Vec<ViewItem<SpaceViewField>> {
-    while view.lines.len() <= line.index() {
-        view.lines.push(Vec::new());
+fn sidebar_space_line_mut(
+    preferences: &mut SidebarSpacePreferences,
+    line: SidebarLine,
+) -> &mut Vec<SidebarItem<SidebarSpaceField>> {
+    while preferences.lines.len() <= line.index() {
+        preferences.lines.push(Vec::new());
     }
-    &mut view.lines[line.index()]
+    &mut preferences.lines[line.index()]
 }
 
-fn space_view_entry(view: &SpaceViewPreferences, item: SpaceViewItem) -> ViewItem<SpaceViewField> {
-    view.lines
+fn sidebar_space_entry(
+    preferences: &SidebarSpacePreferences,
+    item: SidebarSpaceItem,
+) -> SidebarItem<SidebarSpaceField> {
+    preferences
+        .lines
         .iter()
         .flatten()
         .find(|entry| entry.field == item)
         .copied()
-        .unwrap_or_else(|| ViewItem::visible(item))
+        .unwrap_or_else(|| SidebarItem::new(item, false))
 }
 
-fn space_view_entry_mut(
-    view: &mut SpaceViewPreferences,
-    item: SpaceViewItem,
-) -> Option<&mut ViewItem<SpaceViewField>> {
-    view.lines
+fn sidebar_space_entry_mut(
+    preferences: &mut SidebarSpacePreferences,
+    item: SidebarSpaceItem,
+) -> Option<&mut SidebarItem<SidebarSpaceField>> {
+    preferences
+        .lines
         .iter_mut()
         .flatten()
         .find(|entry| entry.field == item)
 }
 
-fn remove_space_view_item(
-    view: &mut SpaceViewPreferences,
-    item: SpaceViewItem,
-) -> Option<ViewItem<SpaceViewField>> {
-    for line in &mut view.lines {
+fn remove_sidebar_space_item(
+    preferences: &mut SidebarSpacePreferences,
+    item: SidebarSpaceItem,
+) -> Option<SidebarItem<SidebarSpaceField>> {
+    for line in &mut preferences.lines {
         if let Some(index) = line.iter().position(|entry| entry.field == item) {
             return Some(line.remove(index));
         }
@@ -1059,47 +1086,56 @@ fn remove_space_view_item(
     None
 }
 
-fn agent_view_line(view: &AgentViewPreferences, line: ViewLine) -> &[ViewItem<AgentViewField>] {
-    view.lines
+fn sidebar_agent_line(
+    preferences: &SidebarAgentPreferences,
+    line: SidebarLine,
+) -> &[SidebarItem<SidebarAgentField>] {
+    preferences
+        .lines
         .get(line.index())
         .map(Vec::as_slice)
         .unwrap_or(&[])
 }
 
-fn agent_view_line_mut(
-    view: &mut AgentViewPreferences,
-    line: ViewLine,
-) -> &mut Vec<ViewItem<AgentViewField>> {
-    while view.lines.len() <= line.index() {
-        view.lines.push(Vec::new());
+fn sidebar_agent_line_mut(
+    preferences: &mut SidebarAgentPreferences,
+    line: SidebarLine,
+) -> &mut Vec<SidebarItem<SidebarAgentField>> {
+    while preferences.lines.len() <= line.index() {
+        preferences.lines.push(Vec::new());
     }
-    &mut view.lines[line.index()]
+    &mut preferences.lines[line.index()]
 }
 
-fn agent_view_entry(view: &AgentViewPreferences, item: AgentViewItem) -> ViewItem<AgentViewField> {
-    view.lines
+fn sidebar_agent_entry(
+    preferences: &SidebarAgentPreferences,
+    item: SidebarAgentItem,
+) -> SidebarItem<SidebarAgentField> {
+    preferences
+        .lines
         .iter()
         .flatten()
         .find(|entry| entry.field == item)
         .copied()
-        .unwrap_or_else(|| ViewItem::visible(item))
+        .unwrap_or_else(|| SidebarItem::new(item, false))
 }
 
-fn agent_view_entry_mut(
-    view: &mut AgentViewPreferences,
-    item: AgentViewItem,
-) -> Option<&mut ViewItem<AgentViewField>> {
-    view.lines
+fn sidebar_agent_entry_mut(
+    preferences: &mut SidebarAgentPreferences,
+    item: SidebarAgentItem,
+) -> Option<&mut SidebarItem<SidebarAgentField>> {
+    preferences
+        .lines
         .iter_mut()
         .flatten()
         .find(|entry| entry.field == item)
 }
 
-fn remove_agent_view_item(
-    view: &mut AgentViewPreferences,
-    item: AgentViewItem,
-) -> Option<ViewItem<AgentViewField>> {
-    for line in &mut view.lines {
+fn remove_sidebar_agent_item(
+    preferences: &mut SidebarAgentPreferences,
+    item: SidebarAgentItem,
+) -> Option<SidebarItem<SidebarAgentField>> {
+    for line in &mut preferences.lines {
         if let Some(index) = line.iter().position(|entry| entry.field == item) {
             return Some(line.remove(index));
         }
@@ -1108,13 +1144,15 @@ fn remove_agent_view_item(
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ViewConfigGroup {
+pub enum SidebarConfigGroup {
     #[default]
     Spaces,
     Agents,
 }
 
-impl ViewConfigGroup {
+impl SidebarConfigGroup {
+    const ALL: [Self; 2] = [Self::Spaces, Self::Agents];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Spaces => "spaces",
@@ -1130,17 +1168,19 @@ impl ViewConfigGroup {
     }
 
     pub fn previous(self) -> Self {
-        match self {
-            Self::Spaces => Self::Agents,
-            Self::Agents => Self::Spaces,
-        }
+        let index = Self::ALL
+            .iter()
+            .position(|group| *group == self)
+            .unwrap_or(0);
+        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
     }
 
     pub fn next(self) -> Self {
-        match self {
-            Self::Spaces => Self::Agents,
-            Self::Agents => Self::Spaces,
-        }
+        let index = Self::ALL
+            .iter()
+            .position(|group| *group == self)
+            .unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
     }
 }
 
@@ -1155,6 +1195,7 @@ pub enum SettingsSection {
     Sound,
     Toast,
     PaneLabels,
+    Sidebar,
     Experiments,
     Integrations,
 }
@@ -1165,6 +1206,7 @@ impl SettingsSection {
         Self::Sound,
         Self::Toast,
         Self::PaneLabels,
+        Self::Sidebar,
         Self::Integrations,
         Self::Experiments,
     ];
@@ -1175,6 +1217,7 @@ impl SettingsSection {
             Self::Sound => "sound",
             Self::Toast => "toasts",
             Self::PaneLabels => "pane labels",
+            Self::Sidebar => "sidebar",
             Self::Experiments => "experiments",
             Self::Integrations => "integrations",
         }
@@ -1260,6 +1303,10 @@ pub struct SettingsState {
     pub section: SettingsSection,
     /// Selected item index within the current section.
     pub list: SelectionListState,
+    /// Active subgroup inside Settings > sidebar.
+    pub sidebar_config_group: SidebarConfigGroup,
+    /// Whether Settings > sidebar is editing line/order for the selected row.
+    pub sidebar_config_editing: bool,
     /// The palette before opening settings (for cancel/restore).
     pub original_palette: Option<Palette>,
     /// The theme name before opening settings.
@@ -1562,8 +1609,8 @@ pub struct AppState {
     pub prompt_new_tab_name: bool,
     pub show_agent_labels_on_pane_borders: bool,
     pub pane_history_persistence: bool,
-    pub space_view: SpaceViewPreferences,
-    pub agent_view: AgentViewPreferences,
+    pub sidebar_space: SidebarSpacePreferences,
+    pub sidebar_agent: SidebarAgentPreferences,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
     /// the pane requested `?25l`. See `[experimental] reveal_hidden_cursor_for_cjk_ime`.
     pub reveal_hidden_cursor_for_cjk_ime: bool,
@@ -1865,8 +1912,8 @@ impl AppState {
             prompt_new_tab_name: true,
             show_agent_labels_on_pane_borders: false,
             pane_history_persistence: false,
-            space_view: SpaceViewPreferences::default(),
-            agent_view: AgentViewPreferences::default(),
+            sidebar_space: SidebarSpacePreferences::default(),
+            sidebar_agent: SidebarAgentPreferences::default(),
             reveal_hidden_cursor_for_cjk_ime: false,
             cjk_ime_agent_filter_configured: false,
             cjk_ime_agents: Vec::new(),
@@ -1889,6 +1936,8 @@ impl AppState {
             settings: SettingsState {
                 section: SettingsSection::Theme,
                 list: SelectionListState::new(0),
+                sidebar_config_group: SidebarConfigGroup::default(),
+                sidebar_config_editing: false,
                 original_palette: None,
                 original_theme: None,
             },
@@ -1985,6 +2034,23 @@ mod tests {
             KeyCode::Char('b'),
             KeyModifiers::SHIFT,
         ));
+    }
+
+    #[test]
+    fn omitted_sidebar_items_are_treated_as_disabled() {
+        let spaces = SidebarSpacePreferences {
+            lines: vec![vec![SidebarItem::visible(SidebarSpaceItem::Name)]],
+        };
+        let agents = SidebarAgentPreferences {
+            lines: vec![vec![SidebarItem::visible(SidebarAgentItem::Status)]],
+        };
+
+        assert!(SidebarSpaceItem::Name.enabled(&spaces));
+        assert!(!SidebarSpaceItem::Branch.enabled(&spaces));
+        assert_eq!(SidebarSpaceItem::Branch.line(&spaces), SidebarLine::Second);
+        assert!(SidebarAgentItem::Status.enabled(&agents));
+        assert!(!SidebarAgentItem::Time.enabled(&agents));
+        assert_eq!(SidebarAgentItem::Time.line(&agents), SidebarLine::Second);
     }
 
     #[test]

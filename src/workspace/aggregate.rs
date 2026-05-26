@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use crate::detect::{Agent, AgentState};
 use crate::layout::PaneId;
-use crate::terminal::{TerminalId, TerminalState};
+use crate::terminal::{TerminalId, TerminalState, WorkingDuration};
 
 use super::{Tab, Workspace};
 
@@ -11,6 +12,7 @@ pub struct PaneDetail {
     pub pane_id: PaneId,
     pub tab_idx: usize,
     pub tab_label: String,
+    pub pane_label: Option<String>,
     pub label: String,
     pub agent_label: String,
     #[allow(dead_code)]
@@ -18,6 +20,7 @@ pub struct PaneDetail {
     pub state: AgentState,
     pub seen: bool,
     pub custom_status: Option<String>,
+    pub working_duration: Option<WorkingDuration>,
 }
 
 impl Tab {
@@ -29,7 +32,11 @@ impl Tab {
         })
     }
 
-    pub fn pane_details(&self, terminals: &HashMap<TerminalId, TerminalState>) -> Vec<PaneDetail> {
+    pub(crate) fn pane_details_at(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+        now: Instant,
+    ) -> Vec<PaneDetail> {
         self.layout
             .pane_ids()
             .iter()
@@ -45,12 +52,14 @@ impl Tab {
                     pane_id: *id,
                     tab_idx: self.number.saturating_sub(1),
                     tab_label: self.display_name(),
+                    pane_label: terminal.manual_label.clone(),
                     label: agent_label.clone(),
                     agent_label,
                     agent: terminal.effective_known_agent(),
                     state: terminal.state,
                     seen: pane.seen,
                     custom_status: terminal.effective_custom_status().map(str::to_string),
+                    working_duration: terminal.working_duration_at(now),
                 })
             })
             .collect()
@@ -89,10 +98,18 @@ impl Workspace {
     }
 
     pub fn pane_details(&self, terminals: &HashMap<TerminalId, TerminalState>) -> Vec<PaneDetail> {
+        self.pane_details_at(terminals, Instant::now())
+    }
+
+    pub(crate) fn pane_details_at(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+        now: Instant,
+    ) -> Vec<PaneDetail> {
         let multi_tab = self.tabs.len() > 1;
         self.tabs
             .iter()
-            .flat_map(|tab| tab.pane_details(terminals))
+            .flat_map(|tab| tab.pane_details_at(terminals, now))
             .map(|mut detail| {
                 if multi_tab {
                     detail.label = format!("{}·{}", detail.tab_label, detail.agent_label);
