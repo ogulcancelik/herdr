@@ -94,7 +94,7 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
         "amp" | "amp-local" => Some(Agent::Amp),
         "grok" | "grok-build" => Some(Agent::Grok),
         "hermes" | "hermes-agent" => Some(Agent::Hermes),
-        "qodercli" | "qoderclicn" | "qoder" => Some(Agent::Qodercli),
+        "qodercli" | "qoderclicn" | "qoder" | "qodercn" => Some(Agent::Qodercli),
         _ => None,
     }
 }
@@ -120,7 +120,7 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
         "amp" | "amp-local" => Some(Agent::Amp),
         "grok" | "grok-build" => Some(Agent::Grok),
         "hermes" | "hermes-agent" => Some(Agent::Hermes),
-        "qodercli" | "qoderclicn" | "qoder" => Some(Agent::Qodercli),
+        "qodercli" | "qoderclicn" | "qoder" | "qodercn" => Some(Agent::Qodercli),
         _ => None,
     }
 }
@@ -2654,6 +2654,7 @@ mod tests {
         assert_eq!(identify_agent("qodercli"), Some(Agent::Qodercli));
         assert_eq!(identify_agent("qoderclicn"), Some(Agent::Qodercli));
         assert_eq!(identify_agent("qoder"), Some(Agent::Qodercli));
+        assert_eq!(identify_agent("qodercn"), Some(Agent::Qodercli));
     }
 
     #[test]
