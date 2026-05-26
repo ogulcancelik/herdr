@@ -640,8 +640,14 @@ fn has_kiro_tool_spinner(content: &str) -> bool {
 fn detect_qodercli(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
-    // Blocked: waiting for user confirmation or tool approval
-    if lower.contains("waiting for user confirmation") || lower.contains("awaiting approval") {
+    // Blocked: waiting for user confirmation or tool approval.
+    // Also covers the "Permission Required / Allow once or always?" dialog
+    // qodercli renders for tool-call approval (mkdir/edit/etc.).
+    if lower.contains("waiting for user confirmation")
+        || lower.contains("awaiting approval")
+        || lower.contains("permission required")
+        || lower.contains("allow once or always?")
+    {
         return AgentState::Blocked;
     }
 
@@ -2605,6 +2611,27 @@ mod tests {
     #[test]
     fn qodercli_idle_on_prompt() {
         assert_eq!(detect_qodercli("> "), AgentState::Idle);
+    }
+
+    #[test]
+    fn qodercli_blocked_on_permission_required_dialog() {
+        // qodercli renders this dialog when a tool call needs user approval.
+        let screen = "\
+Permission Required\n\
+Caller: test\n\
+Command: mkdir -p /root/example\n\
+Allow once or always?\n\
+  \u{276F} 1. Allow Once - allow `mkdir` for one\n\
+    2. Always allow `mkdir` for future sessions\n\
+    3. Reject and tell qodercli something\n";
+        assert_eq!(detect_qodercli(screen), AgentState::Blocked);
+    }
+
+    #[test]
+    fn qodercli_blocked_on_permission_required_alone() {
+        // Even when the prompt copy gets truncated by the viewport, the title
+        // alone should be enough to flip the pane to blocked.
+        assert_eq!(detect_qodercli("Permission Required"), AgentState::Blocked,);
     }
 
     // ---- Helpers ----
