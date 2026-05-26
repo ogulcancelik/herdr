@@ -640,18 +640,7 @@ fn has_kiro_tool_spinner(content: &str) -> bool {
 fn detect_qodercli(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
-    // Blocked: waiting for user confirmation or tool approval.
-    // Also covers the "Permission Required / Allow once or always?" dialog
-    // qodercli renders for tool-call approval (mkdir/edit/etc.), and the
-    // ask-user tool's interactive prompt ("Enter your response" placeholder
-    // and the "Review your answers:" multi-question review tab).
-    if lower.contains("waiting for user confirmation")
-        || lower.contains("awaiting approval")
-        || lower.contains("permission required")
-        || lower.contains("allow once or always?")
-        || lower.contains("enter your response")
-        || lower.contains("review your answers:")
-    {
+    if has_qodercli_blocked_prompt(&lower) {
         return AgentState::Blocked;
     }
 
@@ -672,6 +661,30 @@ fn detect_qodercli(content: &str) -> AgentState {
     }
 
     AgentState::Idle
+}
+
+/// Blocked patterns specific to qodercli.
+///
+/// Mirrors the helper structure used by [`has_claude_blocked_prompt`] so the
+/// pattern surface stays a single, easy-to-extend list.
+///
+/// Covered states:
+/// * Tool-call confirmation banners ("Waiting for user confirmation",
+///   "Awaiting approval").
+/// * The "Permission Required / Allow once or always?" approval dialog.
+/// * The `ask-user` tool's interactive prompt — both the free-form
+///   "Enter your response" placeholder and the "Review your answers:"
+///   multi-question review tab.
+/// * The interactive shell waiting hint emitted by qodercli when an agent
+///   spawns a shell that is now parked for user keystrokes.
+fn has_qodercli_blocked_prompt(lower_content: &str) -> bool {
+    lower_content.contains("waiting for user confirmation")
+        || lower_content.contains("awaiting approval")
+        || lower_content.contains("permission required")
+        || lower_content.contains("allow once or always?")
+        || lower_content.contains("enter your response")
+        || lower_content.contains("review your answers:")
+        || lower_content.contains("shell awaiting input")
 }
 
 // ---------------------------------------------------------------------------
@@ -2658,6 +2671,14 @@ Review your answers:\n\
 \n\
 Project type \u{2192} Web app\n\
 Stack        \u{2192} (not answered)\n";
+        assert_eq!(detect_qodercli(screen), AgentState::Blocked);
+    }
+
+    #[test]
+    fn qodercli_blocked_on_interactive_shell_waiting() {
+        // When qodercli spawns an interactive shell, the loading row turns
+        // into a "Shell awaiting input" hint until the user takes focus.
+        let screen = "! Shell awaiting input (Tab to focus)\n";
         assert_eq!(detect_qodercli(screen), AgentState::Blocked);
     }
 
