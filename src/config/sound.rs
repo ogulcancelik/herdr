@@ -40,6 +40,7 @@ pub struct AgentSoundOverrides {
     pub amp: AgentSoundSetting,
     pub grok: AgentSoundSetting,
     pub hermes: AgentSoundSetting,
+    pub qodercli: AgentSoundSetting,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -130,6 +131,7 @@ impl AgentSoundOverrides {
             Some(Agent::Amp) => self.amp,
             Some(Agent::Grok) => self.grok,
             Some(Agent::Hermes) => self.hermes,
+            Some(Agent::Qodercli) => self.qodercli,
             None => AgentSoundSetting::Default,
         }
     }
@@ -165,6 +167,7 @@ impl Default for AgentSoundOverrides {
             amp: AgentSoundSetting::Default,
             grok: AgentSoundSetting::Default,
             hermes: AgentSoundSetting::Default,
+            qodercli: AgentSoundSetting::Default,
         }
     }
 }

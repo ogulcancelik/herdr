@@ -52,6 +52,7 @@ pub enum Agent {
     Amp,
     Grok,
     Hermes,
+    Qodercli,
 }
 
 pub fn agent_label(agent: Agent) -> &'static str {
@@ -71,6 +72,7 @@ pub fn agent_label(agent: Agent) -> &'static str {
         Agent::Amp => "amp",
         Agent::Grok => "grok",
         Agent::Hermes => "hermes",
+        Agent::Qodercli => "qodercli",
     }
 }
 
@@ -92,6 +94,7 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
         "amp" | "amp-local" => Some(Agent::Amp),
         "grok" | "grok-build" => Some(Agent::Grok),
         "hermes" | "hermes-agent" => Some(Agent::Hermes),
+        "qodercli" | "qoderclicn" | "qoder" => Some(Agent::Qodercli),
         _ => None,
     }
 }
@@ -117,6 +120,7 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
         "amp" | "amp-local" => Some(Agent::Amp),
         "grok" | "grok-build" => Some(Agent::Grok),
         "hermes" | "hermes-agent" => Some(Agent::Hermes),
+        "qodercli" | "qoderclicn" | "qoder" => Some(Agent::Qodercli),
         _ => None,
     }
 }
@@ -184,6 +188,7 @@ pub fn detect_agent(agent: Option<Agent>, screen_content: &str) -> AgentDetectio
         Agent::Amp => detect_amp(screen_content),
         Agent::Grok => detect_grok(screen_content),
         Agent::Hermes => detect_hermes(screen_content),
+        Agent::Qodercli => detect_qodercli(screen_content),
     };
     AgentDetection {
         state,
@@ -626,6 +631,37 @@ fn has_kiro_tool_spinner(content: &str) -> bool {
         let rest = chars.as_str().trim_start();
         rest.chars().next().is_some_and(char::is_alphabetic)
     })
+}
+
+/// Qodercli detection.
+///
+/// Qodercli is a Node.js coding-agent CLI. It surfaces a confirmation prompt
+/// while awaiting tool approval and a braille spinner while working.
+fn detect_qodercli(content: &str) -> AgentState {
+    let lower = content.to_lowercase();
+
+    // Blocked: waiting for user confirmation or tool approval
+    if lower.contains("waiting for user confirmation") || lower.contains("awaiting approval") {
+        return AgentState::Blocked;
+    }
+
+    // Working: spinner active or processing
+    if lower.contains("working")
+        || content.contains('\u{280B}')
+        || content.contains('\u{2819}')
+        || content.contains('\u{2839}')
+        || content.contains('\u{2838}')
+        || content.contains('\u{283C}')
+        || content.contains('\u{2834}')
+        || content.contains('\u{2826}')
+        || content.contains('\u{2827}')
+        || content.contains('\u{2807}')
+        || content.contains('\u{280F}')
+    {
+        return AgentState::Working;
+    }
+
+    AgentState::Idle
 }
 
 // ---------------------------------------------------------------------------
@@ -2542,6 +2578,33 @@ mod tests {
     fn hermes_denied_message_is_idle() {
         let screen = "╭─ ⚕ Hermes ────────────────────────────────────────────────────────────────────────────╮\n    Command was blocked/denied by the safety layer. I did not retry.\n╰───────────────────────────────────────────────────────────────────────────────────────╯\n ⚕ gpt-5.5 │ 15.4K/272K │ [█░░░░░░░░░] 6% │ 2m │ ⏲ 11s\n─────────────────────────────────────────────────────────────────────────────────────────\n❯";
         assert_eq!(detect_state(Some(Agent::Hermes), screen), AgentState::Idle);
+    }
+
+    // ---- Qodercli ----
+
+    #[test]
+    fn qodercli_identified_by_process_name() {
+        assert_eq!(identify_agent("qodercli"), Some(Agent::Qodercli));
+        assert_eq!(identify_agent("qoderclicn"), Some(Agent::Qodercli));
+        assert_eq!(identify_agent("qoder"), Some(Agent::Qodercli));
+    }
+
+    #[test]
+    fn qodercli_blocked_on_confirmation() {
+        assert_eq!(
+            detect_qodercli("Waiting for user confirmation..."),
+            AgentState::Blocked,
+        );
+    }
+
+    #[test]
+    fn qodercli_working_on_spinner() {
+        assert_eq!(detect_qodercli("\u{280B} Thinking..."), AgentState::Working);
+    }
+
+    #[test]
+    fn qodercli_idle_on_prompt() {
+        assert_eq!(detect_qodercli("> "), AgentState::Idle);
     }
 
     // ---- Helpers ----

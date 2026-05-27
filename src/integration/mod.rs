@@ -34,6 +34,10 @@ const HERMES_PLUGIN_INIT_INSTALL_NAME: &str = "__init__.py";
 const HERMES_PLUGIN_MANIFEST_ASSET: &str = include_str!("assets/hermes/plugin.yaml");
 const HERMES_PLUGIN_INIT_ASSET: &str = include_str!("assets/hermes/__init__.py");
 const HERMES_INTEGRATION_VERSION: u32 = 2;
+const QODERCLI_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
+const QODERCLI_HOOK_ASSET: &str = include_str!("assets/qodercli/herdr-agent-state.sh");
+const QODERCLI_INTEGRATION_VERSION: u32 = 1;
+const QODERCLI_CONFIG_DIR_ENV_VAR: &str = "QODER_CONFIG_DIR";
 const INTEGRATION_VERSION_MARKER: &str = "HERDR_INTEGRATION_VERSION=";
 
 #[derive(Debug)]
@@ -64,6 +68,17 @@ pub(crate) struct OmpInstallPaths {
 pub(crate) struct HermesInstallPaths {
     pub plugin_dir: PathBuf,
     pub config_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct QodercliInstallPaths {
+    pub hook_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct QodercliUninstallResult {
+    pub hook_path: PathBuf,
+    pub removed_hook_file: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,6 +244,13 @@ pub(crate) fn install_target(
                 ),
             ]
         }
+        crate::api::schema::IntegrationTarget::Qodercli => {
+            let installed = install_qodercli()?;
+            vec![format!(
+                "installed qodercli integration hook to {}",
+                installed.hook_path.display()
+            )]
+        }
     };
 
     crate::logging::integration_action("install", integration_target_label(target), "ok");
@@ -366,6 +388,20 @@ pub(crate) fn uninstall_target(
             }
             messages
         }
+        crate::api::schema::IntegrationTarget::Qodercli => {
+            let result = uninstall_qodercli()?;
+            if result.removed_hook_file {
+                vec![format!(
+                    "removed qodercli hook at {}",
+                    result.hook_path.display()
+                )]
+            } else {
+                vec![format!(
+                    "no qodercli hook found at {}",
+                    result.hook_path.display()
+                )]
+            }
+        }
     };
 
     crate::logging::integration_action("uninstall", integration_target_label(target), "ok");
@@ -382,6 +418,7 @@ pub(crate) fn integration_target_label(
         crate::api::schema::IntegrationTarget::Codex => "codex",
         crate::api::schema::IntegrationTarget::Opencode => "opencode",
         crate::api::schema::IntegrationTarget::Hermes => "hermes",
+        crate::api::schema::IntegrationTarget::Qodercli => "qodercli",
     }
 }
 
@@ -393,6 +430,7 @@ fn integration_target_command(target: crate::api::schema::IntegrationTarget) -> 
         crate::api::schema::IntegrationTarget::Codex => "codex",
         crate::api::schema::IntegrationTarget::Opencode => "opencode",
         crate::api::schema::IntegrationTarget::Hermes => "hermes",
+        crate::api::schema::IntegrationTarget::Qodercli => "qodercli",
     }
 }
 
@@ -466,7 +504,7 @@ fn integration_specs() -> [(
     crate::api::schema::IntegrationTarget,
     io::Result<PathBuf>,
     u32,
-); 6] {
+); 7] {
     [
         (
             crate::api::schema::IntegrationTarget::Pi,
@@ -497,6 +535,11 @@ fn integration_specs() -> [(
             crate::api::schema::IntegrationTarget::Hermes,
             hermes_plugin_dir().map(|dir| dir.join(HERMES_PLUGIN_INIT_INSTALL_NAME)),
             HERMES_INTEGRATION_VERSION,
+        ),
+        (
+            crate::api::schema::IntegrationTarget::Qodercli,
+            qodercli_dir().map(|dir| dir.join("hooks").join(QODERCLI_HOOK_INSTALL_NAME)),
+            QODERCLI_INTEGRATION_VERSION,
         ),
     ]
 }
@@ -1070,6 +1113,37 @@ pub(crate) fn uninstall_hermes() -> io::Result<HermesUninstallResult> {
     })
 }
 
+pub(crate) fn install_qodercli() -> io::Result<QodercliInstallPaths> {
+    let dir = qodercli_dir()?;
+    if !dir.is_dir() {
+        return Err(io::Error::other(format!(
+            "qodercli config directory not found at {}. install qodercli first",
+            dir.display()
+        )));
+    }
+
+    let hooks_dir = dir.join("hooks");
+    fs::create_dir_all(&hooks_dir)?;
+
+    let hook_path = hooks_dir.join(QODERCLI_HOOK_INSTALL_NAME);
+    fs::write(&hook_path, QODERCLI_HOOK_ASSET)?;
+    make_executable(&hook_path)?;
+
+    Ok(QodercliInstallPaths { hook_path })
+}
+
+pub(crate) fn uninstall_qodercli() -> io::Result<QodercliUninstallResult> {
+    let hook_path = qodercli_dir()?
+        .join("hooks")
+        .join(QODERCLI_HOOK_INSTALL_NAME);
+    let removed_hook_file = remove_file_if_exists(&hook_path)?;
+
+    Ok(QodercliUninstallResult {
+        hook_path,
+        removed_hook_file,
+    })
+}
+
 fn ensure_hooks_object<'a>(
     settings: &'a mut Value,
     settings_path: &Path,
@@ -1528,6 +1602,10 @@ fn hermes_plugin_dir() -> io::Result<PathBuf> {
         .join(HERMES_PLUGIN_INSTALL_NAME))
 }
 
+fn qodercli_dir() -> io::Result<PathBuf> {
+    config_dir_from_env_or_home(QODERCLI_CONFIG_DIR_ENV_VAR, &[".qoder"])
+}
+
 fn home_dir() -> io::Result<PathBuf> {
     std::env::var("HOME")
         .map(PathBuf::from)
@@ -1548,6 +1626,7 @@ mod tests {
         std::env::remove_var(PI_CODING_AGENT_DIR_ENV_VAR);
         std::env::remove_var(CLAUDE_CONFIG_DIR_ENV_VAR);
         std::env::remove_var(CODEX_HOME_ENV_VAR);
+        std::env::remove_var(QODERCLI_CONFIG_DIR_ENV_VAR);
     }
 
     fn unique_base() -> PathBuf {
@@ -2626,5 +2705,22 @@ mod tests {
         assert!(OPENCODE_PLUGIN_ASSET.contains("agent_session_id: sessionID"));
         assert!(HERMES_PLUGIN_INIT_ASSET.contains("session_id = _session_id(kwargs)"));
         assert!(HERMES_PLUGIN_INIT_ASSET.contains("agent_session_id"));
+    }
+
+    #[test]
+    fn install_qodercli_errors_when_config_dir_missing() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let missing = base.join(".qoder");
+        std::env::set_var(QODERCLI_CONFIG_DIR_ENV_VAR, &missing);
+
+        let err = install_qodercli().unwrap_err().to_string();
+        assert!(
+            err.contains("qodercli config directory not found"),
+            "unexpected error: {err}"
+        );
+
+        std::env::remove_var(QODERCLI_CONFIG_DIR_ENV_VAR);
+        let _ = fs::remove_dir_all(base);
     }
 }

@@ -102,11 +102,15 @@ fn parse_integration_target(
     action: &str,
 ) -> std::io::Result<Option<IntegrationTarget>> {
     let Some(target) = args.first().map(|arg| arg.as_str()) else {
-        eprintln!("usage: herdr integration {action} <pi|omp|claude|codex|opencode|hermes>");
+        eprintln!(
+            "usage: herdr integration {action} <pi|omp|claude|codex|opencode|hermes|qodercli>"
+        );
         return Ok(None);
     };
     if args.len() != 1 {
-        eprintln!("usage: herdr integration {action} <pi|omp|claude|codex|opencode|hermes>");
+        eprintln!(
+            "usage: herdr integration {action} <pi|omp|claude|codex|opencode|hermes|qodercli>"
+        );
         return Ok(None);
     }
 
@@ -117,9 +121,10 @@ fn parse_integration_target(
         "codex" => IntegrationTarget::Codex,
         "opencode" => IntegrationTarget::Opencode,
         "hermes" => IntegrationTarget::Hermes,
+        "qodercli" => IntegrationTarget::Qodercli,
         _ => {
             eprintln!("unknown integration target: {target}");
-            eprintln!("currently supported: pi, omp, claude, codex, opencode, hermes");
+            eprintln!("currently supported: pi, omp, claude, codex, opencode, hermes, qodercli");
             return Ok(None);
         }
     };
@@ -135,11 +140,13 @@ fn print_integration_help() {
     eprintln!("  herdr integration install codex");
     eprintln!("  herdr integration install opencode");
     eprintln!("  herdr integration install hermes");
+    eprintln!("  herdr integration install qodercli");
     eprintln!("  herdr integration uninstall pi");
     eprintln!("  herdr integration uninstall omp");
     eprintln!("  herdr integration uninstall claude");
     eprintln!("  herdr integration uninstall codex");
     eprintln!("  herdr integration uninstall opencode");
     eprintln!("  herdr integration uninstall hermes");
+    eprintln!("  herdr integration uninstall qodercli");
     eprintln!("  herdr integration status [--outdated-only]");
 }

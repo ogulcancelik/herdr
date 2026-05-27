@@ -510,6 +510,7 @@ pub enum IntegrationTarget {
     Codex,
     Opencode,
     Hermes,
+    Qodercli,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
