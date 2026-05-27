@@ -14,7 +14,6 @@ use crate::detect::AgentState;
 use crate::layout::PaneId;
 use crate::terminal::TerminalRuntimeRegistry;
 
-pub(crate) const MOBILE_WIDTH_THRESHOLD: u16 = 64;
 const SWITCH_BUTTON_WIDTH: u16 = 10;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -42,8 +41,8 @@ pub(crate) enum MobileSwitcherTarget {
     Menu(usize),
 }
 
-pub(crate) fn is_mobile_width(area: Rect) -> bool {
-    area.width > 0 && area.width <= MOBILE_WIDTH_THRESHOLD
+pub(crate) fn is_mobile_width(area: Rect, threshold: u16) -> bool {
+    area.width > 0 && area.width <= threshold
 }
 
 pub(crate) fn compute_mobile_header_hit_areas(_app: &AppState, area: Rect) -> MobileHeaderHitAreas {

@@ -3,8 +3,8 @@ use std::num::NonZeroUsize;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::{
-    BindingConfig, CommandKeybindConfig, SoundConfig, ThemeConfig, DEFAULT_MOUSE_SCROLL_LINES,
-    DEFAULT_SCROLLBACK_LIMIT_BYTES,
+    BindingConfig, CommandKeybindConfig, SoundConfig, ThemeConfig, DEFAULT_MOBILE_WIDTH_THRESHOLD,
+    DEFAULT_MOUSE_SCROLL_LINES, DEFAULT_SCROLLBACK_LIMIT_BYTES,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -259,6 +259,8 @@ pub struct UiConfig {
     pub sidebar_min_width: u16,
     /// Maximum sidebar width (columns) when expanded. Default: 36.
     pub sidebar_max_width: u16,
+    /// Terminal width at or below which Herdr uses the mobile single-column layout. Default: 64.
+    pub mobile_width_threshold: u16,
     /// Capture mouse input for Herdr's mouse UI. Default: true.
     pub mouse_capture: bool,
     /// Force a full host-terminal redraw when the outer terminal regains focus. Default: true.
@@ -420,6 +422,7 @@ impl Default for UiConfig {
             sidebar_width: 26,
             sidebar_min_width: 18,
             sidebar_max_width: 36,
+            mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
             mouse_capture: true,
             redraw_on_focus_gained: true,
             mouse_scroll_lines: None,
@@ -642,15 +645,21 @@ cjk_ime_agents = ["claude", "codex"]
         let default_config = Config::default();
         assert_eq!(default_config.ui.sidebar_min_width, 18);
         assert_eq!(default_config.ui.sidebar_max_width, 36);
+        assert_eq!(
+            default_config.ui.mobile_width_threshold,
+            DEFAULT_MOBILE_WIDTH_THRESHOLD
+        );
 
         let toml = r#"
 [ui]
 sidebar_min_width = 12
 sidebar_max_width = 80
+mobile_width_threshold = 96
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.ui.sidebar_min_width, 12);
         assert_eq!(config.ui.sidebar_max_width, 80);
+        assert_eq!(config.ui.mobile_width_threshold, 96);
     }
 
     #[test]
