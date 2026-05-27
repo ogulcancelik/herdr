@@ -114,6 +114,7 @@ export default defineConfig({
             { label: 'Integrations', slug: 'docs/integrations' },
             { label: 'Configuration', slug: 'docs/configuration' },
             { label: 'Persistence and remote access', slug: 'docs/persistence-remote' },
+            { label: 'Session state and restore', slug: 'docs/session-state' },
           ],
         },
         {

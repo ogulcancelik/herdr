@@ -14,9 +14,11 @@ herdr                         # launch or attach to the default session
 herdr --session work          # launch or attach to a named session
 herdr --remote workbox        # attach through SSH, using local keybindings
 herdr --remote workbox --remote-keybindings server
+herdr --remote workbox --handoff
 herdr --no-session            # single-process escape hatch
 herdr --default-config        # print default config
 herdr update                  # download and install the latest version
+herdr update --handoff        # opt into live handoff for supported running servers
 herdr --version               # print version
 ```
 
@@ -130,6 +132,24 @@ herdr pane report-agent <pane_id> \
   [--seq N]
 ```
 
+Report display-only pane metadata without taking over semantic state:
+
+```bash
+herdr pane report-metadata <pane_id> \
+  --source ID \
+  [--agent LABEL] \
+  [--applies-to-source ID] \
+  [--title TEXT|--clear-title] \
+  [--display-agent TEXT|--clear-display-agent] \
+  [--custom-status TEXT|--clear-custom-status] \
+  [--state-label STATUS=TEXT] \
+  [--clear-state-labels] \
+  [--seq N] \
+  [--ttl-ms N]
+```
+
+`STATUS` is one of `idle`, `working`, `blocked`, `done`, or `unknown`. `--agent` is a guard for the authoritative agent label. `--applies-to-source` is a guard for the active lifecycle authority source. Use `--display-agent` to change the visible name.
+
 ## Agents
 
 ```bash
@@ -183,12 +203,14 @@ herdr integration install claude
 herdr integration install codex
 herdr integration install opencode
 herdr integration install hermes
+herdr integration install qodercli
 herdr integration uninstall pi
 herdr integration uninstall omp
 herdr integration uninstall claude
 herdr integration uninstall codex
 herdr integration uninstall opencode
 herdr integration uninstall hermes
+herdr integration uninstall qodercli
 herdr integration status [--outdated-only]
 ```
 

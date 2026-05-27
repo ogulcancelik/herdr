@@ -91,10 +91,13 @@ A small keybinding override looks like this:
 ```toml
 [keys]
 prefix = "ctrl+b"
+goto = "prefix+g"
 new_tab = "prefix+c"
 next_tab = "prefix+n"
 previous_tab = "prefix+p"
 focus_pane_left = "prefix+h"
+navigate_workspace_down = "j"
+navigate_pane_down = "ctrl+j"
 split_horizontal = "prefix+minus"
 ```
 
@@ -104,10 +107,17 @@ The default keymap is prefix-first and avoids direct shortcuts that can steal in
 [keys]
 detach = "prefix+q"
 workspace_picker = "prefix+w"
+goto = "prefix+g"
 new_workspace = "prefix+shift+n"
 new_worktree = "prefix+shift+g"
 rename_workspace = "prefix+shift+w"
 close_workspace = "prefix+shift+d"
+navigate_workspace_up = "up"
+navigate_workspace_down = "down"
+navigate_pane_left = "h"
+navigate_pane_down = "j"
+navigate_pane_up = "k"
+navigate_pane_right = "l"
 new_tab = "prefix+c"
 previous_tab = "prefix+p"
 next_tab = "prefix+n"
@@ -118,6 +128,9 @@ focus_pane_left = "prefix+h"
 focus_pane_down = "prefix+j"
 focus_pane_up = "prefix+k"
 focus_pane_right = "prefix+l"
+cycle_pane_next = "prefix+tab"
+cycle_pane_previous = "prefix+shift+tab"
+last_pane = ""
 split_vertical = "prefix+v"
 split_horizontal = "prefix+minus"
 close_pane = "prefix+x"
@@ -132,12 +145,15 @@ Optional actions are unset by default. Bind them with `prefix+` for prefix-mode 
 [keys]
 previous_workspace = "prefix+shift+left"
 next_workspace = "prefix+shift+right"
+last_pane = "prefix+tab"
 open_worktree = "prefix+shift+o"
 remove_worktree = "prefix+alt+d"
 next_tab = ["prefix+n", "ctrl+alt+]"]
 ```
 
-Key strings accept plain keys, modifier combinations such as `ctrl+a`, `shift+n`, `alt+1`, `cmd+k`, and special keys such as `enter`, `tab`, `esc`, `left`, `right`, `up`, and `down`. Named punctuation such as `minus`, `comma`, `ampersand`, `plus`, and `backtick` is also accepted. Plain direct printable keys such as `n` are unsafe because they intercept typing; use `prefix+n` unless you intentionally want a direct binding. Alt, Cmd/Super, and punctuation with modifiers depend on your terminal and tmux settings.
+`last_pane` switches back to the last focused pane across workspaces and tabs. It is unset by default because the tmux-style pane binding `prefix+l` is already used for pane-right focus.
+
+Key strings accept plain keys, modifier combinations such as `ctrl+a`, `shift+n`, `alt+1`, `cmd+k`, and special keys such as `enter`, `tab`, `esc`, `left`, `right`, `up`, and `down`. Named punctuation such as `minus`, `comma`, `ampersand`, `plus`, and `backtick` is also accepted. Plain direct printable keys such as `n` are unsafe because they intercept typing; use `prefix+n` unless you intentionally want a direct binding. The `navigate_workspace_*` and `navigate_pane_*` fields are navigate-mode-only and may use plain keys such as `j` or `k`; they must not use `prefix+`, `esc`, `enter`, `tab`, `shift+tab`, `left`, `right`, or unmodified `1` through `9`. Left and right arrows are permanent aliases for pane-left and pane-right navigation. These navigate-mode shortcuts are independent from general action bindings such as `focus_pane_down = "prefix+j"`; when both use the same key, the navigate-mode shortcut wins while navigate mode is open. Alt, Cmd/Super, and punctuation with modifiers depend on your terminal and tmux settings.
 
 If you have old custom keybindings and want the new defaults, run `herdr config reset-keys`. Herdr backs up `config.toml`, removes `[keys]` and `[[keys.command]]`, and uses built-in v2 defaults after restart or `herdr server reload-config`.
 
@@ -160,7 +176,7 @@ Custom commands use the same keybinding syntax.
 
 ```toml
 [[keys.command]]
-key = "prefix+g"
+key = "prefix+alt+g"
 type = "pane"
 command = "lazygit"
 ```
@@ -211,7 +227,9 @@ Common options:
 sidebar_width = 32
 sidebar_min_width = 18
 sidebar_max_width = 36
+mobile_width_threshold = 64
 mouse_capture = true
+redraw_on_focus_gained = true
 mouse_scroll_lines = 3
 confirm_close = true
 prompt_new_tab_name = true
@@ -222,11 +240,15 @@ accent = "cyan"
 
 `sidebar_min_width` and `sidebar_max_width` control the expanded sidebar's resize bounds in columns. The defaults are 18 and 36.
 
+`mobile_width_threshold` controls the terminal width at or below which Herdr uses the mobile single-column layout. The default is 64 columns; increase it for foldables, tablets, or wide phone terminals.
+
 `agent_panel_scope` can be `all` or `current`. Use `current` if you only want the agent panel to show agents in the active workspace.
 
 `confirm_close` controls whether closing a workspace asks for confirmation. `prompt_new_tab_name` controls whether new tabs ask for a label first.
 
-Set `mouse_capture = false` if you want your terminal to handle normal clicks, such as command-clicking URLs.
+Set `mouse_capture = false` if you want your terminal to handle normal clicks, such as command-clicking URLs. With mouse capture enabled, Ctrl-click opens pane links when your terminal sends that modified click to Herdr; use Shift-Ctrl-click on Linux or Shift-Cmd-click on macOS for the terminal-native bypass path.
+
+Set `redraw_on_focus_gained = false` to avoid the visible full-screen refresh when switching back to Herdr. The default is `true` because a full redraw recovers from rare stale or dirty host terminal surfaces.
 
 Set `mouse_scroll_lines` to change how many pane scrollback lines each mouse wheel notch scrolls. The default is 3. Pane apps that request mouse reporting still receive wheel events directly.
 
@@ -262,7 +284,7 @@ enabled = true
 
 Herdr plays a done sound when an agent finishes and an attention sound when an agent needs input. Set `enabled = false` on shared machines or remote servers unless you explicitly want audio.
 
-On macOS, Herdr uses `afplay`. On Linux, Herdr tries `paplay`, then `aplay`. If no player is available, sound playback is skipped and Herdr logs a warning.
+On macOS, Herdr uses `afplay`. On Linux, Herdr tries mp3-capable players in order: `paplay`, `pw-play`, `ffplay`, `mpg123`, then `mpv`. If no player is available, sound playback is skipped and Herdr logs a warning.
 
 Custom sounds must be mp3 files. Relative paths are resolved from the config file's directory.
 
@@ -294,6 +316,23 @@ scrollback_limit_bytes = 10485760
 
 Existing panes keep their current buffer until they are recreated.
 
+## Pane screen history
+
+By default, full session restart restores workspaces, tabs, panes, cwd, layout, and focus without saving pane contents.
+
+Pane screen history is off by default. Pane output can include secrets, tokens, prompts, and command output, so enable it only when you want Herdr to save recent pane contents across full server restarts:
+
+```toml
+[experimental]
+pane_history = true
+```
+
+You can also toggle it from Settings > Experiments > pane screen history.
+
+When enabled, Herdr stores saved pane history in `session-history.json` next to `session.json`.
+
+For how pane screen history differs from live persistence, snapshot restore, native agent session restore, and live handoff, see [Session state and restore](/docs/session-state/).
+
 ## Nested launches
 
 Herdr normally protects you from launching Herdr inside Herdr.
@@ -316,6 +355,21 @@ kitty_graphics = false
 
 Leave this off unless you are testing terminal image behavior.
 
+## Agent session restore
+
+Herdr can restart supported agent panes in their native conversation sessions after a Herdr server restart.
+
+```toml
+[session]
+resume_agents_on_restore = false
+```
+
+When enabled, Herdr only resumes panes that reported a native session reference through an official Herdr integration. Supported resume targets are Claude Code, Codex, Pi, Hermes Agent, and OpenCode. Unsupported, missing, invalid, duplicated, or stale session references restore as a normal shell in the saved pane directory.
+
+Session references are stored in the local Herdr session snapshot. They are not shown in normal pane, agent, status, or event output.
+
+For how native agent session restore differs from pane screen history and live handoff, see [Session state and restore](/docs/session-state/).
+
 ## IME cursor tracking
 
 When the focused pane hides its cursor and paints its own — common in AI-agent TUIs like Claude Code, pi, and codex — macOS native input methods stop tracking the candidate window position because the outer terminal stops reporting the cursor.
@@ -331,7 +385,7 @@ cjk_ime_cursor_shape = "steady_block"
 
 When enabled, the cursor stays visible at the focused pane's reported position. If the pane reports no cursor position, the anchor falls back to the pane's top-left so a stable IME hint is always available.
 
-`cjk_ime_agents` is an optional allow-list. When empty, the reveal applies to any focused pane. When non-empty, the reveal only applies if the focused pane's detected agent matches one of the listed names — useful to enable the reveal only for AI-agent TUIs that paint their own cursor while leaving plain shells untouched. Accepted names: `pi`, `claude`, `codex`, `gemini`, `cursor`, `agy`, `cline`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`. Unknown names are ignored; if the list contains no valid names, the reveal does not apply.
+`cjk_ime_agents` is an optional allow-list. When empty, the reveal applies to any focused pane. When non-empty, the reveal only applies if the focused pane's detected agent matches one of the listed names — useful to enable the reveal only for AI-agent TUIs that paint their own cursor while leaving plain shells untouched. Accepted names: `pi`, `claude`, `codex`, `gemini`, `cursor`, `agy`, `cline`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`, `qodercli`, and `qoder`. Unknown names are ignored; if the list contains no valid names, the reveal does not apply.
 
 `cjk_ime_cursor_shape` controls the DECSCUSR shape rendered for the IME anchor. Accepted values: `block`, `steady_block` (default), `underline`, `steady_underline`, `bar`, `steady_bar`.
 

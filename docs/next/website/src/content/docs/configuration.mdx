@@ -284,7 +284,7 @@ enabled = true
 
 Herdr plays a done sound when an agent finishes and an attention sound when an agent needs input. Set `enabled = false` on shared machines or remote servers unless you explicitly want audio.
 
-On macOS, Herdr uses `afplay`. On Linux, Herdr tries `paplay`, then `aplay`. If no player is available, sound playback is skipped and Herdr logs a warning.
+On macOS, Herdr uses `afplay`. On Linux, Herdr tries mp3-capable players in order: `paplay`, `pw-play`, `ffplay`, `mpg123`, then `mpv`. If no player is available, sound playback is skipped and Herdr logs a warning.
 
 Custom sounds must be mp3 files. Relative paths are resolved from the config file's directory.
 

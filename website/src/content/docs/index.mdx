@@ -5,7 +5,7 @@ template: splash
 hero:
   tagline: "One terminal for the whole herd: real panes, persistent sessions, SSH attach, state awareness, and CLI/socket orchestration."
   image:
-    html: '<span class="docs-hero-logo" aria-hidden="true"></span>'
+    file: ../../../public/assets/logo.svg
   actions:
     - text: Install Herdr
       link: /docs/install/
@@ -17,11 +17,6 @@ hero:
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
 Herdr is a terminal-native agent runtime and multiplexer. It gives the whole herd persistent terminal workspaces with panes, tabs, mouse control, state awareness, and an API that agents can use themselves.
-
-```bash
-brew install herdr
-herdr
-```
 
 ```bash
 curl -fsSL https://herdr.dev/install.sh | sh
@@ -50,6 +45,11 @@ herdr
     See supported agents, detection behavior, integrations, custom labels, and direct attach.
 
     [Understand agents →](/docs/agents/)
+  </Card>
+  <Card title="Session state">
+    Understand detach, restart restore, pane history replay, native agent resume, and live handoff.
+
+    [Compare state paths →](/docs/session-state/)
   </Card>
   <Card title="Configuration">
     Configure keybindings, themes, sidebar behavior, notifications, scrollback, and advanced options.

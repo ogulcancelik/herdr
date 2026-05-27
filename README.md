@@ -41,7 +41,9 @@ herdr notifies you when a new version is available. run manually to update:
 herdr update
 ```
 
-`herdr update` is disabled for Homebrew and Nix installs. Update those through `brew upgrade herdr` or your Nix workflow.
+By default, updating installs the new binary and leaves compatible running sessions alone, or asks before stopping sessions that must restart. To opt into live server handoff for supported running sessions, run `herdr update --handoff`.
+
+`herdr update` is disabled for Homebrew and Nix installs. Update those through `brew upgrade herdr` or your Nix workflow; live handoff does not apply to package-manager updates.
 
 ## quick start
 
@@ -89,6 +91,8 @@ tmux gives you persistence and panes, but it was built before agents existed. gu
 
 start herdr where the work lives. locally, run `herdr`. it starts or attaches to the background session automatically, with no socket setup. run your agents, split panes, do your work. press `ctrl+b q` to detach. close your terminal, close your laptop; your agents keep running. open a new terminal, run `herdr`, you're back. same session, same panes, same agents.
 
+if you stop the server and later start herdr again, herdr restores the saved session shape. pane screen history, native agent session restore, and live handoff cover different restart/update cases; see [session state and restore](https://herdr.dev/docs/session-state/).
+
 ### from anywhere
 
 need to check on your agents from your phone? just ssh in and run herdr. your shell is remote, herdr runs there, and the panes keep running there after detach. any ssh client works. no app to download, no account to create.
@@ -98,7 +102,7 @@ ssh you@yourserver
 herdr
 ```
 
-or attach from your local terminal through ssh without opening a shell first. your local herdr acts as a thin client, connects over ssh, starts or attaches to the remote herdr server, and streams the ui back to your terminal. remote attach uses your local keybindings by default; pass `--remote-keybindings server` to use the remote server config instead.
+or attach from your local terminal through ssh without opening a shell first. your local herdr acts as a thin client, connects over ssh, starts or attaches to the remote herdr server, and streams the ui back to your terminal. remote attach uses your local keybindings by default; pass `--remote-keybindings server` to use the remote server config instead. pass `--handoff` to opt into live handoff if remote attach needs to replace a supported running remote server. Homebrew and Nix clients bootstrap remote hosts from the matching release asset instead of copying the package-manager-managed local binary.
 
 ```bash
 herdr --remote workbox
@@ -120,7 +124,7 @@ same session, same agents, same state.
 
 `herdr` and `herdr --remote` attach to the full herdr session ui. `herdr agent attach <target>` attaches your current terminal directly to one server-owned terminal, like a single-pane terminal attach. `herdr terminal attach <terminal_id>` does the same by terminal id.
 
-direct attach streams the current rendered terminal state first, then live ansi frames. your input goes straight to that terminal. detach with `ctrl+b q`; send a literal `ctrl+b` with `ctrl+b ctrl+b`. one writable client owns input and resize for a terminal. a second attach fails unless you pass `--takeover`.
+direct attach streams the current rendered terminal state first, then live ansi frames. your input goes straight to that terminal. scroll with the mouse wheel or plain page up/page down; normal input jumps back to the bottom. detach with `ctrl+b q`; send a literal `ctrl+b` with `ctrl+b ctrl+b`. one writable client owns input and resize for a terminal. a second attach fails unless you pass `--takeover`.
 
 ## agent awareness
 
@@ -143,10 +147,10 @@ not a gui window, not a web dashboard, not electron. herdr runs inside whatever 
 
 - **workspaces** — organized around git repos or folder names, each with its own tabs and panes
 - **tabs** — first-class in the socket api and cli
-- **mouse-native** — click panes/tabs/workspaces/agents, drag borders, select text to copy, right-click menus; not keyboard-only
+- **mouse-native** — click panes/tabs/workspaces/agents, drag borders, drag-select text to copy, double-click tokens to copy, right-click menus; not keyboard-only
 - **notifications** — sounds and toasts for background events; tab-aware suppression
 - **18 built-in themes** — catppuccin, terminal, tokyo night, gruvbox, one, solarized, kanagawa, rosé pine, vesper, and light variants for the main palettes
-- **session persistence** — pane processes survive client detach; sessions restore after full restart
+- **session persistence** — pane processes survive client detach; sessions restore panes after full restart, with opt-in recent screen history
 
 ## agents can use herdr too
 
@@ -191,6 +195,7 @@ automatic detection works out of the box. process name matching plus terminal ou
 | antigravity cli | ✓ | ✓ | ✓ |
 | kimi code cli | ✓ | ✓ | ✓ |
 | [github copilot cli](https://github.com/features/copilot) | ✓ | ✓ | ✓ |
+| qoder cli | ✓ | ✓ | ✓ |
 | [kiro cli](https://kiro.dev/docs/cli/) | ✓ | ✓ | — |
 
 detected but not fully tested: gemini cli, cline.
@@ -199,7 +204,7 @@ for agents outside the built-in list, herdr still works as a terminal multiplexe
 
 ### direct integrations
 
-the built-in pi, omp, claude code, codex, opencode, and hermes integrations forward semantic state to herdr over the socket api. install with:
+the built-in pi, omp, claude code, codex, opencode, hermes, and qoder cli integrations forward semantic state to herdr over the socket api. install with:
 
 ```bash
 herdr integration install pi
@@ -208,6 +213,7 @@ herdr integration install claude
 herdr integration install codex
 herdr integration install opencode
 herdr integration install hermes
+herdr integration install qodercli
 ```
 
 see the [integrations docs](https://herdr.dev/docs/integrations/) for setup details.
@@ -222,6 +228,7 @@ press `ctrl+b` to enter prefix mode. default actions are prefix-first and tmux-l
 | `prefix+n` / `prefix+p` | next / previous tab |
 | `prefix+1..9` | switch tab |
 | `prefix+w` | workspace navigation |
+| `prefix+g` | session navigator |
 | `prefix+shift+n` | new workspace |
 | `prefix+shift+g` | new worktree |
 | `prefix+shift+w` | rename workspace |
@@ -236,11 +243,15 @@ press `ctrl+b` to enter prefix mode. default actions are prefix-first and tmux-l
 
 resize mode: `h`/`l` resize width, `j`/`k` resize height, `esc` exit.
 
+session navigator opens a searchable workspace, tab, and pane tree. use `/` for text search, `b`/`w`/`i`/`d` for blocked, working, idle, and done filters, `a` or backspace to clear a state filter, and enter to switch to the highlighted row.
+
+last-pane is available but unset by default. bind `last_pane` in `[keys]` if you want tmux-style back-and-forth navigation to the last focused pane across workspaces and tabs; for example, `last_pane = "prefix+tab"`.
+
 custom command keybindings can launch detached shell helpers or temporary panes:
 
 ```toml
 [[keys.command]]
-key = "prefix+g"
+key = "prefix+alt+g"
 type = "pane" # "shell" or "pane"
 command = "lazygit"
 ```
@@ -286,7 +297,7 @@ full logging and environment variable details: [configuration docs](https://herd
 ## docs
 
 - [configuration](https://herdr.dev/docs/configuration/) — keybindings, themes, notifications, environment variables
-- [integrations](https://herdr.dev/docs/integrations/) — pi, omp, claude code, codex, opencode, hermes integrations
+- [integrations](https://herdr.dev/docs/integrations/) — pi, omp, claude code, codex, opencode, hermes, qoder cli integrations
 - [`SKILL.md`](./SKILL.md) — reusable agent skill
 - [socket api](https://herdr.dev/docs/socket-api/) — socket protocol and cli reference
 

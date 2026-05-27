@@ -15,7 +15,7 @@ For the local, SSH, and `herdr --remote` workflows, see [How to work with Herdr]
 
 ## Create a workspace
 
-Press `n` to create a workspace. A workspace is a project-level container for tabs, panes, and agents.
+Press `prefix+shift+n` to create a workspace. A workspace is a project-level container for tabs, panes, and agents.
 
 Give each active project its own workspace. This keeps agent state readable in the sidebar.
 
@@ -49,7 +49,9 @@ After detaching, run `herdr` again to reattach to the same session.
 
 ## Use the mouse
 
-Herdr is mouse-native. You can click panes, tabs, workspaces, and agents; drag borders; select text; and use right-click menus.
+Herdr is mouse-native. You can click panes, tabs, workspaces, and agents; drag borders; drag-select text to copy it to your clipboard; double-click a token to copy it directly; and use right-click menus. Copying does not require Ctrl+C.
+
+Ctrl-click opens pane links when your terminal sends the modified click to Herdr. This works for OSC 8 hyperlinks and visible `http://` or `https://` URLs. The portable terminal-native fallback is Shift-Ctrl-click on Linux or Shift-Cmd-click on macOS.
 
 ## Manage named sessions
 

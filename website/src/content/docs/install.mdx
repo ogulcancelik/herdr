@@ -7,19 +7,21 @@ Herdr ships as a single binary for Linux and macOS.
 
 ## Install
 
-Install with Homebrew:
-
-```bash
-brew install herdr
-```
-
-Or run the installer:
+Run the installer:
 
 ```bash
 curl -fsSL https://herdr.dev/install.sh | sh
 ```
 
 The installer downloads the right release binary for your platform and places it on your PATH.
+
+## Install with Homebrew
+
+If you already use Homebrew:
+
+```bash
+brew install herdr
+```
 
 ## Verify
 
@@ -33,13 +35,21 @@ If your shell cannot find `herdr`, restart the terminal or check that the instal
 
 ## Update
 
-Herdr checks for new releases and notifies you in the app. Direct installs can update manually:
+Herdr checks for new releases and notifies you in the app. You can update manually:
 
 ```bash
 herdr update
 ```
 
-`herdr update` is disabled for Homebrew and Nix installs. Update those through `brew upgrade herdr` or your Nix workflow.
+`herdr update` is for installs managed by Herdr's own installer. Homebrew and Nix installs are updated through those package managers instead.
+
+By default, `herdr update` installs the new binary and leaves compatible running sessions alone, or asks before stopping sessions that must restart. To opt into live server handoff for supported running sessions, run:
+
+```bash
+herdr update --handoff
+```
+
+Live handoff does not apply to Homebrew or Nix package-manager updates. For those installs, update with the package manager, then restart any running Herdr servers that need the new binary.
 
 ## Install with Nix
 

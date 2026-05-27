@@ -147,7 +147,7 @@ not a gui window, not a web dashboard, not electron. herdr runs inside whatever 
 
 - **workspaces** — organized around git repos or folder names, each with its own tabs and panes
 - **tabs** — first-class in the socket api and cli
-- **mouse-native** — click panes/tabs/workspaces/agents, drag borders, select text to copy, right-click menus; not keyboard-only
+- **mouse-native** — click panes/tabs/workspaces/agents, drag borders, drag-select text to copy, double-click tokens to copy, right-click menus; not keyboard-only
 - **notifications** — sounds and toasts for background events; tab-aware suppression
 - **18 built-in themes** — catppuccin, terminal, tokyo night, gruvbox, one, solarized, kanagawa, rosé pine, vesper, and light variants for the main palettes
 - **session persistence** — pane processes survive client detach; sessions restore panes after full restart, with opt-in recent screen history

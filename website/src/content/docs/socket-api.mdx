@@ -73,7 +73,7 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.close` |
-| Pane | `pane.split`, `pane.list`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.list`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.send`, `agent.rename`, `agent.focus`, `agent.start` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
@@ -162,6 +162,32 @@ Integrations report agent state with `pane.report_agent`.
 `state` is semantic. It affects waits, notifications, and rollups.
 
 `custom_status` is visual. It can show a short label like `indexing` without changing semantic behavior.
+
+Use `pane.report_metadata` when a user hook wants to customize presentation without taking over lifecycle state from a Herdr integration.
+
+```json
+{
+  "id": "req_2",
+  "method": "pane.report_metadata",
+  "params": {
+    "pane_id": "1-1",
+    "source": "user:claude-title",
+    "agent": "claude",
+    "applies_to_source": "herdr:claude",
+    "title": "Refactor auth middleware",
+    "display_agent": "Claude: auth",
+    "custom_status": "refactor auth",
+    "state_labels": {
+      "working": "refactoring auth",
+      "idle": "ready",
+      "done": "review ready"
+    },
+    "ttl_ms": 3600000
+  }
+}
+```
+
+Metadata reports are display-only. Valid metadata can override the pane title, displayed agent name, compact custom status, and visible state labels. `working`, `blocked`, `idle`, waits, notifications, session restore, and rollups still come from the active agent state report. `agent` is an optional guard for the authoritative agent label; `applies_to_source` is an optional guard for the active lifecycle authority source. Use `display_agent` to change the visible name. `state_labels` keys must be `idle`, `working`, `blocked`, `done`, or `unknown`. Use clear fields such as `clear_custom_status: true` with the same `source` to remove one presentation override.
 
 ## Event subscriptions
 

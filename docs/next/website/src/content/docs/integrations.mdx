@@ -47,7 +47,7 @@ Integrations enrich state reporting. They do not replace process detection.
 
 Some integrations also report native agent session references. If `[session] resume_agents_on_restore = true` is enabled, Herdr uses official session references to resume Claude Code, Codex, Pi, Hermes Agent, and OpenCode panes after a Herdr server restart.
 
-Native session restore requires current Herdr integrations: Pi integration version `2`, Claude Code version `4`, Codex version `4`, OpenCode version `2`, or Hermes Agent version `2`. OMP integration version `1` reports agent state only. Check installed versions with `herdr integration status`.
+Native session restore requires current Herdr integrations: Pi integration version `2`, Claude Code version `4`, Codex version `4`, OpenCode version `2`, or Hermes Agent version `2`. OMP integration version `2` reports agent state only. Check installed versions with `herdr integration status`.
 
 ## Pi
 
@@ -169,7 +169,7 @@ herdr pane report-metadata "$HERDR_PANE_ID" \
   --title "Refactor auth middleware" \
   --display-agent "Claude: auth" \
   --custom-status "refactor auth" \
-  --state-label working="deep in the mines" \
+  --state-label working="refactoring auth" \
   --ttl-ms 3600000
 ```
 

@@ -1,6 +1,6 @@
 ---
 title: Integrations
-description: Install Herdr integrations for Pi, OMP, Claude Code, Codex, OpenCode, and Hermes Agent.
+description: Install Herdr integrations for Pi, OMP, Claude Code, Codex, OpenCode, Hermes Agent, and Qoder CLI.
 ---
 
 Herdr detects supported agents automatically. Integrations make that detection more precise by reporting semantic state directly to Herdr.
@@ -18,6 +18,7 @@ herdr integration install claude
 herdr integration install codex
 herdr integration install opencode
 herdr integration install hermes
+herdr integration install qodercli
 ```
 
 ## Uninstall integrations
@@ -29,6 +30,7 @@ herdr integration uninstall claude
 herdr integration uninstall codex
 herdr integration uninstall opencode
 herdr integration uninstall hermes
+herdr integration uninstall qodercli
 ```
 
 ## How Herdr uses integrations
@@ -42,6 +44,10 @@ Herdr combines three signals:
 | Screen heuristics | Fills gaps when hooks are unavailable or incomplete. |
 
 Integrations enrich state reporting. They do not replace process detection.
+
+Some integrations also report native agent session references. If `[session] resume_agents_on_restore = true` is enabled, Herdr uses official session references to resume Claude Code, Codex, Pi, Hermes Agent, and OpenCode panes after a Herdr server restart.
+
+Native session restore requires current Herdr integrations: Pi integration version `2`, Claude Code version `4`, Codex version `4`, OpenCode version `2`, or Hermes Agent version `2`. OMP integration version `2` reports agent state only. Check installed versions with `herdr integration status`.
 
 ## Pi
 
@@ -111,7 +117,7 @@ herdr integration install opencode
 
 Herdr writes the plugin to `~/.config/opencode/plugins/herdr-agent-state.js`. The OpenCode config directory must already exist. Uninstall removes only that plugin file.
 
-The plugin reports semantic state while OpenCode runs inside a Herdr pane.
+The plugin reports semantic state while OpenCode runs inside a Herdr pane. After OpenCode emits a session-bearing event, Herdr can use the reported session id to resume the pane with `opencode --session <id>`.
 
 ## Hermes Agent
 
@@ -123,7 +129,21 @@ herdr integration install hermes
 
 Herdr writes `~/.hermes/plugins/herdr-agent-state/` and enables `herdr-agent-state` in `~/.hermes/config.yaml`. The Hermes config directory must already exist. Restart Hermes after installing so the plugin loads. Uninstall removes the plugin directory and removes `herdr-agent-state` from `plugins.enabled`.
 
-The plugin reports lifecycle, tool, and approval state while Hermes runs inside a Herdr pane. Native screen heuristics remain available when the plugin is not installed.
+The plugin reports lifecycle, tool, approval state, and session id while Hermes runs inside a Herdr pane. Herdr can use the reported session id to resume the pane with `hermes --resume <id>`. Native screen heuristics remain available when the plugin is not installed.
+
+## Qoder CLI
+
+Install the Qoder CLI hook:
+
+```bash
+herdr integration install qodercli
+```
+
+The hook reports semantic state to Herdr when Qoder CLI emits lifecycle events.
+
+Herdr uses `~/.qoder` by default, or `QODER_CONFIG_DIR` when set. The Qoder config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and updates `settings.json` with Herdr hook entries. Uninstall removes the matching hook entries and deletes the hook script.
+
+Native screen heuristics remain available when the hook is not installed.
 
 ## Custom status labels
 
@@ -139,7 +159,21 @@ herdr pane report-agent 1-1 \
   --custom-status indexing
 ```
 
-Custom status is visual-only. Waits, notifications, and workspace rollups still use the semantic state.
+User hooks that run next to a Herdr-managed integration should use metadata instead of `report-agent`. Metadata changes presentation without taking over the integration's `idle`, `working`, `blocked`, or session restore authority. `--agent` guards the report so it only applies while that authoritative agent is active. `--applies-to-source` guards the report so it only applies while that lifecycle authority source is active. `--display-agent` changes the visible name.
+
+```bash
+herdr pane report-metadata "$HERDR_PANE_ID" \
+  --source user:claude-title \
+  --agent claude \
+  --applies-to-source herdr:claude \
+  --title "Refactor auth middleware" \
+  --display-agent "Claude: auth" \
+  --custom-status "refactor auth" \
+  --state-label working="refactoring auth" \
+  --ttl-ms 3600000
+```
+
+Custom status and state labels are visual-only. Waits, notifications, and workspace rollups still use the semantic state.
 
 ## Debug integration state
 
