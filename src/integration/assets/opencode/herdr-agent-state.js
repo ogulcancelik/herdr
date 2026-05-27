@@ -2,7 +2,7 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=opencode
-// HERDR_INTEGRATION_VERSION=3
+// HERDR_INTEGRATION_VERSION=4
 
 import net from "node:net";
 
@@ -71,6 +71,34 @@ function reportState(action, sessionID) {
   });
 }
 
+function releaseSync() {
+  const paneId = process.env.HERDR_PANE_ID;
+  const socketPath = process.env.HERDR_SOCKET_PATH;
+  if (!paneId || !socketPath) return;
+
+  const request = {
+    id: `${SOURCE}:${Date.now()}:${Math.floor(Math.random() * 1_000_000).toString().padStart(6, "0")}`,
+    method: "pane.release_agent",
+    params: {
+      pane_id: paneId,
+      source: SOURCE,
+      agent: "opencode",
+      seq: nextReportSeq(),
+    },
+  };
+
+  try {
+    const client = net.createConnection(socketPath, () => {
+      client.write(`${JSON.stringify(request)}\n`);
+      client.end();
+    });
+    client.unref();
+    client.on("error", () => {});
+  } catch {
+    // process is shutting down — best effort only
+  }
+}
+
 export const HerdrAgentStatePlugin = async () => {
   if (
     process.env.HERDR_ENV !== "1" ||
@@ -79,6 +107,12 @@ export const HerdrAgentStatePlugin = async () => {
   ) {
     return {};
   }
+
+  process.on("beforeExit", releaseSync);
+  process.on("SIGINT", () => { releaseSync(); process.exit(128 + 2); });
+  process.on("SIGTERM", () => { releaseSync(); process.exit(128 + 15); });
+  process.on("SIGHUP", () => { releaseSync(); process.exit(128 + 1); });
+  process.on("SIGQUIT", () => { releaseSync(); process.exit(128 + 3); });
 
   return {
     event: async ({ event }) => {
