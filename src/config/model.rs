@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -282,6 +283,201 @@ pub struct UiConfig {
     pub toast: ToastConfig,
     /// Play sounds when agents change state in background workspaces.
     pub sound: SoundConfig,
+    /// tmux-style status bar (opt-in). See [`StatusBarConfig`].
+    pub status_bar: StatusBarConfig,
+}
+
+/// Where the status bar is drawn relative to the terminal/pane area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusBarPosition {
+    Top,
+    #[default]
+    Bottom,
+}
+
+/// tmux-compatible status bar configuration.
+///
+/// Layer A (default) binds to herdr state that already exists (`agent_state`,
+/// `session_name`, `pane_title`). Layer B (`tmux_compat`) additionally enables
+/// OSC-title capture and the `window_activity` timestamp, which touch shared
+/// hot paths; it is off by default. Format strings use the tmux mini-language
+/// (`#{...}`, `#[...]`, `#(...)`). See `docs/plans/tmux-status-bar.md`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct StatusBarConfig {
+    /// Master switch. Default: false (fully inert when off).
+    pub enabled: bool,
+    /// Enable literal-parity data sources (OSC title capture + `window_activity`
+    /// timestamp). Touches per-pane hot paths. Default: false.
+    pub tmux_compat: bool,
+    /// Bar position. Default: bottom.
+    pub position: StatusBarPosition,
+    /// `status-style`: base style for the whole bar.
+    pub style: String,
+    /// `status-left`.
+    pub left: String,
+    /// `status-right`.
+    pub right: String,
+    /// `window-status-current-format`: the focused/attached pane's segment.
+    pub window_current_format: String,
+    /// `window-status-format`: non-focused panes (full-TUI multi-pane only).
+    pub window_format: String,
+    /// `status-left-length` (0 = unlimited).
+    pub left_length: usize,
+    /// `status-right-length` (0 = unlimited).
+    pub right_length: usize,
+    /// User options (`@name`), referenced via `#{@name}` / `#{E:@name}`. Keys
+    /// are stored without the leading `@`.
+    pub user_options: HashMap<String, String>,
+    /// Optional path to a `.tmux.conf`-style file. Its `set [-g]` status options
+    /// are parsed and applied on top of the fields above, so an existing tmux
+    /// status config can be reused nearly verbatim.
+    pub tmux_conf: Option<String>,
+}
+
+impl Default for StatusBarConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            tmux_compat: false,
+            position: StatusBarPosition::Bottom,
+            style: "bg=colour238,fg=colour231".into(),
+            left: String::new(),
+            window_current_format: " #{pane_title} #{?agent_done,✓,[#{agent_state}]} ".into(),
+            window_format: " #{pane_title} ".into(),
+            right: " #{session_name} ".into(),
+            left_length: 0,
+            right_length: 40,
+            user_options: HashMap::new(),
+            tmux_conf: None,
+        }
+    }
+}
+
+impl StatusBarConfig {
+    /// Apply `set [-g] [-a] <option> <value>` lines from a `.tmux.conf`-style
+    /// string on top of the current config. Unsupported directives are ignored
+    /// with a warning. Only status-related options are recognized.
+    pub fn apply_tmux_conf(&mut self, contents: &str) {
+        for raw in contents.lines() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let tokens = tokenize_conf_line(line);
+            self.apply_tmux_tokens(&tokens);
+        }
+    }
+
+    fn apply_tmux_tokens(&mut self, tokens: &[String]) {
+        let mut i = 0;
+        match tokens.first().map(String::as_str) {
+            Some("set" | "set-option" | "setw" | "set-window-option") => i += 1,
+            _ => return,
+        }
+        let mut append = false;
+        while let Some(tok) = tokens.get(i) {
+            if let Some(flags) = tok.strip_prefix('-') {
+                if flags.contains('a') {
+                    append = true;
+                }
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        let Some(name) = tokens.get(i) else {
+            return;
+        };
+        let value = tokens.get(i + 1).cloned().unwrap_or_default();
+        self.set_tmux_option(name, &value, append);
+    }
+
+    fn set_tmux_option(&mut self, name: &str, value: &str, append: bool) {
+        fn assign(field: &mut String, value: &str, append: bool) {
+            if append {
+                field.push_str(value);
+            } else {
+                *field = value.to_string();
+            }
+        }
+        if let Some(user) = name.strip_prefix('@') {
+            let entry = self.user_options.entry(user.to_string()).or_default();
+            assign(entry, value, append);
+            return;
+        }
+        match name {
+            "status-style" => assign(&mut self.style, value, append),
+            "status-left" => assign(&mut self.left, value, append),
+            "status-right" => assign(&mut self.right, value, append),
+            "window-status-current-format" => {
+                assign(&mut self.window_current_format, value, append)
+            }
+            "window-status-format" => assign(&mut self.window_format, value, append),
+            "status-left-length" => {
+                if let Ok(n) = value.parse() {
+                    self.left_length = n;
+                }
+            }
+            "status-right-length" => {
+                if let Ok(n) = value.parse() {
+                    self.right_length = n;
+                }
+            }
+            "status-position" => {
+                self.position = if value == "top" {
+                    StatusBarPosition::Top
+                } else {
+                    StatusBarPosition::Bottom
+                };
+            }
+            // `status` is on/off/0-5 in tmux; treat anything but off/0 as enabled.
+            "status" => self.enabled = !matches!(value, "off" | "0"),
+            other => {
+                tracing::warn!(option = other, "unsupported tmux status option ignored");
+            }
+        }
+    }
+}
+
+/// Split a config line on whitespace, honoring single and double quotes.
+fn tokenize_conf_line(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut has_token = false;
+    for ch in line.chars() {
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                } else {
+                    cur.push(ch);
+                }
+            }
+            None => match ch {
+                '\'' | '"' => {
+                    quote = Some(ch);
+                    has_token = true;
+                }
+                c if c.is_whitespace() => {
+                    if has_token {
+                        tokens.push(std::mem::take(&mut cur));
+                        has_token = false;
+                    }
+                }
+                c => {
+                    cur.push(c);
+                    has_token = true;
+                }
+            },
+        }
+    }
+    if has_token {
+        tokens.push(cur);
+    }
+    tokens
 }
 
 /// Cursor shape (DECSCUSR) used for the forced IME anchor.
@@ -433,6 +629,7 @@ impl Default for UiConfig {
             accent: "cyan".into(),
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
+            status_bar: StatusBarConfig::default(),
         }
     }
 }
@@ -486,6 +683,57 @@ impl Default for AdvancedConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tmux_conf_subset_applies_status_options() {
+        let mut sb = StatusBarConfig::default();
+        let conf = r#"
+# the user's bar
+set -g status-style 'bg=#{E:@sc},fg=colour16'
+set -g @sc 'colour167'
+set-option -g status-right '#[fg=colour16,bold] #{session_name} '
+set -g status-right-length 12
+set -g status-position top
+set -g window-status-current-format ' #{pane_title}  #(idle.sh) '
+bind a attach-session -d
+"#;
+        sb.apply_tmux_conf(conf);
+        assert_eq!(sb.style, "bg=#{E:@sc},fg=colour16");
+        assert_eq!(sb.user_options.get("sc").map(String::as_str), Some("colour167"));
+        assert_eq!(sb.right, "#[fg=colour16,bold] #{session_name} ");
+        assert_eq!(sb.right_length, 12);
+        assert_eq!(sb.position, StatusBarPosition::Top);
+        assert_eq!(sb.window_current_format, " #{pane_title}  #(idle.sh) ");
+    }
+
+    #[test]
+    fn tmux_conf_append_concatenates() {
+        let mut sb = StatusBarConfig::default();
+        sb.apply_tmux_conf("set -g status-right 'a'\nset -ga status-right 'b'");
+        assert_eq!(sb.right, "ab");
+    }
+
+    #[test]
+    fn status_bar_config_parses_from_toml() {
+        let toml = r#"
+[ui.status_bar]
+enabled = true
+tmux_compat = true
+position = "top"
+right = " #{session_name} "
+
+[ui.status_bar.user_options]
+sc = "colour208"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.ui.status_bar.enabled);
+        assert!(config.ui.status_bar.tmux_compat);
+        assert_eq!(config.ui.status_bar.position, StatusBarPosition::Top);
+        assert_eq!(
+            config.ui.status_bar.user_options.get("sc").map(String::as_str),
+            Some("colour208")
+        );
+    }
 
     #[test]
     fn terminal_default_shell_defaults_empty_and_parses() {
