@@ -61,6 +61,10 @@ pub struct TerminalState {
     fallback_visible_idle: bool,
     fallback_visible_working: bool,
     fallback_observed_at: Option<Instant>,
+    /// Wall-clock time of last observed output, for `#{window_activity}`
+    /// (Layer B / `tmux_compat`). Updated cheaply on every observe; only read
+    /// when the status bar's literal-parity layer is enabled.
+    last_activity: Option<std::time::SystemTime>,
     stale_hook_idle_since: Option<Instant>,
     pub hook_authority: Option<HookAuthority>,
     pub agent_metadata: HashMap<String, AgentMetadata>,
@@ -85,6 +89,7 @@ impl TerminalState {
             fallback_visible_idle: false,
             fallback_visible_working: false,
             fallback_observed_at: None,
+            last_activity: None,
             stale_hook_idle_since: None,
             hook_authority: None,
             agent_metadata: HashMap::new(),
@@ -173,6 +178,7 @@ impl TerminalState {
         self.fallback_visible_idle = visible_idle && fallback_state == AgentState::Idle;
         self.fallback_visible_working = visible_working && fallback_state == AgentState::Working;
         self.fallback_observed_at = Some(now);
+        self.last_activity = Some(std::time::SystemTime::now());
         if process_exited
             && self.hook_authority_not_newer_than(now)
             && self.hook_authority.as_ref().is_some_and(|authority| {
@@ -638,6 +644,14 @@ impl TerminalState {
         self.agent_name.is_some()
             || self.effective_agent_label().is_some()
             || self.launch_argv.is_some()
+    }
+
+    /// Epoch-seconds of last observed output, formatted for `#{window_activity}`
+    /// (Layer B). `None` until any output has been observed.
+    pub fn window_activity_epoch(&self) -> Option<String> {
+        self.last_activity
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs().to_string())
     }
 
     pub fn border_label(&self, show_agent_labels: bool) -> Option<String> {

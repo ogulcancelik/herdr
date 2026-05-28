@@ -1328,8 +1328,19 @@ impl AppState {
             }
         }
         let term = self.terminals.get(tid);
-        let pane_title = term
-            .and_then(|t| t.border_label(true))
+        let tmux_compat = self.status_bar.tmux_compat;
+        // Layer B: prefer the inner app's OSC 0/2 title; fall back to herdr's
+        // agent/effective title (the clean-default source).
+        let osc_title = if tmux_compat {
+            terminal_runtimes
+                .get(tid)
+                .map(|rt| rt.osc_title())
+                .filter(|t| !t.is_empty())
+        } else {
+            None
+        };
+        let pane_title = osc_title
+            .or_else(|| term.and_then(|t| t.border_label(true)))
             .unwrap_or_default();
         let state = term
             .map(|t| t.state)
@@ -1347,10 +1358,15 @@ impl AppState {
             pane_title,
             agent_state,
             agent_done,
-            // Layer B (`tmux_compat`) populates these; unset under the clean default.
-            window_activity: None,
+            // Layer B (`tmux_compat`) exposes `window_activity` from the per-pane
+            // output timestamp; unset under the clean default.
+            window_activity: if tmux_compat {
+                term.and_then(|t| t.window_activity_epoch())
+            } else {
+                None
+            },
             user_options: self.status_bar.user_options.clone(),
-            allow_shell: false,
+            allow_shell: tmux_compat,
         }
     }
 

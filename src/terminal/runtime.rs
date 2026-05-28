@@ -261,6 +261,11 @@ impl TerminalRuntime {
         self.0.cursor_state(area, show_cursor)
     }
 
+    /// The pane's OSC 0/2 title (Layer B / `tmux_compat`), empty if unset.
+    pub fn osc_title(&self) -> String {
+        self.0.osc_title()
+    }
+
     pub fn visible_text(&self) -> String {
         self.0.visible_text()
     }

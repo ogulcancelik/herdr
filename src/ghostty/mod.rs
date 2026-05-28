@@ -703,6 +703,30 @@ impl Terminal {
         self.get_usize(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS)
     }
 
+    /// The terminal title set via OSC 0/2, or an empty string if none.
+    ///
+    /// The returned bytes are borrowed by ghostty until the next `vt_write`, so
+    /// we copy them out immediately into an owned `String`.
+    pub fn title(&self) -> Result<String, Error> {
+        let mut out = ffi::GhosttyString {
+            ptr: ptr::null(),
+            len: 0,
+        };
+        unsafe {
+            ffi::ghostty_terminal_get(
+                self.raw,
+                ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_TITLE,
+                (&mut out as *mut ffi::GhosttyString).cast(),
+            )
+            .into_result()?;
+        }
+        if out.ptr.is_null() || out.len == 0 {
+            return Ok(String::new());
+        }
+        let bytes = unsafe { slice::from_raw_parts(out.ptr, out.len) };
+        Ok(String::from_utf8_lossy(bytes).into_owned())
+    }
+
     pub fn scrollbar(&self) -> Result<TerminalScrollbar, Error> {
         let mut out = ffi::GhosttyTerminalScrollbar::default();
         unsafe {

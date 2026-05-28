@@ -153,6 +153,10 @@ impl PaneTerminal {
         self.ghostty.cursor_state()
     }
 
+    pub fn osc_title(&self) -> String {
+        self.ghostty.osc_title()
+    }
+
     pub fn visible_text(&self) -> String {
         self.ghostty.visible_text()
     }
@@ -625,6 +629,14 @@ impl GhosttyPaneTerminal {
         encoder.encode(&event).ok()
     }
 
+    pub fn osc_title(&self) -> String {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|core| ghostty_title(&core).ok())
+            .unwrap_or_default()
+    }
+
     pub fn visible_text(&self) -> String {
         self.core
             .lock()
@@ -847,6 +859,10 @@ fn ghostty_visible_hyperlinks(
         y += 1;
     }
     Ok(links)
+}
+
+fn ghostty_title(core: &GhosttyPaneCore) -> Result<String, crate::ghostty::Error> {
+    core.terminal.title()
 }
 
 fn ghostty_visible_text(core: &mut GhosttyPaneCore) -> Result<String, crate::ghostty::Error> {

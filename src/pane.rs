@@ -1884,6 +1884,10 @@ impl PaneRuntime {
         })
     }
 
+    pub fn osc_title(&self) -> String {
+        self.terminal.osc_title()
+    }
+
     pub fn visible_text(&self) -> String {
         self.terminal.visible_text()
     }
