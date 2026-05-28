@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Added an opt-in tmux-compatible status bar via `[ui.status_bar]`, off by default. It renders a one-row bar in `terminal attach` / `agent attach` and in the full-TUI view, using tmux's format mini-language (`#{...}`, `#[...]`, `#(...)`) so an existing tmux status config can be reused. Native variables include `session_name`, `pane_title`, `agent_state`, and `agent_done`; user options (`@name`) are supported via `[ui.status_bar.user_options]` or a `.tmux.conf`-subset file referenced by `status_bar.tmux_conf`. The literal-parity data sources — inner-app OSC 0/2 title capture for `#{pane_title}`, the `#{window_activity}` timestamp, and `#(shell)` expansion — are gated behind `status_bar.tmux_compat` so the default never touches per-pane hot paths or spawns subprocesses.
+
 ## [0.6.4] - 2026-05-27
 
 ### Fixed

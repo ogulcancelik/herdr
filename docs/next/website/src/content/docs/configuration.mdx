@@ -254,6 +254,67 @@ Set `mouse_scroll_lines` to change how many pane scrollback lines each mouse whe
 
 Set `show_agent_labels_on_pane_borders = true` if you want detected agent labels in split pane borders when no manual pane label is set.
 
+## Status bar
+
+Herdr has an opt-in, tmux-compatible status bar. It is **off by default**. When enabled it draws a one-row bar in `terminal attach` / `agent attach` (at the configured edge) and in the full-TUI view (always at the bottom, since the tab bar owns the top row).
+
+```toml
+[ui.status_bar]
+enabled = true
+# Layer B: enable literal-parity data sources (OSC title, window_activity, #(shell)).
+# Off by default; touches per-pane hot paths only when on.
+tmux_compat = false
+position = "bottom"            # or "top" (attach mode)
+style = "bg=colour238,fg=colour231"
+left = ""
+window_current_format = " #{pane_title} #{?agent_done,✓,[#{agent_state}]} "
+right = " #{session_name} "
+left_length = 0               # 0 = unlimited
+right_length = 40
+
+[ui.status_bar.user_options]
+# tmux @-options, referenced as #{@sc} / #{E:@sc} (store the key without the @).
+sc = "colour167"
+```
+
+Format strings use tmux's mini-language: `#{var}`, conditionals `#{?cond,a,b}`, comparisons `#{==:a,b}`, substitution `#{s/re/rep/flags:var}`, the expand modifier `#{E:@opt}`, truncation `#{=N:var}`, style directives `#[fg=…,bg=…,bold]`, single-char aliases (`#S`, `#T`, …), and `##` for a literal `#`.
+
+### Variables
+
+| Variable | Meaning |
+|----------|---------|
+| `session_name`, `#S` | The pane's workspace display name |
+| `pane_title`, `#T` | Agent/effective pane title (the inner app's OSC 0/2 title under `tmux_compat`) |
+| `agent_state` | `working` \| `idle` \| `blocked` \| `unknown` |
+| `agent_done` | `1` when an agent finished while unseen, else `0` |
+| `window_activity` | Epoch seconds of last output — **requires `tmux_compat`** |
+| `@name` | User option from `[ui.status_bar.user_options]` |
+
+The recommended activity signal is `agent_state`/`agent_done`, which Herdr tracks first-class — more accurate than a `now − window_activity` idle counter.
+
+### `tmux_compat` layer
+
+Setting `tmux_compat = true` enables three literal-parity data sources, each of which would otherwise add cost to code every pane runs:
+
+- `#{pane_title}` prefers the inner app's OSC 0/2 title (falling back to the agent/effective title).
+- `#{window_activity}` is populated from a per-pane last-output timestamp.
+- `#(command)` expansion runs `sh -c command`, cached for ~1 second. Keep commands fast; they run on the render path only while `tmux_compat` is on.
+
+With it off, the status bar never spawns subprocesses, captures titles, or stamps timestamps.
+
+### Reusing an existing `.tmux.conf`
+
+Point `status_bar.tmux_conf` at a file and Herdr applies its `set [-g] [-a]` status options on top of the fields above:
+
+```toml
+[ui.status_bar]
+enabled = true
+tmux_compat = true
+tmux_conf = "~/.tmux.conf"
+```
+
+Recognized directives are `status-style`, `status-left`, `status-right`, `window-status-current-format`, `window-status-format`, `status-left-length`, `status-right-length`, `status-position`, `status`, and `@user-options`. Other directives (bindings, hooks, non-status options) are ignored with a warning. Multi-line `status` (2–5 rows) and clickable status ranges are not supported.
+
 ## Notifications
 
 Herdr can show popup notifications when agents finish or need input.
