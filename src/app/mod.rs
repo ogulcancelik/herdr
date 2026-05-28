@@ -452,6 +452,7 @@ impl App {
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
+                status_bar_rect: Rect::default(),
                 mobile_header_rect: Rect::default(),
                 mobile_menu_hit_area: Rect::default(),
                 toast_hit_area: Rect::default(),
@@ -503,6 +504,19 @@ impl App {
             sound: config.ui.sound.clone(),
             local_sound_playback: true,
             toast_config: config.ui.toast.clone(),
+            status_bar: {
+                let mut sb = config.ui.status_bar.clone();
+                if let Some(path) = sb.tmux_conf.clone() {
+                    let resolved = crate::worktree::expand_tilde_path(&path);
+                    match std::fs::read_to_string(&resolved) {
+                        Ok(contents) => sb.apply_tmux_conf(&contents),
+                        Err(err) => {
+                            tracing::warn!(path, %err, "failed to read status_bar.tmux_conf")
+                        }
+                    }
+                }
+                sb
+            },
             keybinds: config.keybinds(),
             spinner_tick: 0,
             palette: resolve_palette(config),

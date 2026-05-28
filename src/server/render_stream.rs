@@ -261,23 +261,66 @@ pub(crate) fn render_virtual_with_runtime_registry(
     (buffer, cursor)
 }
 
+/// The sub-rect the attached terminal renders into, given whether a status bar
+/// is present and where. Single source of truth shared by the renderer and the
+/// hyperlink mapping so they always agree.
+pub(crate) fn attach_inner_area(
+    area: Rect,
+    status_present: bool,
+    position: crate::config::StatusBarPosition,
+) -> Rect {
+    let bar_rows: u16 = if status_present { 1 } else { 0 };
+    let body_height = area.height.saturating_sub(bar_rows);
+    match position {
+        crate::config::StatusBarPosition::Top if status_present => Rect {
+            y: area.y + bar_rows,
+            height: body_height,
+            ..area
+        },
+        _ => Rect {
+            height: body_height,
+            ..area
+        },
+    }
+}
+
 /// Renders one server-owned terminal directly for `terminal attach` clients.
+///
+/// When `status` is `Some`, a one-row status bar is composited at the configured
+/// edge and the terminal is rendered into the remaining area. The inner runtime
+/// must already be sized to that reduced height (see `attach_terminal_client` /
+/// the `ClientResize` handler), so its content lines up with the inner area.
 pub(crate) fn render_terminal_virtual(
     runtime: &crate::terminal::TerminalRuntime,
     area: Rect,
+    status: Option<(ratatui::text::Line<'static>, crate::config::StatusBarPosition)>,
 ) -> (ratatui::buffer::Buffer, Option<CursorState>) {
+    let position = status
+        .as_ref()
+        .map(|(_, pos)| *pos)
+        .unwrap_or(crate::config::StatusBarPosition::Bottom);
+    let inner_area = attach_inner_area(area, status.is_some(), position);
+    let bar_y = match position {
+        crate::config::StatusBarPosition::Top => area.y,
+        crate::config::StatusBarPosition::Bottom => area.y + inner_area.height,
+    };
+
     let backend = CursorTrackingBackend::new(area.width, area.height);
     let mut terminal = ratatui::Terminal::new(backend).expect("TestBackend::new should never fail");
 
     terminal
         .draw(|frame| {
-            runtime.render(frame, area, true);
+            runtime.render(frame, inner_area, true);
         })
         .expect("render to TestBackend should never fail");
 
-    let buffer = terminal.backend().buffer().clone();
+    let mut buffer = terminal.backend().buffer().clone();
+    if let Some((line, _)) = status {
+        buffer.set_line(area.x, bar_y, &line, area.width);
+    }
+
     let cursor = runtime
-        .cursor_state(area, true)
+        .cursor_state(inner_area, true)
         .map(|cursor| CursorState {
             x: cursor.x,
             y: cursor.y,
@@ -380,5 +423,38 @@ fn focused_terminal_cursor(
         })
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod status_bar_tests {
+    use super::attach_inner_area;
+    use crate::config::StatusBarPosition;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn no_status_bar_is_inert() {
+        // When no bar is present the inner area is the full area (byte-identical
+        // to pre-feature behavior).
+        let area = Rect::new(0, 0, 80, 24);
+        assert_eq!(
+            attach_inner_area(area, false, StatusBarPosition::Bottom),
+            area
+        );
+        assert_eq!(attach_inner_area(area, false, StatusBarPosition::Top), area);
+    }
+
+    #[test]
+    fn bottom_bar_reserves_last_row() {
+        let area = Rect::new(0, 0, 80, 24);
+        let inner = attach_inner_area(area, true, StatusBarPosition::Bottom);
+        assert_eq!(inner, Rect::new(0, 0, 80, 23));
+    }
+
+    #[test]
+    fn top_bar_reserves_first_row() {
+        let area = Rect::new(0, 0, 80, 24);
+        let inner = attach_inner_area(area, true, StatusBarPosition::Top);
+        assert_eq!(inner, Rect::new(0, 1, 80, 23));
     }
 }

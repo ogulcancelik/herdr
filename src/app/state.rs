@@ -624,6 +624,8 @@ pub struct ViewState {
     pub tab_scroll_right_hit_area: Rect,
     pub new_tab_hit_area: Rect,
     pub terminal_area: Rect,
+    /// Status-bar row (full-TUI). `Rect::default()` (zero height) when disabled.
+    pub status_bar_rect: Rect,
     pub mobile_header_rect: Rect,
     pub mobile_menu_hit_area: Rect,
     pub toast_hit_area: Rect,
@@ -1153,6 +1155,8 @@ pub struct AppState {
     pub sound: SoundConfig,
     pub local_sound_playback: bool,
     pub toast_config: ToastConfig,
+    /// tmux-style status bar configuration (opt-in; inert when disabled).
+    pub status_bar: crate::config::StatusBarConfig,
     pub keybinds: Keybinds,
     /// Frame counter for spinner animations (wraps around).
     pub spinner_tick: u32,
@@ -1304,6 +1308,72 @@ impl AppState {
         self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, pane_id)
     }
 
+    /// Build the status-bar variable context for an attached terminal.
+    pub(crate) fn status_bar_context(
+        &self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        tid: &crate::terminal::TerminalId,
+    ) -> crate::status::StatusContext {
+        let mut session_name = String::new();
+        let mut seen = true;
+        'find: for ws in &self.workspaces {
+            for tab in &ws.tabs {
+                for pane in tab.panes.values() {
+                    if &pane.attached_terminal_id == tid {
+                        session_name = ws.display_name_from(&self.terminals, terminal_runtimes);
+                        seen = pane.seen;
+                        break 'find;
+                    }
+                }
+            }
+        }
+        let term = self.terminals.get(tid);
+        let pane_title = term
+            .and_then(|t| t.border_label(true))
+            .unwrap_or_default();
+        let state = term
+            .map(|t| t.state)
+            .unwrap_or(crate::detect::AgentState::Unknown);
+        let agent_state = match state {
+            crate::detect::AgentState::Working => "working",
+            crate::detect::AgentState::Idle => "idle",
+            crate::detect::AgentState::Blocked => "blocked",
+            crate::detect::AgentState::Unknown => "unknown",
+        }
+        .to_string();
+        let agent_done = !seen && matches!(state, crate::detect::AgentState::Idle);
+        crate::status::StatusContext {
+            session_name,
+            pane_title,
+            agent_state,
+            agent_done,
+            // Layer B (`tmux_compat`) populates these; unset under the clean default.
+            window_activity: None,
+            user_options: self.status_bar.user_options.clone(),
+            allow_shell: false,
+        }
+    }
+
+    /// Compose the status-bar line for an attached terminal, `width` columns wide.
+    pub(crate) fn compose_status_line(
+        &self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        tid: &crate::terminal::TerminalId,
+        width: u16,
+    ) -> ratatui::text::Line<'static> {
+        let ctx = self.status_bar_context(terminal_runtimes, tid);
+        let cfg = &self.status_bar;
+        let spec = crate::status::StatusSpec {
+            style: &cfg.style,
+            left: &cfg.left,
+            right: &cfg.right,
+            window: &cfg.window_current_format,
+            left_length: cfg.left_length,
+            right_length: cfg.right_length,
+        };
+        crate::status::compose(&spec, width, &ctx)
+    }
+
     pub fn is_active_pane(
         &self,
         ws_idx: usize,
@@ -1399,6 +1469,7 @@ impl AppState {
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
+                status_bar_rect: Rect::default(),
                 mobile_header_rect: Rect::default(),
                 mobile_menu_hit_area: Rect::default(),
                 toast_hit_area: Rect::default(),
@@ -1453,6 +1524,7 @@ impl AppState {
             },
             local_sound_playback: false,
             toast_config: ToastConfig::default(),
+            status_bar: crate::config::StatusBarConfig::default(),
             keybinds: Keybinds::default(),
             spinner_tick: 0,
             palette: Palette::catppuccin(),
@@ -1510,6 +1582,61 @@ impl AppState {
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    #[test]
+    fn status_bar_context_binds_workspace_terminal_state() {
+        let mut app = AppState::test_new();
+        let ws = Workspace::test_new("ws3");
+        let tid = ws.tabs[0]
+            .panes
+            .values()
+            .next()
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        let mut term =
+            crate::terminal::TerminalState::new(tid.clone(), std::path::PathBuf::from("/tmp"));
+        term.state = crate::detect::AgentState::Working;
+        term.set_manual_label("claude".to_string());
+        app.terminals.insert(tid.clone(), term);
+        app.workspaces.push(ws);
+
+        let registry = crate::terminal::TerminalRuntimeRegistry::new();
+        let ctx = app.status_bar_context(&registry, &tid);
+        assert_eq!(ctx.session_name, "ws3");
+        assert_eq!(ctx.pane_title, "claude");
+        assert_eq!(ctx.agent_state, "working");
+        assert!(!ctx.agent_done);
+    }
+
+    #[test]
+    fn compose_status_line_renders_title_and_session() {
+        let mut app = AppState::test_new();
+        let ws = Workspace::test_new("1");
+        let tid = ws.tabs[0]
+            .panes
+            .values()
+            .next()
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        let mut term =
+            crate::terminal::TerminalState::new(tid.clone(), std::path::PathBuf::from("/tmp"));
+        term.state = crate::detect::AgentState::Working;
+        term.set_manual_label("agent".to_string());
+        app.terminals.insert(tid.clone(), term);
+        app.workspaces.push(ws);
+        app.status_bar.enabled = true;
+        app.status_bar.window_current_format = " #{pane_title} [#{agent_state}] ".into();
+        app.status_bar.right = " #{session_name} ".into();
+
+        let registry = crate::terminal::TerminalRuntimeRegistry::new();
+        let line = app.compose_status_line(&registry, &tid, 40);
+        assert_eq!(line.width(), 40);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("agent [working]"), "got: {text:?}");
+        assert!(text.trim_end().ends_with(" 1"), "session right: {text:?}");
+    }
 
     #[test]
     fn built_in_theme_names_resolve() {

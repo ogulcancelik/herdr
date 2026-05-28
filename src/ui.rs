@@ -194,6 +194,17 @@ fn compute_view_internal(
         (Rect::default(), main_area)
     };
 
+    // Reserve a bottom status-bar row when enabled. The tab bar owns the top
+    // row in full-TUI, so the bar always sits at the bottom here regardless of
+    // `position`. Disabled => zero-height rect and `terminal_area` is unchanged.
+    let (terminal_area, status_bar_rect) = if app.status_bar.enabled && terminal_area.height > 1 {
+        let [body, bar] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(terminal_area);
+        (body, bar)
+    } else {
+        (terminal_area, Rect::default())
+    };
+
     if !app.sidebar_collapsed {
         app.workspace_scroll = normalized_workspace_scroll(app, sidebar_area, app.workspace_scroll);
         let (_, detail_area) = expanded_sidebar_sections(sidebar_area, app.sidebar_section_split);
@@ -265,6 +276,7 @@ fn compute_view_internal(
         tab_scroll_right_hit_area: tab_bar_view.scroll_right_hit_area,
         new_tab_hit_area: tab_bar_view.new_tab_hit_area,
         terminal_area,
+        status_bar_rect,
         mobile_header_rect: Rect::default(),
         mobile_menu_hit_area: Rect::default(),
         toast_hit_area,
@@ -334,6 +346,7 @@ fn compute_mobile_view(
         tab_scroll_right_hit_area: Rect::default(),
         new_tab_hit_area: Rect::default(),
         terminal_area,
+        status_bar_rect: Rect::default(),
         mobile_header_rect: header_rect,
         mobile_menu_hit_area: header_hits.menu,
         toast_hit_area,
@@ -370,6 +383,10 @@ pub fn render_with_runtime_registry(
     }
     render_panes(app, terminal_runtimes, frame, terminal_area);
 
+    if app.view.status_bar_rect.height > 0 {
+        render_status_bar(app, terminal_runtimes, frame, app.view.status_bar_rect);
+    }
+
     // Ambient notifications sit above panes, but below interactive overlays.
     render_notifications(app, frame, terminal_area);
 
@@ -401,6 +418,24 @@ pub fn render_with_runtime_registry(
         Mode::Navigator => render_navigator_overlay(app, frame),
         Mode::Terminal => {}
     }
+}
+
+/// Render the full-TUI status bar for the focused pane's terminal.
+fn render_status_bar(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let Some(tid) = app
+        .active
+        .and_then(|i| app.workspaces.get(i))
+        .and_then(|ws| ws.focused_pane_id().and_then(|pane| ws.terminal_id(pane).cloned()))
+    else {
+        return;
+    };
+    let line = app.compose_status_line(terminal_runtimes, &tid, area.width);
+    frame.render_widget(ratatui::widgets::Paragraph::new(line), area);
 }
 
 fn render_notifications(app: &AppState, frame: &mut Frame, terminal_area: Rect) {

@@ -1558,6 +1558,16 @@ impl HeadlessServer {
         self.resize_shared_runtime_to_effective_size();
     }
 
+    /// Rows reserved for the status bar in attach mode (0 when disabled, so the
+    /// resize/render paths are byte-identical to today when off).
+    fn status_bar_rows(&self) -> u16 {
+        if self.app.state.status_bar.enabled {
+            1
+        } else {
+            0
+        }
+    }
+
     fn attach_terminal_client(
         &mut self,
         client_id: u64,
@@ -1624,8 +1634,14 @@ impl HeadlessServer {
             .state
             .direct_attach_resize_locks
             .insert(real_terminal_id.clone());
+        let bar_rows = self.status_bar_rows();
         if let Some(runtime) = self.app.terminal_runtimes.get(&real_terminal_id) {
-            runtime.resize(rows, cols, cell_size.width_px, cell_size.height_px);
+            runtime.resize(
+                rows.saturating_sub(bar_rows),
+                cols,
+                cell_size.width_px,
+                cell_size.height_px,
+            );
         }
         true
     }
@@ -1853,8 +1869,14 @@ impl HeadlessServer {
                     None
                 };
                 if let Some(terminal_id) = direct_terminal_id {
+                    let bar_rows = self.status_bar_rows();
                     if let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) {
-                        runtime.resize(rows, cols, cell_width_px, cell_height_px);
+                        runtime.resize(
+                            rows.saturating_sub(bar_rows),
+                            cols,
+                            cell_width_px,
+                            cell_height_px,
+                        );
                     }
                     return true;
                 }
@@ -2246,6 +2268,26 @@ impl HeadlessServer {
                     FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, cursor, &hyperlinks)
                 }
                 ClientConnectionMode::TerminalAttach { terminal_id } => {
+                    let position = self.app.state.status_bar.position;
+                    let status = if self.status_bar_rows() > 0 {
+                        self.terminal_id_by_string(&terminal_id).map(|tid| {
+                            (
+                                self.app.state.compose_status_line(
+                                    &self.app.terminal_runtimes,
+                                    &tid,
+                                    area.width,
+                                ),
+                                position,
+                            )
+                        })
+                    } else {
+                        None
+                    };
+                    let inner_area = crate::server::render_stream::attach_inner_area(
+                        area,
+                        status.is_some(),
+                        position,
+                    );
                     let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) else {
                         self.send_to_client(
                             client_id,
@@ -2258,9 +2300,10 @@ impl HeadlessServer {
                         broken_clients.push(client_id);
                         continue;
                     };
-                    let (buffer, cursor) =
-                        crate::server::render_stream::render_terminal_virtual(runtime, area);
-                    let hyperlinks = runtime.visible_hyperlinks(area);
+                    let (buffer, cursor) = crate::server::render_stream::render_terminal_virtual(
+                        runtime, area, status,
+                    );
+                    let hyperlinks = runtime.visible_hyperlinks(inner_area);
                     FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, cursor, &hyperlinks)
                 }
             };
