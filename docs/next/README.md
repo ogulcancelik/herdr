@@ -195,7 +195,7 @@ automatic detection works out of the box. process name matching plus terminal ou
 | antigravity cli | ✓ | ✓ | ✓ |
 | kimi code cli | ✓ | ✓ | ✓ |
 | [github copilot cli](https://github.com/features/copilot) | ✓ | ✓ | ✓ |
-| qoder cli | ✓ | ✓ | ✓ |
+| [qodercli](https://qoder.com/cli) | ✓ | ✓ | ✓ |
 | [kiro cli](https://kiro.dev/docs/cli/) | ✓ | ✓ | — |
 
 detected but not fully tested: gemini cli, cline.
@@ -204,7 +204,7 @@ for agents outside the built-in list, herdr still works as a terminal multiplexe
 
 ### direct integrations
 
-the built-in pi, omp, claude code, codex, opencode, hermes, and qoder cli integrations forward semantic state to herdr over the socket api. install with:
+the built-in pi, omp, claude code, codex, opencode, hermes, and qodercli integrations forward semantic state to herdr over the socket api. install with:
 
 ```bash
 herdr integration install pi
@@ -297,7 +297,7 @@ full logging and environment variable details: [configuration docs](https://herd
 ## docs
 
 - [configuration](https://herdr.dev/docs/configuration/) — keybindings, themes, notifications, environment variables
-- [integrations](https://herdr.dev/docs/integrations/) — pi, omp, claude code, codex, opencode, hermes, qoder cli integrations
+- [integrations](https://herdr.dev/docs/integrations/) — pi, omp, claude code, codex, opencode, hermes, qodercli integrations
 - [`SKILL.md`](./SKILL.md) — reusable agent skill
 - [socket api](https://herdr.dev/docs/socket-api/) — socket protocol and cli reference
 
