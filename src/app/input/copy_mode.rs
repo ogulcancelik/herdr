@@ -2,7 +2,10 @@ use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 use unicode_width::UnicodeWidthChar;
 
 use crate::{
-    app::{state::CopyModeState, App, AppState, Mode},
+    app::{
+        state::{CopyModeSelection, CopyModeState},
+        App, AppState, Mode,
+    },
     input::TerminalKey,
     selection::Selection,
     terminal::TerminalRuntimeRegistry,
@@ -64,7 +67,7 @@ impl AppState {
             pane_id,
             cursor_row: cursor.0.min(info.inner_rect.height.saturating_sub(1)),
             cursor_col: cursor.1.min(info.inner_rect.width.saturating_sub(1)),
-            selecting: false,
+            selection: None,
         });
         self.mode = Mode::Copy;
     }
@@ -189,7 +192,7 @@ impl AppState {
             metrics,
         ));
         if let Some(copy_mode) = self.copy_mode.as_mut() {
-            copy_mode.selecting = true;
+            copy_mode.selection = Some(CopyModeSelection::Character);
         }
     }
 
@@ -202,15 +205,14 @@ impl AppState {
         };
         let end_col = info.inner_rect.width.saturating_sub(1);
         let metrics = self.pane_scroll_metrics(terminal_runtimes, copy_mode.pane_id);
-        self.selection = Some(Selection::range(
+        let anchor_row = Selection::absolute_row_for_viewport(copy_mode.cursor_row, metrics);
+        self.selection = Some(Selection::line_range(
             copy_mode.pane_id,
-            copy_mode.cursor_row,
-            0,
+            anchor_row,
+            anchor_row,
             end_col,
-            metrics,
         ));
-        copy_mode.cursor_col = end_col;
-        copy_mode.selecting = true;
+        copy_mode.selection = Some(CopyModeSelection::Linewise { anchor_row });
         self.copy_mode = Some(copy_mode);
     }
 
@@ -450,15 +452,38 @@ impl AppState {
     }
 
     fn sync_copy_mode_selection(&mut self, terminal_runtimes: &TerminalRuntimeRegistry) {
-        let Some(copy_mode) = self.copy_mode.filter(|copy_mode| copy_mode.selecting) else {
+        let Some(copy_mode) = self.copy_mode else {
+            return;
+        };
+        let Some(selection) = copy_mode.selection else {
             return;
         };
         let Some(info) = self.pane_info_by_id(copy_mode.pane_id).cloned() else {
             return;
         };
-        let screen_col = info.inner_rect.x.saturating_add(copy_mode.cursor_col);
-        let screen_row = info.inner_rect.y.saturating_add(copy_mode.cursor_row);
-        self.update_selection_cursor(terminal_runtimes, copy_mode.pane_id, screen_col, screen_row);
+        match selection {
+            CopyModeSelection::Character => {
+                let screen_col = info.inner_rect.x.saturating_add(copy_mode.cursor_col);
+                let screen_row = info.inner_rect.y.saturating_add(copy_mode.cursor_row);
+                self.update_selection_cursor(
+                    terminal_runtimes,
+                    copy_mode.pane_id,
+                    screen_col,
+                    screen_row,
+                );
+            }
+            CopyModeSelection::Linewise { anchor_row } => {
+                let metrics = self.pane_scroll_metrics(terminal_runtimes, copy_mode.pane_id);
+                let cursor_row =
+                    Selection::absolute_row_for_viewport(copy_mode.cursor_row, metrics);
+                self.selection = Some(Selection::line_range(
+                    copy_mode.pane_id,
+                    anchor_row,
+                    cursor_row,
+                    info.inner_rect.width.saturating_sub(1),
+                ));
+            }
+        }
     }
 }
 
@@ -595,12 +620,14 @@ fn shifted_ascii_char(ch: char) -> Option<char> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::app_for_mouse_test;
+    use super::super::{app_for_mouse_test, numbered_lines_bytes};
     use super::*;
     use crate::{events::AppEvent, workspace::Workspace};
     use ratatui::layout::Rect;
 
-    fn app_with_copy_screen(bytes: &[u8]) -> (App, crate::layout::PaneId) {
+    fn app_with_copy_runtime(
+        runtime: impl FnOnce(u16, u16) -> crate::terminal::TerminalRuntime,
+    ) -> (App, crate::layout::PaneId) {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
         let pane_id = ws.tabs[0].root_pane;
@@ -608,11 +635,7 @@ mod tests {
         let info = pane_infos[0].clone();
         ws.tabs[0].runtimes.insert(
             pane_id,
-            crate::terminal::TerminalRuntime::test_with_screen_bytes(
-                info.inner_rect.width,
-                info.inner_rect.height,
-                bytes,
-            ),
+            runtime(info.inner_rect.width, info.inner_rect.height),
         );
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
@@ -620,6 +643,43 @@ mod tests {
         app.state.mode = Mode::Terminal;
         app.state.view.pane_infos = pane_infos;
         (app, pane_id)
+    }
+
+    fn app_with_copy_screen(bytes: &[u8]) -> (App, crate::layout::PaneId) {
+        app_with_copy_runtime(|cols, rows| {
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(cols, rows, bytes)
+        })
+    }
+
+    fn app_with_copy_scrollback(bytes: &[u8]) -> (App, crate::layout::PaneId) {
+        app_with_copy_runtime(|cols, rows| {
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+                cols,
+                rows,
+                16 * 1024,
+                bytes,
+            )
+        })
+    }
+
+    fn copy_mode_clipboard_text(app: &mut App) -> String {
+        match app.event_rx.try_recv().expect("clipboard event") {
+            AppEvent::ClipboardWrite { content } => {
+                String::from_utf8(content).expect("utf8 clipboard")
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    fn copy_mode_viewport_top_row(app: &App, pane_id: crate::layout::PaneId) -> usize {
+        let metrics = app
+            .state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .and_then(crate::terminal::TerminalRuntime::scroll_metrics)
+            .expect("copy mode scroll metrics");
+        metrics
+            .max_offset_from_bottom
+            .saturating_sub(metrics.offset_from_bottom)
     }
 
     #[tokio::test]
@@ -667,7 +727,7 @@ mod tests {
 
     #[tokio::test]
     async fn copy_mode_shift_v_y_copies_visible_line() {
-        let (mut app, _) = app_with_copy_screen(b"alpha\nbeta\n");
+        let (mut app, _) = app_with_copy_screen(b"alpha\r\nbeta\r\n");
         app.state.enter_copy_mode(&app.terminal_runtimes);
         if let Some(copy_mode) = app.state.copy_mode.as_mut() {
             copy_mode.cursor_row = 1;
@@ -677,17 +737,99 @@ mod tests {
         app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('v'), KeyModifiers::SHIFT));
         app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()));
 
-        match app.event_rx.try_recv().expect("clipboard event") {
-            AppEvent::ClipboardWrite { content } => {
-                let text = String::from_utf8(content).expect("utf8 clipboard");
-                assert!(
-                    text.ends_with("beta"),
-                    "copied line should include beta: {text:?}"
-                );
-            }
-            other => panic!("unexpected event: {other:?}"),
-        }
+        assert_eq!(copy_mode_clipboard_text(&mut app), "beta");
         assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn copy_mode_shift_v_extends_linewise_down() {
+        let (mut app, _) = app_with_copy_screen(b"alpha\r\nbeta\r\ngamma\r\n");
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        if let Some(copy_mode) = app.state.copy_mode.as_mut() {
+            copy_mode.cursor_row = 0;
+            copy_mode.cursor_col = 2;
+        }
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('v'), KeyModifiers::SHIFT));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('j'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()));
+
+        assert_eq!(copy_mode_clipboard_text(&mut app), "alpha\nbeta");
+    }
+
+    #[tokio::test]
+    async fn copy_mode_shift_v_extends_linewise_up() {
+        let (mut app, _) = app_with_copy_screen(b"alpha\r\nbeta\r\ngamma\r\n");
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        if let Some(copy_mode) = app.state.copy_mode.as_mut() {
+            copy_mode.cursor_row = 1;
+            copy_mode.cursor_col = 2;
+        }
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('v'), KeyModifiers::SHIFT));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('k'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()));
+
+        assert_eq!(copy_mode_clipboard_text(&mut app), "alpha\nbeta");
+    }
+
+    #[tokio::test]
+    async fn copy_mode_shift_v_reverses_without_character_tail() {
+        let (mut app, _) = app_with_copy_screen(b"alpha\r\nbeta\r\ngamma\r\n");
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        if let Some(copy_mode) = app.state.copy_mode.as_mut() {
+            copy_mode.cursor_row = 1;
+            copy_mode.cursor_col = 2;
+        }
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('v'), KeyModifiers::SHIFT));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('j'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('k'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('k'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()));
+
+        assert_eq!(copy_mode_clipboard_text(&mut app), "alpha\nbeta");
+    }
+
+    #[tokio::test]
+    async fn copy_mode_shift_v_horizontal_motion_keeps_linewise_selection() {
+        let (mut app, _) = app_with_copy_screen(b"alpha\r\nbeta\r\n");
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        if let Some(copy_mode) = app.state.copy_mode.as_mut() {
+            copy_mode.cursor_row = 1;
+            copy_mode.cursor_col = 2;
+        }
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('v'), KeyModifiers::SHIFT));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('h'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('l'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()));
+
+        assert_eq!(copy_mode_clipboard_text(&mut app), "beta");
+    }
+
+    #[tokio::test]
+    async fn copy_mode_shift_v_page_up_keeps_linewise_scrollback_selection() {
+        let bytes = numbered_lines_bytes(64);
+        let (mut app, pane_id) = app_with_copy_scrollback(&bytes);
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        if let Some(copy_mode) = app.state.copy_mode.as_mut() {
+            copy_mode.cursor_row = 0;
+            copy_mode.cursor_col = 2;
+        }
+
+        let anchor_row = copy_mode_viewport_top_row(&app, pane_id);
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('v'), KeyModifiers::SHIFT));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()));
+        let cursor_row = copy_mode_viewport_top_row(&app, pane_id);
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()));
+
+        assert!(cursor_row < anchor_row);
+        let expected = (cursor_row..=anchor_row)
+            .map(|row| format!("{row:06}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(copy_mode_clipboard_text(&mut app), expected);
     }
 
     #[tokio::test]

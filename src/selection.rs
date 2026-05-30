@@ -78,6 +78,32 @@ impl Selection {
         }
     }
 
+    pub(crate) fn line_range(
+        pane_id: PaneId,
+        anchor_row: u32,
+        cursor_row: u32,
+        end_col: u16,
+    ) -> Self {
+        let (anchor_col, cursor_col) = if anchor_row <= cursor_row {
+            (0, end_col)
+        } else {
+            (end_col, 0)
+        };
+        Self {
+            pane_id,
+            anchor: (anchor_row, anchor_col),
+            cursor: (cursor_row, cursor_col),
+            phase: Phase::Dragging,
+        }
+    }
+
+    pub(crate) fn absolute_row_for_viewport(
+        viewport_row: u16,
+        metrics: Option<ScrollMetrics>,
+    ) -> u32 {
+        absolute_row_for_viewport_row(viewport_row, metrics)
+    }
+
     /// Convert the anchor's absolute row and pane-relative column back to
     /// screen coordinates. Adds the pane origin before clamping so the
     /// returned (screen_row, screen_col) can be compared directly against
