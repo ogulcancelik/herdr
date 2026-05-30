@@ -189,11 +189,14 @@ Custom commands use the same keybinding syntax.
 key = "prefix+alt+g"
 type = "pane"
 command = "lazygit"
+description = "run lazygit"
 ```
 
 `type = "pane"` opens a temporary pane and closes it when the command exits.
 
 `type = "shell"` runs detached in the background.
+
+An optional `description` can be provided. When specified, this description is displayed in the keybind help panel (opened with `prefix+?`) in place of the default `'custom command'` label.
 
 Custom commands receive `HERDR_SOCKET_PATH`, `HERDR_BIN_PATH`, `HERDR_ACTIVE_WORKSPACE_ID`, `HERDR_ACTIVE_TAB_ID`, `HERDR_ACTIVE_PANE_ID`, and `HERDR_ACTIVE_PANE_CWD` when those values are available. Shell commands run from the focused pane's working directory when Herdr can detect it.
 
