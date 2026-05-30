@@ -70,7 +70,10 @@ pub(super) fn render_copy_mode_overlay(app: &AppState, frame: &mut Frame, area: 
         .bg(app.palette.accent)
         .add_modifier(Modifier::BOLD);
 
-    let select = if app.copy_mode.is_some_and(|copy_mode| copy_mode.selecting) {
+    let select = if app
+        .copy_mode
+        .is_some_and(|copy_mode| copy_mode.selection.is_some())
+    {
         "selecting"
     } else {
         "select"

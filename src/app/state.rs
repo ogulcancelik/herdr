@@ -813,7 +813,13 @@ pub(crate) struct CopyModeState {
     pub pane_id: PaneId,
     pub cursor_row: u16,
     pub cursor_col: u16,
-    pub selecting: bool,
+    pub selection: Option<CopyModeSelection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CopyModeSelection {
+    Character,
+    Linewise { anchor_row: u32 },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
