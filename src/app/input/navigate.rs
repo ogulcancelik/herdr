@@ -1781,6 +1781,7 @@ last_pane = "prefix+tab"
             label: "prefix+m".into(),
             command,
             action: crate::config::CustomCommandAction::Shell,
+            description: None,
         }];
 
         app.handle_key(TerminalKey::new(
@@ -1841,6 +1842,7 @@ last_pane = "prefix+tab"
             label: "prefix+m".into(),
             command,
             action: crate::config::CustomCommandAction::Pane,
+            description: None,
         }];
 
         app.handle_key(TerminalKey::new(

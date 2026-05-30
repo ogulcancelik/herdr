@@ -63,6 +63,8 @@ pub struct CommandKeybindConfig {
     /// Command execution mode. Default: "shell".
     #[serde(rename = "type")]
     pub action_type: CommandKeybindType,
+    /// Optional user-defined description for this custom command.
+    pub description: Option<String>,
 }
 
 impl Default for CommandKeybindConfig {
@@ -71,6 +73,7 @@ impl Default for CommandKeybindConfig {
             key: BindingConfig::empty(),
             command: String::new(),
             action_type: CommandKeybindType::Shell,
+            description: None,
         }
     }
 }
@@ -238,6 +241,7 @@ pub struct CustomCommandKeybind {
     pub label: String,
     pub command: String,
     pub action: CustomCommandAction,
+    pub description: Option<String>,
 }
 
 /// Parsed keybinds for Herdr actions.
@@ -536,6 +540,7 @@ impl Config {
                 label,
                 command: command.command.clone(),
                 action,
+                description: command.description.clone(),
             });
         }
 
@@ -1667,5 +1672,24 @@ new_workspace = "prefix+n"
         assert!(diagnostics.iter().any(|diag| {
             diag.contains("kept keys.new_workspace") && diag.contains("disabled keys.next_tab")
         }));
+    }
+
+    #[test]
+    fn custom_command_with_description_parses() {
+        let config: Config = toml::from_str(
+            r#"
+[[keys.command]]
+key = "prefix+y"
+command = "echo hello"
+description = "say hello"
+"#,
+        )
+        .unwrap();
+        let keybinds = config.keybinds();
+        assert_eq!(keybinds.custom_commands.len(), 1);
+        assert_eq!(
+            keybinds.custom_commands[0].description,
+            Some("say hello".to_string())
+        );
     }
 }

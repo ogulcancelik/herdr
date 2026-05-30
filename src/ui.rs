@@ -1019,12 +1019,12 @@ mod tests {
             .1
             .clone();
 
-        assert!(workspace_tab.contains(&("unset".to_string(), "previous workspace")));
-        assert!(workspace_tab.contains(&("unset".to_string(), "next workspace")));
-        assert!(workspace_tab.contains(&("unset".to_string(), "previous agent")));
-        assert!(workspace_tab.contains(&("unset".to_string(), "next agent")));
-        assert!(workspace_tab.contains(&("unset".to_string(), "focus agent 1-9")));
-        assert!(workspace_tab.contains(&("unset".to_string(), "switch workspace 1-9")));
+        assert!(workspace_tab.contains(&("unset".to_string(), "previous workspace".to_string())));
+        assert!(workspace_tab.contains(&("unset".to_string(), "next workspace".to_string())));
+        assert!(workspace_tab.contains(&("unset".to_string(), "previous agent".to_string())));
+        assert!(workspace_tab.contains(&("unset".to_string(), "next agent".to_string())));
+        assert!(workspace_tab.contains(&("unset".to_string(), "focus agent 1-9".to_string())));
+        assert!(workspace_tab.contains(&("unset".to_string(), "switch workspace 1-9".to_string())));
         assert!(panes
             .iter()
             .any(|(key, label)| key == "prefix+h" && *label == "focus pane left"));

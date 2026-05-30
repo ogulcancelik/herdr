@@ -41,9 +41,7 @@ fn indexed_label(bindings: &[crate::config::IndexedKeybind]) -> String {
     }
 }
 
-pub(super) fn keybind_help_groups(
-    app: &AppState,
-) -> Vec<(&'static str, Vec<(String, &'static str)>)> {
+pub(super) fn keybind_help_groups(app: &AppState) -> Vec<(&'static str, Vec<(String, String)>)> {
     let kb = &app.keybinds;
     let mut groups = Vec::new();
 
@@ -52,15 +50,18 @@ pub(super) fn keybind_help_groups(
         vec![
             (
                 crate::config::format_key_combo((app.prefix_code, app.prefix_mods)),
-                "prefix mode",
+                "prefix mode".to_string(),
             ),
-            (keybind_label(&kb.help), "keybinds"),
-            (keybind_label(&kb.settings), "settings"),
-            (keybind_label(&kb.detach), "detach"),
-            (keybind_label(&kb.reload_config), "reload config"),
+            (keybind_label(&kb.help), "keybinds".to_string()),
+            (keybind_label(&kb.settings), "settings".to_string()),
+            (keybind_label(&kb.detach), "detach".to_string()),
+            (
+                keybind_label(&kb.reload_config),
+                "reload config".to_string(),
+            ),
             (
                 keybind_label(&kb.open_notification_target),
-                "open notification target",
+                "open notification target".to_string(),
             ),
         ],
     ));
@@ -68,14 +69,14 @@ pub(super) fn keybind_help_groups(
     groups.push((
         "navigation",
         vec![
-            ("esc".to_string(), "back"),
+            ("esc".to_string(), "back".to_string()),
             (
                 format!(
                     "{} / {}",
                     keybind_label(&kb.navigate.workspace_up),
                     keybind_label(&kb.navigate.workspace_down)
                 ),
-                "workspace list",
+                "workspace list".to_string(),
             ),
             (
                 format!(
@@ -85,61 +86,118 @@ pub(super) fn keybind_help_groups(
                     keybind_label(&kb.navigate.pane_up),
                     keybind_label(&kb.navigate.pane_right)
                 ),
-                "move focus",
+                "move focus".to_string(),
             ),
-            ("tab / shift+tab".to_string(), "cycle pane"),
-            ("enter".to_string(), "open workspace"),
-            ("1..9".to_string(), "switch workspace"),
+            ("tab / shift+tab".to_string(), "cycle pane".to_string()),
+            ("enter".to_string(), "open workspace".to_string()),
+            ("1..9".to_string(), "switch workspace".to_string()),
         ],
     ));
 
     let workspace_tab = vec![
-        (keybind_label(&kb.workspace_picker), "workspace navigation"),
-        (keybind_label(&kb.goto), "session navigator"),
-        (keybind_label(&kb.new_workspace), "new workspace"),
-        (keybind_label(&kb.new_worktree), "new worktree"),
-        (keybind_label(&kb.open_worktree), "open worktree"),
+        (
+            keybind_label(&kb.workspace_picker),
+            "workspace navigation".to_string(),
+        ),
+        (keybind_label(&kb.goto), "session navigator".to_string()),
+        (
+            keybind_label(&kb.new_workspace),
+            "new workspace".to_string(),
+        ),
+        (keybind_label(&kb.new_worktree), "new worktree".to_string()),
+        (
+            keybind_label(&kb.open_worktree),
+            "open worktree".to_string(),
+        ),
         (
             keybind_label(&kb.remove_worktree),
-            "delete worktree checkout",
+            "delete worktree checkout".to_string(),
         ),
-        (keybind_label(&kb.rename_workspace), "rename workspace"),
-        (keybind_label(&kb.close_workspace), "close workspace"),
-        (keybind_label(&kb.previous_workspace), "previous workspace"),
-        (keybind_label(&kb.next_workspace), "next workspace"),
-        (indexed_label(&kb.switch_workspace), "switch workspace 1-9"),
-        (keybind_label(&kb.previous_agent), "previous agent"),
-        (keybind_label(&kb.next_agent), "next agent"),
-        (indexed_label(&kb.focus_agent), "focus agent 1-9"),
-        (keybind_label(&kb.new_tab), "new tab"),
-        (keybind_label(&kb.rename_tab), "rename tab"),
-        (keybind_label(&kb.previous_tab), "previous tab"),
-        (keybind_label(&kb.next_tab), "next tab"),
-        (indexed_label(&kb.switch_tab), "switch tab 1-9"),
-        (keybind_label(&kb.close_tab), "close tab"),
+        (
+            keybind_label(&kb.rename_workspace),
+            "rename workspace".to_string(),
+        ),
+        (
+            keybind_label(&kb.close_workspace),
+            "close workspace".to_string(),
+        ),
+        (
+            keybind_label(&kb.previous_workspace),
+            "previous workspace".to_string(),
+        ),
+        (
+            keybind_label(&kb.next_workspace),
+            "next workspace".to_string(),
+        ),
+        (
+            indexed_label(&kb.switch_workspace),
+            "switch workspace 1-9".to_string(),
+        ),
+        (
+            keybind_label(&kb.previous_agent),
+            "previous agent".to_string(),
+        ),
+        (keybind_label(&kb.next_agent), "next agent".to_string()),
+        (
+            indexed_label(&kb.focus_agent),
+            "focus agent 1-9".to_string(),
+        ),
+        (keybind_label(&kb.new_tab), "new tab".to_string()),
+        (keybind_label(&kb.rename_tab), "rename tab".to_string()),
+        (keybind_label(&kb.previous_tab), "previous tab".to_string()),
+        (keybind_label(&kb.next_tab), "next tab".to_string()),
+        (indexed_label(&kb.switch_tab), "switch tab 1-9".to_string()),
+        (keybind_label(&kb.close_tab), "close tab".to_string()),
     ];
     groups.push(("workspaces / tabs", workspace_tab));
 
     let panes = vec![
-        (keybind_label(&kb.split_vertical), "split vertical"),
-        (keybind_label(&kb.split_horizontal), "split horizontal"),
-        (keybind_label(&kb.close_pane), "close pane"),
-        (keybind_label(&kb.rename_pane), "rename pane"),
-        (keybind_label(&kb.edit_scrollback), "edit scrollback"),
-        (keybind_label(&kb.copy_mode), "copy mode"),
-        (keybind_label(&kb.zoom), "zoom pane"),
-        (keybind_label(&kb.resize_mode), "resize mode"),
-        (keybind_label(&kb.toggle_sidebar), "toggle sidebar"),
-        (keybind_label(&kb.focus_pane_left), "focus pane left"),
-        (keybind_label(&kb.focus_pane_down), "focus pane down"),
-        (keybind_label(&kb.focus_pane_up), "focus pane up"),
-        (keybind_label(&kb.focus_pane_right), "focus pane right"),
-        (keybind_label(&kb.cycle_pane_next), "cycle pane next"),
+        (
+            keybind_label(&kb.split_vertical),
+            "split vertical".to_string(),
+        ),
+        (
+            keybind_label(&kb.split_horizontal),
+            "split horizontal".to_string(),
+        ),
+        (keybind_label(&kb.close_pane), "close pane".to_string()),
+        (keybind_label(&kb.rename_pane), "rename pane".to_string()),
+        (
+            keybind_label(&kb.edit_scrollback),
+            "edit scrollback".to_string(),
+        ),
+        (keybind_label(&kb.copy_mode), "copy mode".to_string()),
+        (keybind_label(&kb.zoom), "zoom pane".to_string()),
+        (keybind_label(&kb.resize_mode), "resize mode".to_string()),
+        (
+            keybind_label(&kb.toggle_sidebar),
+            "toggle sidebar".to_string(),
+        ),
+        (
+            keybind_label(&kb.focus_pane_left),
+            "focus pane left".to_string(),
+        ),
+        (
+            keybind_label(&kb.focus_pane_down),
+            "focus pane down".to_string(),
+        ),
+        (
+            keybind_label(&kb.focus_pane_up),
+            "focus pane up".to_string(),
+        ),
+        (
+            keybind_label(&kb.focus_pane_right),
+            "focus pane right".to_string(),
+        ),
+        (
+            keybind_label(&kb.cycle_pane_next),
+            "cycle pane next".to_string(),
+        ),
         (
             keybind_label(&kb.cycle_pane_previous),
-            "cycle pane previous",
+            "cycle pane previous".to_string(),
         ),
-        (keybind_label(&kb.last_pane), "last pane"),
+        (keybind_label(&kb.last_pane), "last pane".to_string()),
     ];
     groups.push(("panes", panes));
 
@@ -148,7 +206,10 @@ pub(super) fn keybind_help_groups(
             "custom",
             kb.custom_commands
                 .iter()
-                .map(|binding| (binding.label.clone(), "custom command"))
+                .map(|binding| {
+                    let desc = binding.description.as_deref().unwrap_or("custom command");
+                    (binding.label.clone(), desc.to_string())
+                })
                 .collect(),
         ));
     }
