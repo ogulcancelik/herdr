@@ -168,13 +168,14 @@ for agents outside the built-in list, herdr still works as a terminal multiplexe
 
 ### direct integrations
 
-the built-in pi, omp, claude code, codex, opencode, hermes, and qodercli integrations forward semantic state to herdr over the socket api. install with:
+the built-in pi, omp, claude code, codex, github copilot cli, opencode, hermes, and qodercli integrations forward semantic state to herdr over the socket api. install with:
 
 ```bash
 herdr integration install pi
 herdr integration install omp
 herdr integration install claude
 herdr integration install codex
+herdr integration install copilot
 herdr integration install opencode
 herdr integration install hermes
 herdr integration install qodercli
@@ -223,7 +224,7 @@ In-app settings cover theme, sound, and toast preferences. Herdr writes logs und
 - [install](https://herdr.dev/docs/install/) — install, update, Homebrew, and Nix
 - [session state](https://herdr.dev/docs/session-state/) — detach, restart restore, agent restore, and live handoff
 - [configuration](https://herdr.dev/docs/configuration/) — keybindings, themes, notifications, environment variables
-- [integrations](https://herdr.dev/docs/integrations/) — pi, omp, claude code, codex, opencode, hermes, qodercli integrations
+- [integrations](https://herdr.dev/docs/integrations/) — pi, omp, claude code, codex, github copilot cli, opencode, hermes, qodercli integrations
 - [`SKILL.md`](./SKILL.md) — reusable agent skill
 - [socket api](https://herdr.dev/docs/socket-api/) — socket protocol and cli reference
 

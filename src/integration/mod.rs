@@ -25,6 +25,10 @@ const CODEX_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const CODEX_HOOK_ASSET: &str = include_str!("assets/codex/herdr-agent-state.sh");
 const CODEX_INTEGRATION_VERSION: u32 = 4;
 const CODEX_HOME_ENV_VAR: &str = "CODEX_HOME";
+const COPILOT_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
+const COPILOT_HOOK_ASSET: &str = include_str!("assets/copilot/herdr-agent-state.sh");
+const COPILOT_INTEGRATION_VERSION: u32 = 1;
+const COPILOT_HOME_ENV_VAR: &str = "COPILOT_HOME";
 const OPENCODE_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state.js";
 const OPENCODE_PLUGIN_ASSET: &str = include_str!("assets/opencode/herdr-agent-state.js");
 const OPENCODE_INTEGRATION_VERSION: u32 = 3;
@@ -51,6 +55,12 @@ pub(crate) struct CodexInstallPaths {
     pub hook_path: PathBuf,
     pub hooks_path: PathBuf,
     pub config_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct CopilotInstallPaths {
+    pub hook_path: PathBuf,
+    pub settings_path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -156,6 +166,14 @@ pub(crate) struct CodexUninstallResult {
 }
 
 #[derive(Debug)]
+pub(crate) struct CopilotUninstallResult {
+    pub hook_path: PathBuf,
+    pub settings_path: PathBuf,
+    pub removed_hook_file: bool,
+    pub updated_settings: bool,
+}
+
+#[derive(Debug)]
 pub(crate) struct OpenCodeUninstallResult {
     pub plugin_path: PathBuf,
     pub removed_plugin: bool,
@@ -224,6 +242,19 @@ pub(crate) fn install_target(
                 format!(
                     "ensured codex config at {}",
                     installed.config_path.display()
+                ),
+            ]
+        }
+        crate::api::schema::IntegrationTarget::Copilot => {
+            let installed = install_copilot()?;
+            vec![
+                format!(
+                    "installed copilot integration hook to {}",
+                    installed.hook_path.display()
+                ),
+                format!(
+                    "ensured copilot settings at {}",
+                    installed.settings_path.display()
                 ),
             ]
         }
@@ -356,6 +387,33 @@ pub(crate) fn uninstall_target(
             ));
             messages
         }
+        crate::api::schema::IntegrationTarget::Copilot => {
+            let result = uninstall_copilot()?;
+            let mut messages = Vec::new();
+            if result.removed_hook_file {
+                messages.push(format!(
+                    "removed copilot hook at {}",
+                    result.hook_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no copilot hook found at {}",
+                    result.hook_path.display()
+                ));
+            }
+            if result.updated_settings {
+                messages.push(format!(
+                    "removed herdr copilot hook entries from {}",
+                    result.settings_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no herdr copilot hook entries found in {}",
+                    result.settings_path.display()
+                ));
+            }
+            messages
+        }
         crate::api::schema::IntegrationTarget::Opencode => {
             let result = uninstall_opencode()?;
             if result.removed_plugin {
@@ -438,6 +496,7 @@ pub(crate) fn integration_target_label(
         crate::api::schema::IntegrationTarget::Omp => "omp",
         crate::api::schema::IntegrationTarget::Claude => "claude",
         crate::api::schema::IntegrationTarget::Codex => "codex",
+        crate::api::schema::IntegrationTarget::Copilot => "copilot",
         crate::api::schema::IntegrationTarget::Opencode => "opencode",
         crate::api::schema::IntegrationTarget::Hermes => "hermes",
         crate::api::schema::IntegrationTarget::Qodercli => "qodercli",
@@ -450,6 +509,7 @@ fn integration_target_command(target: crate::api::schema::IntegrationTarget) -> 
         crate::api::schema::IntegrationTarget::Omp => "omp",
         crate::api::schema::IntegrationTarget::Claude => "claude",
         crate::api::schema::IntegrationTarget::Codex => "codex",
+        crate::api::schema::IntegrationTarget::Copilot => "copilot",
         crate::api::schema::IntegrationTarget::Opencode => "opencode",
         crate::api::schema::IntegrationTarget::Hermes => "hermes",
         crate::api::schema::IntegrationTarget::Qodercli => "qodercli",
@@ -526,7 +586,7 @@ fn integration_specs() -> [(
     crate::api::schema::IntegrationTarget,
     io::Result<PathBuf>,
     u32,
-); 7] {
+); 8] {
     [
         (
             crate::api::schema::IntegrationTarget::Pi,
@@ -547,6 +607,11 @@ fn integration_specs() -> [(
             crate::api::schema::IntegrationTarget::Codex,
             codex_dir().map(|dir| dir.join(CODEX_HOOK_INSTALL_NAME)),
             CODEX_INTEGRATION_VERSION,
+        ),
+        (
+            crate::api::schema::IntegrationTarget::Copilot,
+            copilot_dir().map(|dir| dir.join("hooks").join(COPILOT_HOOK_INSTALL_NAME)),
+            COPILOT_INTEGRATION_VERSION,
         ),
         (
             crate::api::schema::IntegrationTarget::Opencode,
@@ -884,6 +949,68 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
     })
 }
 
+pub(crate) fn install_copilot() -> io::Result<CopilotInstallPaths> {
+    let dir = copilot_dir()?;
+    if !dir.is_dir() {
+        return Err(io::Error::other(format!(
+            "copilot config directory not found at {}. install github copilot cli first",
+            dir.display()
+        )));
+    }
+
+    let hooks_dir = dir.join("hooks");
+    fs::create_dir_all(&hooks_dir)?;
+
+    let hook_path = hooks_dir.join(COPILOT_HOOK_INSTALL_NAME);
+    fs::write(&hook_path, COPILOT_HOOK_ASSET)?;
+    make_executable(&hook_path)?;
+
+    let settings_path = dir.join("settings.json");
+    let mut settings = if settings_path.is_file() {
+        serde_json::from_str::<Value>(&fs::read_to_string(&settings_path)?).map_err(|err| {
+            io::Error::other(format!(
+                "failed to parse {}: {err}",
+                settings_path.display()
+            ))
+        })?
+    } else {
+        json!({})
+    };
+
+    let hooks = ensure_hooks_object(
+        &mut settings,
+        &settings_path,
+        "copilot settings",
+        "copilot settings hooks",
+    )?;
+    let command = format!(
+        "bash {}",
+        shell_single_quote(&hook_path.display().to_string())
+    );
+    ensure_direct_command_hook(hooks, "SessionStart", command.clone(), 10, None)?;
+    ensure_direct_command_hook(hooks, "UserPromptSubmit", command.clone(), 10, None)?;
+    ensure_direct_command_hook(hooks, "PreToolUse", command.clone(), 10, None)?;
+    ensure_direct_command_hook(hooks, "PostToolUse", command.clone(), 10, None)?;
+    ensure_direct_command_hook(hooks, "PostToolUseFailure", command.clone(), 10, None)?;
+    ensure_direct_command_hook(hooks, "Stop", command.clone(), 10, None)?;
+    ensure_direct_command_hook(hooks, "agentStop", command.clone(), 10, None)?;
+    ensure_direct_command_hook(hooks, "SessionEnd", command.clone(), 10, None)?;
+    ensure_direct_command_hook(
+        hooks,
+        "notification",
+        command,
+        10,
+        Some("permission_prompt|elicitation_dialog|agent_idle"),
+    )?;
+
+    fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+
+    Ok(CopilotInstallPaths {
+        hook_path,
+        settings_path,
+    })
+}
+
 pub(crate) fn install_opencode() -> io::Result<OpenCodeInstallPaths> {
     let dir = opencode_dir()?;
     if !dir.is_dir() {
@@ -1096,6 +1223,57 @@ pub(crate) fn uninstall_codex() -> io::Result<CodexUninstallResult> {
         config_path,
         removed_hook_file,
         updated_hooks,
+    })
+}
+
+pub(crate) fn uninstall_copilot() -> io::Result<CopilotUninstallResult> {
+    let copilot_dir = copilot_dir()?;
+    let hook_path = copilot_dir.join("hooks").join(COPILOT_HOOK_INSTALL_NAME);
+    let settings_path = copilot_dir.join("settings.json");
+    let mut updated_settings = false;
+
+    if settings_path.is_file() {
+        let mut settings = serde_json::from_str::<Value>(&fs::read_to_string(&settings_path)?)
+            .map_err(|err| {
+                io::Error::other(format!(
+                    "failed to parse {}: {err}",
+                    settings_path.display()
+                ))
+            })?;
+
+        if let Some(hooks) = hooks_object_if_present(
+            &mut settings,
+            &settings_path,
+            "copilot settings",
+            "copilot settings hooks",
+        )? {
+            let command = format!(
+                "bash {}",
+                shell_single_quote(&hook_path.display().to_string())
+            );
+            updated_settings |= remove_direct_command_hook(hooks, "SessionStart", &command)?;
+            updated_settings |= remove_direct_command_hook(hooks, "UserPromptSubmit", &command)?;
+            updated_settings |= remove_direct_command_hook(hooks, "PreToolUse", &command)?;
+            updated_settings |= remove_direct_command_hook(hooks, "PostToolUse", &command)?;
+            updated_settings |= remove_direct_command_hook(hooks, "PostToolUseFailure", &command)?;
+            updated_settings |= remove_direct_command_hook(hooks, "Stop", &command)?;
+            updated_settings |= remove_direct_command_hook(hooks, "agentStop", &command)?;
+            updated_settings |= remove_direct_command_hook(hooks, "SessionEnd", &command)?;
+            updated_settings |= remove_direct_command_hook(hooks, "notification", &command)?;
+        }
+
+        if updated_settings {
+            fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+        }
+    }
+
+    let removed_hook_file = remove_file_if_exists(&hook_path)?;
+
+    Ok(CopilotUninstallResult {
+        hook_path,
+        settings_path,
+        removed_hook_file,
+        updated_settings,
     })
 }
 
@@ -1393,6 +1571,55 @@ fn ensure_command_hook(
     Ok(())
 }
 
+// Claude and Codex use nested hook groups:
+//   { "matcher": "...", "hooks": [{ "type": "command", ... }] }
+// Copilot and Qoder CLI use the flatter settings shape:
+//   { "type": "command", "matcher": "...", "command": "...", ... }
+// Keep the helpers separate so install/uninstall preserves unrelated hooks in
+// each agent's native format instead of normalizing user configuration.
+fn ensure_direct_command_hook(
+    hooks: &mut Map<String, Value>,
+    event: &str,
+    command: String,
+    timeout_sec: u64,
+    matcher: Option<&str>,
+) -> io::Result<()> {
+    let entries = hooks
+        .entry(event.to_string())
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| io::Error::other(format!("hook entries for {event} must be an array")))?;
+
+    if let Some(entry) = entries.iter_mut().find(|entry| {
+        entry.get("type").and_then(Value::as_str) == Some("command")
+            && entry.get("command").and_then(Value::as_str) == Some(command.as_str())
+    }) {
+        let Some(entry_object) = entry.as_object_mut() else {
+            return Ok(());
+        };
+        entry_object.insert("timeoutSec".to_string(), Value::Number(timeout_sec.into()));
+        match matcher {
+            Some(matcher) => {
+                entry_object.insert("matcher".to_string(), Value::String(matcher.to_string()));
+            }
+            None => {
+                entry_object.remove("matcher");
+            }
+        }
+        return Ok(());
+    }
+
+    let mut entry = Map::new();
+    entry.insert("type".to_string(), Value::String("command".to_string()));
+    if let Some(matcher) = matcher {
+        entry.insert("matcher".to_string(), Value::String(matcher.to_string()));
+    }
+    entry.insert("command".to_string(), Value::String(command));
+    entry.insert("timeoutSec".to_string(), Value::Number(timeout_sec.into()));
+    entries.push(Value::Object(entry));
+    Ok(())
+}
+
 fn remove_command_hook(
     hooks: &mut Map<String, Value>,
     event: &str,
@@ -1432,6 +1659,31 @@ fn remove_command_hook(
         hooks.remove(event);
     }
 
+    Ok(removed)
+}
+
+fn remove_direct_command_hook(
+    hooks: &mut Map<String, Value>,
+    event: &str,
+    command: &str,
+) -> io::Result<bool> {
+    let Some(entries_value) = hooks.get_mut(event) else {
+        return Ok(false);
+    };
+
+    let entries = entries_value
+        .as_array_mut()
+        .ok_or_else(|| io::Error::other(format!("hook entries for {event} must be an array")))?;
+
+    let before = entries.len();
+    entries.retain(|entry| {
+        !(entry.get("type").and_then(Value::as_str) == Some("command")
+            && entry.get("command").and_then(Value::as_str) == Some(command))
+    });
+    let removed = entries.len() != before;
+    if entries.is_empty() {
+        hooks.remove(event);
+    }
     Ok(removed)
 }
 
@@ -1708,6 +1960,10 @@ fn codex_dir() -> io::Result<PathBuf> {
     config_dir_from_env_or_home(CODEX_HOME_ENV_VAR, &[".codex"])
 }
 
+fn copilot_dir() -> io::Result<PathBuf> {
+    config_dir_from_env_or_home(COPILOT_HOME_ENV_VAR, &[".copilot"])
+}
+
 fn config_dir_from_env_or_home(
     env_var: &str,
     home_relative_segments: &[&str],
@@ -1781,6 +2037,7 @@ mod tests {
         std::env::remove_var(PI_CODING_AGENT_DIR_ENV_VAR);
         std::env::remove_var(CLAUDE_CONFIG_DIR_ENV_VAR);
         std::env::remove_var(CODEX_HOME_ENV_VAR);
+        std::env::remove_var(COPILOT_HOME_ENV_VAR);
         std::env::remove_var(QODERCLI_CONFIG_DIR_ENV_VAR);
     }
 
@@ -2680,6 +2937,192 @@ mod tests {
     }
 
     #[test]
+    fn install_copilot_writes_hook_and_updates_settings() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let copilot_dir = home.join(".copilot");
+        fs::create_dir_all(&copilot_dir).unwrap();
+        fs::write(
+            copilot_dir.join("settings.json"),
+            r#"{"theme":"dark","hooks":{"PreToolUse":[{"type":"command","command":"echo keep","timeoutSec":10}]}}"#,
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        let installed = install_copilot().unwrap();
+        let hook_content = fs::read_to_string(&installed.hook_path).unwrap();
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(&installed.settings_path).unwrap()).unwrap();
+
+        assert_eq!(
+            installed.hook_path,
+            copilot_dir.join("hooks").join(COPILOT_HOOK_INSTALL_NAME)
+        );
+        assert_eq!(installed.settings_path, copilot_dir.join("settings.json"));
+        assert_eq!(hook_content, COPILOT_HOOK_ASSET);
+        assert_eq!(settings["theme"], "dark");
+        assert_eq!(settings["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
+        assert_eq!(settings["hooks"]["PreToolUse"][0]["command"], "echo keep");
+        assert!(settings["hooks"]["PreToolUse"][1]["command"]
+            .as_str()
+            .unwrap()
+            .contains(COPILOT_HOOK_INSTALL_NAME));
+        assert!(settings["hooks"]["PostToolUse"][0].get("matcher").is_none());
+        assert!(settings["hooks"]["PostToolUseFailure"][0]
+            .get("matcher")
+            .is_none());
+        assert_eq!(
+            settings["hooks"]["notification"][0]["matcher"],
+            "permission_prompt|elicitation_dialog|agent_idle"
+        );
+        assert!(settings["hooks"]["Stop"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains(COPILOT_HOOK_INSTALL_NAME));
+        assert!(settings["hooks"]["agentStop"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains(COPILOT_HOOK_INSTALL_NAME));
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn copilot_v1_integration_status_is_current() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let copilot_hooks_dir = home.join(".copilot").join("hooks");
+        fs::create_dir_all(&copilot_hooks_dir).unwrap();
+        let hook_path = copilot_hooks_dir.join(COPILOT_HOOK_INSTALL_NAME);
+        fs::write(
+            &hook_path,
+            "#!/bin/sh\n# HERDR_INTEGRATION_ID=copilot\n# HERDR_INTEGRATION_VERSION=1\n",
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        let statuses = installed_integration_statuses();
+        let copilot = statuses
+            .iter()
+            .find(|status| status.target == crate::api::schema::IntegrationTarget::Copilot)
+            .unwrap();
+
+        assert_eq!(copilot.path, hook_path);
+        assert_eq!(copilot.installed_version, Some(1));
+        assert_eq!(copilot.expected_version, 1);
+        assert_eq!(copilot.state, IntegrationStatusKind::Current);
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_copilot_uses_copilot_home_env_and_is_idempotent() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let copilot_dir = base.join("custom-copilot");
+        fs::create_dir_all(&copilot_dir).unwrap();
+        std::env::set_var(COPILOT_HOME_ENV_VAR, &copilot_dir);
+
+        let installed = install_copilot().unwrap();
+        install_copilot().unwrap();
+
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(copilot_dir.join("settings.json")).unwrap())
+                .unwrap();
+
+        assert_eq!(
+            installed.hook_path,
+            copilot_dir.join("hooks").join(COPILOT_HOOK_INSTALL_NAME)
+        );
+        assert_eq!(
+            settings["hooks"]["SessionStart"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(settings["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            settings["hooks"]["PostToolUse"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            settings["hooks"]["PostToolUseFailure"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            settings["hooks"]["notification"].as_array().unwrap().len(),
+            1
+        );
+
+        clear_integration_path_env();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn uninstall_copilot_removes_herdr_hooks_and_preserves_others() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let copilot_dir = home.join(".copilot");
+        let hooks_dir = copilot_dir.join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let hook_path = hooks_dir.join(COPILOT_HOOK_INSTALL_NAME);
+        fs::write(&hook_path, COPILOT_HOOK_ASSET).unwrap();
+        let command = format!(
+            "bash {}",
+            shell_single_quote(&hook_path.display().to_string())
+        );
+        fs::write(
+            copilot_dir.join("settings.json"),
+            format!(
+                r#"{{"hooks":{{"PreToolUse":[{{"type":"command","command":"{}","timeoutSec":10}},{{"type":"command","command":"echo keep","timeoutSec":10}}],"PostToolUse":[{{"type":"command","command":"{}","timeoutSec":10}}],"notification":[{{"type":"command","matcher":"permission_prompt|elicitation_dialog|agent_idle","command":"{}","timeoutSec":10}}]}}}}"#,
+                command,
+                command,
+                command,
+            ),
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        let result = uninstall_copilot().unwrap();
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(copilot_dir.join("settings.json")).unwrap())
+                .unwrap();
+
+        assert!(result.removed_hook_file);
+        assert!(result.updated_settings);
+        assert!(!result.hook_path.exists());
+        assert_eq!(settings["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+        assert_eq!(settings["hooks"]["PreToolUse"][0]["command"], "echo keep");
+        assert!(settings["hooks"].get("PostToolUse").is_none());
+        assert!(settings["hooks"].get("notification").is_none());
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_copilot_errors_when_config_dir_missing() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+
+        let err = install_copilot().unwrap_err().to_string();
+
+        assert!(err.contains("copilot config directory not found"));
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn install_opencode_writes_plugin_to_plugins_dir() {
         let _lock = integration_env_lock();
         let base = unique_base();
@@ -2856,6 +3299,10 @@ mod tests {
         assert!(CLAUDE_HOOK_ASSET.contains("agent_session_id"));
         assert!(CODEX_HOOK_ASSET.contains("HERDR_HOOK_INPUT_FILE"));
         assert!(CODEX_HOOK_ASSET.contains("agent_session_id"));
+        assert!(COPILOT_HOOK_ASSET.contains("agent_session_id"));
+        assert!(COPILOT_HOOK_ASSET.contains("notification_type"));
+        assert!(COPILOT_HOOK_ASSET.contains("ask_user"));
+        assert!(COPILOT_HOOK_ASSET.contains("exit_plan_mode"));
         assert!(OPENCODE_PLUGIN_ASSET.contains("properties?.sessionID"));
         assert!(OPENCODE_PLUGIN_ASSET.contains("dispose: async"));
         assert!(OPENCODE_PLUGIN_ASSET.contains("agent_session_id: sessionID"));
