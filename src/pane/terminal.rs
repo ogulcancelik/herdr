@@ -2386,6 +2386,70 @@ mod tests {
         );
     }
 
+    fn render_cells_to_symbols(
+        terminal: &mut crate::ghostty::Terminal,
+    ) -> Vec<(crate::ghostty::CellWide, String)> {
+        let mut render_state = crate::ghostty::RenderState::new().unwrap();
+        render_state.update(terminal).unwrap();
+
+        let mut row_iterator = crate::ghostty::RowIterator::new().unwrap();
+        let mut row_cells = crate::ghostty::RowCells::new().unwrap();
+        let mut rows = render_state
+            .populate_row_iterator(&mut row_iterator)
+            .unwrap();
+        let mut grapheme_scratch = Vec::new();
+        let mut symbol_scratch = String::new();
+
+        let mut out = Vec::new();
+        if rows.next() {
+            let mut cells = rows.populate_cells(&mut row_cells).unwrap();
+            while cells.next() {
+                let wide = cells.wide().unwrap_or(crate::ghostty::CellWide::Narrow);
+                let sym = ghostty_buffer_symbol_into(
+                    &cells,
+                    wide,
+                    false,
+                    &mut grapheme_scratch,
+                    &mut symbol_scratch,
+                )
+                .unwrap()
+                .to_string();
+                out.push((wide, sym));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn grapheme_cluster_mode_keeps_flag_emoji_in_single_wide_cell() {
+        let mut terminal = crate::ghostty::Terminal::new(40, 1, 0).unwrap();
+        terminal.enable_grapheme_cluster_mode();
+        terminal.write("🇧🇷".as_bytes());
+
+        let cells = render_cells_to_symbols(&mut terminal);
+
+        let head = cells
+            .iter()
+            .find(|(w, _)| *w == crate::ghostty::CellWide::Wide)
+            .expect("flag should land in a wide cell");
+        assert_eq!(head.1, "🇧🇷");
+    }
+
+    #[test]
+    fn grapheme_cluster_mode_keeps_zwj_family_in_single_wide_cell() {
+        let mut terminal = crate::ghostty::Terminal::new(40, 1, 0).unwrap();
+        terminal.enable_grapheme_cluster_mode();
+        terminal.write("👨\u{200d}👩\u{200d}👧".as_bytes());
+
+        let cells = render_cells_to_symbols(&mut terminal);
+
+        let head = cells
+            .iter()
+            .find(|(w, _)| *w == crate::ghostty::CellWide::Wide)
+            .expect("ZWJ family should land in a wide cell");
+        assert_eq!(head.1, "👨\u{200d}👩\u{200d}👧");
+    }
+
     #[test]
     fn pane_scrollback_controls_reach_top_without_ui_interference() {
         let (tx, _rx) = mpsc::channel(4);

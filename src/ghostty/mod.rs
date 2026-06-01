@@ -578,6 +578,14 @@ impl Terminal {
         }
     }
 
+    /// Enable grapheme cluster mode (DEC private mode 2027). With this on,
+    /// libghostty-vt stores multi-codepoint grapheme clusters (flags, ZWJ
+    /// sequences, skin-tone modifiers) in a single cell instead of splitting
+    /// them across cells based on East Asian Width.
+    pub fn enable_grapheme_cluster_mode(&mut self) {
+        self.write(b"\x1b[?2027h");
+    }
+
     pub fn resize(
         &mut self,
         cols: u16,
