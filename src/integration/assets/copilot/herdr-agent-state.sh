@@ -2,6 +2,16 @@
 # installed by herdr
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
+# High-level state machine:
+# - SessionStart reports working when Copilot includes an initial prompt, else idle.
+# - UserPromptSubmit reports working for the active turn.
+# - PreToolUse reports blocked for ask_user and exit_plan_mode, else working.
+# - notification permission_prompt / elicitation_dialog reports blocked.
+# - PostToolUse / PostToolUseFailure clears handled blockers back to working.
+# - agentStop / Stop with end_turn reports idle.
+# - SessionEnd only releases ownership for real exits such as user_exit / abort.
+# Official Copilot hooks reference:
+# https://docs.github.com/en/copilot/reference/hooks-reference
 # HERDR_INTEGRATION_ID=copilot
 # HERDR_INTEGRATION_VERSION=1
 

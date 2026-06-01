@@ -34,6 +34,22 @@
 - Pane shutdown no longer warns that a pane is still alive after the direct child has already exited and been reaped. (#338)
 - Closing the last pane or tab in a parent worktree workspace now shows the existing confirmation before closing the whole worktree group. (#369)
 
+## [0.6.5] - 2026-05-29
+
+### Added
+- Added pane copy mode at `prefix+[` with keyboard navigation, visual selection, and clipboard yank support. (#231)
+- Added `foreground_cwd` to pane and agent API/CLI responses so integrations can inspect the active foreground process directory without changing the existing pane/workspace `cwd` semantics. (#345)
+- Added read-only `agent_session` metadata to pane and agent API/CLI responses when official integrations report native session references.
+
+### Fixed
+- Live handoff now preserves terminal state when transferring supported running panes to a replacement server.
+- WSL clipboard writes now prefer OSC 52 before WSLg clipboard tools, so mouse selection and double-click copy populate Windows clipboard history in Windows Terminal. (#333)
+- Incomplete host terminal OSC default-color replies no longer get misread as Alt-key input and forwarded into panes, preventing interactive prompts such as `gh auth login --web` from aborting on split `ESC ]` input. (#279, #306, #344)
+- Workspace rename prompts and background notifications now use live cwd-derived workspace labels instead of stale session labels. (#332)
+- `herdr session stop` no longer fails on zero-duration socket timeouts when the stop deadline is nearly exhausted.
+- Update preview instructions now wrap long package-manager commands instead of truncating the shell command suffix.
+- Restored native agent resume panes now fall back to a shell when the resumed agent exits instead of closing the whole pane.
+
 ## [0.6.4] - 2026-05-27
 
 ### Fixed
