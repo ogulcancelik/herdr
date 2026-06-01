@@ -1481,6 +1481,26 @@ mod tests {
     }
 
     #[test]
+    fn dragging_sidebar_bottom_divider_still_sets_manual_width() {
+        let mut app = app_for_mouse_test();
+        let divider_col = app.state.view.sidebar_rect.x + app.state.view.sidebar_rect.width - 1;
+        let bottom_row = app.state.view.sidebar_rect.y + app.state.view.sidebar_rect.height - 1;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            divider_col,
+            bottom_row,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            divider_col + 5,
+            bottom_row,
+        ));
+
+        assert_eq!(app.state.sidebar_width, 31);
+    }
+
+    #[test]
     fn dragging_past_max_clamps_to_configured_max() {
         let mut app = app_for_mouse_test();
         app.state.sidebar_max_width = 30;

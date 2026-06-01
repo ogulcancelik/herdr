@@ -1180,11 +1180,11 @@ pub(crate) fn collapsed_sidebar_toggle_rect(area: Rect) -> Rect {
 }
 
 pub(crate) fn expanded_sidebar_toggle_rect(area: Rect) -> Rect {
-    if area.width == 0 || area.height == 0 {
+    if area.width <= 1 || area.height == 0 {
         return Rect::default();
     }
     Rect::new(
-        area.x + area.width.saturating_sub(1),
+        area.x + area.width.saturating_sub(2),
         area.y + area.height.saturating_sub(1),
         1,
         1,
@@ -1237,6 +1237,15 @@ mod tests {
             terminal.backend().buffer()[(toggle.x, toggle.y)].symbol(),
             "«"
         );
+    }
+
+    #[test]
+    fn expanded_sidebar_toggle_sits_inside_sidebar_content() {
+        let area = Rect::new(0, 0, 26, 20);
+        let toggle = expanded_sidebar_toggle_rect(area);
+
+        assert_eq!(toggle.x, area.x + area.width - 2);
+        assert_eq!(toggle.y, area.y + area.height - 1);
     }
 
     #[test]
