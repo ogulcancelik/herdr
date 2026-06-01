@@ -672,6 +672,53 @@ fn copilot_hook_maps_turn_lifecycle() {
 }
 
 #[test]
+fn copilot_hook_maps_camel_case_payloads() {
+    let session_start = run_copilot_hook(
+        r#"{"sessionId":"copilot-camel-session","source":"new","initialPrompt":"run tests"}"#,
+    )
+    .expect("copilot camelCase session start should report working");
+    assert_eq!(session_start["method"], "pane.report_agent");
+    assert_eq!(session_start["params"]["state"], "working");
+    assert_eq!(
+        session_start["params"]["agent_session_id"],
+        "copilot-camel-session"
+    );
+
+    let prompt =
+        run_copilot_hook(r#"{"sessionId":"copilot-camel-session","prompt":"continue the task"}"#)
+            .expect("copilot camelCase prompt should report working");
+    assert_eq!(prompt["method"], "pane.report_agent");
+    assert_eq!(prompt["params"]["state"], "working");
+
+    let blocker = run_copilot_hook(
+        r#"{"sessionId":"copilot-camel-session","toolName":"ask_user","toolArgs":{}}"#,
+    )
+    .expect("copilot camelCase ask_user should report blocked");
+    assert_eq!(blocker["method"], "pane.report_agent");
+    assert_eq!(blocker["params"]["state"], "blocked");
+
+    let answered = run_copilot_hook(
+        r#"{"sessionId":"copilot-camel-session","toolName":"ask_user","toolArgs":{},"toolResult":{"resultType":"success","textResultForLlm":"ok"}}"#,
+    )
+    .expect("copilot camelCase postToolUse should report working");
+    assert_eq!(answered["method"], "pane.report_agent");
+    assert_eq!(answered["params"]["state"], "working");
+
+    let idle = run_copilot_hook(
+        r#"{"sessionId":"copilot-camel-session","stopReason":"end_turn","transcriptPath":"/tmp/transcript.jsonl"}"#,
+    )
+    .expect("copilot camelCase agentStop should report idle");
+    assert_eq!(idle["method"], "pane.report_agent");
+    assert_eq!(idle["params"]["state"], "idle");
+
+    let user_exit =
+        run_copilot_hook(r#"{"sessionId":"copilot-camel-session","reason":"user_exit"}"#)
+            .expect("copilot camelCase user exit should release");
+    assert_eq!(user_exit["method"], "pane.release_agent");
+    assert_eq!(user_exit["params"]["agent"], "copilot");
+}
+
+#[test]
 fn copilot_hook_maps_user_prompts_and_notifications() {
     let ask_user = run_copilot_hook(
         r#"{"hook_event_name":"PreToolUse","session_id":"copilot-session","tool_name":"ask_user"}"#,
