@@ -31,6 +31,12 @@ pub(crate) struct SelectionAutoscroll {
     pub last_mouse_screen_row: u16,
     pub inner_rect: Rect,
 }
+
+#[derive(Clone)]
+pub(crate) struct RightClickPassthroughGesture {
+    pub pane_info: PaneInfo,
+    pub modifiers: KeyModifiers,
+}
 use crate::terminal_theme::TerminalTheme;
 use crate::workspace::Workspace;
 
@@ -593,6 +599,48 @@ pub struct WorktreeOpenEntry {
     pub already_open_ws_idx: Option<usize>,
 }
 
+impl WorktreeOpenEntry {
+    pub(crate) fn display_name(&self) -> String {
+        self.branch.clone().unwrap_or_else(|| {
+            self.path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+                .unwrap_or_else(|| self.path.display().to_string())
+        })
+    }
+
+    pub(crate) fn status_label(&self) -> &'static str {
+        if self.already_open_ws_idx.is_some() {
+            "open"
+        } else if self.branch.is_some() {
+            ""
+        } else if self.is_linked_worktree {
+            "detached"
+        } else {
+            "root"
+        }
+    }
+
+    fn search_text(&self) -> String {
+        format!(
+            "{} {} {} {}",
+            self.display_name(),
+            self.path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default(),
+            self.path.display(),
+            self.status_label()
+        )
+        .to_lowercase()
+    }
+
+    fn matches_query(&self, query: &str) -> bool {
+        text_matches_query(query, &self.search_text())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeOpenState {
     pub source_workspace_id: String,
@@ -603,7 +651,63 @@ pub struct WorktreeOpenState {
     pub repo_name: String,
     pub entries: Vec<WorktreeOpenEntry>,
     pub selected: usize,
+    pub query: String,
+    pub search_focused: bool,
     pub error: Option<String>,
+}
+
+impl WorktreeOpenState {
+    pub(crate) fn filtered_indices(&self) -> Vec<usize> {
+        let query = self.query.trim();
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, entry)| {
+                (query.is_empty() || entry.matches_query(query)).then_some(idx)
+            })
+            .collect()
+    }
+
+    pub(crate) fn selected_entry_index(&self) -> Option<usize> {
+        let indices = self.filtered_indices();
+        if indices.contains(&self.selected) {
+            Some(self.selected)
+        } else {
+            indices.first().copied()
+        }
+    }
+
+    pub(crate) fn normalize_selection(&mut self) {
+        if let Some(selected) = self.selected_entry_index() {
+            self.selected = selected;
+        }
+    }
+
+    pub(crate) fn select_previous_filtered(&mut self) {
+        let indices = self.filtered_indices();
+        let Some(current) = self.selected_entry_index() else {
+            return;
+        };
+        let pos = indices.iter().position(|idx| *idx == current).unwrap_or(0);
+        self.selected = indices[pos.saturating_sub(1)];
+    }
+
+    pub(crate) fn select_next_filtered(&mut self) {
+        let indices = self.filtered_indices();
+        let Some(current) = self.selected_entry_index() else {
+            return;
+        };
+        let pos = indices.iter().position(|idx| *idx == current).unwrap_or(0);
+        self.selected = indices[(pos + 1).min(indices.len().saturating_sub(1))];
+    }
+}
+
+pub(crate) fn text_matches_query(query: &str, text: &str) -> bool {
+    let haystack = text.to_lowercase();
+    query
+        .to_lowercase()
+        .split_whitespace()
+        .all(|needle| haystack.contains(needle))
 }
 
 /// Computed view geometry — derived from AppState + terminal size.
@@ -1140,6 +1244,8 @@ pub struct AppState {
     /// Capture mouse input for Herdr's own mouse UI. When false, Herdr only
     /// captures mouse while the focused pane app requests mouse reporting.
     pub mouse_capture: bool,
+    pub right_click_passthrough_modifiers: Option<KeyModifiers>,
+    pub right_click_passthrough: Option<RightClickPassthroughGesture>,
     pub redraw_on_focus_gained: bool,
     pub mouse_scroll_lines: usize,
     pub confirm_close: bool,
@@ -1450,6 +1556,8 @@ impl AppState {
             sidebar_section_split: 0.5,
             agent_panel_scope: AgentPanelScope::AllWorkspaces,
             mouse_capture: true,
+            right_click_passthrough_modifiers: None,
+            right_click_passthrough: None,
             redraw_on_focus_gained: true,
             mouse_scroll_lines: crate::config::DEFAULT_MOUSE_SCROLL_LINES,
             confirm_close: true,

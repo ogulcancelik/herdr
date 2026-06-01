@@ -301,6 +301,96 @@ fn wait_for_file_contains(path: &Path, needle: &str, timeout: Duration) -> Strin
     );
 }
 
+#[cfg(target_os = "linux")]
+fn server_ptmx_fd_count(pid: u32) -> usize {
+    let Ok(entries) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| fs::read_link(entry.path()).ok())
+        .filter(|target| target == Path::new("/dev/ptmx"))
+        .count()
+}
+
+#[cfg(target_os = "macos")]
+fn server_ptmx_fd_count(pid: u32) -> usize {
+    let Ok(output) = std::process::Command::new("lsof")
+        .args(["-nP", "-p", &pid.to_string()])
+        .output()
+    else {
+        return 0;
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.contains("/dev/ptmx"))
+        .count()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn wait_for_server_ptmx_fd_count(pid: u32, expected: usize, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    let mut last_count = 0;
+    while Instant::now() < deadline {
+        last_count = server_ptmx_fd_count(pid);
+        if last_count == expected {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("server pid {pid} had {last_count} /dev/ptmx fds; expected {expected}");
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_replacement_server_pid(runtime_dir: &Path, old_pid: u32, timeout: Duration) -> u32 {
+    let deadline = Instant::now() + timeout;
+    let mut last_pids = Vec::new();
+    while Instant::now() < deadline {
+        last_pids = support::herdr_server_pids_for_runtime_dir(runtime_dir).unwrap_or_default();
+        if let Some(pid) = last_pids.iter().copied().find(|pid| *pid != old_pid) {
+            return pid;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!(
+        "replacement server for {} did not appear; last pids: {:?}",
+        runtime_dir.display(),
+        last_pids
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_replacement_server_pid(_runtime_dir: &Path, old_pid: u32, timeout: Duration) -> u32 {
+    let handoff_socket_pattern = format!("herdr-handoff-{old_pid}.sock");
+    let deadline = Instant::now() + timeout;
+    let mut last_stdout = String::new();
+    while Instant::now() < deadline {
+        if let Ok(output) = std::process::Command::new("pgrep")
+            .args(["-af", &handoff_socket_pattern])
+            .output()
+        {
+            last_stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            for line in last_stdout.lines() {
+                let Some(pid_text) = line.split_whitespace().next() else {
+                    continue;
+                };
+                let Ok(pid) = pid_text.parse::<u32>() else {
+                    continue;
+                };
+                if pid != old_pid {
+                    return pid;
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!(
+        "replacement server for {} did not appear; last pgrep output: {}",
+        _runtime_dir.display(),
+        last_stdout
+    );
+}
+
 fn unused_local_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -328,6 +418,88 @@ fn wait_for_http_contains(port: u16, needle: &str, timeout: Duration) -> String 
     panic!(
         "http server on port {port} did not return {needle:?}; last response was {last_response:?}"
     );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn live_server_holds_one_pty_master_fd_per_pane() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    let server_pid = spawned
+        .child
+        .process_id()
+        .expect("test server should expose pid");
+    wait_for_server_ptmx_fd_count(server_pid, 0, Duration::from_secs(5));
+
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    wait_for_server_ptmx_fd_count(server_pid, 1, Duration::from_secs(5));
+
+    let second = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:split-second",
+            "method": "pane.split",
+            "params": {
+                "target_pane_id": pane_id,
+                "direction": "right",
+                "focus": true
+            }
+        }),
+    );
+    assert_ok(second.clone());
+    let second_pane_id = second["result"]["pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    wait_for_server_ptmx_fd_count(server_pid, 2, Duration::from_secs(5));
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:split-third",
+            "method": "pane.split",
+            "params": {
+                "target_pane_id": second_pane_id,
+                "direction": "down",
+                "focus": true
+            }
+        }),
+    ));
+    wait_for_server_ptmx_fd_count(server_pid, 3, Duration::from_secs(5));
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    let replacement_pid =
+        wait_for_replacement_server_pid(&runtime_dir, server_pid, Duration::from_secs(10));
+    wait_for_api(&api_socket, Duration::from_secs(10));
+    wait_for_server_ptmx_fd_count(replacement_pid, 3, Duration::from_secs(5));
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    drop(spawned);
+    cleanup_test_base(&base);
 }
 
 #[test]
@@ -755,8 +927,7 @@ fn live_handoff_accepts_old_pane_id_from_child_env() {
             "params": {"pane_id": pane_id, "text": format!("printf '%s' \"$HERDR_PANE_ID\" > {}", pane_id_marker.display()), "keys": ["Enter"]}
         }),
     ));
-    support::wait_for_file(&pane_id_marker, Duration::from_secs(5));
-    let old_pane_id = fs::read_to_string(&pane_id_marker).unwrap();
+    let old_pane_id = wait_for_file_contains(&pane_id_marker, "p_", Duration::from_secs(5));
     assert!(
         old_pane_id.starts_with("p_"),
         "unexpected pane id from env: {old_pane_id:?}"

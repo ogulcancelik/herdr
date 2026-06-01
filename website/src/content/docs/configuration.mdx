@@ -56,6 +56,15 @@ default_shell = "nu"
 
 When unset or empty, Herdr uses `$SHELL`, then `/bin/sh`. This is an executable name or path, not a shell command line. Existing panes keep their current shell until they are recreated. Command panes still run through `/bin/sh -c`; detached custom command keybindings use Herdr's existing `/bin/sh -lc` path.
 
+Set how Herdr starts newly created interactive pane shells:
+
+```toml
+[terminal]
+shell_mode = "auto"
+```
+
+`shell_mode = "auto"` starts login shells on macOS so login-only PATH setup such as `/usr/libexec/path_helper` and Homebrew shell initialization runs in new panes. On other platforms, it keeps the existing non-login shell behavior. Use `"login"` to force login-shell startup, or `"non_login"` to opt out. Command panes, detached custom command keybindings, and explicit argv launches keep their existing command execution paths.
+
 Set the working directory policy for new panes, tabs, and workspaces:
 
 ```toml
@@ -180,11 +189,14 @@ Custom commands use the same keybinding syntax.
 key = "prefix+alt+g"
 type = "pane"
 command = "lazygit"
+description = "run lazygit"
 ```
 
 `type = "pane"` opens a temporary pane and closes it when the command exits.
 
 `type = "shell"` runs detached in the background.
+
+An optional `description` can be provided. When specified, this description is displayed in the keybind help panel (opened with `prefix+?`) in place of the default `'custom command'` label.
 
 Custom commands receive `HERDR_SOCKET_PATH`, `HERDR_BIN_PATH`, `HERDR_ACTIVE_WORKSPACE_ID`, `HERDR_ACTIVE_TAB_ID`, `HERDR_ACTIVE_PANE_ID`, and `HERDR_ACTIVE_PANE_CWD` when those values are available. Shell commands run from the focused pane's working directory when Herdr can detect it.
 

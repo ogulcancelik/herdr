@@ -423,7 +423,11 @@ impl HeadlessServer {
             // 8. Wait for next event.
             let next_deadline = self
                 .app
-                .next_headless_loop_deadline(now, needs_render)
+                .next_headless_loop_deadline_with_git_refresh(
+                    now,
+                    needs_render,
+                    self.has_app_client(),
+                )
                 .map(|deadline| deadline.min(now + CLIENT_ACCEPT_POLL_INTERVAL))
                 .or(Some(now + CLIENT_ACCEPT_POLL_INTERVAL));
             let event = {
@@ -901,6 +905,17 @@ impl HeadlessServer {
         changed
     }
 
+    fn app_client_count(&self) -> usize {
+        self.clients
+            .values()
+            .filter(|client| client.is_full_app_client() && client.writer.is_some())
+            .count()
+    }
+
+    fn has_app_client(&self) -> bool {
+        self.app_client_count() > 0
+    }
+
     fn remove_client(&mut self, client_id: u64) -> bool {
         let was_foreground = self.foreground_client_id == Some(client_id);
         self.send_client_graphics_cleanup(client_id);
@@ -1344,7 +1359,8 @@ impl HeadlessServer {
                                 .map(|toast| format!("{}: {}", toast.title, toast.context))
                         } else {
                             Some(format!(
-                                "v{version} available: detach, then run `{install_command}`"
+                                "v{version} available: {}",
+                                crate::update::update_install_instruction(&install_command)
                             ))
                         }
                     } else {
@@ -1619,6 +1635,7 @@ impl HeadlessServer {
         client.mode = ClientConnectionMode::TerminalAttach {
             terminal_id: terminal_id.clone(),
         };
+        client.pending_terminal_attach = false;
         client.render_state.reset_baseline();
         client.last_activity = stamp;
         let was_foreground = self.foreground_client_id == Some(client_id);
@@ -1655,6 +1672,7 @@ impl HeadlessServer {
                 keybindings,
                 writer,
                 render_encoding,
+                direct_attach_requested,
             } => {
                 if self.handoff_in_progress {
                     if let Ok(message) =
@@ -1669,6 +1687,7 @@ impl HeadlessServer {
                     }
                     return false;
                 }
+                let first_app_client = !direct_attach_requested && self.app_client_count() == 0;
                 info!(
                     client_id,
                     cols,
@@ -1693,10 +1712,16 @@ impl HeadlessServer {
                         None,
                         last_activity,
                         render_encoding,
+                        direct_attach_requested,
                         Some(writer),
                     ),
                 );
-                self.foreground_client_id = Some(client_id);
+                if !direct_attach_requested {
+                    self.foreground_client_id = Some(client_id);
+                }
+                if first_app_client {
+                    self.app.mark_git_status_refresh_due(Instant::now());
+                }
                 self.sync_foreground_client_state();
                 self.resize_shared_runtime_to_effective_size();
                 self.nudge_handoff_panes_on_first_client_attach();
@@ -2190,7 +2215,7 @@ impl HeadlessServer {
 
         let mut broken_clients: Vec<u64> = Vec::new();
         for (&client_id, client) in &mut self.clients {
-            if !matches!(client.mode, ClientConnectionMode::App) {
+            if !client.is_full_app_client() {
                 continue;
             }
             if client.host_mouse_capture_active == Some(enabled) {
@@ -2484,7 +2509,9 @@ impl HeadlessServer {
 
         changed |= self.app.clear_due_selection_highlight(now);
 
-        self.app.start_git_status_refresh_if_due(now);
+        if self.has_app_client() {
+            self.app.start_git_status_refresh_if_due(now);
+        }
 
         if self
             .app
@@ -3011,6 +3038,7 @@ new_tab = "prefix+t"
             cell_height_px: 0,
             render_encoding: RenderEncoding::SemanticFrame,
             keybindings: Some(Box::new(local_keybindings)),
+            direct_attach_requested: false,
             writer: writer_a,
         }));
         assert_eq!(
@@ -3034,6 +3062,7 @@ new_tab = "prefix+t"
             cell_height_px: 0,
             render_encoding: RenderEncoding::SemanticFrame,
             keybindings: None,
+            direct_attach_requested: false,
             writer: writer_b,
         }));
         assert_eq!(
@@ -3073,6 +3102,7 @@ new_tab = "prefix+t"
             cell_height_px: 0,
             render_encoding: RenderEncoding::SemanticFrame,
             keybindings: Some(Box::new(local_keybindings)),
+            direct_attach_requested: false,
             writer: writer_a,
         }));
         assert_eq!(server.app.state.config_diagnostic, without_keybindings);
@@ -3085,6 +3115,7 @@ new_tab = "prefix+t"
             cell_height_px: 0,
             render_encoding: RenderEncoding::SemanticFrame,
             keybindings: None,
+            direct_attach_requested: false,
             writer: writer_b,
         }));
         assert_eq!(
@@ -3127,6 +3158,7 @@ next_tab = ""
             cell_height_px: 0,
             render_encoding: RenderEncoding::SemanticFrame,
             keybindings: Some(Box::new(local_keybindings)),
+            direct_attach_requested: false,
             writer,
         }));
         server.app.state.mode = crate::app::Mode::Settings;
@@ -3200,6 +3232,7 @@ next_tab = ""
             cell_height_px: 0,
             render_encoding: RenderEncoding::SemanticFrame,
             keybindings: Some(Box::new(local_config.live_keybinds().unwrap())),
+            direct_attach_requested: false,
             writer: writer_a,
         }));
         server.app.state.mode = crate::app::Mode::Settings;
@@ -3219,6 +3252,7 @@ next_tab = ""
             cell_height_px: 0,
             render_encoding: RenderEncoding::SemanticFrame,
             keybindings: None,
+            direct_attach_requested: false,
             writer: writer_b,
         }));
         assert_eq!(
@@ -3251,6 +3285,7 @@ next_tab = ""
             cell_height_px: 0,
             render_encoding: RenderEncoding::TerminalAnsi,
             keybindings: None,
+            direct_attach_requested: true,
             writer,
         }));
         assert!(server.clients.contains_key(&7));
@@ -3268,6 +3303,115 @@ next_tab = ""
             reason,
             Some("terminal attach failed: terminal term_missing not found".to_owned())
         );
+    }
+
+    fn app_client_marks_git_refresh_due_on_first_attach(render_encoding: RenderEncoding) {
+        let mut server = test_headless_server();
+        server
+            .app
+            .state
+            .workspaces
+            .push(crate::workspace::Workspace::test_new("test"));
+        let future = Instant::now() + Duration::from_secs(60);
+        server.app.last_git_remote_status_refresh = future;
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 7,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding,
+            keybindings: None,
+            direct_attach_requested: false,
+            writer,
+        }));
+
+        assert!(server.has_app_client());
+        assert!(server
+            .app
+            .git_refresh_deadline()
+            .is_some_and(|deadline| deadline <= Instant::now()));
+    }
+
+    #[test]
+    fn terminal_ansi_app_client_enables_headless_git_refresh() {
+        app_client_marks_git_refresh_due_on_first_attach(RenderEncoding::TerminalAnsi);
+    }
+
+    #[test]
+    fn pending_terminal_attach_client_does_not_enable_headless_git_refresh() {
+        let mut server = test_headless_server();
+        server
+            .app
+            .state
+            .workspaces
+            .push(crate::workspace::Workspace::test_new("test"));
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 7,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::TerminalAnsi,
+            keybindings: None,
+            direct_attach_requested: true,
+            writer,
+        }));
+
+        assert!(!server.has_app_client());
+        assert_eq!(
+            server.app.next_headless_loop_deadline_with_git_refresh(
+                Instant::now(),
+                false,
+                server.has_app_client()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn writerless_app_client_does_not_enable_headless_git_refresh() {
+        let mut server = test_headless_server();
+        server
+            .app
+            .state
+            .workspaces
+            .push(crate::workspace::Workspace::test_new("test"));
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 7,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            writer,
+        }));
+        assert!(server.has_app_client());
+
+        server.clients.get_mut(&7).expect("client").writer = None;
+
+        assert!(!server.has_app_client());
+        assert_eq!(
+            server.app.next_headless_loop_deadline_with_git_refresh(
+                Instant::now(),
+                false,
+                server.has_app_client()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn semantic_app_client_marks_git_refresh_due_on_first_attach() {
+        app_client_marks_git_refresh_due_on_first_attach(RenderEncoding::SemanticFrame);
     }
 
     #[test]
@@ -3292,6 +3436,7 @@ next_tab = ""
             cell_height_px: 0,
             render_encoding: RenderEncoding::TerminalAnsi,
             keybindings: None,
+            direct_attach_requested: true,
             writer,
         }));
         assert!(
@@ -4334,6 +4479,7 @@ next_tab = ""
             cell_height_px: 0,
             render_encoding: RenderEncoding::TerminalAnsi,
             keybindings: None,
+            direct_attach_requested: true,
             writer,
         }));
         assert!(
@@ -4917,7 +5063,10 @@ next_tab = ""
         ) {
             ServerMessage::Notify { kind, message } => {
                 assert_eq!(kind, protocol::NotifyKind::SystemToast);
-                assert_eq!(message, "v9.9.9 available: detach, then run `herdr update`");
+                assert_eq!(
+                    message,
+                    "v9.9.9 available: detach, run `herdr update`, then follow its restart guidance"
+                );
             }
             other => panic!("expected system toast notify, got {other:?}"),
         }

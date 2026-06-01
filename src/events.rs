@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use crate::detect::{Agent, AgentState};
 use crate::layout::PaneId;
-use crate::workspace::WorkspaceGitStatus;
+use crate::workspace::{GitStatusCacheEntry, WorkspaceGitStatus};
 
 #[derive(Debug)]
 pub struct WorktreeAddResult {
@@ -89,7 +89,10 @@ pub enum AppEvent {
     /// re-emits it through herdr's own clipboard writer.
     ClipboardWrite { content: Vec<u8> },
     /// Background git status refresh completed for workspaces.
-    GitStatusRefreshed { results: Vec<WorkspaceGitStatus> },
+    GitStatusRefreshed {
+        results: Vec<WorkspaceGitStatus>,
+        cache_updates: Vec<(std::path::PathBuf, GitStatusCacheEntry)>,
+    },
     /// Background `git worktree add` completed.
     WorktreeAddFinished(WorktreeAddResult),
     /// Background `git worktree remove` completed.

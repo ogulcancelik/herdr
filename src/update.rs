@@ -516,8 +516,11 @@ enum RunningServerUpdateOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RunningSessionUpdateOutcome {
     session_label: String,
+    target_noun: &'static str,
     stop_command: String,
     attach_command: Option<String>,
+    server_version: Option<String>,
+    server_protocol: Option<u32>,
     outcome: RunningServerUpdateOutcome,
 }
 
@@ -706,28 +709,34 @@ fn prompt_to_stop_old_servers_before_update(
 ) -> Result<bool, String> {
     if !io::stdin().is_terminal() {
         return Err(
-            "one or more herdr targets must restart for this update; run `herdr update` from an interactive terminal, or stop those targets and run `herdr update` again"
+            "one or more Herdr sessions must restart for this update. Stop the old server to use the new version, then run `herdr update` again from an interactive terminal."
                 .to_string(),
         );
     }
 
     eprintln!(
-        "these running herdr targets must restart to use v{}:",
+        "This update changes Herdr's client/server protocol.\n\nRunning sessions that must restart to use v{}:",
         release.version
     );
     for plan in plans {
         eprintln!(
-            "  {}: v{} protocol {}",
+            "  {}: server v{} protocol {}",
             plan.label(),
             version_label(plan.server.version.as_deref()),
             protocol_label(plan.server.protocol)
         );
     }
-    eprintln!("herdr can leave them running, or stop them after installing the update.");
-    eprintln!("stopping them will exit their pane processes.");
+    eprintln!(
+        "  update: v{} protocol {}",
+        release.version,
+        protocol_label(release.target_protocol)
+    );
+    eprintln!();
+    eprintln!("If you choose no, these sessions keep using the old server until you stop them.");
+    eprintln!("Stop the old server after installing? Stopping exits pane processes.");
 
     loop {
-        eprint!("stop these old targets after updating? [y/N] ");
+        eprint!("stop after installing? [y/N] ");
         io::stderr()
             .flush()
             .map_err(|e| format!("failed to flush prompt: {e}"))?;
@@ -1322,8 +1331,11 @@ fn apply_running_session_update_decisions(
         let stop_command = decision.plan.stop_command();
         outcomes.push(RunningSessionUpdateOutcome {
             session_label: decision.plan.label().to_string(),
+            target_noun: decision.plan.target_noun(),
             stop_command,
             attach_command: decision.plan.attach_command(),
+            server_version: decision.plan.server.version.clone(),
+            server_protocol: decision.plan.server.protocol,
             outcome,
         });
     }
@@ -1333,7 +1345,7 @@ fn apply_running_session_update_decisions(
 
 fn print_running_session_update_outcomes(
     outcomes: &[RunningSessionUpdateOutcome],
-    release: &ReleaseInfo,
+    _release: &ReleaseInfo,
 ) {
     if outcomes.is_empty() {
         eprintln!("run herdr again.");
@@ -1356,17 +1368,20 @@ fn print_running_session_update_outcomes(
                 }
             }
             RunningServerUpdateOutcome::RestartDeferred => {
-                if outcome.attach_command.is_some() {
-                    eprintln!(
-                        "session {} will use v{} after it restarts.",
-                        outcome.session_label, release.version
-                    );
-                } else {
-                    eprintln!(
-                        "server {} will use v{} after it restarts.",
-                        outcome.session_label, release.version
-                    );
-                }
+                eprintln!(
+                    "{} {} is still running v{} protocol {}.",
+                    outcome.target_noun,
+                    outcome.session_label,
+                    version_label(outcome.server_version.as_deref()),
+                    protocol_label(outcome.server_protocol)
+                );
+                eprintln!(
+                    "{}",
+                    crate::session::restart_after_update_guidance(
+                        &outcome.stop_command,
+                        outcome.attach_command.as_deref()
+                    )
+                );
             }
             RunningServerUpdateOutcome::Stopped
             | RunningServerUpdateOutcome::FailedHandoffOldServerStopped
@@ -1384,17 +1399,20 @@ fn print_running_session_update_outcomes(
                 }
             }
             RunningServerUpdateOutcome::FailedHandoffOldServerKept => {
-                if outcome.attach_command.is_some() {
-                    eprintln!(
-                        "session {} is still running with your panes; stop it later with `{}` to use v{}.",
-                        outcome.session_label, outcome.stop_command, release.version
-                    );
-                } else {
-                    eprintln!(
-                        "server {} is still running with your panes; stop it later with `{}` to use v{}.",
-                        outcome.session_label, outcome.stop_command, release.version
-                    );
-                }
+                eprintln!(
+                    "{} {} is still running v{} protocol {}.",
+                    outcome.target_noun,
+                    outcome.session_label,
+                    version_label(outcome.server_version.as_deref()),
+                    protocol_label(outcome.server_protocol)
+                );
+                eprintln!(
+                    "{}",
+                    crate::session::restart_after_update_guidance(
+                        &outcome.stop_command,
+                        outcome.attach_command.as_deref()
+                    )
+                );
             }
             RunningServerUpdateOutcome::FailedHandoffUnknown => {
                 if let Some(command) = &outcome.attach_command {
@@ -1424,6 +1442,21 @@ pub(crate) fn update_install_command() -> &'static str {
         NIX_UPDATE_COMMAND
     } else {
         HERDR_UPDATE_COMMAND
+    }
+}
+
+pub(crate) fn update_install_instruction(install_command: &str) -> String {
+    match install_command {
+        HERDR_UPDATE_COMMAND => {
+            "detach, run `herdr update`, then follow its restart guidance".to_string()
+        }
+        HOMEBREW_UPDATE_COMMAND => {
+            "detach, run `brew update && brew upgrade herdr`, then restart this Herdr session when ready".to_string()
+        }
+        NIX_UPDATE_COMMAND => {
+            "detach, update through Nix, then restart this Herdr session when ready".to_string()
+        }
+        command => format!("detach, run `{command}`, then restart this Herdr session when ready"),
     }
 }
 
@@ -2252,6 +2285,18 @@ mod tests {
         );
 
         assert_eq!(body, "### Fixed\n- Brew notes");
+    }
+
+    #[test]
+    fn update_install_instruction_distinguishes_install_from_restart() {
+        assert_eq!(
+            update_install_instruction(HERDR_UPDATE_COMMAND),
+            "detach, run `herdr update`, then follow its restart guidance"
+        );
+        assert_eq!(
+            update_install_instruction(HOMEBREW_UPDATE_COMMAND),
+            "detach, run `brew update && brew upgrade herdr`, then restart this Herdr session when ready"
+        );
     }
 
     #[test]

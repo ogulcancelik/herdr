@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -52,6 +52,15 @@ pub enum ClientKeybindings {
     Local { keys_toml: String },
 }
 
+/// Client behavior requested at connection time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClientLaunchMode {
+    /// Full app client.
+    App,
+    /// Direct terminal attach client.
+    TerminalAttach,
+}
+
 /// Messages sent from the client to the server over the client protocol socket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientMessage {
@@ -71,6 +80,8 @@ pub enum ClientMessage {
         requested_encoding: RenderEncoding,
         /// Keybinding profile requested by the client.
         keybindings: ClientKeybindings,
+        /// Whether this connection will render the full app or attach directly to a pane terminal.
+        launch_mode: ClientLaunchMode,
     },
 
     /// Raw input bytes read from the client's stdin.
@@ -651,6 +662,7 @@ mod tests {
             cell_height_px: 16,
             requested_encoding: RenderEncoding::SemanticFrame,
             keybindings: ClientKeybindings::Server,
+            launch_mode: ClientLaunchMode::App,
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ClientMessage, _) =
@@ -952,6 +964,7 @@ mod tests {
             cell_height_px: 16,
             requested_encoding: RenderEncoding::SemanticFrame,
             keybindings: ClientKeybindings::Server,
+            launch_mode: ClientLaunchMode::App,
         };
         let mut buf = Vec::new();
         write_message(&mut buf, &msg).unwrap();
@@ -1025,6 +1038,7 @@ mod tests {
                     cell_height_px: 16,
                     requested_encoding: RenderEncoding::SemanticFrame,
                     keybindings: ClientKeybindings::Server,
+                    launch_mode: ClientLaunchMode::App,
                 },
                 1 => ClientMessage::Input {
                     data: vec![(i % 256) as u8; (i as usize % 50) + 1],
@@ -1460,6 +1474,7 @@ mod tests {
             cell_height_px: 16,
             requested_encoding: RenderEncoding::SemanticFrame,
             keybindings: ClientKeybindings::Server,
+            launch_mode: ClientLaunchMode::App,
         };
         let mut buf = Vec::new();
         write_message(&mut buf, &msg).unwrap();
@@ -1494,6 +1509,7 @@ mod tests {
                 cell_height_px: 16,
                 requested_encoding: RenderEncoding::SemanticFrame,
                 keybindings: ClientKeybindings::Server,
+                launch_mode: ClientLaunchMode::App,
             },
             ClientMessage::Input {
                 data: b"hello world".to_vec(),

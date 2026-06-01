@@ -14,8 +14,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::protocol::{
-    self, AttachScrollDirection, AttachScrollSource, ClientKeybindings, ClientMessage,
-    RenderEncoding, ServerMessage, MAX_CLIPBOARD_IMAGE_PAYLOAD, MAX_FRAME_SIZE,
+    self, AttachScrollDirection, AttachScrollSource, ClientKeybindings, ClientLaunchMode,
+    ClientMessage, RenderEncoding, ServerMessage, MAX_CLIPBOARD_IMAGE_PAYLOAD, MAX_FRAME_SIZE,
     MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
 };
 
@@ -57,6 +57,7 @@ pub(crate) enum ServerEvent {
         cell_height_px: u32,
         render_encoding: RenderEncoding,
         keybindings: Option<Box<crate::config::LiveKeybindConfig>>,
+        direct_attach_requested: bool,
         writer: ClientWriter,
     },
     /// A client sent an input message.
@@ -159,68 +160,77 @@ pub(crate) fn handle_client_handshake(
         }
     };
 
-    let (client_cols, client_rows, cell_width_px, cell_height_px, render_encoding, keybindings) =
-        match hello {
-            ClientMessage::Hello {
-                version,
-                cols,
-                rows,
+    let (
+        client_cols,
+        client_rows,
+        cell_width_px,
+        cell_height_px,
+        render_encoding,
+        keybindings,
+        direct_attach_requested,
+    ) = match hello {
+        ClientMessage::Hello {
+            version,
+            cols,
+            rows,
+            cell_width_px,
+            cell_height_px,
+            requested_encoding,
+            keybindings,
+            launch_mode,
+        } => {
+            // Version check.
+            match protocol::check_client_version(version) {
+                protocol::VersionCheck::Compatible => {}
+                protocol::VersionCheck::Incompatible(reason) => {
+                    // Send rejection Welcome.
+                    let welcome = ServerMessage::Welcome {
+                        version: PROTOCOL_VERSION,
+                        encoding: RenderEncoding::SemanticFrame,
+                        error: Some(reason),
+                    };
+                    let _ = protocol::write_message(&mut stream, &welcome);
+                    return Ok(());
+                }
+            }
+
+            let keybindings = match parse_client_keybindings(keybindings) {
+                Ok(keybindings) => keybindings,
+                Err(error) => {
+                    let welcome = ServerMessage::Welcome {
+                        version: PROTOCOL_VERSION,
+                        encoding: RenderEncoding::SemanticFrame,
+                        error: Some(error),
+                    };
+                    let _ = protocol::write_message(&mut stream, &welcome);
+                    return Ok(());
+                }
+            };
+
+            // Clamp size.
+            let (clamped_cols, clamped_rows) = clamp_terminal_size(cols, rows);
+            (
+                clamped_cols,
+                clamped_rows,
                 cell_width_px,
                 cell_height_px,
                 requested_encoding,
                 keybindings,
-            } => {
-                // Version check.
-                match protocol::check_client_version(version) {
-                    protocol::VersionCheck::Compatible => {}
-                    protocol::VersionCheck::Incompatible(reason) => {
-                        // Send rejection Welcome.
-                        let welcome = ServerMessage::Welcome {
-                            version: PROTOCOL_VERSION,
-                            encoding: RenderEncoding::SemanticFrame,
-                            error: Some(reason),
-                        };
-                        let _ = protocol::write_message(&mut stream, &welcome);
-                        return Ok(());
-                    }
-                }
-
-                let keybindings = match parse_client_keybindings(keybindings) {
-                    Ok(keybindings) => keybindings,
-                    Err(error) => {
-                        let welcome = ServerMessage::Welcome {
-                            version: PROTOCOL_VERSION,
-                            encoding: RenderEncoding::SemanticFrame,
-                            error: Some(error),
-                        };
-                        let _ = protocol::write_message(&mut stream, &welcome);
-                        return Ok(());
-                    }
-                };
-
-                // Clamp size.
-                let (clamped_cols, clamped_rows) = clamp_terminal_size(cols, rows);
-                (
-                    clamped_cols,
-                    clamped_rows,
-                    cell_width_px,
-                    cell_height_px,
-                    requested_encoding,
-                    keybindings,
-                )
-            }
-            _ => {
-                // First message must be Hello.
-                debug!(client_id, "first message was not Hello, closing");
-                let welcome = ServerMessage::Welcome {
-                    version: PROTOCOL_VERSION,
-                    encoding: RenderEncoding::SemanticFrame,
-                    error: Some("expected Hello as first message".to_owned()),
-                };
-                let _ = protocol::write_message(&mut stream, &welcome);
-                return Ok(());
-            }
-        };
+                launch_mode == ClientLaunchMode::TerminalAttach,
+            )
+        }
+        _ => {
+            // First message must be Hello.
+            debug!(client_id, "first message was not Hello, closing");
+            let welcome = ServerMessage::Welcome {
+                version: PROTOCOL_VERSION,
+                encoding: RenderEncoding::SemanticFrame,
+                error: Some("expected Hello as first message".to_owned()),
+            };
+            let _ = protocol::write_message(&mut stream, &welcome);
+            return Ok(());
+        }
+    };
 
     // Send Welcome.
     let welcome = ServerMessage::Welcome {
@@ -250,6 +260,7 @@ pub(crate) fn handle_client_handshake(
         cell_height_px,
         render_encoding,
         keybindings,
+        direct_attach_requested,
         writer,
     });
 
@@ -576,6 +587,7 @@ new_tab = "ctrl+notakey"
                 cell_height_px: 16,
                 requested_encoding: RenderEncoding::TerminalAnsi,
                 keybindings: ClientKeybindings::Server,
+                launch_mode: ClientLaunchMode::App,
             },
         )
         .expect("write hello");
@@ -607,6 +619,7 @@ new_tab = "ctrl+notakey"
                 cell_height_px,
                 render_encoding,
                 keybindings,
+                direct_attach_requested,
                 writer,
             } => {
                 assert_eq!(client_id, 42);
@@ -614,6 +627,70 @@ new_tab = "ctrl+notakey"
                 assert_eq!((cell_width_px, cell_height_px), (8, 16));
                 assert_eq!(render_encoding, RenderEncoding::TerminalAnsi);
                 assert!(keybindings.is_none());
+                assert!(!direct_attach_requested);
+                drop(writer);
+            }
+            other => panic!("expected ClientConnected, got {other:?}"),
+        }
+
+        drop(client_stream);
+        should_quit.store(true, Ordering::Release);
+        handle
+            .join()
+            .expect("handshake thread join")
+            .expect("handshake thread result");
+    }
+
+    #[test]
+    fn handshake_marks_terminal_attach_launch_mode() {
+        let (mut client_stream, server_stream) = UnixStream::pair().expect("socket pair");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let handshake_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            handle_client_handshake(server_stream, 42, &server_event_tx, &handshake_quit)
+        });
+
+        protocol::write_message(
+            &mut client_stream,
+            &ClientMessage::Hello {
+                version: PROTOCOL_VERSION,
+                cols: 100,
+                rows: 30,
+                cell_width_px: 8,
+                cell_height_px: 16,
+                requested_encoding: RenderEncoding::TerminalAnsi,
+                keybindings: ClientKeybindings::Server,
+                launch_mode: ClientLaunchMode::TerminalAttach,
+            },
+        )
+        .expect("write hello");
+
+        let welcome: ServerMessage =
+            protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).expect("read welcome");
+        match welcome {
+            ServerMessage::Welcome {
+                version,
+                encoding,
+                error,
+            } => {
+                assert_eq!(version, PROTOCOL_VERSION);
+                assert_eq!(encoding, RenderEncoding::TerminalAnsi);
+                assert_eq!(error, None);
+            }
+            other => panic!("expected Welcome, got {other:?}"),
+        }
+
+        match server_event_rx
+            .blocking_recv()
+            .expect("client connected event")
+        {
+            ServerEvent::ClientConnected {
+                direct_attach_requested,
+                writer,
+                ..
+            } => {
+                assert!(direct_attach_requested);
                 drop(writer);
             }
             other => panic!("expected ClientConnected, got {other:?}"),

@@ -3,6 +3,8 @@
 //! Each pane's live bottom-of-buffer text is read periodically and matched
 //! against known agent output patterns to determine state.
 
+mod agents;
+
 /// The detected state of a terminal pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentState {
@@ -52,6 +54,7 @@ pub enum Agent {
     Amp,
     Grok,
     Hermes,
+    Kilo,
     Qodercli,
 }
 
@@ -72,6 +75,7 @@ pub fn agent_label(agent: Agent) -> &'static str {
         Agent::Amp => "amp",
         Agent::Grok => "grok",
         Agent::Hermes => "hermes",
+        Agent::Kilo => "kilo",
         Agent::Qodercli => "qodercli",
     }
 }
@@ -94,6 +98,7 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
         "amp" | "amp-local" => Some(Agent::Amp),
         "grok" | "grok-build" => Some(Agent::Grok),
         "hermes" | "hermes-agent" => Some(Agent::Hermes),
+        "kilo" | "kilo-code" | "kilo code" => Some(Agent::Kilo),
         "qodercli" | "qoderclicn" | "qoder" | "qodercn" => Some(Agent::Qodercli),
         _ => None,
     }
@@ -120,6 +125,7 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
         "amp" | "amp-local" => Some(Agent::Amp),
         "grok" | "grok-build" => Some(Agent::Grok),
         "hermes" | "hermes-agent" => Some(Agent::Hermes),
+        "kilo" | "kilo-code" | "kilo code" => Some(Agent::Kilo),
         "qodercli" | "qoderclicn" | "qoder" | "qodercn" => Some(Agent::Qodercli),
         _ => None,
     }
@@ -172,436 +178,66 @@ pub fn detect_agent(agent: Option<Agent>, screen_content: &str) -> AgentDetectio
             visible_working: false,
         };
     };
-    let state = match agent {
-        Agent::Pi => detect_pi(screen_content),
-        Agent::Claude => detect_claude(screen_content),
-        Agent::Codex => detect_codex(screen_content),
-        Agent::Gemini => detect_gemini(screen_content),
-        Agent::Cursor => detect_cursor(screen_content),
-        Agent::Antigravity => detect_antigravity(screen_content),
-        Agent::Cline => detect_cline(screen_content),
-        Agent::OpenCode => detect_opencode(screen_content),
-        Agent::GithubCopilot => detect_github_copilot(screen_content),
-        Agent::Kimi => detect_kimi(screen_content),
-        Agent::Kiro => detect_kiro(screen_content),
-        Agent::Droid => detect_droid(screen_content),
-        Agent::Amp => detect_amp(screen_content),
-        Agent::Grok => detect_grok(screen_content),
-        Agent::Hermes => detect_hermes(screen_content),
-        Agent::Qodercli => detect_qodercli(screen_content),
-    };
-    AgentDetection {
-        state,
-        visible_blocker: has_visible_blocker(agent, screen_content, state),
-        visible_idle: has_visible_idle(agent, screen_content, state),
-        visible_working: has_visible_working(agent, screen_content, state),
-    }
+    agents::detect(agent, screen_content)
 }
 
 // ---------------------------------------------------------------------------
 // Per-agent detectors
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 fn detect_pi(content: &str) -> AgentState {
-    // pi shows "Working..." when the agent is processing
-    if content.contains("Working...") {
-        return AgentState::Working;
-    }
-    AgentState::Idle
+    detect_state(Some(Agent::Pi), content)
 }
 
-/// Claude Code detection. The most complex — it has a structured prompt box UI.
-///
-/// Screen layout:
-/// ```text
-///   (agent output / tool results)
-///   ───────────────────────── (top border)
-///   ❯ _                      (prompt line)
-///   ───────────────────────── (bottom border)
-/// ```
+#[cfg(test)]
 fn detect_claude(content: &str) -> AgentState {
-    let lower = content.to_lowercase();
-
-    // Search prompt is always idle
-    if content.contains("⌕ Search…") {
-        return AgentState::Idle;
-    }
-
-    // ctrl+r toggle — don't change state
-    // (we return Idle as a safe default since we don't have previous state here)
-    if lower.contains("ctrl+r to toggle") {
-        return AgentState::Idle;
-    }
-
-    // --- Blocked detection (full content including prompt box) ---
-
-    if has_claude_blocked_prompt(content, &lower) {
-        return AgentState::Blocked;
-    }
-
-    // --- Working detection (content above the prompt box) ---
-
-    if has_claude_working_chrome(content) {
-        return AgentState::Working;
-    }
-
-    AgentState::Idle
+    detect_state(Some(Agent::Claude), content)
 }
 
+#[cfg(test)]
 fn detect_codex(content: &str) -> AgentState {
-    let lower = content.to_lowercase();
-
-    // Blocked patterns
-    if lower.contains("press enter to confirm or esc to cancel")
-        || lower.contains("enter to submit answer")
-        || lower.contains("enter to submit all")
-        || lower.contains("allow command?")
-        || lower.contains("[y/n]")
-        || lower.contains("yes (y)")
-    {
-        return AgentState::Blocked;
-    }
-    if has_confirmation_prompt(&lower) {
-        return AgentState::Blocked;
-    }
-
-    // Working
-    if has_interrupt_pattern(&lower) || has_codex_working_header(content) {
-        return AgentState::Working;
-    }
-
-    AgentState::Idle
+    detect_state(Some(Agent::Codex), content)
 }
 
+#[cfg(test)]
 fn detect_gemini(content: &str) -> AgentState {
-    let lower = content.to_lowercase();
-
-    // Blocked — explicit confirmation
-    if lower.contains("waiting for user confirmation") {
-        return AgentState::Blocked;
-    }
-
-    // Blocked — box-drawing confirmation prompts
-    if content.contains("│ Apply this change")
-        || content.contains("│ Allow execution")
-        || content.contains("│ Do you want to proceed")
-    {
-        return AgentState::Blocked;
-    }
-    if has_confirmation_prompt(&lower) {
-        return AgentState::Blocked;
-    }
-
-    // Working
-    if lower.contains("esc to cancel") {
-        return AgentState::Working;
-    }
-
-    AgentState::Idle
+    detect_state(Some(Agent::Gemini), content)
 }
 
+#[cfg(test)]
 fn detect_cursor(content: &str) -> AgentState {
-    let lower = content.to_lowercase();
-
-    // Blocked
-    if has_cursor_blocked_prompt(content, &lower) {
-        return AgentState::Blocked;
-    }
-
-    // Working
-    if lower.contains("ctrl+c to stop") {
-        return AgentState::Working;
-    }
-    if has_cursor_spinner(content) {
-        return AgentState::Working;
-    }
-
-    AgentState::Idle
+    detect_state(Some(Agent::Cursor), content)
 }
 
+#[cfg(test)]
 fn detect_antigravity(content: &str) -> AgentState {
-    let lower = content.to_lowercase();
-
-    let has_permission_request = lower.contains("requesting permission for:");
-    let has_permission_question = lower.contains("do you want to proceed?");
-    let has_permission_controls = lower.contains("tab amend") && lower.contains("edit command");
-    if has_permission_request && (has_permission_question || has_permission_controls) {
-        return AgentState::Blocked;
-    }
-
-    if has_antigravity_spinner(content) || has_antigravity_background_tasks(content) {
-        return AgentState::Working;
-    }
-
-    AgentState::Idle
+    detect_state(Some(Agent::Antigravity), content)
 }
 
+#[cfg(test)]
 fn detect_cline(content: &str) -> AgentState {
-    let lower = content.to_lowercase();
-
-    // Blocked
-    if lower.contains("let cline use this tool") {
-        return AgentState::Blocked;
-    }
-    // [act mode] or [plan mode] followed by "yes"
-    if (lower.contains("[act mode]") || lower.contains("[plan mode]")) && lower.contains("yes") {
-        return AgentState::Blocked;
-    }
-
-    // Idle
-    if lower.contains("cline is ready for your message") {
-        return AgentState::Idle;
-    }
-
-    // Cline defaults to working (unlike most agents that default to idle)
-    AgentState::Working
+    detect_state(Some(Agent::Cline), content)
 }
 
+#[cfg(test)]
 fn detect_opencode(content: &str) -> AgentState {
-    // Blocked
-    if content.contains("△ Permission required") || has_opencode_question_prompt(content) {
-        return AgentState::Blocked;
-    }
-
-    // Working
-    if has_interrupt_pattern(&content.to_lowercase()) {
-        return AgentState::Working;
-    }
-
-    AgentState::Idle
+    detect_state(Some(Agent::OpenCode), content)
 }
 
+#[cfg(test)]
 fn detect_github_copilot(content: &str) -> AgentState {
-    let lower = content.to_lowercase();
-
-    // Blocked
-    if lower.contains("esc to cancel")
-        && (lower.contains("enter to select")
-            || lower.contains("enter to confirm")
-            || lower.contains("enter to submit"))
-    {
-        return AgentState::Blocked;
-    }
-
-    // Working
-    if lower.contains("esc to cancel")
-        || lower.contains("esc cancel")
-        || lower.contains("esc again to cancel")
-    {
-        return AgentState::Working;
-    }
-
-    AgentState::Idle
+    detect_state(Some(Agent::GithubCopilot), content)
 }
 
+#[cfg(test)]
 fn detect_kimi(content: &str) -> AgentState {
-    if has_kimi_blocked_prompt(content) {
-        return AgentState::Blocked;
-    }
-
-    if has_kimi_working_status(content) {
-        return AgentState::Working;
-    }
-
-    AgentState::Idle
+    detect_state(Some(Agent::Kimi), content)
 }
 
-fn has_kimi_blocked_prompt(content: &str) -> bool {
-    let lower = content.to_lowercase();
-    lower.contains("requesting approval")
-        && (lower.contains("approve once") || lower.contains("approve for this session"))
-        && lower.contains("reject")
-        && (lower.contains("1/2/3/4 choose") || lower.contains("↵ confirm"))
-}
-
-fn has_kimi_working_status(content: &str) -> bool {
-    content.lines().any(|line| {
-        let trimmed = line.trim();
-        if matches!(
-            trimmed,
-            "🌕" | "🌖" | "🌗" | "🌘" | "🌑" | "🌒" | "🌓" | "🌔"
-        ) {
-            return true;
-        }
-
-        let mut chars = trimmed.chars();
-        let Some(first) = chars.next() else {
-            return false;
-        };
-        if !('\u{2800}'..='\u{28FF}').contains(&first) {
-            return false;
-        }
-
-        let rest = chars
-            .as_str()
-            .trim_start_matches(|c| ('\u{2800}'..='\u{28FF}').contains(&c))
-            .trim_start()
-            .to_lowercase();
-        rest.starts_with("thinking...") || rest.starts_with("using ")
-    })
-}
-
-/// Kiro CLI detection.
-///
-/// Kiro exposes reliable working and idle terminal markers. Tool approval
-/// prompts render with a stable "requires approval" line and an action menu.
-fn detect_kiro(content: &str) -> AgentState {
-    let lower = content.to_lowercase();
-
-    let has_approval_request = lower.contains("requires approval");
-    let has_approval_actions = lower.contains("yes, single permission")
-        || lower.contains("trust, always allow")
-        || lower.contains("no (tab to edit)")
-        || lower.contains("esc to close");
-    if has_approval_request && has_approval_actions {
-        return AgentState::Blocked;
-    }
-
-    if lower.contains("kiro is working")
-        || (lower.contains("esc to cancel") && has_kiro_tool_spinner(content))
-    {
-        return AgentState::Working;
-    }
-
-    AgentState::Idle
-}
-
-/// Droid detection.
-///
-/// Working: braille spinner line (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏) + "Thinking..." + "(Press ESC to stop)"
-/// Blocked: EXECUTE prompt with selection box ("Yes, allow" / "No, cancel") +
-///          "Use ↑↓ to navigate, Enter to select"
-/// Idle: prompt box visible, no spinner, no selection prompt
+#[cfg(test)]
 fn detect_droid(content: &str) -> AgentState {
-    let lower = content.to_lowercase();
-
-    // Blocked: EXECUTE approval prompt with selection UI chrome
-    // Primary (AND): structural keyword + chrome text = certain
-    let has_execute = content.contains("EXECUTE");
-    let has_selection_chrome = lower.contains("enter to select")
-        || lower.contains("↑↓ to navigate")
-        || lower.contains("esc to cancel");
-    let has_selection_options = lower.contains("> yes, allow") || lower.contains("> no, cancel");
-
-    if has_execute && (has_selection_chrome || has_selection_options) {
-        return AgentState::Blocked;
-    }
-    // Secondary: selection chrome + options together (no EXECUTE needed)
-    if has_selection_chrome && has_selection_options {
-        return AgentState::Blocked;
-    }
-
-    // Working: braille spinner character at start of a line + "Thinking..."
-    // The braille chars (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏) are very specific — won't appear in normal content
-    if has_braille_spinner(content) && lower.contains("esc to stop") {
-        return AgentState::Working;
-    }
-    // Fallback: "ESC to stop" alone is still a strong signal (it's UI chrome)
-    if lower.contains("esc to stop") {
-        return AgentState::Working;
-    }
-
-    AgentState::Idle
-}
-
-/// Amp (Sourcegraph) detection.
-///
-/// Blocked approval prompts use a shared footer with options like
-/// "Approve", "Allow All for This Session", "Allow All for Every Session",
-/// "Allow File for Every Session", and "Deny with feedback". The header varies
-/// by approval type, for example "Invoke tool ...?", "Run this command?",
-/// "Allow editing file:", or "Allow creating file:".
-///
-/// Working layout:
-/// ```text
-///   ✓ Search Map the core runtime architecture...
-///   ⋯ Oracle ▼
-///   ≈ Running tools...         Esc to cancel
-/// ```
-fn detect_amp(content: &str) -> AgentState {
-    let lower = content.to_lowercase();
-
-    let has_waiting_for_approval = lower.contains("waiting for approval");
-    let has_approval_header = lower.contains("invoke tool")
-        || lower.contains("run this command?")
-        || lower.contains("allow editing file:")
-        || lower.contains("allow creating file:")
-        || lower.contains("confirm tool call");
-    let has_approval_actions = lower.contains("approve")
-        && (lower.contains("allow all for this session")
-            || lower.contains("allow all for every session")
-            || lower.contains("allow file for every session")
-            || lower.contains("deny with feedback"));
-
-    if has_approval_actions && (has_waiting_for_approval || has_approval_header) {
-        return AgentState::Blocked;
-    }
-
-    if lower.contains("esc to cancel") {
-        return AgentState::Working;
-    }
-
-    AgentState::Idle
-}
-
-/// Grok Build detection.
-///
-/// Blocked permission prompts display a whitelist scope selector with choices
-/// like "Yes, proceed" and "No, reject". Working turns show a braille spinner
-/// status line such as "⠋ Waiting… 1.8s" plus live controls like
-/// "Ctrl+c:cancel" and "Ctrl+Enter:interject".
-fn detect_grok(content: &str) -> AgentState {
-    let lower = content.to_lowercase();
-
-    if lower.contains("use ← → to choose permission whitelist scope")
-        || lower.contains("yes, proceed")
-        || lower.contains("no, reject")
-        || lower.contains("ctrl+o:yolo")
-        || lower.contains(":scope")
-    {
-        return AgentState::Blocked;
-    }
-
-    if has_braille_spinner(content)
-        && (lower.contains("waiting")
-            || lower.contains("run ")
-            || lower.contains("read ")
-            || lower.contains("search ")
-            || lower.contains("list "))
-    {
-        return AgentState::Working;
-    }
-
-    if lower.contains("ctrl+c:cancel") && lower.contains("ctrl+enter:interject") {
-        return AgentState::Working;
-    }
-
-    AgentState::Idle
-}
-
-/// Hermes Agent detection.
-///
-/// Hermes shows a bottom status bar while turns are active and modal approval
-/// dialogs for dangerous terminal commands. Prefer the modal controls for
-/// blocked detection, then the live interrupt/status controls for working.
-fn detect_hermes(content: &str) -> AgentState {
-    let lower = content.to_lowercase();
-
-    let has_approval_options = lower.contains("allow once")
-        && lower.contains("allow for this session")
-        && lower.contains("deny");
-    let has_approval_controls = lower.contains("enter to confirm")
-        || lower.contains("↑/↓ to select")
-        || lower.contains("show full command");
-    if (lower.contains("dangerous command") || has_approval_options) && has_approval_controls {
-        return AgentState::Blocked;
-    }
-
-    if lower.contains("msg=interrupt") || lower.contains("ctrl+c cancel") {
-        return AgentState::Working;
-    }
-
-    AgentState::Idle
+    detect_state(Some(Agent::Droid), content)
 }
 
 /// Check for braille spinner characters at the start of a line.
@@ -618,117 +254,14 @@ fn has_braille_spinner(content: &str) -> bool {
     false
 }
 
-fn has_kiro_tool_spinner(content: &str) -> bool {
-    content.lines().any(|line| {
-        let trimmed = line.trim_start();
-        let mut chars = trimmed.chars();
-        let Some(first) = chars.next() else {
-            return false;
-        };
-        if !matches!(first, '◔' | '◑' | '◕' | '●') {
-            return false;
-        }
-        let rest = chars.as_str().trim_start();
-        rest.chars().next().is_some_and(char::is_alphabetic)
-    })
-}
-
-/// Qodercli detection.
-///
-/// Qodercli is a Node.js coding-agent CLI. It surfaces a confirmation prompt
-/// while awaiting tool approval and a braille spinner while working.
+#[cfg(test)]
 fn detect_qodercli(content: &str) -> AgentState {
-    let lower = content.to_lowercase();
-
-    // Idle short-circuit: double-press confirmation hints render *over* the
-    // input prompt while the user briefly holds Ctrl+C / Esc. The pane is
-    // effectively idle there — without this, a stale spinner row above could
-    // still flip it to Working.
-    if has_qodercli_idle_override(&lower) {
-        return AgentState::Idle;
-    }
-
-    if has_qodercli_blocked_prompt(&lower) {
-        return AgentState::Blocked;
-    }
-
-    // Working: explicit "(esc to cancel, …)" hint or an active spinner row.
-    if has_qodercli_working_hint(&lower) || has_qodercli_spinner_row(content) {
-        return AgentState::Working;
-    }
-
-    AgentState::Idle
+    detect_state(Some(Agent::Qodercli), content)
 }
 
-/// Idle override hints. Mirrors the `⌕ Search…` / `ctrl+r to toggle` shortcut
-/// in [`detect_claude`]: when these UI bits are visible the pane is sitting at
-/// a static prompt and should not be classified as Working or Blocked.
-///
-/// Covers qodercli's "press again" exit/rewind banners.
-fn has_qodercli_idle_override(lower_content: &str) -> bool {
-    lower_content.contains("press ctrl+c again to exit")
-        || lower_content.contains("press ctrl+d again to exit")
-        || lower_content.contains("press esc again to rewind")
-}
-
-/// Working hints qodercli prints alongside the spinner while the model is
-/// responding. The "(esc to cancel, …)" suffix is unique to qodercli's loading
-/// indicator and survives even when the spinner glyph is masked (e.g. by
-/// a hook icon).
-fn has_qodercli_working_hint(lower_content: &str) -> bool {
-    lower_content.contains("(esc to cancel,")
-}
-
-/// Strict spinner-row detection for qodercli.
-///
-/// Matches a line whose first non-whitespace glyph is a braille pattern
-/// (U+2800–U+28FF, the cli-spinners "dots" set qodercli renders), followed by
-/// a space and at least one alphabetic character on the same line. This avoids
-/// flagging the pane as Working when the scrollback merely contains a stale
-/// braille glyph from an earlier frame.
-fn has_qodercli_spinner_row(content: &str) -> bool {
-    for line in content.lines() {
-        let trimmed = line.trim_start();
-        let mut chars = trimmed.chars();
-        let Some(first) = chars.next() else {
-            continue;
-        };
-        if !('\u{2800}'..='\u{28FF}').contains(&first) {
-            continue;
-        }
-        let rest: String = chars.collect();
-        if rest.starts_with(' ') && rest.chars().any(|c| c.is_alphabetic()) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Blocked patterns specific to qodercli.
-///
-/// Mirrors the helper structure used by [`has_claude_blocked_prompt`] so the
-/// pattern surface stays a single, easy-to-extend list.
-///
-/// Covered states:
-/// * Tool-call confirmation banners ("Waiting for user confirmation",
-///   "Awaiting approval").
-/// * The "Permission Required / Allow once or always?" approval dialog.
-/// * The `ask-user` tool's interactive prompt. "Asking User" is the dialog's
-///   stable BaseTabDialog title and covers every form (single-select,
-///   multi-select, free-form input, review tab). The "Enter your response"
-///   placeholder and "Review your answers:" review heading are kept as
-///   defensive fallbacks in case the title row scrolls off-screen.
-/// * The interactive shell waiting hint emitted by qodercli when an agent
-///   spawns a shell that is now parked for user keystrokes.
-fn has_qodercli_blocked_prompt(lower_content: &str) -> bool {
-    lower_content.contains("waiting for user confirmation")
-        || lower_content.contains("awaiting approval")
-        || lower_content.contains("permission required")
-        || lower_content.contains("allow once or always?")
-        || lower_content.contains("asking user")
-        || lower_content.contains("enter your response")
-        || lower_content.contains("review your answers:")
-        || lower_content.contains("shell awaiting input")
+#[cfg(test)]
+fn detect_kilo(content: &str) -> AgentState {
+    detect_state(Some(Agent::Kilo), content)
 }
 
 // ---------------------------------------------------------------------------
@@ -747,39 +280,6 @@ fn has_confirmation_prompt(lower_content: &str) -> bool {
     false
 }
 
-/// Claude uses the same generic Select and Dialog widgets for both
-/// permission flows and ordinary slash/settings menus. Match only the
-/// permission and interview prompts that actually need user input.
-fn has_claude_blocked_prompt(content: &str, lower_content: &str) -> bool {
-    has_confirmation_prompt(lower_content)
-        || lower_content.contains("do you want to proceed?")
-        || lower_content.contains("would you like to proceed?")
-        || lower_content.contains("waiting for permission")
-        || lower_content.contains("do you want to allow this connection?")
-        || lower_content.contains("tab to amend")
-        || lower_content.contains("ctrl+e to explain")
-        || lower_content.contains("chat about this")
-        || lower_content.contains("review your answers")
-        || lower_content.contains("skip interview and plan immediately")
-        || (has_selection_prompt(content) && has_claude_yes_no_choice(content))
-}
-
-fn has_claude_yes_no_choice(content: &str) -> bool {
-    content.lines().any(|line| {
-        let trimmed = line
-            .trim()
-            .trim_start_matches('❯')
-            .trim_start()
-            .to_lowercase();
-        trimmed == "yes"
-            || trimmed == "no"
-            || trimmed.starts_with("1. yes")
-            || trimmed.starts_with("2. no")
-            || trimmed.starts_with("yes, and ")
-            || trimmed.starts_with("no, and tell claude")
-    })
-}
-
 /// Check for "❯" followed by numbered options like "1."
 fn has_selection_prompt(content: &str) -> bool {
     for line in content.lines() {
@@ -794,300 +294,26 @@ fn has_selection_prompt(content: &str) -> bool {
     false
 }
 
-/// Check for "esc" + "interrupt" pattern
+/// Check for real interrupt hints, not unrelated "esc" and "interrupt" text.
 fn has_interrupt_pattern(lower_content: &str) -> bool {
     lower_content.contains("esc to interrupt")
         || lower_content.contains("ctrl+c to interrupt")
-        || (lower_content.contains("esc") && lower_content.contains("interrupt"))
+        || lower_content.contains("press esc to interrupt")
 }
 
-/// Claude Code spinner characters + activity label.
-/// The verb changes frequently ("Processing…", "Pouncing…", etc.), so rely
-/// on the spinner glyph + trailing ellipsis rather than specific wording.
-/// Include Claude's narrow-pane middle-dot frame too.
-fn has_spinner_activity(content: &str) -> bool {
-    const SPINNER_CHARS: &str = "·✱✲✳✴✵✶✷✸✹✺✻✼✽✾✿❀❁❂❃❇❈❉❊❋✢✣✤✥✦✧✨⊛⊕⊙◉◎◍⁂⁕※⍟☼★☆";
-    for line in content.lines() {
-        let trimmed = line.trim();
-        let mut chars = trimmed.chars();
-        if let Some(first) = chars.next() {
-            if SPINNER_CHARS.contains(first) {
-                let rest: String = chars.collect();
-                if rest.starts_with(' ')
-                    && rest.contains('\u{2026}')
-                    && rest.chars().any(|c| c.is_alphanumeric())
-                {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-fn has_visible_blocker(agent: Agent, content: &str, state: AgentState) -> bool {
-    if state != AgentState::Blocked {
-        return false;
-    }
-
-    match agent {
-        // Strong visible blockers are opt-in because this flag can override
-        // hook authority. Plain blocked heuristics remain valid fallback state,
-        // but they must not become hook overrides unless the current UI chrome
-        // is known to be structural and live.
-        Agent::Claude => has_claude_visible_blocker(content),
-        Agent::Codex => has_codex_visible_blocker(content),
-        _ => false,
-    }
-}
-
-fn has_claude_visible_blocker(content: &str) -> bool {
-    let lower = content.to_lowercase();
-    lower.contains("do you want to proceed?")
-        && has_claude_yes_no_choice(content)
-        && (lower.contains("bash command")
-            || lower.contains("bash(")
-            || lower.contains("contains expansion")
-            || lower.contains("tab to amend")
-            || lower.contains("ctrl+e to explain"))
-}
-
-fn has_codex_visible_blocker(content: &str) -> bool {
-    let lower = content.to_lowercase();
-    lower.contains("press enter to confirm or esc to cancel")
-        || lower.contains("enter to submit answer")
-        || lower.contains("enter to submit all")
-        || lower.contains("allow command?")
-}
-
-fn has_visible_idle(agent: Agent, content: &str, state: AgentState) -> bool {
-    if state != AgentState::Idle {
-        return false;
-    }
-
-    match agent {
-        Agent::Claude => has_claude_prompt_box(content),
-        Agent::Codex => has_codex_prompt(content),
-        _ => false,
-    }
-}
-
-fn has_visible_working(agent: Agent, content: &str, state: AgentState) -> bool {
-    if state != AgentState::Working {
-        return false;
-    }
-
-    match agent {
-        Agent::Claude => has_claude_working_chrome(content),
-        Agent::Codex => has_codex_visible_working(content),
-        _ => false,
-    }
-}
-
-fn has_codex_visible_working(content: &str) -> bool {
-    let lines: Vec<&str> = content.lines().collect();
-    let Some(working_index) = lines.iter().rposition(|line| codex_live_working_line(line)) else {
-        return false;
-    };
-
-    lines[working_index + 1..].iter().all(|line| {
-        let trimmed = line.trim_start();
-        !trimmed.starts_with('•')
-            && !trimmed.starts_with('■')
-            && !trimmed.starts_with('✗')
-            && !trimmed.starts_with('✓')
-    })
-}
-
-fn has_codex_working_header(content: &str) -> bool {
-    content.lines().any(codex_working_status_line)
-}
-
-fn codex_live_working_line(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    let lower = trimmed.to_lowercase();
-    codex_working_status_line(line)
-        && (trimmed.contains("Waiting for background terminal")
-            || lower.contains("esc to interrupt")
-            || lower.contains("esc…"))
-}
-
-fn codex_working_status_line(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    trimmed.starts_with('•')
-        && (trimmed.contains("Working (") || trimmed.contains("Waiting for background terminal ("))
-}
-
-fn has_codex_prompt(content: &str) -> bool {
-    content.lines().any(|line| {
-        let trimmed = line.trim_start();
-        trimmed == "›" || trimmed.starts_with("› ")
-    })
-}
-
-fn has_cursor_blocked_prompt(content: &str, lower: &str) -> bool {
-    if lower.contains("waiting for approval") || lower.contains("run this command?") {
-        return true;
-    }
-
-    if lower.contains("(y) (enter)")
-        || lower.contains("keep (n)")
-        || lower.contains("skip (esc or n)")
-    {
-        return true;
-    }
-
-    content.lines().any(|line| {
-        let line = line.trim().to_lowercase();
-        let has_yes_action = line.contains("(y)");
-        has_yes_action
-            && (line.contains("allow")
-                || line.contains("run (once)")
-                || line.contains("→ run")
-                || line.starts_with("run "))
-    })
-}
-
-/// Cursor status line: spinner glyphs followed by a live action label.
+#[cfg(test)]
 fn has_cursor_spinner(content: &str) -> bool {
-    content.lines().any(|line| {
-        let trimmed = line.trim_start();
-        let mut chars = trimmed.chars();
-        let Some(first) = chars.next() else {
-            return false;
-        };
-        let rest = chars.as_str().trim_start();
-
-        if matches!(first, '⬡' | '⬢') {
-            return cursor_status_word_is_active(rest);
-        }
-
-        if ('\u{2800}'..='\u{28FF}').contains(&first) {
-            let rest = rest.trim_start_matches(|c| ('\u{2800}'..='\u{28FF}').contains(&c));
-            return cursor_status_word_is_active(rest.trim_start());
-        }
-
-        false
-    })
+    agents::cursor::has_cursor_spinner(content)
 }
 
-fn cursor_status_word_is_active(rest: &str) -> bool {
-    let Some(word) = rest.split_whitespace().next() else {
-        return false;
-    };
-    word.trim_end_matches(|c: char| !c.is_alphabetic())
-        .to_ascii_lowercase()
-        .ends_with("ing")
-}
-
-fn has_antigravity_spinner(content: &str) -> bool {
-    content.lines().any(|line| {
-        let trimmed = line.trim_start();
-        let mut chars = trimmed.chars();
-        let Some(first) = chars.next() else {
-            return false;
-        };
-        if !('\u{2800}'..='\u{28FF}').contains(&first) {
-            return false;
-        }
-
-        let rest = chars
-            .as_str()
-            .trim_start_matches(|c| ('\u{2800}'..='\u{28FF}').contains(&c))
-            .trim_start();
-        cursor_status_word_is_active(rest)
-    })
-}
-
-fn has_antigravity_background_tasks(content: &str) -> bool {
-    let bottom_lines: Vec<&str> = content
-        .lines()
-        .rev()
-        .filter(|line| !line.trim().is_empty())
-        .take(5)
-        .collect();
-
-    bottom_lines.into_iter().any(|line| {
-        let line = line.trim().to_lowercase();
-        line.contains("/tasks") && antigravity_task_count(&line).is_some_and(|count| count > 0)
-    })
-}
-
-fn antigravity_task_count(line: &str) -> Option<u32> {
-    for marker in [" task(s)", " tasks", " task"] {
-        let Some((before, _)) = line.split_once(marker) else {
-            continue;
-        };
-        let raw_count = before.split_whitespace().last()?.trim_matches(|c| c == '·');
-        if let Ok(count) = raw_count.parse() {
-            return Some(count);
-        }
-    }
-    None
-}
-
-fn has_opencode_question_prompt(content: &str) -> bool {
-    let lower = content.to_lowercase();
-    let has_enter_action = lower.contains("enter confirm")
-        || lower.contains("enter submit")
-        || lower.contains("enter toggle");
-    let has_question_nav = content.contains("↑↓ select") || content.contains("⇆ tab");
-
-    lower.contains("esc dismiss") && has_enter_action && has_question_nav
-}
-
-fn has_claude_working_chrome(content: &str) -> bool {
-    let above = content_above_prompt_box(content);
-    let above_lower = above.to_lowercase();
-    above_lower.contains("esc to interrupt")
-        || above_lower.contains("ctrl+c to interrupt")
-        || has_spinner_activity(above)
-}
-
-/// Extract content above Claude's prompt box.
-/// The prompt box is two ─── border lines with ❯ between them.
+#[cfg(test)]
 fn content_above_prompt_box(content: &str) -> &str {
-    let lines: Vec<&str> = content.lines().collect();
-
-    if let Some(i) = claude_prompt_box_top_border_index(&lines) {
-        let byte_offset: usize = lines[..i].iter().map(|l| l.len() + 1).sum();
-        return &content[..byte_offset.min(content.len())];
-    }
-
-    // No prompt box found, return all content
-    content
+    agents::claude_code::content_above_prompt_box(content)
 }
 
-fn has_claude_prompt_box(content: &str) -> bool {
-    let lines: Vec<&str> = content.lines().collect();
-    let Some(top_border_index) = claude_prompt_box_top_border_index(&lines) else {
-        return false;
-    };
-
-    lines[top_border_index + 1..]
-        .iter()
-        .take_while(|line| !is_horizontal_rule(line))
-        .any(|line| line.trim_start().starts_with('❯'))
-}
-
-fn claude_prompt_box_top_border_index(lines: &[&str]) -> Option<usize> {
-    let mut border_count = 0;
-
-    for i in (0..lines.len()).rev() {
-        if is_horizontal_rule(lines[i]) {
-            border_count += 1;
-            if border_count == 2 {
-                return Some(i);
-            }
-        }
-    }
-
-    None
-}
-
-fn is_horizontal_rule(line: &str) -> bool {
-    let trimmed = line.trim();
-    !trimmed.is_empty() && trimmed.chars().all(|c| c == '─')
+#[cfg(test)]
+fn has_spinner_activity(content: &str) -> bool {
+    agents::claude_code::has_spinner_activity(content)
 }
 
 // ---------------------------------------------------------------------------
@@ -1312,6 +538,61 @@ mod tests {
         std::env::temp_dir().join(unique)
     }
 
+    #[test]
+    fn moved_agent_detection_routes_through_production_dispatch() {
+        let cases = [
+            (Agent::Pi, "Working...", AgentState::Working),
+            (
+                Agent::Claude,
+                "✽ Writing…\nesc to interrupt\n──────\n❯ \n──────",
+                AgentState::Working,
+            ),
+            (
+                Agent::Codex,
+                "generating code\nesc to interrupt",
+                AgentState::Working,
+            ),
+            (Agent::Gemini, "Esc to cancel", AgentState::Working),
+            (Agent::Cursor, "Ctrl+C to stop", AgentState::Working),
+            (
+                Agent::Antigravity,
+                "⠋ Thinking through the request",
+                AgentState::Working,
+            ),
+            (Agent::Cline, "Reading project files", AgentState::Working),
+            (
+                Agent::OpenCode,
+                "running tool\nesc to interrupt",
+                AgentState::Working,
+            ),
+            (Agent::GithubCopilot, "Esc cancel", AgentState::Working),
+            (Agent::Kimi, "🌕", AgentState::Working),
+            (Agent::Kiro, "Kiro is working", AgentState::Working),
+            (Agent::Droid, "Press ESC to stop", AgentState::Working),
+            (Agent::Amp, "Esc to cancel", AgentState::Working),
+            (
+                Agent::Grok,
+                "⠋ Waiting… 1.8s\nCtrl+c:cancel Ctrl+Enter:interject",
+                AgentState::Working,
+            ),
+            (Agent::Hermes, "msg=interrupt", AgentState::Working),
+            (
+                Agent::Kilo,
+                "Ask · DeepSeek V4 Pro\nesc interrupt",
+                AgentState::Working,
+            ),
+            (Agent::Qodercli, "\u{280B} Thinking...", AgentState::Working),
+        ];
+
+        for (agent, screen, expected) in cases {
+            assert_eq!(
+                detect_agent(Some(agent), screen).state,
+                expected,
+                "production dispatch for {agent:?}"
+            );
+        }
+    }
+
     // ---- Agent identification ----
 
     #[test]
@@ -1337,6 +618,8 @@ mod tests {
         assert_eq!(identify_agent("grok-build"), Some(Agent::Grok));
         assert_eq!(identify_agent("hermes"), Some(Agent::Hermes));
         assert_eq!(identify_agent("hermes-agent"), Some(Agent::Hermes));
+        assert_eq!(identify_agent("kilo"), Some(Agent::Kilo));
+        assert_eq!(identify_agent("kilo-code"), Some(Agent::Kilo));
     }
 
     #[test]
@@ -1356,6 +639,7 @@ mod tests {
         assert_eq!(parse_agent_label("kiro-cli"), Some(Agent::Kiro));
         assert_eq!(parse_agent_label("grok-build"), Some(Agent::Grok));
         assert_eq!(parse_agent_label("hermes-agent"), Some(Agent::Hermes));
+        assert_eq!(parse_agent_label("kilo-code"), Some(Agent::Kilo));
     }
 
     #[test]
@@ -1367,6 +651,7 @@ mod tests {
         assert_eq!(agent_label(Agent::Kiro), "kiro");
         assert_eq!(agent_label(Agent::Grok), "grok");
         assert_eq!(agent_label(Agent::Hermes), "hermes");
+        assert_eq!(agent_label(Agent::Kilo), "kilo");
     }
 
     #[test]
@@ -1732,6 +1017,28 @@ mod tests {
     }
 
     #[test]
+    fn claude_interrupted_permission_prompt_box_is_visible_idle() {
+        let screen = "❯ this is a test, create some dummy files on /tmp and -rm rf them i wanna test\n    permissions\n\n  Thought for 7s (ctrl+o to expand)\n\n● Bash(tmpdir=$(mktemp -d /tmp/claude-perm-test.XXXXXX) && touch \"$tmpdir/file1.txt\"\n      \"$tmpdir/file2.log\" && mkdir \"$tmpdir/subdir\" && touch\n      \"$tmpdir/subdir/nested.txt\"…)\n  ⎿  Interrupted · What should Claude do instead?\n\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ \n─────────────────────────────────────────────────────────────────────────────────────────\n  ~/P/herdr ⎇ master ▱▱▱▱▱ 0%";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(detection.visible_idle);
+        assert!(!detection.visible_working);
+        assert!(!detection.visible_blocker);
+    }
+
+    #[test]
+    fn claude_spinner_after_interrupted_permission_is_visible_working() {
+        let screen = "❯ this is a test, create some dummy files on /tmp and -rm rf them i wanna test\n    permissions\n\n  Thought for 7s (ctrl+o to expand)\n\n● Bash(tmpdir=$(mktemp -d /tmp/claude-perm-test.XXXXXX) && touch \"$tmpdir/file1.txt\"\n      \"$tmpdir/file2.log\" && mkdir \"$tmpdir/subdir\" && touch\n      \"$tmpdir/subdir/nested.txt\"…)\n  ⎿  Interrupted · What should Claude do instead?\n\n❯ test\n\n✢ Garnishing… (1s · thinking with high effort)\n  ⎿  Tip: Run claude --continue or claude --resume to resume a conversation\n\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ \n─────────────────────────────────────────────────────────────────────────────────────────\n  ~/P/herdr ⎇ master ▱▱▱▱▱ 0%";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Working);
+        assert!(detection.visible_working);
+        assert!(!detection.visible_idle);
+        assert!(!detection.visible_blocker);
+    }
+
+    #[test]
     fn claude_separators_without_prompt_are_not_visible_idle() {
         let screen = "Task complete.\n─────────────\nplain text\n─────────────";
         let detection = detect_agent(Some(Agent::Claude), screen);
@@ -1746,6 +1053,7 @@ mod tests {
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Working);
+        assert!(detection.visible_working);
         assert!(!detection.visible_idle);
     }
 
@@ -1799,6 +1107,16 @@ mod tests {
         let detection = detect_agent(Some(Agent::Codex), "The docs mention [y/n] prompts.");
 
         assert_eq!(detection.state, AgentState::Blocked);
+        assert!(!detection.visible_blocker);
+    }
+
+    #[test]
+    fn codex_replayed_transcript_weak_blocked_text_above_prompt_is_idle() {
+        let screen = "Codex\nBlocked signals in src/detect/agents/codex.rs:6: confirm footer, submit answer/all, allow command, [y/n], yes (y), or generic confirmation.\n\nLikely false positives: [y/n] and generic confirmation prose still mark Blocked.\n\n• Agent thread 019e7670-ba31-7641-b6e0-545c101de8c3 is closed. Replaying saved transcript.\n\n\n› Summarize recent commits\n\n  ~/Projects/herdr · master · gpt-5.5 default · Context 37% used";
+        let detection = detect_agent(Some(Agent::Codex), screen);
+
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(detection.visible_idle);
         assert!(!detection.visible_blocker);
     }
 
@@ -1876,6 +1194,102 @@ mod tests {
     }
 
     #[test]
+    fn codex_live_working_status_above_current_prompt_stays_working() {
+        let detection = detect_agent(
+            Some(Agent::Codex),
+            "• Ran git diff --name-status v0.6.3..HEAD\n  └ A    website/src/pages/releases/index.astro\n\n• Working (28s • esc to interrupt)\n\n\n› Run /review on my current changes\n\n  ~/Projects/herdr · master · gpt-5.5 high · Context 7% used · 5h 96% left",
+        );
+
+        assert_eq!(detection.state, AgentState::Working);
+        assert!(detection.visible_working);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
+    fn codex_background_terminal_status_above_current_prompt_stays_working() {
+        let detection = detect_agent(
+            Some(Agent::Codex),
+            "• Ran just check\n  └ test output...\n\n• Working (1m 36s) · 1 background terminal running · /ps to view · /stop to close\n\n\n› Run /review on my current changes",
+        );
+
+        assert_eq!(detection.state, AgentState::Working);
+        assert!(detection.visible_working);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
+    fn codex_reviewing_approval_request_is_visible_working() {
+        let detection = detect_agent(
+            Some(Agent::Codex),
+            "• Reviewing approval request (22s • esc to interrupt)\n  └ /bin/zsh -lc 'rm -rf /tmp/codex-rm-test'\n\n\n› Summarize recent commits\n\n  ~/Projects/herdr · master",
+        );
+
+        assert_eq!(detection.state, AgentState::Working);
+        assert!(detection.visible_working);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
+    fn codex_reviewing_approval_request_without_prompt_is_visible_working() {
+        let detection = detect_agent(
+            Some(Agent::Codex),
+            "• Running git push --force-with-lease origin codex/ci-flake-diagnostics\n\n• Reviewing approval request (2m 53s • esc to interrupt)\n  └ /bin/zsh -lc 'git push --force-with-lease origin codex/ci-flake-diagnostics'",
+        );
+
+        assert_eq!(detection.state, AgentState::Working);
+        assert!(detection.visible_working);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
+    fn codex_reviewing_multiple_approval_requests_is_visible_working() {
+        let detection = detect_agent(
+            Some(Agent::Codex),
+            "• Reviewing 2 approval requests (0s • esc to interrupt)\n\n\n› Summarize recent commits\n\n  ~/Projects/herdr · master",
+        );
+
+        assert_eq!(detection.state, AgentState::Working);
+        assert!(detection.visible_working);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
+    fn codex_booting_mcp_server_is_visible_working() {
+        let detection = detect_agent(
+            Some(Agent::Codex),
+            "• Booting MCP server: codex_apps (7s • esc to interrupt)\n\n\n› ok spawn one again please\n\n  ~/Projects/herdr · master",
+        );
+
+        assert_eq!(detection.state, AgentState::Working);
+        assert!(detection.visible_working);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
+    fn codex_stale_working_status_above_current_idle_prompt_is_idle() {
+        let detection = detect_agent(
+            Some(Agent::Codex),
+            "■ Conversation interrupted - tell the model what to do differently. Something went wrong?\nHit `/feedback` to report the issue.\n\n\n› `/feedback` to report the issue.\n\n\n  › Working\n\n\n  • Working (2s • esc to interrupt)\n\n\n  › Run /review on my current changes\n\n    ~/Projects/herdr · master · gpt-5.5 high · Context 7% used\n\n\n■ Conversation interrupted - tell the model what to do differently. Something went wrong?\nHit `/feedback` to report the issue.\n\n\n› Run /review on my current changes\n\n  ~/Projects/herdr · master · gpt-5.5 high · Context 7% used · 5h 95% left",
+        );
+
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(detection.visible_idle);
+        assert!(!detection.visible_working);
+    }
+
+    #[test]
+    fn codex_pasted_transcript_in_current_prompt_does_not_trigger_working() {
+        let detection = detect_agent(
+            Some(Agent::Codex),
+            "› so there is a problem\n\n\n\n\n  • Working (2s • esc to interrupt)\n\n\n  › Run /review on my current changes\n\n    ~/Projects/herdr · master · gpt-5.5 high · Context 0% used · 5h 94% left · weekly\n  36% …\n\n  wdyt\n\n\n\n  ~/Projects/herdr · master · gpt-5.5 high · Context 0% used · 5h 94% left · weekly 36% …",
+        );
+
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(detection.visible_idle);
+        assert!(!detection.visible_working);
+    }
+
+    #[test]
     fn codex_background_terminal_wait_is_visible_working() {
         let detection = detect_agent(
             Some(Agent::Codex),
@@ -1905,8 +1319,9 @@ mod tests {
             "• Working (17s • esc to interrupt)\n\n• Ran git status --short\n  └ M src/detect.rs\n\n› Implement {feature}",
         );
 
-        assert_eq!(detection.state, AgentState::Working);
+        assert_eq!(detection.state, AgentState::Idle);
         assert!(!detection.visible_working);
+        assert!(detection.visible_idle);
     }
 
     #[test]
@@ -1916,8 +1331,27 @@ mod tests {
             "• Waiting for background terminal (0s • esc to …\n  └ cargo test -p codex-core\n\n• Ran git status --short\n  └ M src/detect.rs\n\n› Implement {feature}",
         );
 
-        assert_eq!(detection.state, AgentState::Working);
+        assert_eq!(detection.state, AgentState::Idle);
         assert!(!detection.visible_working);
+        assert!(detection.visible_idle);
+    }
+
+    #[test]
+    fn codex_queued_follow_up_keeps_active_working_status() {
+        let cases = [
+            "• Working (9m 24s • esc to interrupt)\n\n  • Queued follow-up inputs\n    ↳ also a new bug we can talk about later\n    alt + ↑ edit last queued message\n\n› Summarize recent commits\n\n  ~/Projects/herdr · master",
+            "• Working (9m 24s • esc to interrupt)\n\n• Queued follow-up inputs\n  ↳ also a new bug we can talk about later\n  alt + ↑ edit last queued message\n\n› Summarize recent commits\n\n  ~/Projects/herdr · master",
+            "• Working (4s • esc to interrupt)\n\n  • Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n    ↳ you mean that\n\n› Summarize recent commits\n\n  ~/Projects/herdr · master",
+            "• Working (4s • esc to interrupt)\n\n• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n  ↳ you mean that\n\n› Summarize recent commits\n\n  ~/Projects/herdr · master",
+        ];
+
+        for screen in cases {
+            let detection = detect_agent(Some(Agent::Codex), screen);
+
+            assert_eq!(detection.state, AgentState::Working);
+            assert!(detection.visible_working);
+            assert!(!detection.visible_idle);
+        }
     }
 
     #[test]
@@ -2163,6 +1597,38 @@ mod tests {
     #[test]
     fn opencode_idle() {
         assert_eq!(detect_opencode("> "), AgentState::Idle);
+    }
+
+    // ---- Kilo ----
+
+    #[test]
+    fn kilo_waiting_question_prompt() {
+        assert_eq!(
+            detect_kilo(
+                "Write the following joke to ~/joke.md?\n\
+                 1. Yes, write it\n\
+                 2. No, thanks\n\
+                 3. Type your own answer\n\
+                 ↑↓ select  enter submit  esc dismiss",
+            ),
+            AgentState::Blocked
+        );
+    }
+
+    #[test]
+    fn kilo_working() {
+        assert_eq!(
+            detect_kilo("Ask · DeepSeek V4 Pro\nesc interrupt\n12.8K (1%) · $0.01"),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn kilo_idle() {
+        assert_eq!(
+            detect_kilo("Ask anything... \"Fix broken tests\"\nCode · DeepSeek V4 Pro"),
+            AgentState::Idle
+        );
     }
 
     // ---- GitHub Copilot ----

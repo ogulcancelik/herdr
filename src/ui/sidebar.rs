@@ -1179,6 +1179,18 @@ pub(crate) fn collapsed_sidebar_toggle_rect(area: Rect) -> Rect {
     Rect::new(x, bottom_y, 1, 1)
 }
 
+pub(crate) fn expanded_sidebar_toggle_rect(area: Rect) -> Rect {
+    if area.width <= 1 || area.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(
+        area.x + area.width.saturating_sub(2),
+        area.y + area.height.saturating_sub(1),
+        1,
+        1,
+    )
+}
+
 fn render_sidebar_toggle(
     app: &AppState,
     frame: &mut Frame,
@@ -1186,25 +1198,55 @@ fn render_sidebar_toggle(
     collapsed: bool,
     p: &Palette,
 ) {
-    if !collapsed {
-        return;
-    }
-    let toggle_area = collapsed_sidebar_toggle_rect(area);
+    let toggle_area = if collapsed {
+        collapsed_sidebar_toggle_rect(area)
+    } else {
+        expanded_sidebar_toggle_rect(area)
+    };
     if toggle_area == Rect::default() {
         return;
     }
-    let icon_style = if app.global_menu_attention_badge_visible() {
+    let icon = if collapsed { "»" } else { "«" };
+    let icon_style = if collapsed && app.global_menu_attention_badge_visible() {
         Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(p.overlay0)
     };
-    frame.render_widget(Paragraph::new(Span::styled("»", icon_style)), toggle_area);
+    frame.render_widget(Paragraph::new(Span::styled(icon, icon_style)), toggle_area);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{detect::Agent, workspace::Workspace};
+    use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn render_sidebar_toggle_draws_expanded_collapse_icon() {
+        let app = crate::app::state::AppState::test_new();
+        let area = Rect::new(0, 0, 26, 20);
+        let mut terminal =
+            Terminal::new(TestBackend::new(26, 20)).expect("test terminal should initialize");
+
+        terminal
+            .draw(|frame| render_sidebar_toggle(&app, frame, area, false, &app.palette))
+            .expect("sidebar toggle should render");
+
+        let toggle = expanded_sidebar_toggle_rect(area);
+        assert_eq!(
+            terminal.backend().buffer()[(toggle.x, toggle.y)].symbol(),
+            "«"
+        );
+    }
+
+    #[test]
+    fn expanded_sidebar_toggle_sits_inside_sidebar_content() {
+        let area = Rect::new(0, 0, 26, 20);
+        let toggle = expanded_sidebar_toggle_rect(area);
+
+        assert_eq!(toggle.x, area.x + area.width - 2);
+        assert_eq!(toggle.y, area.y + area.height - 1);
+    }
 
     #[test]
     fn all_workspaces_agent_panel_entries_use_workspace_and_optional_tab_labels() {

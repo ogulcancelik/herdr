@@ -3,16 +3,28 @@ name: Nix
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-    paths-ignore:
-      - "website/**"
-      - "docs/**"
-      - "**/*.md"
+    paths:
+      - ".github/workflows/nix.yml"
+      - "assets/**"
+      - "build.rs"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "flake.lock"
+      - "flake.nix"
+      - "nix/**"
+      - "vendor/**"
   push:
     branches: [master]
-    paths-ignore:
-      - "website/**"
-      - "docs/**"
-      - "**/*.md"
+    paths:
+      - ".github/workflows/nix.yml"
+      - "assets/**"
+      - "build.rs"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "flake.lock"
+      - "flake.nix"
+      - "nix/**"
+      - "vendor/**"
 
 permissions:
   contents: read

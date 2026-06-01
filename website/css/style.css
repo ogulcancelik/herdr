@@ -1031,19 +1031,25 @@ samp {
     align-items: center;
     flex-wrap: wrap;
     gap: 0.35rem;
-    padding-left: 0.1rem;
     color: var(--muted);
     font-family: var(--mono);
-    font-size: 0.78rem;
+    font-size: 0.72rem;
     font-weight: 600;
 }
 
+.install-label {
+    width: 100%;
+    color: var(--muted);
+}
+
 .install-method {
-    border: 0;
-    background: transparent;
+    border: 1px solid var(--term-border);
+    border-radius: var(--radius-sm);
+    background: var(--term-bg);
     color: var(--muted);
     cursor: pointer;
-    padding: 0;
+    min-height: 2rem;
+    padding: 0.4rem 0.7rem;
     font-family: var(--mono);
     font-weight: 600;
 }
@@ -1055,7 +1061,9 @@ samp {
 }
 
 .install-method.is-active {
-    color: var(--ink);
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent);
 }
 
 .install-card {

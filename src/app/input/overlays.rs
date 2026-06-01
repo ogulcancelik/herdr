@@ -380,27 +380,18 @@ impl AppState {
         if inner.height < 8 || inner.width < 4 {
             return None;
         }
-        let body = crate::ui::modal_stack_areas(inner, 2, 1, 0, 1).content;
-        let preview = self
-            .release_notes
-            .as_ref()
-            .is_some_and(|notes| notes.preview);
-        Some(
-            crate::ui::release_notes_sections(
-                body,
-                preview,
-                &self.update_install_command,
-                &self.palette,
-            )
-            .notes_body,
-        )
+        Some(crate::ui::modal_stack_areas(inner, 2, 1, 0, 1).content)
     }
 
     fn release_notes_scroll_metrics(&self) -> Option<crate::pane::ScrollMetrics> {
         let notes = self.release_notes.as_ref()?;
         let body = self.release_notes_body_rect()?;
         let viewport_rows = body.height.max(1) as usize;
-        let lines = crate::ui::release_notes_display_lines(notes, &self.palette);
+        let lines = crate::ui::release_notes_display_lines(
+            notes,
+            &self.update_install_command,
+            &self.palette,
+        );
 
         let rows_for_width = |wrap_width: u16| {
             crate::ui::release_notes_wrapped_line_count(&lines, wrap_width.max(1))
@@ -752,5 +743,38 @@ mod tests {
         ));
 
         assert!(app.state.request_complete_onboarding);
+    }
+
+    #[test]
+    fn release_notes_preview_scrollbar_uses_full_content_body() {
+        let mut app = app_for_mouse_test();
+        app.state.view.sidebar_rect = Rect::new(0, 0, 24, 16);
+        app.state.view.terminal_area = Rect::new(24, 0, 96, 16);
+        app.state.release_notes = Some(crate::app::state::ReleaseNotesState {
+            version: "9.9.9".into(),
+            body: "### Added\n- Custom command keybindings now accept an optional description field.\n\n### Fixed\n- Sidebar Git status refresh now deduplicates workspaces.\n- Large restored sessions no longer leave panes without shells after startup.\n- Pane shutdown no longer warns after the direct child has already exited.\n- Closing the last pane or tab in a parent worktree workspace now shows the existing confirmation before closing the whole worktree group.\n- Update prompts, toasts, and docs now distinguish installing a new binary from stopping or reattaching a running Herdr session to use it."
+                .into(),
+            scroll: 0,
+            preview: true,
+        });
+        app.state.update_install_command = "brew update && brew upgrade herdr".into();
+
+        let inner = app.state.release_notes_modal_inner().unwrap();
+        let expected_body = crate::ui::modal_stack_areas(inner, 2, 1, 0, 1).content;
+        let body = app.state.release_notes_body_rect().unwrap();
+
+        assert_eq!(body, expected_body);
+
+        let metrics = app.state.release_notes_scroll_metrics().unwrap();
+        assert_eq!(metrics.viewport_rows, body.height as usize);
+        assert!(metrics.max_offset_from_bottom > 0);
+
+        let track = crate::ui::release_notes_scrollbar_rect(body, metrics).unwrap();
+        assert_eq!(track.y, body.y);
+        assert!(matches!(
+            app.state
+                .release_notes_scrollbar_target_at(track.x, track.y),
+            Some(ScrollbarClickTarget::Thumb { .. } | ScrollbarClickTarget::Track { .. })
+        ));
     }
 }

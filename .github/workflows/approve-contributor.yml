@@ -29,12 +29,17 @@ jobs:
             const commenter = context.payload.comment.user.login;
             const commentBody = context.payload.comment.body || '';
             const approvedFile = '.github/APPROVED_CONTRIBUTORS';
+            const approveMatch = commentBody.match(/(^|\s)\/approve(?:\s+@([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?))?(?=$|\s)/i);
+            const maintainerPermissions = ['admin', 'maintain', 'write'];
 
-            if (!/(^|\s)\/approve(?=$|\s)/i.test(commentBody)) {
+            if (!approveMatch) {
               console.log('Comment does not contain /approve');
               core.setOutput('status', 'skipped');
               return;
             }
+
+            const approvedUser = approveMatch[2] || issueAuthor;
+            core.setOutput('approved_user', approvedUser);
 
             try {
               const { data: permissionLevel } = await github.rest.repos.getCollaboratorPermissionLevel({
@@ -43,8 +48,8 @@ jobs:
                 username: commenter,
               });
 
-              if (permissionLevel.permission !== 'admin') {
-                console.log(`${commenter} does not have admin access`);
+              if (!maintainerPermissions.includes(permissionLevel.permission)) {
+                console.log(`${commenter} does not have maintainer access`);
                 core.setOutput('status', 'skipped');
                 return;
               }
@@ -60,22 +65,22 @@ jobs:
               .map(line => line.trim().toLowerCase())
               .filter(line => line && !line.startsWith('#'));
 
-            if (approvedList.includes(issueAuthor.toLowerCase())) {
-              console.log(`${issueAuthor} is already approved`);
+            if (approvedList.includes(approvedUser.toLowerCase())) {
+              console.log(`${approvedUser} is already approved`);
               core.setOutput('status', 'already');
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.issue.number,
-                body: `@${issueAuthor} is already in the approved contributors list.`,
+                body: `@${approvedUser} is already in the approved contributors list.`,
               });
               return;
             }
 
-            content = content.trimEnd() + '\n' + issueAuthor + '\n';
+            content = content.trimEnd() + '\n' + approvedUser + '\n';
             fs.writeFileSync(approvedFile, content);
 
-            console.log(`Added ${issueAuthor} to approved contributors`);
+            console.log(`Added ${approvedUser} to approved contributors`);
             core.setOutput('status', 'added');
 
       - name: Commit and push
@@ -86,7 +91,7 @@ jobs:
           git config user.name "kangal-bot"
           git config user.email "285672167+kangal-bot@users.noreply.github.com"
           git add .github/APPROVED_CONTRIBUTORS
-          git diff --staged --quiet || git commit -m "chore: approve contributor ${{ github.event.issue.user.login }}"
+          git diff --staged --quiet || git commit -m "chore: approve contributor ${{ steps.update.outputs.approved_user }}"
           git push "https://x-access-token:${KANGAL_GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:${{ github.event.repository.default_branch }}
 
       - name: Comment on issue
@@ -95,10 +100,10 @@ jobs:
         with:
           github-token: ${{ secrets.KANGAL_GITHUB_TOKEN }}
           script: |
-            const issueAuthor = context.payload.issue.user.login;
+            const approvedUser = '${{ steps.update.outputs.approved_user }}';
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: `@${issueAuthor} has been added to the approved contributors list. You can now submit PRs. Thanks for contributing!`,
+              body: `@${approvedUser} has been added to the approved contributors list. You can now submit PRs for maintainer-approved work. Thanks for contributing!`,
             });

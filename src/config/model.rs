@@ -1,6 +1,7 @@
 use std::num::NonZeroUsize;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use crossterm::event::KeyModifiers;
+use serde::{de, Deserialize, Deserializer, Serialize};
 
 use super::{
     BindingConfig, CommandKeybindConfig, SoundConfig, ThemeConfig, DEFAULT_MOBILE_WIDTH_THRESHOLD,
@@ -32,6 +33,59 @@ impl AgentPanelScopeConfig {
             Self::All => "all",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RightClickPassthroughModifierConfig(Option<KeyModifiers>);
+
+impl RightClickPassthroughModifierConfig {
+    pub fn modifiers(self) -> Option<KeyModifiers> {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for RightClickPassthroughModifierConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        parse_right_click_passthrough_modifier(&value)
+            .map(Self)
+            .ok_or_else(|| {
+                de::Error::custom(
+                    "right_click_passthrough_modifier must be empty, off, none, disabled, ctrl/control, alt/option, cmd/command/super, meta, hyper, or a + separated combination without shift",
+                )
+            })
+    }
+}
+
+fn parse_right_click_passthrough_modifier(value: &str) -> Option<Option<KeyModifiers>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("off")
+        || trimmed.eq_ignore_ascii_case("none")
+        || trimmed.eq_ignore_ascii_case("disabled")
+    {
+        return Some(None);
+    }
+
+    let mut modifiers = KeyModifiers::empty();
+    for token in trimmed.split('+') {
+        let token = token.trim().to_ascii_lowercase();
+        let modifier = match token.as_str() {
+            "ctrl" | "control" => KeyModifiers::CONTROL,
+            "alt" | "option" => KeyModifiers::ALT,
+            "cmd" | "command" | "super" => KeyModifiers::SUPER,
+            "meta" => KeyModifiers::META,
+            "hyper" => KeyModifiers::HYPER,
+            "shift" => return None,
+            _ => return None,
+        };
+        modifiers |= modifier;
+    }
+
+    (!modifiers.is_empty()).then_some(Some(modifiers))
 }
 
 #[derive(Debug, Clone)]
@@ -277,6 +331,8 @@ pub struct UiConfig {
     pub mobile_width_threshold: u16,
     /// Capture mouse input for Herdr's mouse UI. Default: true.
     pub mouse_capture: bool,
+    /// Modifier that lets right-click gestures pass through to pane apps. Empty disables it.
+    pub right_click_passthrough_modifier: RightClickPassthroughModifierConfig,
     /// Force a full host-terminal redraw when the outer terminal regains focus. Default: true.
     pub redraw_on_focus_gained: bool,
     /// Lines to scroll per mouse wheel notch. Default: 3.
@@ -375,7 +431,8 @@ pub struct ExperimentalConfig {
     /// list means apply to any focused pane. Unknown agent names are ignored;
     /// if the list contains no valid names, the reveal does not apply.
     /// Accepted names: pi, claude, codex, gemini, cursor, cline, opencode,
-    /// copilot, kimi, kiro, droid, amp, grok, hermes. Default: empty.
+    /// copilot, kimi, kiro, droid, amp, grok, hermes, kilo, qodercli, qoder.
+    /// Default: empty.
     pub cjk_ime_agents: Vec<String>,
     /// Cursor shape rendered for the IME anchor when
     /// `reveal_hidden_cursor_for_cjk_ime` is enabled. Default: "steady_block".
@@ -455,6 +512,7 @@ impl Default for UiConfig {
             sidebar_max_width: 36,
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
             mouse_capture: true,
+            right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),
             redraw_on_focus_gained: true,
             mouse_scroll_lines: None,
             confirm_close: true,
@@ -473,6 +531,10 @@ impl UiConfig {
         self.mouse_scroll_lines
             .map(NonZeroUsize::get)
             .unwrap_or(DEFAULT_MOUSE_SCROLL_LINES)
+    }
+
+    pub fn right_click_passthrough_modifiers(&self) -> Option<KeyModifiers> {
+        self.right_click_passthrough_modifier.modifiers()
     }
 }
 
@@ -716,6 +778,78 @@ mouse_capture = false
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(!config.ui.mouse_capture);
+    }
+
+    #[test]
+    fn right_click_passthrough_modifier_defaults_off_and_parses() {
+        let default_config = Config::default();
+        assert_eq!(default_config.ui.right_click_passthrough_modifiers(), None);
+
+        for value in ["", "off", "none", "disabled"] {
+            let toml = format!(
+                r#"
+[ui]
+right_click_passthrough_modifier = "{value}"
+"#
+            );
+            let config: Config = toml::from_str(&toml).unwrap();
+            assert_eq!(
+                config.ui.right_click_passthrough_modifiers(),
+                None,
+                "value {value:?} should disable passthrough"
+            );
+        }
+
+        for (value, expected) in [
+            ("ctrl", KeyModifiers::CONTROL),
+            ("control", KeyModifiers::CONTROL),
+            ("alt", KeyModifiers::ALT),
+            ("option", KeyModifiers::ALT),
+            ("cmd", KeyModifiers::SUPER),
+            ("command", KeyModifiers::SUPER),
+            ("super", KeyModifiers::SUPER),
+            ("meta", KeyModifiers::META),
+            ("hyper", KeyModifiers::HYPER),
+        ] {
+            let toml = format!(
+                r#"
+[ui]
+right_click_passthrough_modifier = "{value}"
+"#
+            );
+            let config: Config = toml::from_str(&toml).unwrap();
+            assert_eq!(
+                config.ui.right_click_passthrough_modifiers(),
+                Some(expected),
+                "value {value:?} should parse"
+            );
+        }
+
+        let toml = r#"
+[ui]
+right_click_passthrough_modifier = "cmd+alt"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.ui.right_click_passthrough_modifiers(),
+            Some(KeyModifiers::SUPER | KeyModifiers::ALT)
+        );
+    }
+
+    #[test]
+    fn right_click_passthrough_modifier_rejects_shift() {
+        for value in ["shift", "shift+ctrl", "ctrl+", "ctrl++alt", "banana"] {
+            let toml = format!(
+                r#"
+[ui]
+right_click_passthrough_modifier = "{value}"
+"#
+            );
+            assert!(
+                toml::from_str::<Config>(&toml).is_err(),
+                "value {value:?} should be rejected"
+            );
+        }
     }
 
     #[test]

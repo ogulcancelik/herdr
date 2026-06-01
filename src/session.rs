@@ -111,6 +111,33 @@ pub fn stop_command_for(name: Option<&str>) -> String {
     }
 }
 
+pub fn restart_after_update_guidance(stop_command: &str, attach_command: Option<&str>) -> String {
+    let restart = match attach_command {
+        Some(command) => format!("Run `{stop_command}`, then run `{command}` again."),
+        None => format!("Run `{stop_command}`, then restart Herdr with the same socket override."),
+    };
+    format!(
+        "Stop the old server to use the new version.\nStopping exits pane processes.\n{restart}"
+    )
+}
+
+pub fn active_restart_after_update_guidance() -> String {
+    if !explicit_session_requested() {
+        if let Ok(socket_path) = std::env::var(crate::api::SOCKET_PATH_ENV_VAR) {
+            return restart_after_update_guidance(
+                &format!(
+                    "{}={} herdr server stop",
+                    crate::api::SOCKET_PATH_ENV_VAR,
+                    socket_path
+                ),
+                None,
+            );
+        }
+    }
+
+    restart_after_update_guidance(&local_stop_command(), Some(&local_attach_command()))
+}
+
 pub fn explicit_session_requested() -> bool {
     EXPLICIT_SESSION_REQUESTED.load(Ordering::Relaxed)
 }
@@ -696,6 +723,32 @@ mod tests {
         assert_eq!(local_stop_command(), "herdr session stop work");
 
         std::env::remove_var(SESSION_ENV_VAR);
+    }
+
+    #[test]
+    fn restart_after_update_guidance_names_stop_and_attach_commands() {
+        assert_eq!(
+            restart_after_update_guidance(
+                "herdr session stop work",
+                Some("herdr session attach work")
+            ),
+            "Stop the old server to use the new version.\nStopping exits pane processes.\nRun `herdr session stop work`, then run `herdr session attach work` again."
+        );
+    }
+
+    #[test]
+    fn active_restart_after_update_guidance_respects_socket_override() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, "/tmp/custom-herdr.sock");
+        std::env::remove_var(SESSION_ENV_VAR);
+        clear_explicit_session_for_test();
+
+        assert_eq!(
+            active_restart_after_update_guidance(),
+            "Stop the old server to use the new version.\nStopping exits pane processes.\nRun `HERDR_SOCKET_PATH=/tmp/custom-herdr.sock herdr server stop`, then restart Herdr with the same socket override."
+        );
+
+        std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
     }
 
     #[test]

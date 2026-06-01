@@ -1,0 +1,25 @@
+title: "[idea] "
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: idea / problem
+      description: what do you want to do, or what feels awkward today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: requested-change
+    attributes:
+      label: requested change
+      description: what would you like herdr to support?
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: why you want this
+      description: how would this help you?
+    validations:
+      required: true

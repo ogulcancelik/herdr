@@ -82,41 +82,28 @@ pub(super) fn render_release_notes_overlay(app: &AppState, frame: &mut Frame, ar
             .add_modifier(Modifier::BOLD),
     );
 
-    let sections = release_notes_sections(
-        stack.content,
-        notes.preview,
-        &app.update_install_command,
-        &app.palette,
-    );
+    let notes_body = stack.content;
+    let display_lines =
+        release_notes_display_lines(notes, &app.update_install_command, &app.palette);
     let metrics = crate::pane::ScrollMetrics {
         offset_from_bottom: app.release_notes_max_scroll().saturating_sub(notes.scroll) as usize,
         max_offset_from_bottom: app.release_notes_max_scroll() as usize,
-        viewport_rows: sections.notes_body.height.max(1) as usize,
+        viewport_rows: notes_body.height.max(1) as usize,
     };
-    let track = release_notes_scrollbar_rect(sections.notes_body, metrics);
+    let track = release_notes_scrollbar_rect(notes_body, metrics);
     let notes_text_area = track
         .map(|_| {
             Rect::new(
-                sections.notes_body.x,
-                sections.notes_body.y,
-                sections.notes_body.width.saturating_sub(1),
-                sections.notes_body.height,
+                notes_body.x,
+                notes_body.y,
+                notes_body.width.saturating_sub(1),
+                notes_body.height,
             )
         })
-        .unwrap_or(sections.notes_body);
-
-    if let Some(instructions_area) = sections.instructions {
-        render_release_notes_preview_panel(
-            frame,
-            instructions_area,
-            &notes.version,
-            &app.update_install_command,
-            &app.palette,
-        );
-    }
+        .unwrap_or(notes_body);
 
     let body = Paragraph::new(
-        release_notes_display_lines(notes, &app.palette)
+        display_lines
             .into_iter()
             .map(|(_, line)| line)
             .collect::<Vec<_>>(),
@@ -389,115 +376,49 @@ pub(crate) fn release_notes_lines<'a>(body: &'a str, p: &Palette) -> Vec<(usize,
     lines
 }
 
-pub(crate) struct ReleaseNotesSections {
-    pub instructions: Option<Rect>,
-    pub notes_body: Rect,
-}
-
-pub(crate) fn release_notes_sections(
-    area: Rect,
-    preview: bool,
+fn release_notes_preview_line_entries<'a>(
     install_command: &str,
     p: &Palette,
-) -> ReleaseNotesSections {
-    if preview && area.height >= 6 {
-        let preview_height = release_notes_preview_panel_height(area.width, install_command, p)
-            .min(area.height.saturating_sub(1));
-        let rows = Layout::vertical([Constraint::Length(preview_height), Constraint::Min(0)])
-            .areas::<2>(area);
-        ReleaseNotesSections {
-            instructions: Some(rows[0]),
-            notes_body: rows[1],
-        }
-    } else {
-        ReleaseNotesSections {
-            instructions: None,
-            notes_body: area,
-        }
-    }
-}
-
-fn release_notes_preview_panel_height(area_width: u16, install_command: &str, p: &Palette) -> u16 {
-    let text_width = area_width.saturating_sub(2).max(1);
-    let text_height = Paragraph::new(release_notes_preview_lines("", install_command, p))
-        .wrap(Wrap { trim: false })
-        .line_count(text_width) as u16;
-    text_height.saturating_add(3)
-}
-
-pub(super) fn release_notes_preview_lines<'a>(
-    _version: &str,
-    install_command: &'a str,
-    p: &Palette,
-) -> Vec<Line<'a>> {
+) -> Vec<(usize, Line<'a>)> {
     let title_style = Style::default().fg(p.text).add_modifier(Modifier::BOLD);
     let text_style = Style::default().fg(p.text);
-    let code_style = Style::default()
+    let inline_code_style = Style::default()
         .fg(p.accent)
         .bg(p.surface0)
         .add_modifier(Modifier::BOLD);
+    let instruction = crate::update::update_install_instruction(install_command);
+    let (instruction_width, mut instruction_spans) =
+        release_notes_inline_spans(&instruction, text_style, inline_code_style);
+    instruction_spans.insert(0, Span::raw(" "));
 
     vec![
-        Line::from(vec![
-            Span::styled(
-                "●",
-                Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" update ready", title_style),
-        ]),
-        Line::from(vec![
-            Span::styled("detach from this session, then run ", text_style),
-            Span::styled(install_command, code_style),
-            Span::styled(" in your shell", text_style),
-        ]),
+        (
+            15,
+            Line::from(vec![
+                Span::raw(" "),
+                Span::styled(
+                    "●",
+                    Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" update ready", title_style),
+            ]),
+        ),
+        (instruction_width + 1, Line::from(instruction_spans)),
     ]
-}
-
-fn render_release_notes_preview_panel(
-    frame: &mut Frame,
-    area: Rect,
-    _version: &str,
-    install_command: &str,
-    p: &Palette,
-) {
-    let preview_lines = release_notes_preview_lines(_version, install_command, p);
-    let text_height = Paragraph::new(preview_lines.clone())
-        .wrap(Wrap { trim: false })
-        .line_count(area.width.saturating_sub(2).max(1)) as u16;
-    let rows = Layout::vertical([
-        Constraint::Length(text_height),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
-    .areas::<4>(area);
-
-    let text_area = Rect::new(
-        rows[0].x + 1,
-        rows[0].y,
-        rows[0].width.saturating_sub(2),
-        rows[0].height,
-    );
-    frame.render_widget(
-        Paragraph::new(preview_lines).wrap(Wrap { trim: false }),
-        text_area,
-    );
-
-    let divider_area = Rect::new(rows[2].x + 1, rows[2].y, rows[2].width.saturating_sub(2), 1);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "─".repeat(divider_area.width as usize),
-            Style::default().fg(p.surface1),
-        )])),
-        divider_area,
-    );
 }
 
 pub(crate) fn release_notes_display_lines<'a>(
     notes: &'a ReleaseNotesState,
+    install_command: &str,
     p: &Palette,
 ) -> Vec<(usize, Line<'a>)> {
-    release_notes_lines(notes.body.as_str(), p)
+    let mut lines = Vec::new();
+    if notes.preview {
+        lines.extend(release_notes_preview_line_entries(install_command, p));
+        lines.push((0, Line::raw("")));
+    }
+    lines.extend(release_notes_lines(notes.body.as_str(), p));
+    lines
 }
 
 pub(crate) fn product_announcement_display_lines<'a>(
@@ -527,26 +448,12 @@ pub(crate) fn release_notes_close_button_rect(area: Rect) -> Rect {
 mod tests {
     use super::*;
     use crate::app::state::Palette;
-    use ratatui::{backend::TestBackend, Terminal};
 
     fn line_text(line: &Line<'_>) -> String {
         line.spans
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>()
-    }
-
-    fn buffer_text(buffer: &ratatui::buffer::Buffer, area: Rect) -> String {
-        (area.y..area.y + area.height)
-            .map(|row| {
-                (area.x..area.x + area.width)
-                    .map(|x| buffer[(x, row)].symbol())
-                    .collect::<String>()
-                    .trim_end()
-                    .to_string()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 
     #[test]
@@ -580,68 +487,44 @@ mod tests {
     #[test]
     fn release_notes_preview_lines_show_update_steps() {
         let palette = Palette::catppuccin();
-        let lines = release_notes_preview_lines("0.5.0", "herdr update", &palette);
+        let lines = release_notes_preview_line_entries("herdr update", &palette)
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>();
 
         assert_eq!(lines.len(), 2);
-        assert_eq!(line_text(&lines[0]), "● update ready");
+        assert_eq!(line_text(&lines[0]), " ● update ready");
         assert_eq!(
             line_text(&lines[1]),
-            "detach from this session, then run herdr update in your shell"
+            " detach, run herdr update, then follow its restart guidance"
         );
-        assert_eq!(lines[0].spans[0].style.fg, Some(palette.accent));
-        assert_eq!(lines[0].spans[1].style.fg, Some(palette.text));
+        assert_eq!(lines[0].spans[1].style.fg, Some(palette.accent));
+        assert_eq!(lines[0].spans[2].style.fg, Some(palette.text));
+        assert_eq!(lines[1].spans[2].content.as_ref(), "herdr update");
+        assert_eq!(lines[1].spans[2].style.fg, Some(palette.accent));
+        assert_eq!(lines[1].spans[2].style.bg, Some(palette.surface0));
     }
 
     #[test]
-    fn release_notes_preview_section_expands_for_wrapped_install_command() {
+    fn release_notes_preview_display_is_part_of_the_scrollable_notes_body() {
         let palette = Palette::catppuccin();
-        let area = Rect::new(0, 0, 40, 12);
-        let sections =
-            release_notes_sections(area, true, "brew update && brew upgrade herdr", &palette);
+        let notes = ReleaseNotesState {
+            version: "0.6.6".into(),
+            body: "### Added\n- One".into(),
+            scroll: 0,
+            preview: true,
+        };
 
-        let instructions = sections
-            .instructions
-            .expect("preview should reserve an instructions panel");
-        assert_eq!(instructions.height, 7);
-        assert_eq!(sections.notes_body.y, 7);
-        assert_eq!(sections.notes_body.height, 5);
-    }
+        let lines = release_notes_display_lines(&notes, "herdr update", &palette);
 
-    #[test]
-    fn release_notes_preview_section_keeps_short_install_command_compact() {
-        let palette = Palette::catppuccin();
-        let area = Rect::new(0, 0, 80, 12);
-        let sections = release_notes_sections(area, true, "herdr update", &palette);
-
-        let instructions = sections
-            .instructions
-            .expect("preview should reserve an instructions panel");
-        assert_eq!(instructions.height, 5);
-        assert_eq!(sections.notes_body.y, 5);
-        assert_eq!(sections.notes_body.height, 7);
-    }
-
-    #[test]
-    fn release_notes_preview_panel_renders_wrapped_install_command_suffix() {
-        let palette = Palette::catppuccin();
-        let area = Rect::new(0, 0, 40, 7);
-        let backend = TestBackend::new(area.width, area.height);
-        let mut terminal = Terminal::new(backend).unwrap();
-
-        terminal
-            .draw(|frame| {
-                render_release_notes_preview_panel(
-                    frame,
-                    area,
-                    "0.6.4",
-                    "brew update && brew upgrade herdr",
-                    &palette,
-                );
-            })
-            .unwrap();
-
-        let rendered = buffer_text(terminal.backend().buffer(), area);
-        assert!(rendered.contains("your shell"), "{rendered}");
+        assert_eq!(line_text(&lines[0].1), " ● update ready");
+        assert_eq!(
+            line_text(&lines[1].1),
+            " detach, run herdr update, then follow its restart guidance"
+        );
+        assert_eq!(line_text(&lines[2].1), "");
+        assert_eq!(line_text(&lines[3].1), " ADDED");
+        assert_eq!(line_text(&lines[4].1), " • One");
     }
 
     #[test]

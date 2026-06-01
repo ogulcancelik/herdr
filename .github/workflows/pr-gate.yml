@@ -15,6 +15,7 @@ jobs:
       - name: Check if contributor is approved
         uses: actions/github-script@v9
         with:
+          github-token: ${{ secrets.KANGAL_GITHUB_TOKEN }}
           script: |
             const prAuthor = context.payload.pull_request.user.login;
             const reopener = context.payload.sender?.login ?? null;
@@ -102,15 +103,19 @@ jobs:
             const message = [
               `Hi @${prAuthor}, thanks for your interest in contributing!`,
               '',
-              'We ask new contributors to open an issue first before submitting a PR. This helps us discuss the approach and avoid wasted effort.',
+              'New contributors need maintainer approval before opening PRs. This keeps review time focused on accepted work and avoids wasted effort.',
               '',
-              'Herdr is opinionated about how it should look, feel, and work. If your change affects UI, behavior, interaction patterns, or product direction, discuss it in an issue first.',
+              'Herdr is opinionated about how it should look, feel, and work. Feature requests, ideas, questions, contribution proposals, and product-direction checks belong in Discussions, not issues.',
               '',
               '**Next steps:**',
-              '1. Open an issue describing what you want to change and why',
-              '2. Keep it concise and write in your own voice',
-              '3. If a maintainer approves with `/approve`, you will be added to the approved contributors list',
-              '4. Then you can submit your PR',
+              '1. If this is a feature or behavior change, open a Discussion describing what you want to change and why',
+              '2. If the work is accepted, a maintainer may convert the discussion into an issue or create a new issue for it',
+              '3. If this is a reproducible bug, open a bug report using the issue template',
+              '4. Wait for maintainer approval on an accepted issue before opening a PR',
+              '   Maintainers approve first-time PR paths with `/approve @your-github-username` on the accepted issue.',
+              '5. Keep it concise and write in your own voice',
+              '',
+              'A discussion, issue, branch, or proposed implementation does not reserve the work and does not mean the PR path is approved.',
               '',
               `This PR will be closed automatically. See https://github.com/${context.repo.owner}/${context.repo.repo}/blob/${defaultBranch}/CONTRIBUTING.md for more details.`,
             ].join('\n');

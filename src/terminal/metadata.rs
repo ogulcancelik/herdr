@@ -361,6 +361,7 @@ impl TerminalState {
         }
 
         if self.visible_blocker_overrides_hook()
+            || self.visible_working_overrides_hook()
             || self.visible_idle_masks_hook_custom_status(state, now)
         {
             return None;

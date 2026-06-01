@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 // Effective state arbitration is intentionally centralized here. Hooks are the
 // default authority for agent-owned internal state, but a narrow set of strong
-// visible screen signals can veto stale non-blocked hook reports. Precedence is:
-// hook blocked > strong visible blocker > Claude visible idle > hook > fallback.
+// visible screen signals can veto stale hook reports. Precedence is:
+// strong visible blocker > visible working/idle recovery > hook > fallback.
 // Process-exit updates clear matching hook authority before recomputing state.
 
 use crate::detect::{Agent, AgentState};
@@ -583,12 +583,27 @@ impl TerminalState {
 
     fn visible_working_overrides_hook(&self) -> bool {
         self.fallback_visible_working
-            && self.fallback_not_older_than_hook()
+            && self.visible_working_is_fresh_enough_for_hook()
             && self.hook_authority.as_ref().is_some_and(|authority| {
-                authority.state == AgentState::Idle
+                (authority.state == AgentState::Idle || authority.state == AgentState::Blocked)
                     && crate::detect::parse_agent_label(&authority.agent_label)
                         == self.detected_agent
             })
+    }
+
+    fn visible_working_is_fresh_enough_for_hook(&self) -> bool {
+        self.fallback_not_older_than_hook()
+            || self
+                .fallback_observed_at
+                .zip(
+                    self.hook_authority
+                        .as_ref()
+                        .map(|authority| authority.reported_at),
+                )
+                .is_some_and(|(observed_at, reported_at)| {
+                    reported_at >= observed_at
+                        && reported_at.duration_since(observed_at) < CLAUDE_WORKING_HOLD
+                })
     }
 
     fn visible_idle_stales_hook(&self, now: Instant) -> bool {
@@ -600,7 +615,7 @@ impl TerminalState {
         self.fallback_visible_idle
             && self.fallback_not_older_than_hook()
             && self.hook_authority.as_ref().is_some_and(|authority| {
-                authority.state == AgentState::Working
+                (authority.state == AgentState::Working || authority.state == AgentState::Blocked)
                     && crate::detect::parse_agent_label(&authority.agent_label)
                         == self.detected_agent
             })
@@ -611,7 +626,7 @@ impl TerminalState {
         let visible_idle_stales_hook = self.fallback_visible_idle
             && self.fallback_not_older_than_hook()
             && self.hook_authority.as_ref().is_some_and(|authority| {
-                authority.state == AgentState::Working
+                (authority.state == AgentState::Working || authority.state == AgentState::Blocked)
                     && crate::detect::parse_agent_label(&authority.agent_label)
                         == self.detected_agent
             });
@@ -684,12 +699,7 @@ impl TerminalState {
         previous_presentation: EffectivePresentation,
         now: Instant,
     ) -> Option<EffectiveStateChange> {
-        let state = if self
-            .hook_authority
-            .as_ref()
-            .is_some_and(|authority| authority.state == AgentState::Blocked)
-            || self.visible_blocker_overrides_hook()
-        {
+        let state = if self.visible_blocker_overrides_hook() {
             AgentState::Blocked
         } else if self.visible_working_overrides_hook() {
             AgentState::Working
@@ -1188,28 +1198,164 @@ mod tests {
     }
 
     #[test]
-    fn visible_idle_does_not_override_hook_blocked() {
+    fn recent_visible_working_holds_against_newer_claude_hook_idle() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            now,
+        );
+
+        let change = terminal.set_hook_authority_with_custom_status_at(
+            "herdr:claude".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            None,
+            None,
+            now + Duration::from_millis(100),
+        );
+
+        assert!(change.unwrap().effective_state_change.is_none());
+        assert_eq!(terminal.state, AgentState::Working);
+    }
+
+    #[test]
+    fn old_visible_working_does_not_hold_against_newer_claude_hook_idle() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            now,
+        );
+
+        let change = terminal.set_hook_authority_with_custom_status_at(
+            "herdr:claude".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            None,
+            None,
+            now + CLAUDE_WORKING_HOLD + Duration::from_millis(1),
+        );
+
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(
+            change
+                .unwrap()
+                .effective_state_change
+                .unwrap()
+                .previous_state,
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn refreshed_visible_working_overrides_newer_hook_blocked() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            now,
+        );
+        terminal.set_hook_authority_with_custom_status_at(
+            "herdr:codex".into(),
+            "codex".into(),
+            AgentState::Blocked,
+            None,
+            Some("permission".into()),
+            None,
+            None,
+            now + CLAUDE_WORKING_HOLD + Duration::from_millis(1),
+        );
+
+        assert_eq!(terminal.state, AgentState::Blocked);
+
+        let change = terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            now + CLAUDE_WORKING_HOLD + Duration::from_millis(800),
+        );
+
+        assert_eq!(terminal.state, AgentState::Working);
+        assert_eq!(terminal.effective_custom_status(), None);
+        assert_eq!(
+            change.effective_state_change.unwrap().previous_state,
+            AgentState::Blocked
+        );
+    }
+
+    #[test]
+    fn visible_idle_waits_before_overriding_claude_hook_blocked() {
+        let now = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
-        terminal.set_hook_authority(
+        terminal.set_hook_authority_with_custom_status_at(
             "herdr:claude".into(),
             "claude".into(),
             AgentState::Blocked,
             None,
+            Some("permission".into()),
             None,
+            None,
+            now,
         );
 
-        let change = terminal.set_detected_state_with_visible_blocker(
+        let waiting = terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Claude),
             AgentState::Idle,
             false,
             true,
             false,
+            false,
+            now + Duration::from_millis(500),
         );
 
+        assert!(waiting.effective_state_change.is_none());
         assert_eq!(terminal.fallback_state, AgentState::Idle);
         assert_eq!(terminal.state, AgentState::Blocked);
-        assert!(change.is_none());
+        assert_eq!(
+            terminal.effective_custom_status().as_deref(),
+            Some("permission")
+        );
+
+        let change = terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            now + Duration::from_millis(500) + STALE_HOOK_IDLE_GRACE + Duration::from_millis(1),
+        );
+
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(terminal.effective_custom_status(), None);
+        assert_eq!(
+            change.effective_state_change.unwrap().previous_state,
+            AgentState::Blocked
+        );
     }
 
     #[test]

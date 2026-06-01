@@ -1054,7 +1054,7 @@ mod tests {
             24,
             80,
             0,
-            "/bin/true",
+            "/usr/bin/true",
             crate::config::ShellModeConfig::NonLogin,
             false,
             events,

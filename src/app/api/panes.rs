@@ -387,6 +387,15 @@ impl App {
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
             return pane_not_found(id, &target.pane_id);
         };
+        if self.state.close_pane_would_close_workspace(ws_idx, pane_id)
+            && self.state.confirm_implicit_worktree_group_close(ws_idx)
+        {
+            return encode_error(
+                id,
+                "confirmation_required",
+                "closing this pane would close a worktree group",
+            );
+        }
         let workspace_id = self.state.workspaces[ws_idx].id.clone();
         let terminal_id = self.state.terminal_id_for_pane(ws_idx, pane_id);
         let should_close_workspace = {

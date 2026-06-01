@@ -238,17 +238,25 @@ impl AppState {
             return false;
         }
         let sidebar = self.view.sidebar_rect;
+        let toggle = crate::ui::expanded_sidebar_toggle_rect(sidebar);
+        let on_toggle = toggle.width > 0
+            && col >= toggle.x
+            && col < toggle.x + toggle.width
+            && row >= toggle.y
+            && row < toggle.y + toggle.height;
         sidebar.width > 0
+            && !on_toggle
             && col == sidebar.x + sidebar.width.saturating_sub(1)
             && row >= sidebar.y
             && row < sidebar.y + sidebar.height
     }
 
-    pub(super) fn on_collapsed_sidebar_toggle(&self, col: u16, row: u16) -> bool {
-        if !self.sidebar_collapsed {
-            return false;
-        }
-        let rect = crate::ui::collapsed_sidebar_toggle_rect(self.view.sidebar_rect);
+    pub(super) fn on_sidebar_toggle(&self, col: u16, row: u16) -> bool {
+        let rect = if self.sidebar_collapsed {
+            crate::ui::collapsed_sidebar_toggle_rect(self.view.sidebar_rect)
+        } else {
+            crate::ui::expanded_sidebar_toggle_rect(self.view.sidebar_rect)
+        };
         rect.width > 0
             && col >= rect.x
             && col < rect.x + rect.width
@@ -970,6 +978,24 @@ mod tests {
     }
 
     #[test]
+    fn clicking_expanded_sidebar_toggle_collapses_sidebar() {
+        let mut app = app_for_mouse_test();
+        app.state.sidebar_collapsed = false;
+        app.state.view.sidebar_rect = Rect::new(0, 0, 26, 20);
+        app.state.view.terminal_area = Rect::new(26, 0, 80, 20);
+
+        let toggle = crate::ui::expanded_sidebar_toggle_rect(app.state.view.sidebar_rect);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+
+        assert!(app.state.sidebar_collapsed);
+        assert!(app.state.drag.is_none());
+    }
+
+    #[test]
     fn clicking_workspace_switches_on_mouse_up() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
@@ -1452,6 +1478,26 @@ mod tests {
         assert_eq!(app.state.sidebar_width, 31);
         let snapshot = capture_snapshot(&app.state);
         assert_eq!(snapshot.sidebar_width, Some(31));
+    }
+
+    #[test]
+    fn dragging_sidebar_bottom_divider_still_sets_manual_width() {
+        let mut app = app_for_mouse_test();
+        let divider_col = app.state.view.sidebar_rect.x + app.state.view.sidebar_rect.width - 1;
+        let bottom_row = app.state.view.sidebar_rect.y + app.state.view.sidebar_rect.height - 1;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            divider_col,
+            bottom_row,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            divider_col + 5,
+            bottom_row,
+        ));
+
+        assert_eq!(app.state.sidebar_width, 31);
     }
 
     #[test]

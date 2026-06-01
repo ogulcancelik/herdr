@@ -23,6 +23,8 @@ pub(crate) type RenderTarget = (
 pub(crate) struct ClientConnection {
     /// Whether this connection is the full app client or a direct terminal attach.
     pub(crate) mode: ClientConnectionMode,
+    /// True after the handshake for clients that will switch into direct terminal attach mode.
+    pub(crate) pending_terminal_attach: bool,
     /// Client-local app keybindings. None means use the server's keybindings.
     pub(crate) keybindings: Option<Box<crate::config::LiveKeybindConfig>>,
     /// The client's terminal size after clamping.
@@ -73,6 +75,7 @@ impl ClientConnection {
             outer_terminal_focus,
             last_activity,
             render_encoding,
+            false,
             writer,
         )
     }
@@ -86,10 +89,12 @@ impl ClientConnection {
         outer_terminal_focus: Option<bool>,
         last_activity: u64,
         render_encoding: RenderEncoding,
+        pending_terminal_attach: bool,
         writer: Option<ClientWriter>,
     ) -> Self {
         Self {
             mode,
+            pending_terminal_attach,
             keybindings,
             terminal_size,
             cell_size,
@@ -110,6 +115,10 @@ impl ClientConnection {
     pub(crate) fn request_full_redraw(&mut self) {
         self.render_state.reset_baseline();
         self.graphics_surface_reset_pending = true;
+    }
+
+    pub(crate) fn is_full_app_client(&self) -> bool {
+        matches!(self.mode, ClientConnectionMode::App) && !self.pending_terminal_attach
     }
 
     pub(crate) fn request_semantic_redraw_after_input(&mut self) {
@@ -168,7 +177,7 @@ pub(crate) fn events_include_interaction(events: &[crate::raw_input::RawInputEve
 pub(crate) fn latest_app_client(clients: &HashMap<u64, ClientConnection>) -> Option<u64> {
     clients
         .iter()
-        .filter(|(_, client)| matches!(client.mode, ClientConnectionMode::App))
+        .filter(|(_, client)| client.is_full_app_client())
         .max_by_key(|(_, client)| client.last_activity)
         .map(|(&client_id, _)| client_id)
 }
@@ -194,7 +203,11 @@ pub(crate) fn render_targets(
 ) -> Vec<RenderTarget> {
     let mut targets: Vec<RenderTarget> = clients
         .iter()
-        .filter(|(_, client)| client.writer.is_some())
+        .filter(|(_, client)| {
+            client.writer.is_some()
+                && (client.is_full_app_client()
+                    || matches!(client.mode, ClientConnectionMode::TerminalAttach { .. }))
+        })
         .map(|(&client_id, client)| {
             (
                 client_id,

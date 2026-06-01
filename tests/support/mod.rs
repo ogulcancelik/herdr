@@ -61,6 +61,21 @@ pub fn unregister_runtime_dir(path: &Path) {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub fn herdr_server_pids_for_runtime_dir(runtime_dir: &Path) -> std::io::Result<Vec<u32>> {
+    let mut pids = Vec::new();
+    for pid in iter_worktree_server_pids()? {
+        let Some(process_runtime_dir) = process_runtime_dir(pid)? else {
+            continue;
+        };
+        if process_runtime_dir == runtime_dir {
+            pids.push(pid);
+        }
+    }
+    pids.sort_unstable();
+    Ok(pids)
+}
+
 pub fn cleanup_test_base(base: &Path) {
     let runtime_dir = base.join("runtime");
     let runtime_dirs = HashSet::from([runtime_dir.clone()]);
@@ -224,6 +239,7 @@ pub fn client_handshake(
             &encode_varint_u32(16), // cell_height_px
             &encode_varint_u32(0),  // RenderEncoding::SemanticFrame
             &encode_varint_u32(0),  // ClientKeybindings::Server
+            &encode_varint_u32(0),  // ClientLaunchMode::App
         ],
     );
     let framed = frame_message(&hello_payload);

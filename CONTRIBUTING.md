@@ -18,35 +18,50 @@ Herdr has a specific direction for how it should look, feel, and work.
 
 That includes interaction patterns, layout behavior, mouse ergonomics, terminology, and how features fit the product as a whole.
 
-If your idea changes or contradicts that direction, do not start with a PR. Start with an issue.
+If your idea changes or contradicts that direction, do not start with a PR. Start with a discussion.
 
-If you have a suggestion, disagreement, or contradiction with the current product direction, that belongs in an issue first.
+If you have a suggestion, disagreement, feature request, or product-direction question, start a GitHub Discussion instead of an issue or PR.
+
+## Issues and discussions
+
+The issue tracker is the maintainer work queue.
+
+Issues are only for reproducible bug reports and maintainer-created or maintainer-converted work items. If an issue is open, it should be real, scoped, and actionable.
+
+Use GitHub Discussions for feature requests, ideas, questions, contribution proposals, design discussion, behavior changes, and product-direction checks.
+
+Discussions are community input. Upvotes and comments help show demand, but they do not guarantee implementation, priority, maintainer attention, or PR approval. A maintainer may ignore a discussion, reject it, implement it directly, ask for more detail, or convert it into an accepted issue.
+
+Issues that do not use the bug report template may be closed automatically.
 
 ## First-time contributors
 
 We use an approval gate for new contributors.
 
-Before opening your first PR, open an issue describing what you want to change and why. Keep it short. Write in your own voice. If you intend to implement it yourself, check the contribution intent box in the issue form, or include `/i-intend-to-pr` in the issue body when using the GitHub CLI or API. The `intends-to-pr` label will be added automatically. A maintainer will comment `/approve` if the direction is approved. Once approved, you can open PRs.
+Before opening your first PR, get maintainer approval on an accepted issue. If you want to propose new work, open a discussion describing what you want to change and why. If the work is accepted, a maintainer may convert the discussion into an issue or create a new issue for it.
+
+If an accepted issue already exists, comment on that issue before starting work. A maintainer will comment `/approve @your-github-username` on the issue if your PR path is approved. That adds you to `.github/APPROVED_CONTRIBUTORS`.
+
+Keep it short. Write in your own voice. A discussion, upvote, branch, or proposed implementation does not reserve the work and does not mean the PR path is approved.
 
 This exists because AI makes it trivial to generate plausible-looking contributions that do not fit the app.
 
-Agent note: if you are an AI agent preparing an issue or PR for this repository, check whether the human's GitHub username is listed in `.github/APPROVED_CONTRIBUTORS`. If they are not listed, warn them that opening a PR will be closed automatically and guide them to open an issue first. Keep the scope small, preserve herdr's product direction, run the documented checks, and make sure the human can explain the change. Do not open a PR before the issue is approved.
+Agent note: if you are an AI agent preparing an issue or PR for this repository, check whether the human's GitHub username is listed in `.github/APPROVED_CONTRIBUTORS`. If they are not listed, warn them that opening a PR will be closed automatically. For feature requests, ideas, questions, and contribution proposals, guide them to GitHub Discussions. For bugs, use the bug report issue template and include a real reproduction. Do not bypass the issue template with the GitHub CLI or API. Keep the scope small, preserve herdr's product direction, run the documented checks, and make sure the human can explain the change.
 
-## What to put in a first issue
+## What to put in a bug report
 
-Your first issue should answer these questions clearly:
+Bug reports should answer these questions clearly:
 
 - what is the current behavior
-- what do you want to change
-- why this change belongs in herdr
-- whether this changes UI, interaction, or workflow expectations
-- whether you intend to implement it yourself
+- what is the expected behavior
+- what is the shortest reproduction
+- how does this affect you
+- what Herdr version, OS, and terminal are affected
+- what shell and config are relevant, if any
 
-If your proposal changes the visual language, interaction model, or overall product direction, say that directly. That is exactly what issues are for.
+If there is no reproduction yet, start a discussion instead.
 
-If your issue does not make the direction clear, it will likely be closed.
-
-If you plan to implement the change yourself, say that directly in the issue and check the contribution intent box. If you are using the GitHub CLI or API, include `/i-intend-to-pr` in the issue body instead. That adds the `intends-to-pr` label automatically, signals intent, and does not mean the change is approved.
+If your proposal changes the visual language, interaction model, workflow, persistence, architecture, or product direction, start a discussion instead.
 
 ## Documentation for unreleased changes
 
@@ -94,15 +109,15 @@ Do not use GitHub closing keywords like `fixes #128`, `closes #128`, or `resolve
 
 ## PR scope
 
-Small bug fixes that clearly match the existing design are good candidates for PRs after approval.
+Small bug fixes for accepted issues that clearly match the existing design are good candidates for PRs after approval.
 
-Bigger changes to UI, behavior, interaction patterns, persistence, or architecture need issue discussion first.
+Bigger changes to UI, behavior, interaction patterns, persistence, or architecture need discussion and maintainer approval first.
 
 If a PR introduces a feature without prior alignment, or changes herdr's feel without discussion, it will likely be closed.
 
 ## Questions?
 
-Open an issue first.
+Open a GitHub Discussion.
 
 ---
 

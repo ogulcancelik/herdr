@@ -8,7 +8,35 @@ use super::{
     RESIZE_POLL_INTERVAL, SELECTION_AUTOSCROLL_INTERVAL,
 };
 use crate::events::AppEvent;
-use crate::workspace::{Workspace, WorkspaceGitStatus};
+use crate::workspace::{GitStatusCacheEntry, Workspace, WorkspaceGitStatus};
+use std::collections::HashMap;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkspaceGitRefreshItem {
+    pub(crate) workspace_id: String,
+    pub(crate) resolved_identity_cwd: std::path::PathBuf,
+    pub(crate) cache_key: std::path::PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkspaceGitRefreshTarget {
+    pub(crate) workspace_id: String,
+    pub(crate) resolved_identity_cwd: std::path::PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkspaceGitRefreshJob {
+    pub(crate) cache_key: std::path::PathBuf,
+    pub(crate) status_cwd: std::path::PathBuf,
+    pub(crate) cached: Option<GitStatusCacheEntry>,
+    pub(crate) targets: Vec<WorkspaceGitRefreshTarget>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkspaceGitRefreshOutput {
+    pub(crate) results: Vec<WorkspaceGitStatus>,
+    pub(crate) cache_updates: Vec<(std::path::PathBuf, GitStatusCacheEntry)>,
+}
 
 impl App {
     pub(crate) fn shutdown_detached_terminal_runtimes(&mut self) {
@@ -394,15 +422,7 @@ impl App {
             return;
         }
 
-        let workspaces: Vec<_> = self
-            .state
-            .workspaces
-            .iter()
-            .filter_map(|ws| {
-                ws.resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)
-                    .map(|cwd| (ws.id.clone(), cwd))
-            })
-            .collect();
+        let workspaces = self.workspace_git_refresh_items();
 
         if workspaces.is_empty() {
             self.last_git_remote_status_refresh = now;
@@ -411,15 +431,25 @@ impl App {
 
         self.git_refresh_in_flight = true;
         let event_tx = self.event_tx.clone();
+        let cache = self.git_status_cache.clone();
         std::thread::spawn(move || {
-            let results = workspaces
-                .into_iter()
-                .map(|(workspace_id, resolved_identity_cwd)| {
-                    Workspace::git_status_for_cwd(workspace_id, resolved_identity_cwd)
-                })
-                .collect::<Vec<WorkspaceGitStatus>>();
-            let _ = event_tx.blocking_send(AppEvent::GitStatusRefreshed { results });
+            let output = refresh_workspace_git_statuses_with_cache(workspaces, &cache);
+            let _ = event_tx.blocking_send(AppEvent::GitStatusRefreshed {
+                results: output.results,
+                cache_updates: output.cache_updates,
+            });
         });
+    }
+
+    pub(crate) fn mark_git_status_refresh_due(&mut self, now: Instant) {
+        if self.git_refresh_in_flight {
+            self.git_refresh_due_after_in_flight = true;
+            return;
+        }
+        self.last_git_remote_status_refresh = now
+            .checked_sub(GIT_REMOTE_STATUS_REFRESH_INTERVAL)
+            .unwrap_or(now);
+        self.git_refresh_due_after_in_flight = false;
     }
 
     pub(crate) fn git_refresh_deadline(&self) -> Option<Instant> {
@@ -428,15 +458,16 @@ impl App {
     }
 
     pub(crate) fn next_loop_deadline(&self, now: Instant, needs_render: bool) -> Option<Instant> {
-        self.next_loop_deadline_with_resize_poll(now, needs_render, true)
+        self.next_loop_deadline_with_resize_poll(now, needs_render, true, true)
     }
 
-    pub(crate) fn next_headless_loop_deadline(
+    pub(crate) fn next_headless_loop_deadline_with_git_refresh(
         &self,
         now: Instant,
         needs_render: bool,
+        include_git_refresh: bool,
     ) -> Option<Instant> {
-        self.next_loop_deadline_with_resize_poll(now, needs_render, false)
+        self.next_loop_deadline_with_resize_poll(now, needs_render, false, include_git_refresh)
     }
 
     fn next_loop_deadline_with_resize_poll(
@@ -444,6 +475,7 @@ impl App {
         now: Instant,
         needs_render: bool,
         include_resize_poll: bool,
+        include_git_refresh: bool,
     ) -> Option<Instant> {
         let render_deadline = if needs_render {
             self.last_render_at
@@ -459,7 +491,9 @@ impl App {
             self.toast_deadline,
             self.copy_feedback_deadline,
             self.next_animation_tick,
-            self.git_refresh_deadline(),
+            include_git_refresh
+                .then(|| self.git_refresh_deadline())
+                .flatten(),
             self.next_auto_update_check,
             self.agent_metadata_deadline,
             self.session_save_deadline,
@@ -470,6 +504,24 @@ impl App {
         .into_iter()
         .flatten()
         .min()
+    }
+
+    fn workspace_git_refresh_items(&self) -> Vec<WorkspaceGitRefreshItem> {
+        self.state
+            .workspaces
+            .iter()
+            .filter_map(|ws| {
+                let cwd =
+                    ws.resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)?;
+                let git_key = crate::workspace::git_status_cache_key(&cwd);
+                let cache_key = git_key.unwrap_or_else(|| cwd.clone());
+                Some(WorkspaceGitRefreshItem {
+                    workspace_id: ws.id.clone(),
+                    resolved_identity_cwd: cwd,
+                    cache_key,
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn drain_internal_events(&mut self) -> bool {
@@ -497,11 +549,69 @@ impl App {
     }
 }
 
+pub(crate) fn deduplicate_git_refresh_items(
+    items: Vec<WorkspaceGitRefreshItem>,
+    cache: &HashMap<std::path::PathBuf, GitStatusCacheEntry>,
+) -> Vec<WorkspaceGitRefreshJob> {
+    let mut indexes = HashMap::<std::path::PathBuf, usize>::new();
+    let mut jobs = Vec::<WorkspaceGitRefreshJob>::new();
+
+    for item in items {
+        let target = WorkspaceGitRefreshTarget {
+            workspace_id: item.workspace_id,
+            resolved_identity_cwd: item.resolved_identity_cwd.clone(),
+        };
+        if let Some(&index) = indexes.get(&item.cache_key) {
+            jobs[index].targets.push(target);
+            continue;
+        }
+
+        let status_cwd = item.cache_key.clone();
+        let cached = cache.get(&item.cache_key).cloned();
+        indexes.insert(item.cache_key, jobs.len());
+        jobs.push(WorkspaceGitRefreshJob {
+            cache_key: status_cwd.clone(),
+            status_cwd,
+            cached,
+            targets: vec![target],
+        });
+    }
+
+    jobs
+}
+
+pub(crate) fn refresh_workspace_git_statuses_with_cache(
+    items: Vec<WorkspaceGitRefreshItem>,
+    cache: &HashMap<std::path::PathBuf, GitStatusCacheEntry>,
+) -> WorkspaceGitRefreshOutput {
+    let mut results = Vec::new();
+    let mut cache_updates = Vec::new();
+
+    for job in deduplicate_git_refresh_items(items, cache) {
+        let (snapshot, cache_entry) =
+            Workspace::git_status_snapshot_for_cwd_with_cache(&job.status_cwd, job.cached.as_ref());
+        if let Some(cache_entry) = cache_entry {
+            cache_updates.push((job.cache_key.clone(), cache_entry));
+        }
+        results.extend(job.targets.into_iter().map(move |target| {
+            snapshot
+                .clone()
+                .into_workspace_status(target.workspace_id, target.resolved_identity_cwd)
+        }));
+    }
+
+    WorkspaceGitRefreshOutput {
+        results,
+        cache_updates,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::state;
     use crate::workspace::Workspace;
+    use std::path::PathBuf;
 
     fn test_app_with_pane() -> (super::super::App, crate::layout::PaneId) {
         let mut app = super::super::App::new(
@@ -523,6 +633,131 @@ mod tests {
             is_focused: true,
         });
         (app, pane_id)
+    }
+
+    #[test]
+    fn git_refresh_deduplicates_workspaces_with_same_cache_key() {
+        let repo =
+            std::env::temp_dir().join(format!("herdr-git-refresh-dedupe-{}", std::process::id()));
+        let nested = repo.join("nested");
+        let other = repo.join("other");
+        std::fs::create_dir_all(&nested).expect("create nested dir");
+        std::fs::create_dir_all(&other).expect("create other dir");
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("init")
+            .output()
+            .expect("run git init");
+
+        let output = refresh_workspace_git_statuses_with_cache(
+            vec![
+                WorkspaceGitRefreshItem {
+                    workspace_id: "one".into(),
+                    resolved_identity_cwd: nested.clone(),
+                    cache_key: repo.clone(),
+                },
+                WorkspaceGitRefreshItem {
+                    workspace_id: "two".into(),
+                    resolved_identity_cwd: other.clone(),
+                    cache_key: repo.clone(),
+                },
+            ],
+            &HashMap::new(),
+        );
+
+        assert_eq!(output.cache_updates.len(), 1);
+        assert_eq!(output.cache_updates[0].0, repo);
+        assert_eq!(output.results.len(), 2);
+        assert_eq!(output.results[0].workspace_id, "one");
+        assert_eq!(
+            output.results[0].resolved_identity_cwd,
+            PathBuf::from(&nested)
+        );
+        assert_eq!(output.results[1].workspace_id, "two");
+        assert_eq!(
+            output.results[1].resolved_identity_cwd,
+            PathBuf::from(&other)
+        );
+
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn git_refresh_items_use_cwd_cache_key_for_non_git_cwd() {
+        let mut app = super::super::App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        let cwd = std::env::temp_dir().join(format!("herdr-non-git-cwd-{}", std::process::id()));
+        std::fs::create_dir_all(&cwd).expect("create temp cwd");
+        let mut ws = Workspace::test_new("test");
+        ws.identity_cwd = cwd.clone();
+        ws.tabs.clear();
+        app.state.workspaces.push(ws);
+
+        let items = app.workspace_git_refresh_items();
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].cache_key, cwd);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn headless_deadline_can_suppress_git_refresh_timer() {
+        let mut app = super::super::App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces.push(Workspace::test_new("test"));
+        let now = Instant::now();
+        app.last_git_remote_status_refresh = now - super::super::GIT_REMOTE_STATUS_REFRESH_INTERVAL;
+
+        assert_eq!(
+            app.next_headless_loop_deadline_with_git_refresh(now, false, false),
+            None
+        );
+        assert_eq!(
+            app.next_headless_loop_deadline_with_git_refresh(now, false, true),
+            Some(now)
+        );
+    }
+
+    #[test]
+    fn git_refresh_due_request_survives_in_flight_refresh() {
+        let mut app = super::super::App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        let now = Instant::now();
+        app.git_refresh_in_flight = true;
+
+        app.mark_git_status_refresh_due(now);
+        assert!(app.git_refresh_due_after_in_flight);
+
+        app.handle_internal_event(crate::events::AppEvent::GitStatusRefreshed {
+            results: Vec::new(),
+            cache_updates: Vec::new(),
+        });
+
+        assert!(!app.git_refresh_in_flight);
+        assert!(!app.git_refresh_due_after_in_flight);
+        assert_eq!(app.git_refresh_deadline(), None);
+
+        app.state.workspaces.push(Workspace::test_new("test"));
+        let deadline = app
+            .git_refresh_deadline()
+            .expect("refresh should be due once a workspace exists");
+        assert!(deadline <= Instant::now());
     }
 
     #[test]

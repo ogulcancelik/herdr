@@ -40,8 +40,8 @@ use self::onboarding::render_onboarding_overlay;
 use self::panes::{compute_pane_infos, render_panes, resize_tab_panes};
 pub(crate) use self::release_notes::{
     product_announcement_display_lines, release_notes_close_button_rect,
-    release_notes_display_lines, release_notes_sections, release_notes_wrapped_line_count,
-    PRODUCT_ANNOUNCEMENT_MODAL_SIZE, RELEASE_NOTES_MODAL_SIZE,
+    release_notes_display_lines, release_notes_wrapped_line_count, PRODUCT_ANNOUNCEMENT_MODAL_SIZE,
+    RELEASE_NOTES_MODAL_SIZE,
 };
 use self::release_notes::{render_product_announcement_overlay, render_release_notes_overlay};
 pub(crate) use self::scrollbar::{
@@ -59,17 +59,19 @@ pub(crate) use self::{
     dialogs::{
         confirm_close_button_rects, confirm_close_popup_rect, new_linked_worktree_button_rects,
         new_linked_worktree_inner_rect, open_existing_worktree_button_rects,
-        open_existing_worktree_inner_rect, open_existing_worktree_visible_start,
-        remove_worktree_button_rects, remove_worktree_popup_rect, rename_button_rects,
+        open_existing_worktree_inner_rect, open_existing_worktree_max_visible_rows,
+        open_existing_worktree_visible_start, remove_worktree_button_rects,
+        remove_worktree_popup_rect, rename_button_rects,
     },
     settings::{settings_button_rects, settings_show_primary_action},
     sidebar::{
         agent_panel_body_rect, agent_panel_entries, agent_panel_scroll_metrics,
         agent_panel_scrollbar_rect, agent_panel_toggle_rect, collapsed_sidebar_sections,
         collapsed_sidebar_toggle_rect, compute_workspace_card_areas, expanded_sidebar_sections,
-        normalized_workspace_scroll, sidebar_section_divider_rect, workspace_drop_indicator_row,
-        workspace_list_entries, workspace_list_rect, workspace_list_scroll_metrics,
-        workspace_list_scrollbar_rect, workspace_parent_group_state, WorkspaceListEntry,
+        expanded_sidebar_toggle_rect, normalized_workspace_scroll, sidebar_section_divider_rect,
+        workspace_drop_indicator_row, workspace_list_entries, workspace_list_rect,
+        workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
+        WorkspaceListEntry,
     },
 };
 pub(crate) use self::{
@@ -1019,23 +1021,79 @@ mod tests {
             .1
             .clone();
 
-        assert!(workspace_tab.contains(&("unset".to_string(), "previous workspace")));
-        assert!(workspace_tab.contains(&("unset".to_string(), "next workspace")));
-        assert!(workspace_tab.contains(&("unset".to_string(), "previous agent")));
-        assert!(workspace_tab.contains(&("unset".to_string(), "next agent")));
-        assert!(workspace_tab.contains(&("unset".to_string(), "focus agent 1-9")));
-        assert!(workspace_tab.contains(&("unset".to_string(), "switch workspace 1-9")));
+        assert!(workspace_tab
+            .iter()
+            .any(|(key, label)| key == "unset" && label.as_ref() == "previous workspace"));
+        assert!(workspace_tab
+            .iter()
+            .any(|(key, label)| key == "unset" && label.as_ref() == "next workspace"));
+        assert!(workspace_tab
+            .iter()
+            .any(|(key, label)| key == "unset" && label.as_ref() == "previous agent"));
+        assert!(workspace_tab
+            .iter()
+            .any(|(key, label)| key == "unset" && label.as_ref() == "next agent"));
+        assert!(workspace_tab
+            .iter()
+            .any(|(key, label)| key == "unset" && label.as_ref() == "focus agent 1-9"));
+        assert!(workspace_tab
+            .iter()
+            .any(|(key, label)| key == "unset" && label.as_ref() == "switch workspace 1-9"));
         assert!(panes
             .iter()
-            .any(|(key, label)| key == "prefix+h" && *label == "focus pane left"));
+            .any(|(key, label)| key == "prefix+h" && label.as_ref() == "focus pane left"));
         assert!(panes
             .iter()
-            .any(|(key, label)| key == "prefix+j" && *label == "focus pane down"));
+            .any(|(key, label)| key == "prefix+j" && label.as_ref() == "focus pane down"));
         assert!(panes
             .iter()
-            .any(|(key, label)| key == "prefix+k" && *label == "focus pane up"));
+            .any(|(key, label)| key == "prefix+k" && label.as_ref() == "focus pane up"));
         assert!(panes
             .iter()
-            .any(|(key, label)| key == "prefix+l" && *label == "focus pane right"));
+            .any(|(key, label)| key == "prefix+l" && label.as_ref() == "focus pane right"));
+    }
+
+    #[test]
+    fn keybind_help_shows_custom_command_descriptions() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.keybinds.custom_commands = vec![
+            crate::config::CustomCommandKeybind {
+                bindings: crate::config::ActionKeybinds::prefix("alt+g"),
+                label: "prefix+alt+g".to_string(),
+                command: "lazygit".to_string(),
+                action: crate::config::CustomCommandAction::Pane,
+                description: Some("open lazygit".to_string()),
+            },
+            crate::config::CustomCommandKeybind {
+                bindings: crate::config::ActionKeybinds::prefix("alt+h"),
+                label: "prefix+alt+h".to_string(),
+                command: "echo hello".to_string(),
+                action: crate::config::CustomCommandAction::Shell,
+                description: None,
+            },
+        ];
+
+        let groups = keybind_help_groups(&app);
+        let custom = groups
+            .iter()
+            .find(|(name, _)| *name == "custom")
+            .expect("custom group")
+            .1
+            .clone();
+        assert!(custom
+            .iter()
+            .any(|(key, label)| key == "prefix+alt+g" && label.as_ref() == "open lazygit"));
+        assert!(custom
+            .iter()
+            .any(|(key, label)| key == "prefix+alt+h" && label.as_ref() == "custom command"));
+
+        let rendered_help = keybind_help_lines(&app)
+            .into_iter()
+            .flat_map(|(_, line)| line.spans)
+            .map(|span| span.content.into_owned())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(rendered_help.contains("open lazygit"));
+        assert!(rendered_help.contains("custom command"));
     }
 }
