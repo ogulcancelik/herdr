@@ -169,11 +169,16 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
         remote.live_handoff,
     )?;
 
+    let manage_ssh_config = crate::config::Config::load()
+        .config
+        .remote
+        .manage_ssh_config;
     let _bridge = SshStdioBridge::start(
         remote.target,
         prepared_remote.remote_herdr,
         local_socket.clone(),
         session_name,
+        manage_ssh_config,
     )?;
 
     run_client_process(&local_socket, &reattach_command, remote.keybindings)
@@ -1273,6 +1278,7 @@ fn command_failed(context: &str, output: &Output) -> io::Error {
 
 struct SshStdioBridge {
     local_socket: PathBuf,
+    keepalive_ssh_config: Option<PathBuf>,
     should_stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -1283,14 +1289,26 @@ impl SshStdioBridge {
         remote_herdr: RemoteHerdr,
         local_socket: PathBuf,
         session_name: String,
+        manage_ssh_config: bool,
     ) -> io::Result<Self> {
         let _ = std::fs::remove_file(&local_socket);
         let listener = UnixListener::bind(&local_socket)?;
         crate::ipc::restrict_socket_permissions(&local_socket, BRIDGE_SOCKET_PERMISSION_MODE)?;
         listener.set_nonblocking(true)?;
 
+        let keepalive_ssh_config = if manage_ssh_config {
+            write_keepalive_ssh_config()
+                .inspect_err(|err| {
+                    tracing::debug!(%err, "could not write ssh keepalive config; using plain ssh");
+                })
+                .ok()
+        } else {
+            None
+        };
+
         let should_stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&should_stop);
+        let thread_ssh_config = keepalive_ssh_config.clone();
         let thread = thread::spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
                 match listener.accept() {
@@ -1301,9 +1319,13 @@ impl SshStdioBridge {
                             );
                             continue;
                         }
-                        if let Err(err) =
-                            bridge_connection(stream, &target, &remote_herdr, &session_name)
-                        {
+                        if let Err(err) = bridge_connection(
+                            stream,
+                            &target,
+                            &remote_herdr,
+                            &session_name,
+                            thread_ssh_config.as_deref(),
+                        ) {
                             eprintln!("herdr: remote bridge failed: {err}");
                         }
                     }
@@ -1320,6 +1342,7 @@ impl SshStdioBridge {
 
         Ok(Self {
             local_socket,
+            keepalive_ssh_config,
             should_stop,
             thread: Some(thread),
         })
@@ -1333,7 +1356,85 @@ impl Drop for SshStdioBridge {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+        // Remove the generated ssh config only after the bridge thread has
+        // joined, so it can never start a connection with a config path that
+        // was just deleted.
+        if let Some(dir) = self.keepalive_ssh_config.as_deref().and_then(Path::parent) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
+}
+
+/// Creates a fresh user-only (`0700`) directory under the temp dir for the
+/// bridge's generated ssh config, returning its path.
+///
+/// Using a private directory created with fail-if-exists semantics — rather
+/// than a predictable file in the world-writable temp dir — stops a local user
+/// from pre-planting a symlink or world-writable file that herdr would write
+/// and `ssh -F` would then read.
+fn private_ssh_config_dir() -> io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let base = std::env::temp_dir();
+    for attempt in 0..100 {
+        let dir = base.join(format!("herdr-ssh-{}-{attempt}", std::process::id()));
+        match fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "failed to create private herdr ssh config directory",
+    ))
+}
+
+/// Quotes a path for an ssh_config `Include` so a path containing spaces (or
+/// glob metacharacters) is treated as one literal token instead of being split
+/// or expanded by ssh — otherwise the user's config might not be Included and
+/// herdr's fallback would wrongly take effect.
+fn ssh_config_quote(path: &str) -> String {
+    format!("\"{path}\"")
+}
+
+/// Builds a temporary ssh config that keeps the bridge tunnel alive without
+/// overriding the user's own settings, returning its path.
+///
+/// The file `Include`s the user's real ssh config first, so ssh's
+/// first-value-wins rule keeps any `ServerAlive*` the user set there (including
+/// an explicit `0` to disable it); herdr's values apply only when the user has
+/// none.
+fn write_keepalive_ssh_config() -> io::Result<PathBuf> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let path = private_ssh_config_dir()?.join("config");
+
+    let mut contents = String::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        let user_config = PathBuf::from(home).join(".ssh").join("config");
+        if user_config.is_file() {
+            contents.push_str(&format!(
+                "Include {}\n",
+                ssh_config_quote(&user_config.to_string_lossy())
+            ));
+        }
+    }
+    if Path::new("/etc/ssh/ssh_config").is_file() {
+        contents.push_str("Include /etc/ssh/ssh_config\n");
+    }
+    contents.push_str("Host *\n");
+    contents.push_str("  ServerAliveInterval 15\n");
+    contents.push_str("  ServerAliveCountMax 4\n");
+
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(BRIDGE_SOCKET_PERMISSION_MODE)
+        .open(&path)?;
+    file.write_all(contents.as_bytes())?;
+    Ok(path)
 }
 
 fn bridge_connection(
@@ -1341,8 +1442,13 @@ fn bridge_connection(
     target: &str,
     remote_herdr: &RemoteHerdr,
     session_name: &str,
+    keepalive_ssh_config: Option<&Path>,
 ) -> io::Result<()> {
     let mut command = Command::new("ssh");
+    // Use the generated keepalive ssh config when present; otherwise plain ssh.
+    if let Some(ssh_config) = keepalive_ssh_config {
+        command.arg("-F").arg(ssh_config);
+    }
     command
         .arg("-T")
         .arg(target)
@@ -1520,6 +1626,7 @@ mod tests {
             remote_herdr,
             socket.clone(),
             "default".to_string(),
+            false,
         )
         .expect("start bridge listener");
 
@@ -1528,6 +1635,65 @@ mod tests {
 
         drop(bridge);
         let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn keepalive_ssh_config_includes_user_config_then_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = write_keepalive_ssh_config().expect("write keepalive config");
+        let contents = std::fs::read_to_string(&path).expect("read keepalive config");
+
+        // herdr's fallback keepalive is present...
+        assert!(
+            contents.contains("Host *"),
+            "config should add a Host * fallback block: {contents}"
+        );
+        assert!(
+            contents.contains("ServerAliveInterval 15"),
+            "config should set the keepalive interval: {contents}"
+        );
+        assert!(
+            contents.contains("ServerAliveCountMax 4"),
+            "config should set the keepalive count: {contents}"
+        );
+        // ...and any user config is Included (quoted) BEFORE it so first-value-wins
+        // keeps the user's own settings.
+        if let Some(home) = std::env::var_os("HOME") {
+            let user_config = PathBuf::from(home).join(".ssh").join("config");
+            if user_config.is_file() {
+                let include = format!(
+                    "Include {}",
+                    ssh_config_quote(&user_config.to_string_lossy())
+                );
+                let include_at = contents.find(&include).expect("user config Included");
+                let fallback_at = contents.find("Host *").expect("fallback present");
+                assert!(
+                    include_at < fallback_at,
+                    "user config must be Included before herdr's fallback: {contents}"
+                );
+            }
+        }
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, BRIDGE_SOCKET_PERMISSION_MODE,
+            "keepalive config must be user-only"
+        );
+        // The config lives in a private 0700 dir, not a predictable temp path.
+        let dir = path.parent().expect("config has a parent dir");
+        let dir_mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "ssh config dir must be user-only");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ssh_config_quote_wraps_path_with_spaces() {
+        assert_eq!(
+            ssh_config_quote("/home/a b/.ssh/config"),
+            "\"/home/a b/.ssh/config\""
+        );
     }
 
     #[test]

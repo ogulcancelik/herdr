@@ -248,6 +248,16 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # a Herdr server restart. Requires official integrations that report session refs.
 # resume_agents_on_restore = false
 
+[remote]
+# Whether herdr manages the ssh config used for the `herdr --remote` bridge.
+# When true (default), herdr runs the bridge ssh through a generated config that
+# includes your ~/.ssh/config first and adds ServerAliveInterval/
+# ServerAliveCountMax as a fallback (so any keepalive you set yourself still
+# wins) to survive idle network/NAT timeouts. Set false to run plain ssh against
+# your ssh config unchanged — this does not force keepalive off, it only stops
+# herdr from adding its own.
+# manage_ssh_config = true
+
 [experimental]
 # Allow launching herdr from inside a herdr-managed pane.
 # allow_nested = false
