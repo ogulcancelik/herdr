@@ -1,12 +1,16 @@
 {
   lib,
+  stdenv,
   rustPlatform,
   callPackage,
   runCommand,
+  writeShellScriptBin,
   zig_0_15,
   zstd,
   pkg-config,
   git,
+  apple-sdk ? null,
+  cctools ? null,
 }:
 
 let
@@ -14,7 +18,8 @@ let
   zigDeps = callPackage ../vendor/libghostty-vt/build.zig.zon.nix {
     name = "herdr-libghostty-vt-zig-cache";
     inherit zstd;
-    linkFarm = name: entries:
+    linkFarm =
+      name: entries:
       runCommand name { } ''
         mkdir -p $out
         ${lib.concatMapStringsSep "\n" (entry: ''
@@ -22,6 +27,25 @@ let
         '') entries}
       '';
   };
+
+  darwinSdkRoot = "${apple-sdk}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk";
+  darwinDeveloperDir = "${apple-sdk}/Platforms/MacOSX.platform/Developer";
+  darwinXcodeSelect = writeShellScriptBin "xcode-select" ''
+    if [ "$1" = "--print-path" ]; then
+      echo ${lib.escapeShellArg darwinDeveloperDir}
+      exit 0
+    fi
+    echo "unsupported xcode-select invocation: $*" >&2
+    exit 1
+  '';
+  darwinXcrun = writeShellScriptBin "xcrun" ''
+    if [ "$1" = "--sdk" ] && [ "$3" = "--show-sdk-path" ]; then
+      echo ${lib.escapeShellArg darwinSdkRoot}
+      exit 0
+    fi
+    echo "unsupported xcrun invocation: $*" >&2
+    exit 1
+  '';
 in
 rustPlatform.buildRustPackage {
   pname = "herdr";
@@ -49,6 +73,11 @@ rustPlatform.buildRustPackage {
   nativeBuildInputs = [
     git
     pkg-config
+  ]
+  ++ lib.optionals stdenv.hostPlatform.isDarwin [
+    cctools
+    darwinXcodeSelect
+    darwinXcrun
   ];
 
   env = {
@@ -56,6 +85,9 @@ rustPlatform.buildRustPackage {
     LIBGHOSTTY_VT_SIMD = "true";
     LIBGHOSTTY_VT_ZIG_SYSTEM_DIR = zigDeps;
     ZIG = lib.getExe zig_0_15;
+  }
+  // lib.optionalAttrs stdenv.hostPlatform.isDarwin {
+    SDKROOT = darwinSdkRoot;
   };
 
   preBuild = ''
