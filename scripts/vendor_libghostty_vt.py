@@ -35,15 +35,18 @@ def git_head(repo: Path) -> str:
 
 
 def ensure_dist_archive(source_repo: Path) -> Path:
+    head = git_head(source_repo)[:9]
     subprocess.run(
         ["zig", "build", "dist", "-Demit-lib-vt", "-Doptimize=ReleaseFast"],
         cwd=source_repo,
         check=True,
     )
     dist_dir = source_repo / "zig-out" / "dist"
-    archives = sorted(dist_dir.glob("libghostty-vt-*.tar.gz"))
+    archives = sorted(dist_dir.glob(f"libghostty-vt-*+{head}.tar.gz"))
     if not archives:
-        raise FileNotFoundError(f"no libghostty-vt dist archive found in {dist_dir}")
+        raise FileNotFoundError(
+            f"no libghostty-vt dist archive for HEAD {head} found in {dist_dir}"
+        )
     return archives[-1]
 
 

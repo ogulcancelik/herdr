@@ -43,6 +43,7 @@ mod pty;
 mod raw_input;
 mod release_notes;
 mod remote;
+mod render_prof;
 mod selection;
 mod server;
 mod session;
@@ -246,7 +247,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 [session]
 # Resume supported AI-agent panes into their native conversation sessions after
 # a Herdr server restart. Requires official integrations that report session refs.
-# resume_agents_on_restore = false
+# resume_agents_on_restore = true
 
 [remote]
 # Whether herdr manages the ssh config used for the `herdr --remote` bridge.

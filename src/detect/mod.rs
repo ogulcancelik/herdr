@@ -1900,6 +1900,12 @@ mod tests {
     }
 
     #[test]
+    fn kiro_blocked_on_subagent_tool_approval_prompt() {
+        let screen = "  Please delegate to a sub-agent to search the web\n\n● Orchestrating (1 agent)\n  esc to cancel\n  ctrl+g open agent monitor\n  ● web-research kiro_default ⚠ tool approval needed\n\n ◐ Tasks · 1 done · 2 remaining                                                                                                                                              ctrl+x to expand\n──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n ⚠ 3 tool approvals pending from subagents\n ❯ (a) Approve all pending\n   (f) Approve all pending and auto-approve all future requests\n   (c) Configure individually (agent monitor)\n   (x) Exit (cancel subagents)                                 %";
+        assert_eq!(detect_state(Some(Agent::Kiro), screen), AgentState::Blocked);
+    }
+
+    #[test]
     fn kiro_does_not_treat_stale_failure_spinner_as_working() {
         let screen = "● 1 MCP failure — see /mcp\n─────────────────────────────────────────────────────\nKiro · auto · ◔ 6%\n\n ask a question or describe a task ↵";
         assert_eq!(detect_state(Some(Agent::Kiro), screen), AgentState::Idle);

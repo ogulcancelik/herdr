@@ -63,6 +63,9 @@ impl BlitEncoder {
         let full = force_full
             || prev.is_none()
             || prev.is_some_and(|p| p.width != frame.width || p.height != frame.height);
+        let prof_stats =
+            crate::render_prof::enabled().then(|| compute_prof_blit_stats(frame, prev, full));
+        let prof_started = crate::render_prof::timer();
         let mut bytes = Vec::new();
         let mut next_last_visible_cursor = self.last_visible_cursor;
         let mut next_last_cursor_shape = self.last_cursor_shape;
@@ -73,6 +76,18 @@ impl BlitEncoder {
             &mut next_last_visible_cursor,
             &mut next_last_cursor_shape,
         );
+        if let Some(stats) = prof_stats {
+            crate::render_prof::duration_since("ansi_encode.total", prof_started);
+            crate::render_prof::counter("ansi_encode.bytes", bytes.len() as u64);
+            crate::render_prof::counter("ansi_encode.scanned_cells", stats.scanned_cells);
+            crate::render_prof::counter("ansi_encode.changed_cells", stats.changed_cells);
+            crate::render_prof::counter("ansi_encode.changed_runs", stats.changed_runs);
+            if full {
+                crate::render_prof::event("ansi_encode.full");
+            } else {
+                crate::render_prof::event("ansi_encode.partial");
+            }
+        }
         EncodedBlit {
             bytes,
             full,
@@ -90,6 +105,79 @@ impl BlitEncoder {
     pub(crate) fn is_current(&self, frame: &FrameData) -> bool {
         self.last_frame.as_ref() == Some(frame)
     }
+
+    pub(crate) fn last_frame(&self) -> Option<&FrameData> {
+        self.last_frame.as_ref()
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct ProfBlitStats {
+    scanned_cells: u64,
+    changed_cells: u64,
+    changed_runs: u64,
+}
+
+fn compute_prof_blit_stats(
+    frame: &FrameData,
+    prev: Option<&FrameData>,
+    full: bool,
+) -> ProfBlitStats {
+    let Some(prev) = prev.filter(|_| !full) else {
+        let changed_cells = frame.cells.iter().filter(|cell| !cell.skip).count() as u64;
+        return ProfBlitStats {
+            scanned_cells: frame.cells.len() as u64,
+            changed_cells,
+            changed_runs: changed_cells,
+        };
+    };
+    if prev.width != frame.width || prev.height != frame.height {
+        let changed_cells = frame.cells.iter().filter(|cell| !cell.skip).count() as u64;
+        return ProfBlitStats {
+            scanned_cells: frame.cells.len() as u64,
+            changed_cells,
+            changed_runs: changed_cells,
+        };
+    }
+
+    let sanitized_hyperlinks = sanitized_frame_hyperlinks(frame);
+    let prev_sanitized_hyperlinks = sanitized_frame_hyperlinks(prev);
+    let mut stats = ProfBlitStats {
+        scanned_cells: frame.cells.len() as u64,
+        changed_cells: 0,
+        changed_runs: 0,
+    };
+    for row in 0..frame.height {
+        let mut in_run = false;
+        let mut invalidated = 0usize;
+        let mut to_skip = 0usize;
+        for col in 0..frame.width {
+            let idx = (row as usize) * (frame.width as usize) + (col as usize);
+            let cell = &frame.cells[idx];
+            let prev_cell = &prev.cells[idx];
+            let changed = !cell.skip
+                && (!cells_visually_equal(
+                    &sanitized_hyperlinks,
+                    cell,
+                    &prev_sanitized_hyperlinks,
+                    prev_cell,
+                ) || invalidated > 0)
+                && to_skip == 0;
+            if changed {
+                stats.changed_cells += 1;
+                if !in_run {
+                    stats.changed_runs += 1;
+                    in_run = true;
+                }
+            } else {
+                in_run = false;
+            }
+            to_skip = cell_width(cell).saturating_sub(1);
+            let affected_width = cmp::max(cell_width(cell), cell_width(prev_cell));
+            invalidated = cmp::max(affected_width, invalidated).saturating_sub(1);
+        }
+    }
+    stats
 }
 
 // ---------------------------------------------------------------------------

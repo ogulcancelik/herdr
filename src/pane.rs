@@ -29,6 +29,7 @@ mod state;
 mod terminal;
 
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
+pub(crate) use self::terminal::{TerminalDirtyPatch, TerminalDirtyPatchOutcome};
 pub use self::{
     state::PaneState,
     terminal::{InputState, ScrollMetrics, TerminalCursorState},
@@ -1149,51 +1150,6 @@ impl PaneRuntime {
         )
     }
 
-    pub fn spawn_agent_restore(
-        pane_id: PaneId,
-        rows: u16,
-        cols: u16,
-        cwd: std::path::PathBuf,
-        launch: crate::agent_resume::AgentResumeLaunch<'_>,
-        scrollback_limit_bytes: usize,
-        host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        events: mpsc::Sender<AppEvent>,
-        render_notify: Arc<Notify>,
-        render_dirty: Arc<AtomicBool>,
-    ) -> std::io::Result<Self> {
-        let Some((program, args)) = launch.plan.argv.split_first() else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "restore argv must not be empty",
-            ));
-        };
-
-        let mut cmd = CommandBuilder::new(program);
-        for arg in args {
-            cmd.arg(arg);
-        }
-        cmd.cwd(cwd);
-        cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
-        apply_pane_terminal_env(&mut cmd);
-        crate::integration::apply_pane_env(&mut cmd, pane_id);
-        Self::spawn_command_builder(
-            pane_id,
-            rows,
-            cols,
-            scrollback_limit_bytes,
-            host_terminal_theme,
-            events,
-            render_notify,
-            render_dirty,
-            cmd,
-            "failed to spawn agent restore pane",
-            SpawnInitialState {
-                detected_agent: crate::detect::parse_agent_label(&launch.plan.agent),
-                history_ansi: launch.initial_history_ansi,
-            },
-        )
-    }
-
     #[cfg(unix)]
     pub fn from_handoff_fd(
         import: crate::handoff_runtime::ImportedHandoffRuntime,
@@ -1844,6 +1800,14 @@ impl PaneRuntime {
         self.terminal.render(frame, area, show_cursor);
     }
 
+    pub(crate) fn collect_dirty_patch(
+        &self,
+        area_width: u16,
+        area_height: u16,
+    ) -> TerminalDirtyPatchOutcome {
+        self.terminal.collect_dirty_patch(area_width, area_height)
+    }
+
     pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, String)> {
         self.terminal.visible_hyperlinks(area)
     }
@@ -2017,6 +1981,11 @@ impl PaneRuntime {
 
     pub(crate) fn test_with_screen_bytes(cols: u16, rows: u16, bytes: &[u8]) -> Self {
         Self::test_with_scrollback_bytes(cols, rows, 0, bytes)
+    }
+
+    pub(crate) fn test_process_pty_bytes(&self, bytes: &[u8]) {
+        let (tx, _rx) = mpsc::channel(1);
+        let _ = self.terminal.process_pty_bytes(self.pane_id, 0, bytes, &tx);
     }
 
     pub(crate) fn test_with_scrollback_bytes(
@@ -2357,116 +2326,6 @@ mod tests {
         let truncated = truncate_handoff_history(history, 12);
 
         assert!(truncated.is_empty());
-    }
-
-    fn process_command_name(pid: u32) -> Option<String> {
-        let output = std::process::Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "comm="])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let command = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        (!command.is_empty()).then_some(command)
-    }
-
-    async fn wait_for_child_pid(runtime: &PaneRuntime) -> u32 {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        while tokio::time::Instant::now() < deadline {
-            let pid = runtime.child_pid.load(Ordering::Acquire);
-            if pid != 0 {
-                return pid;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        panic!("child pid was not published");
-    }
-
-    #[tokio::test]
-    async fn spawn_agent_restore_uses_restore_command_as_pane_child() {
-        let (events, _event_rx) = mpsc::channel(4);
-        let plan = crate::agent_resume::AgentResumePlan {
-            agent: "codex".into(),
-            argv: vec!["/bin/cat".into()],
-            dedupe_key: "test".into(),
-        };
-        let runtime = PaneRuntime::spawn_agent_restore(
-            PaneId::from_raw(7),
-            24,
-            80,
-            std::env::current_dir().unwrap(),
-            crate::agent_resume::AgentResumeLaunch {
-                plan: &plan,
-                initial_history_ansi: None,
-            },
-            0,
-            crate::terminal_theme::TerminalTheme::default(),
-            events,
-            Arc::new(Notify::new()),
-            Arc::new(AtomicBool::new(false)),
-        )
-        .unwrap();
-
-        let pid = wait_for_child_pid(&runtime).await;
-        let command = process_command_name(pid).expect("child process should be visible to ps");
-
-        assert!(
-            command.ends_with("cat"),
-            "restore command should be the pane child, got {command:?}"
-        );
-        assert!(
-            !command.ends_with("sh"),
-            "restore must not keep a shell wrapper as the pane child"
-        );
-
-        runtime.shutdown();
-    }
-
-    #[tokio::test]
-    async fn spawn_agent_restore_reports_pane_death_after_early_failure() {
-        let (events, mut event_rx) = mpsc::channel(8);
-        let plan = crate::agent_resume::AgentResumePlan {
-            agent: "codex".into(),
-            argv: vec!["/bin/sh".into(), "-c".into(), "exit 7".into()],
-            dedupe_key: "test".into(),
-        };
-        let runtime = PaneRuntime::spawn_agent_restore(
-            PaneId::from_raw(7),
-            24,
-            80,
-            std::env::current_dir().unwrap(),
-            crate::agent_resume::AgentResumeLaunch {
-                plan: &plan,
-                initial_history_ansi: None,
-            },
-            0,
-            crate::terminal_theme::TerminalTheme::default(),
-            events,
-            Arc::new(Notify::new()),
-            Arc::new(AtomicBool::new(false)),
-        )
-        .unwrap();
-
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        let mut died = false;
-        while tokio::time::Instant::now() < deadline {
-            let Some(event) = tokio::time::timeout(
-                deadline.saturating_duration_since(tokio::time::Instant::now()),
-                event_rx.recv(),
-            )
-            .await
-            .expect("pane death event should arrive") else {
-                break;
-            };
-            if matches!(event, AppEvent::PaneDied { pane_id } if pane_id == PaneId::from_raw(7)) {
-                died = true;
-                break;
-            }
-        }
-
-        assert!(died, "failed direct agent restore should report pane death");
-        runtime.shutdown();
     }
 
     #[tokio::test]

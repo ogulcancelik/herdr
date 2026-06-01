@@ -1,6 +1,6 @@
 ---
 title: Integrations
-description: Install Herdr integrations for Pi, OMP, Claude Code, Codex, OpenCode, Hermes Agent, and Qoder CLI.
+description: Install Herdr integrations for Pi, OMP, Claude Code, Codex, GitHub Copilot CLI, OpenCode, Hermes Agent, and Qoder CLI.
 ---
 
 Herdr detects supported agents automatically. Integrations make that detection more precise by reporting semantic state directly to Herdr.
@@ -16,6 +16,7 @@ herdr integration install pi
 herdr integration install omp
 herdr integration install claude
 herdr integration install codex
+herdr integration install copilot
 herdr integration install opencode
 herdr integration install hermes
 herdr integration install qodercli
@@ -28,6 +29,7 @@ herdr integration uninstall pi
 herdr integration uninstall omp
 herdr integration uninstall claude
 herdr integration uninstall codex
+herdr integration uninstall copilot
 herdr integration uninstall opencode
 herdr integration uninstall hermes
 herdr integration uninstall qodercli
@@ -45,9 +47,9 @@ Herdr combines three signals:
 
 Integrations enrich state reporting. They do not replace process detection.
 
-Some integrations also report native agent session references. If `[session] resume_agents_on_restore = true` is enabled, Herdr uses official session references to resume Claude Code, Codex, Pi, Hermes Agent, and OpenCode panes after a Herdr server restart.
+Some integrations also report native agent session references. Herdr uses official session references to resume Claude Code, Codex, GitHub Copilot CLI, Pi, Hermes Agent, and OpenCode panes after a Herdr server restart unless `[session] resume_agents_on_restore = false` disables it.
 
-Native session restore requires current Herdr integrations: Pi integration version `2`, Claude Code version `4`, Codex version `4`, OpenCode version `2`, or Hermes Agent version `2`. OMP integration version `2` reports agent state only. Check installed versions with `herdr integration status`.
+Native session restore requires current Herdr integrations: Pi integration version `2`, Claude Code version `4`, Codex version `4`, GitHub Copilot CLI version `1`, OpenCode version `2`, or Hermes Agent version `2`. OMP integration version `2` reports agent state only. Check installed versions with `herdr integration status`.
 
 ## Pi
 
@@ -106,6 +108,20 @@ herdr integration install codex
 Codex state is reported through the same local socket API used by other integrations.
 
 Herdr uses `~/.codex` by default, or `CODEX_HOME` when set. The Codex config directory must already exist. Install writes `herdr-agent-state.sh`, updates `hooks.json`, and ensures `[features] hooks = true` in `config.toml`. It also removes the deprecated top-level `codex_hooks` flag when present. Uninstall removes Herdr entries from `hooks.json` and deletes the hook script, but leaves `config.toml` unchanged.
+
+## GitHub Copilot CLI
+
+Install the GitHub Copilot CLI hook:
+
+```bash
+herdr integration install copilot
+```
+
+Copilot state is reported through the same local socket API used by other integrations.
+
+Herdr uses `~/.copilot` by default, or `COPILOT_HOME` when set. The Copilot config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and updates `settings.json` with Herdr hook entries. The hook maps prompt submission, tool use, post-tool progress after approvals, `ask_user` prompts, `exit_plan_mode` plan review prompts, permission notifications, agent idle notifications, turn stops, and session exits into Herdr state. Uninstall removes Herdr entries from `settings.json` and deletes the hook script.
+
+After Copilot emits a session-bearing event, Herdr can use the reported session id to resume the pane with `copilot --resume=<id>`.
 
 ## OpenCode
 

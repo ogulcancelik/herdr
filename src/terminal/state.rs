@@ -73,6 +73,7 @@ pub struct TerminalState {
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
+    pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
 }
 
 impl TerminalState {
@@ -98,6 +99,7 @@ impl TerminalState {
             revision: 0,
             launch_argv: None,
             respawn_shell_on_exit: false,
+            pending_agent_resume_plan: None,
         }
     }
 
@@ -108,6 +110,14 @@ impl TerminalState {
 
     pub fn with_respawn_shell_on_exit(mut self) -> Self {
         self.respawn_shell_on_exit = true;
+        self
+    }
+
+    pub fn with_pending_agent_resume_plan(
+        mut self,
+        plan: crate::agent_resume::AgentResumePlan,
+    ) -> Self {
+        self.pending_agent_resume_plan = Some(plan);
         self
     }
 
@@ -667,8 +677,10 @@ impl TerminalState {
         self.hook_authority = None;
         self.persisted_agent_session = None;
         self.agent_metadata.clear();
+        self.state = AgentState::Unknown;
         self.launch_argv = None;
         self.respawn_shell_on_exit = false;
+        self.pending_agent_resume_plan = None;
         self.clear_agent_name();
     }
 
@@ -1863,6 +1875,27 @@ mod tests {
         assert!(mutation.session_ref_changed);
         assert!(mutation.effective_state_change.is_none());
         assert!(terminal.persisted_agent_session.is_none());
+    }
+
+    #[test]
+    fn respawn_cleanup_resets_restored_agent_status() {
+        let mut terminal = test_terminal();
+        terminal.respawn_shell_on_exit = true;
+        terminal.set_agent_name("codex".into());
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
+        });
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+
+        terminal.clear_agent_runtime_identity_after_respawn();
+
+        assert_eq!(terminal.state, AgentState::Unknown);
+        assert!(terminal.detected_agent.is_none());
+        assert!(terminal.agent_name.is_none());
+        assert!(terminal.persisted_agent_session.is_none());
+        assert!(!terminal.respawn_shell_on_exit);
     }
 
     #[test]

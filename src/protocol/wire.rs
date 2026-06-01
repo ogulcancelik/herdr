@@ -401,7 +401,7 @@ pub enum ServerMessage {
 /// - Named colors (Reset, Black, …, White) → `0x00_00_00_XX` where XX is 0..=16
 /// - Indexed palette → `0x01_00_00_XX` where XX is the palette index
 /// - RGB → `0x02_RR_GG_BB` with components in the lower 3 bytes
-fn color_to_u32(color: ratatui::style::Color) -> u32 {
+pub(crate) fn color_to_u32(color: ratatui::style::Color) -> u32 {
     match color {
         ratatui::style::Color::Reset => 0x00_00_00_00,
         ratatui::style::Color::Black => 0x00_00_00_01,
@@ -463,7 +463,7 @@ fn u32_to_color(val: u32) -> ratatui::style::Color {
 }
 
 /// Converts a ratatui `Modifier` bitmask to a u16 for wire transport.
-fn modifier_to_u16(modifier: ratatui::style::Modifier) -> u16 {
+pub(crate) fn modifier_to_u16(modifier: ratatui::style::Modifier) -> u16 {
     modifier.bits()
 }
 

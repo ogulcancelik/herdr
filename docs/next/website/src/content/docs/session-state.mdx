@@ -40,14 +40,14 @@ When enabled, Herdr stores saved pane history in `session-history.json` next to 
 
 Some agents can resume their own conversation sessions. Herdr can use official integration-reported session references to restart supported agent panes after a Herdr server restart.
 
-Enable it with:
+This is enabled by default. Disable it with:
 
 ```toml
 [session]
-resume_agents_on_restore = true
+resume_agents_on_restore = false
 ```
 
-When enabled, Herdr only resumes panes that reported a native session reference through a current official Herdr integration.
+Herdr only resumes panes that reported a native session reference through a current official Herdr integration.
 
 Native session restore requires these Herdr integration versions or newer:
 
@@ -56,6 +56,7 @@ Native session restore requires these Herdr integration versions or newer:
 | Pi | `2` | `pi --session <path-or-id>` |
 | Claude Code | `4` | `claude --resume <id>` |
 | Codex | `4` | `codex resume <id>` |
+| GitHub Copilot CLI | `1` | `copilot --resume=<id>` |
 | OpenCode | `2` | `opencode --session <id>` |
 | Hermes Agent | `2` | `hermes --resume <id>` |
 

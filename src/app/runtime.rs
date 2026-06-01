@@ -165,13 +165,15 @@ impl App {
         false
     }
 
-    pub(crate) fn handle_scheduled_tasks(&mut self, now: Instant) -> bool {
+    pub(crate) fn handle_scheduled_tasks(&mut self, now: Instant, geometry_dirty: bool) -> bool {
         let mut changed = false;
+        let mut resized = false;
 
         self.sync_animation_timer(now);
 
         if now >= self.next_resize_poll {
-            changed |= self.handle_resize_poll();
+            resized = self.handle_resize_poll();
+            changed |= resized;
             self.next_resize_poll = now + RESIZE_POLL_INTERVAL;
         }
 
@@ -247,6 +249,12 @@ impl App {
             changed = true;
         }
 
+        if geometry_dirty || resized {
+            self.pending_agent_resume_deadline = None;
+        } else {
+            self.sync_pending_agent_resume_deadline(now);
+            changed |= self.start_pending_agent_resumes(self.pending_agent_resume_due(now));
+        }
         self.sync_animation_timer(now);
         changed
     }
@@ -496,6 +504,7 @@ impl App {
                 .flatten(),
             self.next_auto_update_check,
             self.agent_metadata_deadline,
+            self.pending_agent_resume_deadline,
             self.session_save_deadline,
             self.selection_autoscroll_deadline,
             self.selection_highlight_clear_deadline,
@@ -913,5 +922,90 @@ mod tests {
         // At scrollback bottom, can't scroll further down — should stop
         assert!(app.state.selection_autoscroll.is_none());
         assert!(app.selection_autoscroll_deadline.is_none());
+    }
+
+    #[tokio::test]
+    async fn raw_input_batch_does_not_start_pending_agent_resume_before_render() {
+        let (mut app, pane_id) = test_app_with_pane();
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("test pane should have a terminal");
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal should exist")
+            .pending_agent_resume_plan = Some(crate::agent_resume::AgentResumePlan {
+            agent: "codex".into(),
+            argv: vec!["/bin/sh".into(), "-c".into(), "sleep 5".into()],
+            dedupe_key: "herdr:codex\0codex\0Id\0codex-session".into(),
+        });
+
+        assert!(
+            app.handle_raw_input_batch(crate::raw_input::RawInputEvent::HostDefaultColor {
+                kind: crate::terminal_theme::DefaultColorKind::Foreground,
+                color: crate::terminal_theme::RgbColor {
+                    r: 220,
+                    g: 220,
+                    b: 220,
+                },
+            })
+            .await
+        );
+        assert!(
+            app.terminal_runtimes.get(&terminal_id).is_none(),
+            "raw input can mutate active geometry; pending resumes must wait for render to refresh pane_infos"
+        );
+        assert!(app
+            .state
+            .terminals
+            .get(&terminal_id)
+            .expect("test terminal should still exist")
+            .pending_agent_resume_plan
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn scheduled_tasks_do_not_start_pending_agent_resume_when_geometry_dirty() {
+        let (mut app, pane_id) = test_app_with_pane();
+        app.state.ensure_test_terminals();
+        app.state.host_terminal_theme = crate::terminal_theme::TerminalTheme {
+            foreground: Some(crate::terminal_theme::RgbColor {
+                r: 220,
+                g: 220,
+                b: 220,
+            }),
+            background: Some(crate::terminal_theme::RgbColor {
+                r: 20,
+                g: 20,
+                b: 20,
+            }),
+        };
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("test pane should have a terminal");
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal should exist")
+            .pending_agent_resume_plan = Some(crate::agent_resume::AgentResumePlan {
+            agent: "codex".into(),
+            argv: vec!["/bin/sh".into(), "-c".into(), "sleep 5".into()],
+            dedupe_key: "herdr:codex\0codex\0Id\0codex-session".into(),
+        });
+        app.pending_agent_resume_deadline = Some(Instant::now() - Duration::from_millis(1));
+
+        assert!(!app.handle_scheduled_tasks(Instant::now(), true));
+        assert!(app.terminal_runtimes.get(&terminal_id).is_none());
+        assert!(app
+            .state
+            .terminals
+            .get(&terminal_id)
+            .expect("test terminal should still exist")
+            .pending_agent_resume_plan
+            .is_some());
+        assert!(app.pending_agent_resume_deadline.is_none());
     }
 }

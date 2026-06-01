@@ -519,7 +519,7 @@ mod tests {
         let deadline = app
             .selection_highlight_clear_deadline
             .expect("highlight clear deadline");
-        assert!(app.handle_scheduled_tasks(deadline + std::time::Duration::from_millis(1)));
+        assert!(app.handle_scheduled_tasks(deadline + std::time::Duration::from_millis(1), false));
         assert!(app.state.selection.is_none());
     }
 
