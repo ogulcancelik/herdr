@@ -1,0 +1,42 @@
+---
+import { getCollection } from 'astro:content';
+import MarketingLayout from '../../components/MarketingLayout.astro';
+
+const releases = (await getCollection('releases'))
+  .filter((release) => !release.data.draft)
+  .map((release) => ({ ...release, slug: release.data.path }))
+  .sort((a, b) => b.data.date.valueOf() - a.data.date.valueOf());
+---
+
+<MarketingLayout
+  title="Herdr releases"
+  description="Product-focused release notes for Herdr."
+  canonicalPath="/releases/"
+>
+  <main class="content-shell">
+    <section class="page-hero page-hero-compact">
+      <p class="eyebrow"><span class="status-dot dot-working"></span>Releases</p>
+      <h1>What changed in Herdr.</h1>
+      <p class="hero-lede">
+        See what the herd has been working on.
+      </p>
+    </section>
+
+    <section class="section section-narrow" aria-label="Releases">
+      <div class="post-list">
+        {releases.map((release) => (
+          <article class="post-card">
+            <a class="post-card-link" href={`/releases/${release.slug}/`}>
+              <div>
+                <p class="release-card-version">{release.data.version}</p>
+                <h2>{release.data.title}</h2>
+                <p>{release.data.description}</p>
+              </div>
+              <span aria-hidden="true">-></span>
+            </a>
+          </article>
+        ))}
+      </div>
+    </section>
+  </main>
+</MarketingLayout>

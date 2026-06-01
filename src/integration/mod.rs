@@ -15,7 +15,7 @@ const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/herdr-agent-state.ts");
 const PI_INTEGRATION_VERSION: u32 = 2;
 const OMP_EXTENSION_INSTALL_NAME: &str = "herdr-omp-agent-state.ts";
 const OMP_EXTENSION_ASSET: &str = include_str!("assets/omp/herdr-agent-state.ts");
-const OMP_INTEGRATION_VERSION: u32 = 1;
+const OMP_INTEGRATION_VERSION: u32 = 2;
 const PI_CODING_AGENT_DIR_ENV_VAR: &str = "PI_CODING_AGENT_DIR";
 const CLAUDE_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const CLAUDE_HOOK_ASSET: &str = include_str!("assets/claude/herdr-agent-state.sh");
@@ -27,13 +27,17 @@ const CODEX_INTEGRATION_VERSION: u32 = 4;
 const CODEX_HOME_ENV_VAR: &str = "CODEX_HOME";
 const OPENCODE_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state.js";
 const OPENCODE_PLUGIN_ASSET: &str = include_str!("assets/opencode/herdr-agent-state.js");
-const OPENCODE_INTEGRATION_VERSION: u32 = 2;
+const OPENCODE_INTEGRATION_VERSION: u32 = 3;
 const HERMES_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state";
 const HERMES_PLUGIN_MANIFEST_INSTALL_NAME: &str = "plugin.yaml";
 const HERMES_PLUGIN_INIT_INSTALL_NAME: &str = "__init__.py";
 const HERMES_PLUGIN_MANIFEST_ASSET: &str = include_str!("assets/hermes/plugin.yaml");
 const HERMES_PLUGIN_INIT_ASSET: &str = include_str!("assets/hermes/__init__.py");
 const HERMES_INTEGRATION_VERSION: u32 = 2;
+const QODERCLI_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
+const QODERCLI_HOOK_ASSET: &str = include_str!("assets/qodercli/herdr-agent-state.sh");
+const QODERCLI_INTEGRATION_VERSION: u32 = 1;
+const QODERCLI_CONFIG_DIR_ENV_VAR: &str = "QODER_CONFIG_DIR";
 const INTEGRATION_VERSION_MARKER: &str = "HERDR_INTEGRATION_VERSION=";
 
 #[derive(Debug)]
@@ -64,6 +68,20 @@ pub(crate) struct OmpInstallPaths {
 pub(crate) struct HermesInstallPaths {
     pub plugin_dir: PathBuf,
     pub config_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct QodercliInstallPaths {
+    pub hook_path: PathBuf,
+    pub settings_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct QodercliUninstallResult {
+    pub hook_path: PathBuf,
+    pub settings_path: PathBuf,
+    pub removed_hook_file: bool,
+    pub updated_settings: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,6 +247,19 @@ pub(crate) fn install_target(
                 ),
             ]
         }
+        crate::api::schema::IntegrationTarget::Qodercli => {
+            let installed = install_qodercli()?;
+            vec![
+                format!(
+                    "installed qodercli integration hook to {}",
+                    installed.hook_path.display()
+                ),
+                format!(
+                    "ensured qodercli settings at {}",
+                    installed.settings_path.display()
+                ),
+            ]
+        }
     };
 
     crate::logging::integration_action("install", integration_target_label(target), "ok");
@@ -366,6 +397,33 @@ pub(crate) fn uninstall_target(
             }
             messages
         }
+        crate::api::schema::IntegrationTarget::Qodercli => {
+            let result = uninstall_qodercli()?;
+            let mut messages = Vec::new();
+            if result.removed_hook_file {
+                messages.push(format!(
+                    "removed qodercli hook at {}",
+                    result.hook_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no qodercli hook found at {}",
+                    result.hook_path.display()
+                ));
+            }
+            if result.updated_settings {
+                messages.push(format!(
+                    "removed herdr qodercli hook entries from {}",
+                    result.settings_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no herdr qodercli hook entries found in {}",
+                    result.settings_path.display()
+                ));
+            }
+            messages
+        }
     };
 
     crate::logging::integration_action("uninstall", integration_target_label(target), "ok");
@@ -382,6 +440,7 @@ pub(crate) fn integration_target_label(
         crate::api::schema::IntegrationTarget::Codex => "codex",
         crate::api::schema::IntegrationTarget::Opencode => "opencode",
         crate::api::schema::IntegrationTarget::Hermes => "hermes",
+        crate::api::schema::IntegrationTarget::Qodercli => "qodercli",
     }
 }
 
@@ -393,6 +452,7 @@ fn integration_target_command(target: crate::api::schema::IntegrationTarget) -> 
         crate::api::schema::IntegrationTarget::Codex => "codex",
         crate::api::schema::IntegrationTarget::Opencode => "opencode",
         crate::api::schema::IntegrationTarget::Hermes => "hermes",
+        crate::api::schema::IntegrationTarget::Qodercli => "qodercli",
     }
 }
 
@@ -466,7 +526,7 @@ fn integration_specs() -> [(
     crate::api::schema::IntegrationTarget,
     io::Result<PathBuf>,
     u32,
-); 6] {
+); 7] {
     [
         (
             crate::api::schema::IntegrationTarget::Pi,
@@ -497,6 +557,11 @@ fn integration_specs() -> [(
             crate::api::schema::IntegrationTarget::Hermes,
             hermes_plugin_dir().map(|dir| dir.join(HERMES_PLUGIN_INIT_INSTALL_NAME)),
             HERMES_INTEGRATION_VERSION,
+        ),
+        (
+            crate::api::schema::IntegrationTarget::Qodercli,
+            qodercli_dir().map(|dir| dir.join("hooks").join(QODERCLI_HOOK_INSTALL_NAME)),
+            QODERCLI_INTEGRATION_VERSION,
         ),
     ]
 }
@@ -1070,6 +1135,170 @@ pub(crate) fn uninstall_hermes() -> io::Result<HermesUninstallResult> {
     })
 }
 
+pub(crate) fn install_qodercli() -> io::Result<QodercliInstallPaths> {
+    let dir = qodercli_dir()?;
+    if !dir.is_dir() {
+        return Err(io::Error::other(format!(
+            "qodercli config directory not found at {}. install qodercli first",
+            dir.display()
+        )));
+    }
+
+    let hooks_dir = dir.join("hooks");
+    fs::create_dir_all(&hooks_dir)?;
+
+    let hook_path = hooks_dir.join(QODERCLI_HOOK_INSTALL_NAME);
+    fs::write(&hook_path, QODERCLI_HOOK_ASSET)?;
+    make_executable(&hook_path)?;
+
+    // Register the hook in ~/.qoder/settings.json. The schema mirrors claude
+    // settings.json (per https://docs.qoder.com/zh/cli/hooks): a top-level
+    // `hooks` object keyed by event name, each entry holding a matcher + a
+    // list of `{type: "command", command, timeout?}` invocations. The hook
+    // script reads the event payload from stdin via `hook_event_name` so the
+    // installation never depends on a `QODER_HOOK_EVENT` environment
+    // variable.
+    let settings_path = dir.join("settings.json");
+    let mut settings = if settings_path.is_file() {
+        serde_json::from_str::<Value>(&fs::read_to_string(&settings_path)?).map_err(|err| {
+            io::Error::other(format!(
+                "failed to parse {}: {err}",
+                settings_path.display()
+            ))
+        })?
+    } else {
+        json!({})
+    };
+
+    let hooks = ensure_hooks_object(
+        &mut settings,
+        &settings_path,
+        "qodercli settings",
+        "qodercli settings hooks",
+    )?;
+    let quoted_hook_path = shell_single_quote(&hook_path.display().to_string());
+
+    // SubagentStop is intentionally *not* mapped to working: the hook script
+    // returns early on it (mirroring assets/claude/herdr-agent-state.sh) so
+    // that recap/away-summary frames cannot revive an idle pane.
+    ensure_command_hook(
+        hooks,
+        "SessionStart",
+        format!("bash {quoted_hook_path} idle"),
+        10,
+        Some("*"),
+    )?;
+    ensure_command_hook(
+        hooks,
+        "UserPromptSubmit",
+        format!("bash {quoted_hook_path} working"),
+        10,
+        Some("*"),
+    )?;
+    ensure_command_hook(
+        hooks,
+        "PreToolUse",
+        format!("bash {quoted_hook_path} working"),
+        10,
+        Some("*"),
+    )?;
+    ensure_command_hook(
+        hooks,
+        "PermissionRequest",
+        format!("bash {quoted_hook_path} blocked"),
+        10,
+        Some("*"),
+    )?;
+    ensure_command_hook(
+        hooks,
+        "Stop",
+        format!("bash {quoted_hook_path} idle"),
+        10,
+        Some("*"),
+    )?;
+    ensure_command_hook(
+        hooks,
+        "SessionEnd",
+        format!("bash {quoted_hook_path} release"),
+        10,
+        Some("*"),
+    )?;
+
+    fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+
+    Ok(QodercliInstallPaths {
+        hook_path,
+        settings_path,
+    })
+}
+
+pub(crate) fn uninstall_qodercli() -> io::Result<QodercliUninstallResult> {
+    let hook_path = qodercli_dir()?
+        .join("hooks")
+        .join(QODERCLI_HOOK_INSTALL_NAME);
+    let settings_path = qodercli_dir()?.join("settings.json");
+    let mut updated_settings = false;
+
+    if settings_path.is_file() {
+        let mut settings = serde_json::from_str::<Value>(&fs::read_to_string(&settings_path)?)
+            .map_err(|err| {
+                io::Error::other(format!(
+                    "failed to parse {}: {err}",
+                    settings_path.display()
+                ))
+            })?;
+
+        if let Some(hooks) = hooks_object_if_present(
+            &mut settings,
+            &settings_path,
+            "qodercli settings",
+            "qodercli settings hooks",
+        )? {
+            let quoted_hook_path = shell_single_quote(&hook_path.display().to_string());
+            updated_settings |= remove_command_hook(
+                hooks,
+                "SessionStart",
+                &format!("bash {quoted_hook_path} idle"),
+            )?;
+            updated_settings |= remove_command_hook(
+                hooks,
+                "UserPromptSubmit",
+                &format!("bash {quoted_hook_path} working"),
+            )?;
+            updated_settings |= remove_command_hook(
+                hooks,
+                "PreToolUse",
+                &format!("bash {quoted_hook_path} working"),
+            )?;
+            updated_settings |= remove_command_hook(
+                hooks,
+                "PermissionRequest",
+                &format!("bash {quoted_hook_path} blocked"),
+            )?;
+            updated_settings |=
+                remove_command_hook(hooks, "Stop", &format!("bash {quoted_hook_path} idle"))?;
+            updated_settings |= remove_command_hook(
+                hooks,
+                "SessionEnd",
+                &format!("bash {quoted_hook_path} release"),
+            )?;
+        }
+
+        if updated_settings {
+            fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+        }
+    }
+
+    let removed_hook_file = remove_file_if_exists(&hook_path)?;
+
+    Ok(QodercliUninstallResult {
+        hook_path,
+        settings_path,
+        removed_hook_file,
+        updated_settings,
+    })
+}
+
 fn ensure_hooks_object<'a>(
     settings: &'a mut Value,
     settings_path: &Path,
@@ -1528,6 +1757,10 @@ fn hermes_plugin_dir() -> io::Result<PathBuf> {
         .join(HERMES_PLUGIN_INSTALL_NAME))
 }
 
+fn qodercli_dir() -> io::Result<PathBuf> {
+    config_dir_from_env_or_home(QODERCLI_CONFIG_DIR_ENV_VAR, &[".qoder"])
+}
+
 fn home_dir() -> io::Result<PathBuf> {
     std::env::var("HOME")
         .map(PathBuf::from)
@@ -1548,6 +1781,7 @@ mod tests {
         std::env::remove_var(PI_CODING_AGENT_DIR_ENV_VAR);
         std::env::remove_var(CLAUDE_CONFIG_DIR_ENV_VAR);
         std::env::remove_var(CODEX_HOME_ENV_VAR);
+        std::env::remove_var(QODERCLI_CONFIG_DIR_ENV_VAR);
     }
 
     fn unique_base() -> PathBuf {
@@ -2623,8 +2857,163 @@ mod tests {
         assert!(CODEX_HOOK_ASSET.contains("HERDR_HOOK_INPUT_FILE"));
         assert!(CODEX_HOOK_ASSET.contains("agent_session_id"));
         assert!(OPENCODE_PLUGIN_ASSET.contains("properties?.sessionID"));
+        assert!(OPENCODE_PLUGIN_ASSET.contains("dispose: async"));
         assert!(OPENCODE_PLUGIN_ASSET.contains("agent_session_id: sessionID"));
+        assert!(!OPENCODE_PLUGIN_ASSET.contains("await reportState(\"idle\", sessionID);\n          }\n          break;\n        case \"session.status\""));
         assert!(HERMES_PLUGIN_INIT_ASSET.contains("session_id = _session_id(kwargs)"));
         assert!(HERMES_PLUGIN_INIT_ASSET.contains("agent_session_id"));
+        // Qoder hook reads the event from the stdin JSON payload (per
+        // https://docs.qoder.com/zh/cli/hooks). Make sure the bundled script
+        // never reaches for a QODER_HOOK_EVENT environment variable.
+        assert!(QODERCLI_HOOK_ASSET.contains("HERDR_HOOK_INPUT_FILE"));
+        assert!(QODERCLI_HOOK_ASSET.contains("hook_event_name"));
+        assert!(QODERCLI_HOOK_ASSET.contains("agent_session_id"));
+        assert!(!QODERCLI_HOOK_ASSET.contains("QODER_HOOK_EVENT"));
+    }
+
+    #[test]
+    fn install_qodercli_writes_hook_and_updates_settings() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let qoder_dir = base.join(".qoder");
+        fs::create_dir_all(&qoder_dir).unwrap();
+        fs::write(
+            qoder_dir.join("settings.json"),
+            r#"{"permissions":{"allow":["Read"]},"hooks":{}}"#,
+        )
+        .unwrap();
+        std::env::set_var(QODERCLI_CONFIG_DIR_ENV_VAR, &qoder_dir);
+
+        let installed = install_qodercli().unwrap();
+
+        assert_eq!(
+            installed.hook_path,
+            qoder_dir.join("hooks").join(QODERCLI_HOOK_INSTALL_NAME)
+        );
+        assert_eq!(installed.settings_path, qoder_dir.join("settings.json"));
+        assert!(installed.hook_path.is_file());
+
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(&installed.settings_path).unwrap()).unwrap();
+        let hooks = settings
+            .get("hooks")
+            .and_then(Value::as_object)
+            .expect("hooks should be present");
+        for event in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PermissionRequest",
+            "Stop",
+            "SessionEnd",
+        ] {
+            assert!(
+                hooks.contains_key(event),
+                "expected hooks.{event} to be registered"
+            );
+        }
+        // Pre-existing settings keys must be preserved.
+        assert!(settings.get("permissions").is_some());
+
+        std::env::remove_var(QODERCLI_CONFIG_DIR_ENV_VAR);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_qodercli_is_idempotent_for_hook_entries() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let qoder_dir = base.join(".qoder");
+        fs::create_dir_all(&qoder_dir).unwrap();
+        std::env::set_var(QODERCLI_CONFIG_DIR_ENV_VAR, &qoder_dir);
+
+        install_qodercli().unwrap();
+        install_qodercli().unwrap();
+
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(qoder_dir.join("settings.json")).unwrap())
+                .unwrap();
+        let hooks = settings.get("hooks").and_then(Value::as_object).unwrap();
+        for event in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PermissionRequest",
+            "Stop",
+            "SessionEnd",
+        ] {
+            let entries = hooks.get(event).and_then(Value::as_array).unwrap();
+            assert_eq!(
+                entries.len(),
+                1,
+                "expected hooks.{event} to contain exactly one entry, got {entries:?}"
+            );
+        }
+
+        std::env::remove_var(QODERCLI_CONFIG_DIR_ENV_VAR);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn uninstall_qodercli_removes_herdr_hooks_and_preserves_others() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let qoder_dir = base.join(".qoder");
+        fs::create_dir_all(&qoder_dir).unwrap();
+        std::env::set_var(QODERCLI_CONFIG_DIR_ENV_VAR, &qoder_dir);
+
+        install_qodercli().unwrap();
+        // Inject a foreign hook entry the user might have configured by hand.
+        let mut settings: Value =
+            serde_json::from_str(&fs::read_to_string(qoder_dir.join("settings.json")).unwrap())
+                .unwrap();
+        settings["hooks"]["UserPromptSubmit"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "matcher": "*",
+                "hooks": [{"type": "command", "command": "echo user-defined"}],
+            }));
+        fs::write(
+            qoder_dir.join("settings.json"),
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+
+        let result = uninstall_qodercli().unwrap();
+        assert!(result.removed_hook_file);
+        assert!(result.updated_settings);
+
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(qoder_dir.join("settings.json")).unwrap())
+                .unwrap();
+        let hooks = settings.get("hooks").and_then(Value::as_object).unwrap();
+        let remaining = hooks
+            .get("UserPromptSubmit")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+        let cmd = remaining[0]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(cmd, "echo user-defined");
+
+        std::env::remove_var(QODERCLI_CONFIG_DIR_ENV_VAR);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_qodercli_errors_when_config_dir_missing() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let missing = base.join(".qoder");
+        std::env::set_var(QODERCLI_CONFIG_DIR_ENV_VAR, &missing);
+
+        let err = install_qodercli().unwrap_err().to_string();
+        assert!(
+            err.contains("qodercli config directory not found"),
+            "unexpected error: {err}"
+        );
+
+        std::env::remove_var(QODERCLI_CONFIG_DIR_ENV_VAR);
+        let _ = fs::remove_dir_all(base);
     }
 }

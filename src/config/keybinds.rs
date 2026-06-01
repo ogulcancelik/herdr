@@ -63,6 +63,8 @@ pub struct CommandKeybindConfig {
     /// Command execution mode. Default: "shell".
     #[serde(rename = "type")]
     pub action_type: CommandKeybindType,
+    /// Optional user-defined description for this custom command.
+    pub description: Option<String>,
 }
 
 impl Default for CommandKeybindConfig {
@@ -71,6 +73,7 @@ impl Default for CommandKeybindConfig {
             key: BindingConfig::empty(),
             command: String::new(),
             action_type: CommandKeybindType::Shell,
+            description: None,
         }
     }
 }
@@ -238,6 +241,7 @@ pub struct CustomCommandKeybind {
     pub label: String,
     pub command: String,
     pub action: CustomCommandAction,
+    pub description: Option<String>,
 }
 
 /// Parsed keybinds for Herdr actions.
@@ -282,12 +286,14 @@ pub struct Keybinds {
     pub close_tab: ActionKeybinds,
     pub rename_pane: ActionKeybinds,
     pub edit_scrollback: ActionKeybinds,
+    pub copy_mode: ActionKeybinds,
     pub focus_pane_left: ActionKeybinds,
     pub focus_pane_down: ActionKeybinds,
     pub focus_pane_up: ActionKeybinds,
     pub focus_pane_right: ActionKeybinds,
     pub cycle_pane_next: ActionKeybinds,
     pub cycle_pane_previous: ActionKeybinds,
+    pub last_pane: ActionKeybinds,
     pub split_vertical: ActionKeybinds,
     pub split_horizontal: ActionKeybinds,
     pub close_pane: ActionKeybinds,
@@ -459,10 +465,12 @@ impl Config {
             close_tab: action!("keys.close_tab", &self.keys.close_tab),
             rename_pane: action!("keys.rename_pane", &self.keys.rename_pane),
             edit_scrollback: action!("keys.edit_scrollback", &self.keys.edit_scrollback),
+            copy_mode: action!("keys.copy_mode", &self.keys.copy_mode),
             focus_pane_left: action!("keys.focus_pane_left", &self.keys.focus_pane_left),
             focus_pane_down: action!("keys.focus_pane_down", &self.keys.focus_pane_down),
             focus_pane_up: action!("keys.focus_pane_up", &self.keys.focus_pane_up),
             focus_pane_right: action!("keys.focus_pane_right", &self.keys.focus_pane_right),
+            last_pane: action!("keys.last_pane", &self.keys.last_pane),
             cycle_pane_next: action!("keys.cycle_pane_next", &self.keys.cycle_pane_next),
             cycle_pane_previous: action!(
                 "keys.cycle_pane_previous",
@@ -532,6 +540,7 @@ impl Config {
                 label,
                 command: command.command.clone(),
                 action,
+                description: command.description.clone(),
             });
         }
 
@@ -1265,6 +1274,24 @@ next_tab = "prefix+n"
     }
 
     #[test]
+    fn copy_mode_uses_tmux_prefix_bracket_by_default() {
+        let kb = Config::default().keybinds();
+        assert_eq!(
+            binding_triggers(&kb.copy_mode),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('['),
+                KeyModifiers::empty()
+            ))]
+        );
+    }
+
+    #[test]
+    fn back_and_forth_keybinds_are_unset_by_default() {
+        let kb = Config::default().keybinds();
+        assert!(kb.last_pane.bindings.is_empty());
+    }
+
+    #[test]
     fn array_bindings_allow_prefix_and_modified_direct() {
         let config: Config = toml::from_str(
             r#"
@@ -1645,5 +1672,24 @@ new_workspace = "prefix+n"
         assert!(diagnostics.iter().any(|diag| {
             diag.contains("kept keys.new_workspace") && diag.contains("disabled keys.next_tab")
         }));
+    }
+
+    #[test]
+    fn custom_command_with_description_parses() {
+        let config: Config = toml::from_str(
+            r#"
+[[keys.command]]
+key = "prefix+y"
+command = "echo hello"
+description = "say hello"
+"#,
+        )
+        .unwrap();
+        let keybinds = config.keybinds();
+        assert_eq!(keybinds.custom_commands.len(), 1);
+        assert_eq!(
+            keybinds.custom_commands[0].description,
+            Some("say hello".to_string())
+        );
     }
 }

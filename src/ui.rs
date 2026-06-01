@@ -26,8 +26,8 @@ use self::dialogs::{
 };
 use self::keybind_help::render_keybind_help_overlay;
 use self::menus::{
-    render_context_menu, render_global_launcher_menu, render_navigate_overlay,
-    render_prefix_overlay, render_resize_overlay,
+    render_context_menu, render_copy_mode_overlay, render_global_launcher_menu,
+    render_navigate_overlay, render_prefix_overlay, render_resize_overlay,
 };
 use self::mobile::{
     compute_mobile_header_hit_areas, is_mobile_width, mobile_switcher_max_scroll_for_height,
@@ -40,7 +40,7 @@ use self::onboarding::render_onboarding_overlay;
 use self::panes::{compute_pane_infos, render_panes, resize_tab_panes};
 pub(crate) use self::release_notes::{
     product_announcement_display_lines, release_notes_close_button_rect,
-    release_notes_display_lines, release_notes_sections, PRODUCT_ANNOUNCEMENT_MODAL_SIZE,
+    release_notes_display_lines, release_notes_wrapped_line_count, PRODUCT_ANNOUNCEMENT_MODAL_SIZE,
     RELEASE_NOTES_MODAL_SIZE,
 };
 use self::release_notes::{render_product_announcement_overlay, render_release_notes_overlay};
@@ -50,14 +50,18 @@ pub(crate) use self::scrollbar::{
 };
 use self::settings::render_settings_overlay;
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
-use self::status::{render_config_diagnostic, render_toast_notification, toast_notification_rect};
+use self::status::{
+    render_config_diagnostic, render_copy_feedback, render_toast_notification,
+    toast_notification_rect,
+};
 use self::tabs::render_tab_bar;
 pub(crate) use self::{
     dialogs::{
         confirm_close_button_rects, confirm_close_popup_rect, new_linked_worktree_button_rects,
         new_linked_worktree_inner_rect, open_existing_worktree_button_rects,
-        open_existing_worktree_inner_rect, open_existing_worktree_visible_start,
-        remove_worktree_button_rects, remove_worktree_popup_rect, rename_button_rects,
+        open_existing_worktree_inner_rect, open_existing_worktree_max_visible_rows,
+        open_existing_worktree_visible_start, remove_worktree_button_rects,
+        remove_worktree_popup_rect, rename_button_rects,
     },
     settings::{settings_button_rects, settings_show_primary_action},
     sidebar::{
@@ -168,7 +172,7 @@ fn compute_view_internal(
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
-    if is_mobile_width(area) {
+    if is_mobile_width(area, app.mobile_width_threshold) {
         compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
         return;
     }
@@ -380,6 +384,7 @@ pub fn render_with_runtime_registry(
         }
         Mode::Navigate => render_navigate_overlay(app, frame, terminal_area),
         Mode::Prefix => render_prefix_overlay(app, frame, terminal_area),
+        Mode::Copy => render_copy_mode_overlay(app, frame, terminal_area),
         Mode::Resize => render_resize_overlay(app, frame, terminal_area),
         Mode::ConfirmClose => render_confirm_close_overlay(app, frame, terminal_area),
         Mode::ContextMenu => {
@@ -406,6 +411,7 @@ fn render_notifications(app: &AppState, frame: &mut Frame, terminal_area: Rect) 
     if let Some(message) = &app.config_diagnostic {
         render_config_diagnostic(frame, terminal_area, message, &app.palette);
     }
+    let mut copy_feedback_offset = u16::from(has_config_diagnostic);
     if let Some(toast) = &app.toast {
         if app.view.layout == ViewLayout::Mobile {
             render_mobile_toast_banner(
@@ -424,6 +430,20 @@ fn render_notifications(app: &AppState, frame: &mut Frame, terminal_area: Rect) 
                 &app.palette,
             );
         }
+        copy_feedback_offset =
+            copy_feedback_offset.saturating_add(if app.view.layout == ViewLayout::Mobile {
+                1
+            } else {
+                toast_notification_rect(terminal_area, toast, has_config_diagnostic).height
+            });
+    }
+    if let Some(feedback) = &app.copy_feedback {
+        let area = if app.view.layout == ViewLayout::Mobile {
+            frame.area()
+        } else {
+            terminal_area
+        };
+        render_copy_feedback(frame, area, feedback, copy_feedback_offset, &app.palette);
     }
 }
 
@@ -454,16 +474,11 @@ fn _build_hints(items: &[(&str, &str)], key_style: Style, dim_style: Style) -> V
 #[cfg(test)]
 mod tests {
     use super::keybind_help::keybind_help_groups;
-    use super::release_notes::{release_notes_lines, release_notes_preview_lines};
     use super::scrollbar::scrollbar_thumb;
     use super::*;
-    use crate::{
-        app::state::{Palette, ViewLayout},
-        layout::PaneInfo,
-        workspace::Workspace,
-    };
+    use crate::{app::state::ViewLayout, layout::PaneInfo, workspace::Workspace};
+    use ratatui::style::Color;
     use ratatui::{backend::TestBackend, Terminal};
-    use ratatui::{style::Color, text::Line};
 
     #[tokio::test]
     async fn focused_pane_cursor_wins_during_terminal_render() {
@@ -524,6 +539,24 @@ mod tests {
             app.view.mobile_menu_hit_area.x + app.view.mobile_menu_hit_area.width,
             44
         );
+    }
+
+    #[test]
+    fn configured_mobile_width_threshold_controls_layout_switch() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+        assert_eq!(app.view.layout, ViewLayout::Desktop);
+
+        app.mobile_width_threshold = 90;
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+        assert_eq!(app.view.layout, ViewLayout::Mobile);
+        assert_eq!(app.view.mobile_header_rect, Rect::new(0, 0, 80, 2));
+        assert_eq!(app.view.terminal_area, Rect::new(0, 2, 80, 18));
     }
 
     #[test]
@@ -925,13 +958,6 @@ mod tests {
         assert_eq!(scrollbar_offset_from_drag_row(metrics, track, row, grab), 7);
     }
 
-    fn line_text(line: &Line<'_>) -> String {
-        line.spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>()
-    }
-
     fn buffer_row_text(buffer: &ratatui::buffer::Buffer, area: Rect, row: u16) -> String {
         (area.x..area.x + area.width)
             .map(|x| buffer[(x, row)].symbol())
@@ -953,79 +979,6 @@ mod tests {
         )
         .expect("write HEAD");
         root
-    }
-
-    #[test]
-    fn release_notes_inline_code_spans_are_styled_without_backticks() {
-        let palette = Palette::catppuccin();
-        let lines = release_notes_lines("- `herdr pane run ...` now works", &palette);
-
-        assert_eq!(lines.len(), 1);
-        assert_eq!(line_text(&lines[0].1), " • herdr pane run ... now works");
-        assert_eq!(lines[0].1.spans[1].content.as_ref(), "herdr pane run ...");
-        assert_eq!(lines[0].1.spans[1].style.fg, Some(palette.accent));
-        assert_eq!(lines[0].1.spans[1].style.bg, Some(palette.surface0));
-    }
-
-    #[test]
-    fn release_notes_config_inline_code_uses_nonbreaking_spaces() {
-        let palette = Palette::catppuccin();
-        let lines = release_notes_lines("- After: `new_tab = \"prefix+c\"`", &palette);
-
-        assert_eq!(lines.len(), 1);
-        assert_eq!(
-            lines[0].1.spans[2].content.as_ref(),
-            "new_tab\u{00a0}=\u{00a0}\"prefix+c\""
-        );
-        assert_eq!(
-            line_text(&lines[0].1).replace('\u{00a0}', " "),
-            " • After: new_tab = \"prefix+c\""
-        );
-    }
-
-    #[test]
-    fn release_notes_preview_lines_show_update_steps() {
-        let palette = Palette::catppuccin();
-        let lines = release_notes_preview_lines("0.5.0", "herdr update", &palette);
-
-        assert_eq!(lines.len(), 2);
-        assert_eq!(line_text(&lines[0]), "● update ready");
-        assert_eq!(
-            line_text(&lines[1]),
-            "detach from this session, then run herdr update in your shell"
-        );
-        assert_eq!(lines[0].spans[0].style.fg, Some(palette.accent));
-        assert_eq!(lines[0].spans[1].style.fg, Some(palette.text));
-    }
-
-    #[test]
-    fn release_notes_fenced_code_blocks_render_as_preformatted_lines() {
-        let palette = Palette::catppuccin();
-        let lines = release_notes_lines(
-            "### Fixed\n```bash\njust check\n- not a bullet\n```\n- after",
-            &palette,
-        );
-
-        assert_eq!(lines.len(), 4);
-        assert_eq!(line_text(&lines[0].1), " FIXED");
-        assert_eq!(line_text(&lines[1].1), "▏ just check");
-        assert_eq!(line_text(&lines[2].1), "▏ - not a bullet");
-        assert_eq!(line_text(&lines[3].1), " • after");
-        assert_eq!(lines[1].1.spans[0].style.fg, Some(palette.accent));
-        assert_eq!(lines[1].1.spans[0].style.bg, Some(palette.surface1));
-        assert_eq!(lines[1].1.spans[1].style.bg, Some(palette.surface1));
-        assert_eq!(lines[1].1.spans[2].style.bg, Some(palette.surface1));
-    }
-
-    #[test]
-    fn release_notes_fenced_code_blocks_preserve_blank_lines() {
-        let palette = Palette::catppuccin();
-        let lines = release_notes_lines("```\nfirst\n\nsecond\n```", &palette);
-
-        assert_eq!(lines.len(), 3);
-        assert_eq!(line_text(&lines[0].1), "▏ first");
-        assert_eq!(line_text(&lines[1].1), "▏ ");
-        assert_eq!(line_text(&lines[2].1), "▏ second");
     }
 
     #[test]
@@ -1068,23 +1021,79 @@ mod tests {
             .1
             .clone();
 
-        assert!(workspace_tab.contains(&("unset".to_string(), "previous workspace")));
-        assert!(workspace_tab.contains(&("unset".to_string(), "next workspace")));
-        assert!(workspace_tab.contains(&("unset".to_string(), "previous agent")));
-        assert!(workspace_tab.contains(&("unset".to_string(), "next agent")));
-        assert!(workspace_tab.contains(&("unset".to_string(), "focus agent 1-9")));
-        assert!(workspace_tab.contains(&("unset".to_string(), "switch workspace 1-9")));
+        assert!(workspace_tab
+            .iter()
+            .any(|(key, label)| key == "unset" && label.as_ref() == "previous workspace"));
+        assert!(workspace_tab
+            .iter()
+            .any(|(key, label)| key == "unset" && label.as_ref() == "next workspace"));
+        assert!(workspace_tab
+            .iter()
+            .any(|(key, label)| key == "unset" && label.as_ref() == "previous agent"));
+        assert!(workspace_tab
+            .iter()
+            .any(|(key, label)| key == "unset" && label.as_ref() == "next agent"));
+        assert!(workspace_tab
+            .iter()
+            .any(|(key, label)| key == "unset" && label.as_ref() == "focus agent 1-9"));
+        assert!(workspace_tab
+            .iter()
+            .any(|(key, label)| key == "unset" && label.as_ref() == "switch workspace 1-9"));
         assert!(panes
             .iter()
-            .any(|(key, label)| key == "prefix+h" && *label == "focus pane left"));
+            .any(|(key, label)| key == "prefix+h" && label.as_ref() == "focus pane left"));
         assert!(panes
             .iter()
-            .any(|(key, label)| key == "prefix+j" && *label == "focus pane down"));
+            .any(|(key, label)| key == "prefix+j" && label.as_ref() == "focus pane down"));
         assert!(panes
             .iter()
-            .any(|(key, label)| key == "prefix+k" && *label == "focus pane up"));
+            .any(|(key, label)| key == "prefix+k" && label.as_ref() == "focus pane up"));
         assert!(panes
             .iter()
-            .any(|(key, label)| key == "prefix+l" && *label == "focus pane right"));
+            .any(|(key, label)| key == "prefix+l" && label.as_ref() == "focus pane right"));
+    }
+
+    #[test]
+    fn keybind_help_shows_custom_command_descriptions() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.keybinds.custom_commands = vec![
+            crate::config::CustomCommandKeybind {
+                bindings: crate::config::ActionKeybinds::prefix("alt+g"),
+                label: "prefix+alt+g".to_string(),
+                command: "lazygit".to_string(),
+                action: crate::config::CustomCommandAction::Pane,
+                description: Some("open lazygit".to_string()),
+            },
+            crate::config::CustomCommandKeybind {
+                bindings: crate::config::ActionKeybinds::prefix("alt+h"),
+                label: "prefix+alt+h".to_string(),
+                command: "echo hello".to_string(),
+                action: crate::config::CustomCommandAction::Shell,
+                description: None,
+            },
+        ];
+
+        let groups = keybind_help_groups(&app);
+        let custom = groups
+            .iter()
+            .find(|(name, _)| *name == "custom")
+            .expect("custom group")
+            .1
+            .clone();
+        assert!(custom
+            .iter()
+            .any(|(key, label)| key == "prefix+alt+g" && label.as_ref() == "open lazygit"));
+        assert!(custom
+            .iter()
+            .any(|(key, label)| key == "prefix+alt+h" && label.as_ref() == "custom command"));
+
+        let rendered_help = keybind_help_lines(&app)
+            .into_iter()
+            .flat_map(|(_, line)| line.spans)
+            .map(|span| span.content.into_owned())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(rendered_help.contains("open lazygit"));
+        assert!(rendered_help.contains("custom command"));
     }
 }

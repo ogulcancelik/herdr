@@ -147,20 +147,6 @@ impl TileLayout {
         }
     }
 
-    pub fn focus_next(&mut self) {
-        let ids = self.pane_ids();
-        if let Some(pos) = ids.iter().position(|id| *id == self.focus) {
-            self.focus = ids[(pos + 1) % ids.len()];
-        }
-    }
-
-    pub fn focus_prev(&mut self) {
-        let ids = self.pane_ids();
-        if let Some(pos) = ids.iter().position(|id| *id == self.focus) {
-            self.focus = ids[(pos + ids.len() - 1) % ids.len()];
-        }
-    }
-
     pub fn focus_pane(&mut self, id: PaneId) {
         if self.pane_ids().contains(&id) {
             self.focus = id;

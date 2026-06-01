@@ -13,12 +13,17 @@ use std::time::{Duration, Instant};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use support::{
     cleanup_test_base, client_handshake, register_runtime_dir, register_spawned_herdr_pid,
-    unregister_spawned_herdr_pid, wait_for_disconnect, wait_for_socket,
+    send_input, unregister_spawned_herdr_pid, wait_for_disconnect, wait_for_socket,
 };
 
 struct SpawnedHerdr {
     _master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
+}
+
+struct RequestError {
+    retryable: bool,
+    message: String,
 }
 
 impl Drop for SpawnedHerdr {
@@ -162,14 +167,56 @@ fn spawn_default_session_server(config_home: &Path, runtime_dir: &Path) -> Spawn
     }
 }
 
-fn request(socket_path: &Path, request: serde_json::Value) -> serde_json::Value {
-    let mut stream = UnixStream::connect(socket_path).unwrap();
-    stream.write_all(request.to_string().as_bytes()).unwrap();
-    stream.write_all(b"\n").unwrap();
-    stream.flush().unwrap();
+fn try_request(
+    socket_path: &Path,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, RequestError> {
+    let mut stream = UnixStream::connect(socket_path).map_err(|err| RequestError {
+        retryable: true,
+        message: format!("connect {}: {err}", socket_path.display()),
+    })?;
+    let request_text = request.to_string();
+    stream
+        .write_all(request_text.as_bytes())
+        .map_err(|err| RequestError {
+            retryable: true,
+            message: format!("write request to {}: {err}", socket_path.display()),
+        })?;
+    stream.write_all(b"\n").map_err(|err| RequestError {
+        retryable: true,
+        message: format!("write newline to {}: {err}", socket_path.display()),
+    })?;
+    stream.flush().map_err(|err| RequestError {
+        retryable: true,
+        message: format!("flush request to {}: {err}", socket_path.display()),
+    })?;
     let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line).unwrap();
-    serde_json::from_str(&line).unwrap()
+    BufReader::new(stream)
+        .read_line(&mut line)
+        .map_err(|err| RequestError {
+            retryable: true,
+            message: format!("read response from {}: {err}", socket_path.display()),
+        })?;
+    if line.is_empty() {
+        return Err(RequestError {
+            retryable: true,
+            message: format!(
+                "empty response from {} for request {request_text}",
+                socket_path.display()
+            ),
+        });
+    }
+    serde_json::from_str(&line).map_err(|err| RequestError {
+        retryable: false,
+        message: format!(
+            "parse response from {} for request {request_text}: {err}; response was {line:?}",
+            socket_path.display()
+        ),
+    })
+}
+
+fn request(socket_path: &Path, request: serde_json::Value) -> serde_json::Value {
+    try_request(socket_path, request).unwrap_or_else(|err| panic!("{}", err.message))
 }
 
 fn assert_ok(response: serde_json::Value) {
@@ -181,19 +228,25 @@ fn assert_ok(response: serde_json::Value) {
 
 fn wait_for_api(socket_path: &Path, timeout: Duration) {
     let deadline = Instant::now() + timeout;
+    let mut last_error = String::new();
     while Instant::now() < deadline {
-        if UnixStream::connect(socket_path).is_ok() {
-            let response = request(
-                socket_path,
-                serde_json::json!({"id":"test:ping","method":"ping","params":{}}),
-            );
-            if response.get("result").is_some() {
-                return;
+        match try_request(
+            socket_path,
+            serde_json::json!({"id":"test:ping","method":"ping","params":{}}),
+        ) {
+            Ok(response) if response.get("result").is_some() => return,
+            Ok(response) => panic!("api ping returned non-success response: {response}"),
+            Err(err) if !err.retryable => panic!("{}", err.message),
+            Err(err) => {
+                last_error = err.message;
             }
         }
         thread::sleep(Duration::from_millis(25));
     }
-    panic!("api did not become ready at {}", socket_path.display());
+    panic!(
+        "api did not become ready at {}; last error: {last_error}",
+        socket_path.display()
+    );
 }
 
 fn wait_for_output(socket_path: &Path, pane_id: &str, needle: &str) {
@@ -248,6 +301,96 @@ fn wait_for_file_contains(path: &Path, needle: &str, timeout: Duration) -> Strin
     );
 }
 
+#[cfg(target_os = "linux")]
+fn server_ptmx_fd_count(pid: u32) -> usize {
+    let Ok(entries) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| fs::read_link(entry.path()).ok())
+        .filter(|target| target == Path::new("/dev/ptmx"))
+        .count()
+}
+
+#[cfg(target_os = "macos")]
+fn server_ptmx_fd_count(pid: u32) -> usize {
+    let Ok(output) = std::process::Command::new("lsof")
+        .args(["-nP", "-p", &pid.to_string()])
+        .output()
+    else {
+        return 0;
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.contains("/dev/ptmx"))
+        .count()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn wait_for_server_ptmx_fd_count(pid: u32, expected: usize, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    let mut last_count = 0;
+    while Instant::now() < deadline {
+        last_count = server_ptmx_fd_count(pid);
+        if last_count == expected {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("server pid {pid} had {last_count} /dev/ptmx fds; expected {expected}");
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_replacement_server_pid(runtime_dir: &Path, old_pid: u32, timeout: Duration) -> u32 {
+    let deadline = Instant::now() + timeout;
+    let mut last_pids = Vec::new();
+    while Instant::now() < deadline {
+        last_pids = support::herdr_server_pids_for_runtime_dir(runtime_dir).unwrap_or_default();
+        if let Some(pid) = last_pids.iter().copied().find(|pid| *pid != old_pid) {
+            return pid;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!(
+        "replacement server for {} did not appear; last pids: {:?}",
+        runtime_dir.display(),
+        last_pids
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_replacement_server_pid(_runtime_dir: &Path, old_pid: u32, timeout: Duration) -> u32 {
+    let handoff_socket_pattern = format!("herdr-handoff-{old_pid}.sock");
+    let deadline = Instant::now() + timeout;
+    let mut last_stdout = String::new();
+    while Instant::now() < deadline {
+        if let Ok(output) = std::process::Command::new("pgrep")
+            .args(["-af", &handoff_socket_pattern])
+            .output()
+        {
+            last_stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            for line in last_stdout.lines() {
+                let Some(pid_text) = line.split_whitespace().next() else {
+                    continue;
+                };
+                let Ok(pid) = pid_text.parse::<u32>() else {
+                    continue;
+                };
+                if pid != old_pid {
+                    return pid;
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!(
+        "replacement server for {} did not appear; last pgrep output: {}",
+        _runtime_dir.display(),
+        last_stdout
+    );
+}
+
 fn unused_local_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -275,6 +418,88 @@ fn wait_for_http_contains(port: u16, needle: &str, timeout: Duration) -> String 
     panic!(
         "http server on port {port} did not return {needle:?}; last response was {last_response:?}"
     );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn live_server_holds_one_pty_master_fd_per_pane() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    let server_pid = spawned
+        .child
+        .process_id()
+        .expect("test server should expose pid");
+    wait_for_server_ptmx_fd_count(server_pid, 0, Duration::from_secs(5));
+
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    wait_for_server_ptmx_fd_count(server_pid, 1, Duration::from_secs(5));
+
+    let second = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:split-second",
+            "method": "pane.split",
+            "params": {
+                "target_pane_id": pane_id,
+                "direction": "right",
+                "focus": true
+            }
+        }),
+    );
+    assert_ok(second.clone());
+    let second_pane_id = second["result"]["pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    wait_for_server_ptmx_fd_count(server_pid, 2, Duration::from_secs(5));
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:split-third",
+            "method": "pane.split",
+            "params": {
+                "target_pane_id": second_pane_id,
+                "direction": "down",
+                "focus": true
+            }
+        }),
+    ));
+    wait_for_server_ptmx_fd_count(server_pid, 3, Duration::from_secs(5));
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    let replacement_pid =
+        wait_for_replacement_server_pid(&runtime_dir, server_pid, Duration::from_secs(10));
+    wait_for_api(&api_socket, Duration::from_secs(10));
+    wait_for_server_ptmx_fd_count(replacement_pid, 3, Duration::from_secs(5));
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    drop(spawned);
+    cleanup_test_base(&base);
 }
 
 #[test]
@@ -480,6 +705,408 @@ fn live_handoff_preserves_pane_process_io() {
         serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
     );
     let _ = client_socket;
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn live_handoff_preserves_keyboard_protocol_for_client_input() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+    let script = base.join("read-raw.py");
+    let ready_marker = base.join("keyboard-ready");
+    let received_marker = base.join("keyboard-received");
+
+    fs::create_dir_all(&base).unwrap();
+    fs::write(
+        &script,
+        format!(
+            r#"import os
+import pathlib
+import select
+import sys
+import tty
+
+sys.stdout.buffer.write(b"\x1b[>5u")
+sys.stdout.flush()
+pathlib.Path({ready:?}).write_text("ready")
+tty.setraw(sys.stdin.fileno())
+ready_fds, _, _ = select.select([sys.stdin.fileno()], [], [], 5)
+data = os.read(sys.stdin.fileno(), 32) if ready_fds else b""
+pathlib.Path({received:?}).write_text(data.hex())
+"#,
+            ready = ready_marker.display().to_string(),
+            received = received_marker.display().to_string()
+        ),
+    )
+    .unwrap();
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:run",
+            "method": "pane.send_input",
+            "params": {"pane_id": pane_id, "text": format!("python3 {}", script.display()), "keys": ["Enter"]}
+        }),
+    ));
+    support::wait_for_file(&ready_marker, Duration::from_secs(5));
+
+    let protocol = request(
+        &api_socket,
+        serde_json::json!({"id":"test:protocol","method":"ping","params":{}}),
+    )["result"]["protocol"]
+        .as_u64()
+        .unwrap() as u32;
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(5));
+
+    let mut client_stream = UnixStream::connect(&client_socket).unwrap();
+    let (server_protocol, error) = client_handshake(&mut client_stream, protocol, 80, 24).unwrap();
+    assert_eq!(server_protocol, protocol);
+    assert!(error.is_none(), "client handshake failed: {error:?}");
+    send_input(&mut client_stream, b"\x1b[13;2u").unwrap();
+
+    wait_for_file_contains(&received_marker, "1b5b31333b3275", Duration::from_secs(5));
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn live_handoff_preserves_modify_other_keys_for_client_input() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+    let script = base.join("read-raw.py");
+    let ready_marker = base.join("modify-ready");
+    let received_marker = base.join("modify-received");
+
+    fs::create_dir_all(&base).unwrap();
+    fs::write(
+        &script,
+        format!(
+            r#"import os
+import pathlib
+import select
+import sys
+import tty
+
+sys.stdout.buffer.write(b"\x1b[>4;2m")
+sys.stdout.flush()
+pathlib.Path({ready:?}).write_text("ready")
+tty.setraw(sys.stdin.fileno())
+ready_fds, _, _ = select.select([sys.stdin.fileno()], [], [], 5)
+data = os.read(sys.stdin.fileno(), 32) if ready_fds else b""
+pathlib.Path({received:?}).write_text(data.hex())
+"#,
+            ready = ready_marker.display().to_string(),
+            received = received_marker.display().to_string()
+        ),
+    )
+    .unwrap();
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:run",
+            "method": "pane.send_input",
+            "params": {"pane_id": pane_id, "text": format!("python3 {}", script.display()), "keys": ["Enter"]}
+        }),
+    ));
+    support::wait_for_file(&ready_marker, Duration::from_secs(5));
+
+    let protocol = request(
+        &api_socket,
+        serde_json::json!({"id":"test:protocol","method":"ping","params":{}}),
+    )["result"]["protocol"]
+        .as_u64()
+        .unwrap() as u32;
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(5));
+
+    let mut client_stream = UnixStream::connect(&client_socket).unwrap();
+    let (server_protocol, error) = client_handshake(&mut client_stream, protocol, 80, 24).unwrap();
+    assert_eq!(server_protocol, protocol);
+    assert!(error.is_none(), "client handshake failed: {error:?}");
+    send_input(&mut client_stream, b"\x1b[13;2u").unwrap();
+
+    wait_for_file_contains(
+        &received_marker,
+        "1b5b32373b323b31337e",
+        Duration::from_secs(5),
+    );
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn live_handoff_accepts_old_pane_id_from_child_env() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let pane_id_marker = base.join("old-pane-id");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:print-id",
+            "method": "pane.send_input",
+            "params": {"pane_id": pane_id, "text": format!("printf '%s' \"$HERDR_PANE_ID\" > {}", pane_id_marker.display()), "keys": ["Enter"]}
+        }),
+    ));
+    let old_pane_id = wait_for_file_contains(&pane_id_marker, "p_", Duration::from_secs(5));
+    assert!(
+        old_pane_id.starts_with("p_"),
+        "unexpected pane id from env: {old_pane_id:?}"
+    );
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:old-pane-report",
+            "method": "pane.report_agent",
+            "params": {
+                "pane_id": old_pane_id,
+                "source": "handoff-test",
+                "agent": "pi",
+                "state": "working"
+            }
+        }),
+    ));
+    let agents = request(
+        &api_socket,
+        serde_json::json!({"id":"test:agent-list","method":"agent.list","params":{}}),
+    );
+    let found = agents["result"]["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|agent| {
+            agent["agent"].as_str() == Some("pi")
+                && agent["agent_status"].as_str() == Some("working")
+        });
+    assert!(
+        found,
+        "old pane id report did not update restored pane: {agents}"
+    );
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn live_handoff_keeps_agent_started_pane_after_agent_exits() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let started_marker = base.join("agent-started");
+    let exited_marker = base.join("agent-exited");
+    let shell_marker = base.join("shell-after-agent");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+
+    let command = format!(
+        "echo started > {}; sleep 1; echo exited > {}",
+        started_marker.display(),
+        exited_marker.display()
+    );
+    let started = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:agent-start",
+            "method": "agent.start",
+            "params": {
+                "name": "handoff-agent",
+                "cwd": "/tmp",
+                "focus": true,
+                "argv": ["/bin/sh", "-c", command]
+            }
+        }),
+    );
+    assert_ok(started.clone());
+    let pane_id = started["result"]["agent"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    support::wait_for_file(&started_marker, Duration::from_secs(5));
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+    support::wait_for_file(&exited_marker, Duration::from_secs(5));
+    thread::sleep(Duration::from_millis(300));
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:shell-after-agent",
+            "method": "pane.send_input",
+            "params": {"pane_id": pane_id, "text": format!("echo alive > {}", shell_marker.display()), "keys": ["Enter"]}
+        }),
+    ));
+    support::wait_for_file(&shell_marker, Duration::from_secs(5));
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn live_handoff_keeps_shell_pane_after_foreground_process_exits() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let started_marker = base.join("foreground-started");
+    let exited_marker = base.join("foreground-exited");
+    let shell_marker = base.join("shell-after-foreground");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let command = format!(
+        "sh -c 'echo started > {}; sleep 1; echo exited > {}'",
+        started_marker.display(),
+        exited_marker.display()
+    );
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:run-foreground",
+            "method": "pane.send_input",
+            "params": {"pane_id": pane_id, "text": command, "keys": ["Enter"]}
+        }),
+    ));
+    support::wait_for_file(&started_marker, Duration::from_secs(5));
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+    support::wait_for_file(&exited_marker, Duration::from_secs(5));
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:shell-after-foreground",
+            "method": "pane.send_input",
+            "params": {"pane_id": pane_id, "text": format!("echo alive > {}", shell_marker.display()), "keys": ["Enter"]}
+        }),
+    ));
+    support::wait_for_file(&shell_marker, Duration::from_secs(5));
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
     cleanup_test_base(&base);
 }
 

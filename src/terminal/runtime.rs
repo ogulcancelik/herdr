@@ -45,8 +45,11 @@ impl TerminalRuntime {
     }
 
     #[cfg(unix)]
-    pub fn handoff_pane(&self, pane_id: u32) -> crate::server::handoff::HandoffPane {
-        self.0.handoff_pane(pane_id)
+    pub fn handoff_runtime_state(
+        &self,
+        pane_id: u32,
+    ) -> crate::handoff_runtime::HandoffRuntimeState {
+        self.0.handoff_runtime_state(pane_id)
     }
 
     #[cfg(unix)]
@@ -56,7 +59,7 @@ impl TerminalRuntime {
 
     #[cfg(unix)]
     pub fn from_handoff_fd(
-        import: crate::pane::PaneRuntimeImport,
+        import: crate::handoff_runtime::ImportedHandoffRuntime,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         events: mpsc::Sender<AppEvent>,
@@ -81,7 +84,7 @@ impl TerminalRuntime {
         cwd: std::path::PathBuf,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        default_shell: &str,
+        shell_config: crate::pane::PaneShellConfig<'_>,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
@@ -93,7 +96,7 @@ impl TerminalRuntime {
             cwd,
             scrollback_limit_bytes,
             host_terminal_theme,
-            default_shell,
+            shell_config,
             events,
             render_notify,
             render_dirty,
@@ -108,7 +111,7 @@ impl TerminalRuntime {
         cwd: std::path::PathBuf,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        default_shell: &str,
+        shell_config: crate::pane::PaneShellConfig<'_>,
         initial_history_ansi: Option<&str>,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
@@ -121,7 +124,7 @@ impl TerminalRuntime {
             cwd,
             scrollback_limit_bytes,
             host_terminal_theme,
-            default_shell,
+            shell_config,
             initial_history_ansi,
             events,
             render_notify,
@@ -369,14 +372,18 @@ impl TerminalRuntime {
     pub fn cwd(&self) -> Option<std::path::PathBuf> {
         self.0.cwd()
     }
+
+    pub fn foreground_cwd(&self) -> Option<std::path::PathBuf> {
+        self.0.foreground_cwd()
+    }
+
+    pub(crate) fn current_size(&self) -> (u16, u16) {
+        self.0.current_size()
+    }
 }
 
 #[cfg(test)]
 impl TerminalRuntime {
-    pub(crate) fn current_size(&self) -> (u16, u16) {
-        self.0.current_size()
-    }
-
     pub(crate) fn test_with_channel(cols: u16, rows: u16) -> (Self, mpsc::Receiver<Bytes>) {
         let (runtime, rx) = crate::pane::PaneRuntime::test_with_channel(cols, rows);
         (Self(runtime), rx)

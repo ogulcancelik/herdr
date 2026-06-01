@@ -8,9 +8,22 @@ use ratatui::{
 
 use super::widgets::panel_contrast_fg;
 use crate::{
-    app::state::{Palette, ToastKind, ToastNotification},
+    app::state::{CopyFeedback, Palette, ToastKind, ToastNotification},
     detect::AgentState,
 };
+
+pub(crate) fn copy_feedback_rect(area: Rect, feedback: &CopyFeedback, offset_rows: u16) -> Rect {
+    if area.width == 0 || area.height == 0 {
+        return Rect::default();
+    }
+
+    let content_width = feedback.message.len() as u16 + 4;
+    let width = content_width.min(area.width);
+    let height = 3u16.min(area.height);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height + offset_rows);
+    Rect::new(x, y, width, height)
+}
 
 pub(crate) fn toast_notification_rect(
     area: Rect,
@@ -19,7 +32,8 @@ pub(crate) fn toast_notification_rect(
 ) -> Rect {
     let content_width = (toast.title.len().max(toast.context.len()) as u16) + 4;
     let width = content_width.saturating_add(2).min(area.width);
-    let height = 4u16.min(area.height);
+    let content_height = if toast.context.is_empty() { 1 } else { 2 };
+    let height = (content_height + 2).min(area.height);
     let x = area.x + area.width.saturating_sub(width);
     let y = area.y
         + area
@@ -50,7 +64,7 @@ pub(super) fn render_toast_notification(
     let inner = block.inner(toast_area);
     frame.render_widget(block, toast_area);
 
-    if inner.height < 2 {
+    if inner.height < 1 {
         return;
     }
 
@@ -71,7 +85,47 @@ pub(super) fn render_toast_notification(
     ]);
 
     frame.render_widget(Paragraph::new(title), title_row);
-    frame.render_widget(Paragraph::new(context), context_row);
+    if !toast.context.is_empty() && inner.height >= 2 {
+        frame.render_widget(Paragraph::new(context), context_row);
+    }
+}
+
+pub(super) fn render_copy_feedback(
+    frame: &mut Frame,
+    area: Rect,
+    feedback: &CopyFeedback,
+    offset_rows: u16,
+    p: &Palette,
+) {
+    let feedback_area = copy_feedback_rect(area, feedback, offset_rows);
+    if feedback_area.is_empty() {
+        return;
+    }
+
+    frame.render_widget(Clear, feedback_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(p.green))
+        .style(Style::default().bg(p.panel_bg));
+    let inner = block.inner(feedback_area);
+    frame.render_widget(block, feedback_area);
+
+    if inner.height == 0 {
+        return;
+    }
+
+    let text = Line::from(vec![
+        Span::styled("●", Style::default().fg(p.green).bg(p.panel_bg)),
+        Span::raw(" "),
+        Span::styled(
+            &feedback.message,
+            Style::default()
+                .fg(p.text)
+                .bg(p.panel_bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(text), inner);
 }
 
 pub(super) fn render_config_diagnostic(frame: &mut Frame, area: Rect, message: &str, p: &Palette) {

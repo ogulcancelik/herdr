@@ -16,7 +16,6 @@ async function preparePublicAssets() {
     'install.sh',
     'latest.json',
     'robots.txt',
-    'sitemap.xml',
     '_headers',
     '_redirects',
   ]) {

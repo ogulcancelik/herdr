@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
     state::{WorktreeCreateState, WorktreeOpenEntry, WorktreeOpenState, WorktreeRemoveState},
@@ -225,6 +225,8 @@ impl App {
             repo_name: space.label,
             entries,
             selected: 0,
+            query: String::new(),
+            search_focused: false,
             error: None,
         });
         self.state.mode = Mode::OpenExistingWorktree;
@@ -277,15 +279,49 @@ impl App {
             }
             KeyCode::Up => {
                 if let Some(open) = &mut self.state.worktree_open {
-                    open.selected = open.selected.saturating_sub(1);
+                    open.select_previous_filtered();
                 }
             }
             KeyCode::Down => {
                 if let Some(open) = &mut self.state.worktree_open {
-                    open.selected = open
-                        .selected
-                        .saturating_add(1)
-                        .min(open.entries.len().saturating_sub(1));
+                    open.select_next_filtered();
+                }
+            }
+            KeyCode::Char('/') => {
+                if let Some(open) = &mut self.state.worktree_open {
+                    if open.search_focused {
+                        open.query.push('/');
+                        open.normalize_selection();
+                    } else {
+                        open.search_focused = true;
+                    }
+                }
+            }
+            KeyCode::Char(ch)
+                if self
+                    .state
+                    .worktree_open
+                    .as_ref()
+                    .is_some_and(|open| open.search_focused)
+                    && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) =>
+            {
+                if let Some(open) = &mut self.state.worktree_open {
+                    if !ch.is_control() {
+                        open.query.push(ch);
+                        open.normalize_selection();
+                    }
+                }
+            }
+            KeyCode::Backspace
+                if self
+                    .state
+                    .worktree_open
+                    .as_ref()
+                    .is_some_and(|open| open.search_focused) =>
+            {
+                if let Some(open) = &mut self.state.worktree_open {
+                    open.query.pop();
+                    open.normalize_selection();
                 }
             }
             KeyCode::Enter => self.open_selected_existing_worktree(),
@@ -297,7 +333,10 @@ impl App {
         let Some(open) = self.state.worktree_open.as_ref() else {
             return;
         };
-        let Some(entry) = open.entries.get(open.selected).cloned() else {
+        let Some(entry_idx) = open.selected_entry_index() else {
+            return;
+        };
+        let Some(entry) = open.entries.get(entry_idx).cloned() else {
             return;
         };
         let source_workspace_id = open.source_workspace_id.clone();
@@ -349,6 +388,8 @@ impl App {
                     repo_name,
                     entries: vec![entry],
                     selected: 0,
+                    query: String::new(),
+                    search_focused: false,
                     error: Some(format!("failed to open worktree: {err}")),
                 });
                 self.state.mode = Mode::OpenExistingWorktree;
@@ -741,6 +782,8 @@ mod tests {
                 already_open_ws_idx: Some(1),
             }],
             selected: 0,
+            query: String::new(),
+            search_focused: false,
             error: None,
         });
 
@@ -757,6 +800,73 @@ mod tests {
             std::path::PathBuf::from("/repo/herdr-issue")
         );
         assert!(target_membership.is_linked_worktree);
+    }
+
+    #[test]
+    fn worktree_open_search_filters_entries() {
+        let mut app = app_for_worktree_tests();
+        app.state.worktree_open = Some(WorktreeOpenState {
+            source_workspace_id: "source".into(),
+            source_existing_membership: None,
+            source_checkout_path: "/repo/herdr".into(),
+            source_repo_root: "/repo/herdr".into(),
+            repo_key: "repo-key".into(),
+            repo_name: "herdr".into(),
+            entries: vec![
+                WorktreeOpenEntry {
+                    path: "/repo/herdr".into(),
+                    branch: Some("main".into()),
+                    is_linked_worktree: false,
+                    already_open_ws_idx: Some(0),
+                },
+                WorktreeOpenEntry {
+                    path: "/repo/fd-cleanup".into(),
+                    branch: Some("fd-cleanup".into()),
+                    is_linked_worktree: true,
+                    already_open_ws_idx: None,
+                },
+                WorktreeOpenEntry {
+                    path: "/repo/bell-forward-macos-bounce".into(),
+                    branch: Some("bell-forward-macos-bounce".into()),
+                    is_linked_worktree: true,
+                    already_open_ws_idx: None,
+                },
+            ],
+            selected: 0,
+            query: String::new(),
+            search_focused: false,
+            error: None,
+        });
+
+        app.handle_worktree_open_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('/'),
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        app.handle_worktree_open_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('f'),
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        app.handle_worktree_open_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('d'),
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        app.handle_worktree_open_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('-'),
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        app.handle_worktree_open_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        app.handle_worktree_open_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('l'),
+            crossterm::event::KeyModifiers::empty(),
+        ));
+
+        let open = app.state.worktree_open.as_ref().unwrap();
+        assert_eq!(open.query, "fd-cl");
+        assert_eq!(open.filtered_indices(), vec![1]);
+        assert_eq!(open.selected_entry_index(), Some(1));
     }
 
     #[test]

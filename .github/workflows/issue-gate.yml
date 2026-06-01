@@ -1,0 +1,164 @@
+name: Issue Gate
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  check-template:
+    if: ${{ !github.event.issue.pull_request }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Close non-template issues
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.KANGAL_GITHUB_TOKEN }}
+          script: |
+            const issue = context.payload.issue;
+            const author = issue.user.login;
+            const sender = context.payload.sender?.login ?? author;
+            const bugConfirmationPattern = /^\s*-\s*\[[xX]\]\s*I confirm this is a reproducible bug, not a feature request, idea, question, contribution proposal, or direction check\.\s*$/m;
+            const requiredSections = [
+              '### Is this a reproducible bug?',
+              '### Current behavior',
+              '### Expected behavior',
+              '### Reproduction',
+              '### Impact',
+              '### Environment',
+            ];
+            const requiredEnvironmentFields = [
+              /^\s*(?:-\s*)?Herdr version:[^\S\r\n]*\S.*$/m,
+              /^\s*(?:-\s*)?Operating system:[^\S\r\n]*\S.*$/m,
+              /^\s*(?:-\s*)?Terminal:[^\S\r\n]*\S.*$/m,
+            ];
+
+            function escapeRegExp(value) {
+              return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            }
+
+            function extractSection(body, heading) {
+              const pattern = new RegExp(`^${escapeRegExp(heading)}\\s*$`, 'm');
+              const match = pattern.exec(body);
+              if (!match) {
+                return null;
+              }
+
+              const sectionStart = match.index + match[0].length;
+              const rest = body.slice(sectionStart);
+              const headingIndex = requiredSections.indexOf(heading);
+              const nextTemplateHeading = requiredSections
+                .slice(headingIndex + 1)
+                .map((section) => {
+                  const nextPattern = new RegExp(`^${escapeRegExp(section)}\\s*$`, 'm');
+                  const nextMatch = nextPattern.exec(rest);
+                  return nextMatch ? nextMatch.index : -1;
+                })
+                .filter((index) => index !== -1)
+                .sort((left, right) => left - right)[0];
+              return (nextTemplateHeading === undefined ? rest : rest.slice(0, nextTemplateHeading)).trim();
+            }
+
+            function hasContent(section) {
+              return typeof section === 'string' && section.trim().length > 0;
+            }
+
+            async function getPermission(username) {
+              try {
+                const { data: permissionLevel } = await github.rest.repos.getCollaboratorPermissionLevel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  username,
+                });
+                return permissionLevel.permission;
+              } catch {
+                return null;
+              }
+            }
+
+            const maintainerPermissions = ['admin', 'maintain', 'write'];
+            const authorPermission = await getPermission(author);
+            if (maintainerPermissions.includes(authorPermission)) {
+              console.log(`${author} is a collaborator with ${authorPermission} access; leaving issue open`);
+              return;
+            }
+
+            const senderPermission = sender === author ? authorPermission : await getPermission(sender);
+            if (maintainerPermissions.includes(senderPermission)) {
+              console.log(`${sender} opened this issue with ${senderPermission} access; leaving issue open`);
+              return;
+            }
+
+            const body = issue.body || '';
+            const hasBugConfirmation = bugConfirmationPattern.test(body);
+            const hasBugTemplate = requiredSections.every((section) => body.includes(section));
+            const currentBehavior = extractSection(body, '### Current behavior');
+            const expectedBehavior = extractSection(body, '### Expected behavior');
+            const reproduction = extractSection(body, '### Reproduction');
+            const impact = extractSection(body, '### Impact');
+            const environment = extractSection(body, '### Environment');
+            const hasRequiredContent = [
+              currentBehavior,
+              expectedBehavior,
+              reproduction,
+              impact,
+            ].every(hasContent);
+            const hasEnvironmentFields = hasContent(environment) && requiredEnvironmentFields.every((pattern) => pattern.test(environment));
+            if (hasBugConfirmation && hasBugTemplate && hasRequiredContent && hasEnvironmentFields) {
+              console.log(`#${issue.number} matches the bug report template`);
+              return;
+            }
+
+            if (hasBugConfirmation && hasBugTemplate && hasRequiredContent && !hasEnvironmentFields) {
+              const message = [
+                `hi @${author}, thanks for opening this.`,
+                '',
+                'this bug report is missing required environment details. please edit the issue and fill in herdr version, operating system, and terminal.',
+                '',
+                'shell and relevant config are optional, but they help when they affect the bug.',
+              ].join('\n');
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: message,
+              });
+
+              console.log(`#${issue.number} is missing required environment details; leaving issue open for correction`);
+              return;
+            }
+
+            const message = [
+              `hi @${author}, thanks for opening this.`,
+              '',
+              'this issue does not appear to use the full bug report template. herdr issues are only for reproducible bugs and maintainer-created or maintainer-converted work items.',
+              '',
+              'bug reports must include the reproducible-bug confirmation, current behavior, expected behavior, reproduction, impact, and environment fields with herdr version, operating system, and terminal.',
+              '',
+              'feature requests, ideas, questions, contribution proposals, and direction checks belong in discussions:',
+              `https://github.com/${context.repo.owner}/${context.repo.repo}/discussions`,
+              '',
+              'please read the contributing guidelines before opening issues or prs:',
+              `https://github.com/${context.repo.owner}/${context.repo.repo}/blob/${context.payload.repository.default_branch}/CONTRIBUTING.md`,
+              '',
+              'closing this so the issue tracker stays limited to actionable bug reports.',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              body: message,
+            });
+
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              state: 'closed',
+              state_reason: 'not_planned',
+            });

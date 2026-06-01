@@ -1,0 +1,38 @@
+---
+import { getCollection } from 'astro:content';
+import MarketingLayout from '../../components/MarketingLayout.astro';
+
+const posts = (await getCollection('blog'))
+  .filter((post) => !post.data.draft)
+  .map((post) => ({ ...post, slug: post.id.replace(/\.(md|mdx)$/i, '') }))
+  .sort((a, b) => b.data.date.valueOf() - a.data.date.valueOf());
+---
+
+<MarketingLayout
+  title="Herdr blog"
+  description="Notes on terminal-native agent workflows and the engineering behind Herdr."
+  canonicalPath="/blog/"
+>
+  <main class="content-shell">
+    <section class="page-hero page-hero-compact">
+      <p class="eyebrow"><span class="status-dot dot-working"></span>Blog</p>
+      <h1>Notes from Herdr.</h1>
+      <p class="hero-lede">
+        Product notes and implementation writeups for the terminal-native agent multiplexer.
+      </p>
+    </section>
+
+    <section class="section section-narrow" aria-label="Blog posts">
+      <div class="post-list">
+        {posts.map((post) => (
+          <article class="post-card">
+            <a class="post-card-link" href={`/blog/${post.slug}/`}>
+              <h2>{post.data.title}</h2>
+              <span aria-hidden="true">→</span>
+            </a>
+          </article>
+        ))}
+      </div>
+    </section>
+  </main>
+</MarketingLayout>

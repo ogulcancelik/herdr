@@ -12,6 +12,28 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  flake-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31.10.6
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            always-allow-substitutes = true
+
+      - name: Run Nix flake check
+        run: |
+          nix flake check --print-build-logs
+          nix flake check --all-systems --no-build --print-build-logs
+
   build:
     permissions:
       contents: read
@@ -123,7 +145,7 @@ jobs:
         run: python3 scripts/changelog.py validate-product-announcement
 
   release:
-    needs: [build, validate-release-inputs]
+    needs: [build, flake-check, validate-release-inputs]
     runs-on: ubuntu-latest
     permissions:
       contents: write

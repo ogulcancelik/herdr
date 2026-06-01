@@ -14,86 +14,122 @@
   --sl-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --sl-content-width: 54rem;
   --sl-sidebar-width: 18.5rem;
-  --sl-color-accent-low: #123c37;
-  --sl-color-accent: #42cabb;
-  --sl-color-accent-high: #d9fff8;
-  --sl-color-white: #f8fbff;
-  --sl-color-gray-1: #e8edf2;
-  --sl-color-gray-2: #c7d0d9;
-  --sl-color-gray-3: #93a0ad;
-  --sl-color-gray-4: #62707f;
-  --sl-color-gray-5: #34404c;
-  --sl-color-gray-6: #202833;
-  --sl-color-black: #10151c;
-  --sl-color-bg: #10151c;
-  --sl-color-bg-nav: #151b23;
-  --sl-color-bg-sidebar: #151b23;
-  --sl-color-bg-inline-code: #202833;
-  --sl-color-hairline: #25303b;
-  --sl-color-hairline-light: #34404c;
+}
+
+:root,
+:root[data-theme="dark"] {
+  --sl-color-accent-low: #26314f;
+  --sl-color-accent: #7aa2f7;
+  --sl-color-accent-high: #a9c2ff;
+  --sl-color-white: #d5dcff;
+  --sl-color-gray-1: #c0caf5;
+  --sl-color-gray-2: #a9b1d6;
+  --sl-color-gray-3: #737aa2;
+  --sl-color-gray-4: #565f89;
+  --sl-color-gray-5: #414868;
+  --sl-color-gray-6: #2f3549;
+  --sl-color-gray-7: #24283b;
+  --sl-color-black: #1a1b26;
+  --sl-color-bg: #1a1b26;
+  --sl-color-bg-nav: #202331;
+  --sl-color-bg-sidebar: #202331;
+  --sl-color-bg-inline-code: #24283b;
+  --sl-color-hairline: #2f3549;
+  --sl-color-hairline-light: #414868;
 }
 
 :root[data-theme="light"] {
-  --sl-color-accent-low: #d7f1ed;
-  --sl-color-accent: #1f6f68;
-  --sl-color-accent-high: #0f3f3b;
-  --sl-color-white: #151a21;
-  --sl-color-gray-1: #26313c;
-  --sl-color-gray-2: #40505d;
-  --sl-color-gray-3: #687381;
-  --sl-color-gray-4: #8d989f;
-  --sl-color-gray-5: #d4cabd;
-  --sl-color-gray-6: #eee7dc;
-  --sl-color-gray-7: #f7f3ea;
-  --sl-color-black: #fffdf8;
-  --sl-color-bg: #f7f3ea;
-  --sl-color-bg-nav: #fffdf8;
-  --sl-color-bg-sidebar: #fffdf8;
-  --sl-color-bg-inline-code: #eee7dc;
-  --sl-color-hairline: #ded6c8;
-  --sl-color-hairline-light: #c9bdad;
+  --sl-color-accent-low: #c4c8da;
+  --sl-color-accent: #2e7de9;
+  --sl-color-accent-high: #1f2f66;
+  --sl-color-white: #1f2f66;
+  --sl-color-gray-1: #3760bf;
+  --sl-color-gray-2: #68709a;
+  --sl-color-gray-3: #8990b3;
+  --sl-color-gray-4: #a8aecb;
+  --sl-color-gray-5: #b6bbd1;
+  --sl-color-gray-6: #c4c8da;
+  --sl-color-gray-7: #d8d9e0;
+  --sl-color-black: #e1e2e7;
+  --sl-color-bg: #e1e2e7;
+  --sl-color-bg-nav: #d8d9e0;
+  --sl-color-bg-sidebar: #d8d9e0;
+  --sl-color-bg-inline-code: #c4c8da;
+  --sl-color-hairline: #b6bbd1;
+  --sl-color-hairline-light: #a8aecb;
 }
 
 .site-title {
   font-family: var(--sl-font-mono);
-  font-weight: 800;
+  font-weight: 700;
   letter-spacing: -0.04em;
+}
+
+.docs-brand-logo {
+  position: relative;
+  display: inline-block;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 4px;
+  background: var(--sl-color-bg-nav);
+}
+
+.docs-brand-logo::before {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  background: var(--sl-color-white);
+  -webkit-mask: url("/assets/agent-icons/herdr-mask.svg") center / contain no-repeat;
+  mask: url("/assets/agent-icons/herdr-mask.svg") center / contain no-repeat;
+}
+
+.docs-hero-logo {
+  display: block;
+  width: min(20rem, 62vw);
+  aspect-ratio: 1;
+  background: var(--sl-color-white);
+  -webkit-mask: url("/assets/agent-icons/herdr-mask.svg") center / contain no-repeat;
+  mask: url("/assets/agent-icons/herdr-mask.svg") center / contain no-repeat;
 }
 
 .sl-markdown-content {
   font-size: 1rem;
-  line-height: 1.75;
+  line-height: 1.65;
 }
 
 .sl-markdown-content h1,
 .hero h1 {
-  letter-spacing: -0.055em;
-  line-height: 0.98;
-  font-size: clamp(2.4rem, 5vw, 4.2rem);
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  font-weight: 400;
+  font-size: clamp(2rem, 5vw, 3.2rem);
+  font-family: var(--sl-font-mono);
 }
 
 .sl-markdown-content h2 {
-  margin-top: 2.6rem;
-  letter-spacing: -0.035em;
+  margin-top: 2.4rem;
+  letter-spacing: -0.02em;
+  font-family: var(--sl-font-mono);
+  font-weight: 400;
 }
 
 .sl-markdown-content h3 {
-  letter-spacing: -0.025em;
+  letter-spacing: -0.01em;
+  font-family: var(--sl-font-mono);
+  font-weight: 400;
 }
 
 .sl-markdown-content > p:first-child {
-  font-size: 1.08rem;
+  font-size: 1.05rem;
   color: var(--sl-color-gray-1);
 }
 
 #starlight__sidebar a[aria-current="page"] {
-  background: color-mix(in srgb, var(--sl-color-accent) 13%, transparent);
+  background: color-mix(in srgb, var(--sl-color-accent) 8%, transparent);
   color: var(--sl-color-accent-high);
   box-shadow: inset 2px 0 0 var(--sl-color-accent);
-}
-
-:root[data-theme="light"] #starlight__sidebar a[aria-current="page"] {
-  color: var(--sl-color-accent-high);
 }
 
 .mobile-doc-shots {
@@ -111,7 +147,7 @@
   display: block;
   width: 100%;
   border: 1px solid var(--sl-color-hairline);
-  border-radius: 1rem;
+  border-radius: 4px;
 }
 
 .mobile-doc-shots figcaption {
@@ -124,17 +160,19 @@
 .sl-markdown-content a:not(:where(.not-content *)) {
   text-decoration-thickness: 1px;
   text-underline-offset: 0.18em;
+  color: var(--sl-color-accent);
 }
 
 .sl-markdown-content code:not(:where(.not-content *)) {
   border: 1px solid var(--sl-color-hairline);
-  border-radius: 0.35rem;
+  border-radius: 2px;
   font-size: 0.88em;
+  background: var(--sl-color-bg-inline-code);
 }
 
 .sl-markdown-content pre {
   border: 1px solid var(--sl-color-hairline);
-  border-radius: 0.85rem;
+  border-radius: 4px;
 }
 
 .expressive-code {
@@ -143,7 +181,7 @@
 
 .expressive-code .frame {
   border: 1px solid var(--sl-color-hairline) !important;
-  border-radius: 0.85rem !important;
+  border-radius: 4px !important;
   box-shadow: none !important;
   overflow: hidden;
 }
@@ -169,8 +207,9 @@
 .sl-markdown-content .card {
   border-color: var(--sl-color-hairline);
   background:
-    linear-gradient(180deg, color-mix(in srgb, var(--sl-color-accent) 5%, transparent), transparent 58%),
+    linear-gradient(180deg, color-mix(in srgb, var(--sl-color-accent) 4%, transparent), transparent 58%),
     var(--sl-color-black);
+  border-radius: 4px;
 }
 
 .sl-markdown-content .card .title {
@@ -179,5 +218,5 @@
 
 .hero img {
   image-rendering: auto;
-  filter: drop-shadow(0 20px 50px rgb(31 111 104 / 0.18));
+  border-radius: 4px;
 }

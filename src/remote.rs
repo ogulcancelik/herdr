@@ -54,6 +54,7 @@ impl RemoteKeybindings {
 pub(crate) struct RemoteLaunch {
     pub(crate) target: String,
     pub(crate) keybindings: RemoteKeybindings,
+    pub(crate) live_handoff: bool,
 }
 
 pub(crate) fn extract_remote_args(
@@ -67,9 +68,15 @@ pub(crate) fn extract_remote_args(
     let mut remote_target = None;
     let mut keybindings = RemoteKeybindings::Local;
     let mut keybindings_seen = false;
+    let mut live_handoff = false;
     let mut index = 1;
     while index < args.len() {
         let arg = &args[index];
+        if arg == "--handoff" {
+            live_handoff = true;
+            index += 1;
+            continue;
+        }
         if arg == "--remote" {
             if remote_target.is_some() {
                 return Err("--remote can only be specified once".to_string());
@@ -118,9 +125,13 @@ pub(crate) fn extract_remote_args(
     let remote = remote_target.map(|target| RemoteLaunch {
         target,
         keybindings,
+        live_handoff,
     });
     if remote.is_none() && keybindings_seen {
         return Err("--remote-keybindings requires --remote".to_string());
+    }
+    if remote.is_none() && live_handoff {
+        cleaned.push("--handoff".to_string());
     }
 
     Ok((cleaned, remote))
@@ -143,13 +154,19 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
     let program = std::env::args()
         .next()
         .unwrap_or_else(|| "herdr".to_string());
-    let reattach_command =
-        reattach_command(&program, &remote.target, &session_name, remote.keybindings);
-    let prepared_remote = prepare_remote_herdr(&remote.target)?;
+    let reattach_command = reattach_command(
+        &program,
+        &remote.target,
+        &session_name,
+        remote.keybindings,
+        remote.live_handoff,
+    );
+    let prepared_remote = prepare_remote_herdr(&remote.target, remote.live_handoff)?;
     ensure_remote_server_ready(
         &remote.target,
         &prepared_remote.remote_herdr,
         prepared_remote.installed_or_replaced,
+        remote.live_handoff,
     )?;
 
     let _bridge = SshStdioBridge::start(
@@ -283,7 +300,61 @@ impl RemoteHerdr {
 #[derive(Deserialize)]
 struct RemoteUpdateManifest {
     version: String,
+    protocol: Option<u32>,
     assets: BTreeMap<String, String>,
+    #[serde(default, deserialize_with = "deserialize_remote_manifest_releases")]
+    releases: BTreeMap<String, RemoteReleaseMetadata>,
+}
+
+#[derive(Deserialize)]
+struct RemoteReleaseMetadata {
+    protocol: Option<u32>,
+    #[serde(default)]
+    assets: BTreeMap<String, String>,
+}
+
+fn deserialize_remote_manifest_releases<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, RemoteReleaseMetadata>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(serde_json::Value::Object(object)) => object
+            .into_iter()
+            .filter_map(|(version, release)| {
+                serde_json::from_value::<RemoteReleaseMetadata>(release)
+                    .ok()
+                    .map(|metadata| (version, metadata))
+            })
+            .collect(),
+        _ => BTreeMap::new(),
+    })
+}
+
+impl RemoteUpdateManifest {
+    fn release_for_version(&self, version: &str) -> Option<RemoteManifestReleaseRef<'_>> {
+        if self.version.trim_start_matches('v') == version {
+            return Some(RemoteManifestReleaseRef {
+                protocol: self.protocol,
+                assets: &self.assets,
+            });
+        }
+
+        self.releases.get(version).and_then(|release| {
+            (!release.assets.is_empty()).then_some(RemoteManifestReleaseRef {
+                protocol: release.protocol,
+                assets: &release.assets,
+            })
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RemoteManifestReleaseRef<'a> {
+    protocol: Option<u32>,
+    assets: &'a BTreeMap<String, String>,
 }
 
 struct InstallSource {
@@ -318,7 +389,10 @@ impl InstallSource {
     }
 }
 
-fn prepare_remote_herdr(target: &str) -> io::Result<PreparedRemoteHerdr> {
+fn prepare_remote_herdr(
+    target: &str,
+    live_handoff_enabled: bool,
+) -> io::Result<PreparedRemoteHerdr> {
     let platform = detect_remote_platform(target)?;
     let remote_herdr = RemoteHerdr::for_platform(platform);
     let override_binary = remote_binary_override_path()?;
@@ -347,7 +421,11 @@ fn prepare_remote_herdr(target: &str) -> io::Result<PreparedRemoteHerdr> {
             .ok()
             .and_then(|exists| exists.then_some(&remote_herdr))
     }) {
-        confirm_remote_install_with_running_server(target, status_probe_herdr)?;
+        confirm_remote_install_with_running_server(
+            target,
+            status_probe_herdr,
+            live_handoff_enabled,
+        )?;
     }
     confirm_remote_install(
         target,
@@ -501,11 +579,23 @@ fn remote_binary_override_path() -> io::Result<Option<PathBuf>> {
 }
 
 fn install_source_description(platform: &RemotePlatform, override_binary: Option<&Path>) -> String {
+    install_source_description_for(
+        platform,
+        override_binary,
+        local_binary_can_seed_remote(platform),
+    )
+}
+
+fn install_source_description_for(
+    platform: &RemotePlatform,
+    override_binary: Option<&Path>,
+    local_binary_can_seed_remote: bool,
+) -> String {
     if let Some(path) = override_binary {
         return format!("{REMOTE_BINARY_ENV_VAR} ({})", path.display());
     }
 
-    if *platform == RemotePlatform::local() {
+    if local_binary_can_seed_remote {
         "the current local herdr binary".to_string()
     } else {
         format!(
@@ -525,10 +615,22 @@ fn resolve_install_source(
 
     if *platform == RemotePlatform::local() {
         let path = std::env::current_exe()?;
-        return Ok(InstallSource::persistent(path));
+        if !crate::update::is_package_manager_managed_exe_path(&path) {
+            return Ok(InstallSource::persistent(path));
+        }
     }
 
     download_release_asset(platform)
+}
+
+fn local_binary_can_seed_remote(platform: &RemotePlatform) -> bool {
+    if *platform != RemotePlatform::local() {
+        return false;
+    }
+
+    std::env::current_exe()
+        .map(|path| !crate::update::is_package_manager_managed_exe_path(&path))
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -552,6 +654,7 @@ fn ensure_remote_server_ready(
     target: &str,
     remote_herdr: &RemoteHerdr,
     remote_binary_changed: bool,
+    live_handoff_enabled: bool,
 ) -> io::Result<()> {
     let status = remote_server_status(target, remote_herdr)?;
     let RemoteServerStatus::Running {
@@ -569,7 +672,9 @@ fn ensure_remote_server_ready(
         return Ok(());
     };
 
-    if live_handoff && confirm_remote_server_handoff(target, version.as_deref(), protocol, reason)?
+    if live_handoff_enabled
+        && live_handoff
+        && confirm_remote_server_handoff(target, version.as_deref(), protocol, reason)?
     {
         match live_handoff_remote_server(target, remote_herdr) {
             Ok(()) => return Ok(()),
@@ -606,6 +711,7 @@ fn remote_server_restart_reason(
 fn confirm_remote_install_with_running_server(
     target: &str,
     remote_herdr: &RemoteHerdr,
+    live_handoff_enabled: bool,
 ) -> io::Result<()> {
     let status = match remote_server_status(target, remote_herdr) {
         Ok(status) => status,
@@ -641,13 +747,13 @@ fn confirm_remote_install_with_running_server(
     else {
         return Ok(());
     };
-    if live_handoff {
+    if live_handoff_enabled && live_handoff {
         return Ok(());
     }
 
     if !io::stdin().is_terminal() {
         return Err(io::Error::other(format!(
-            "remote herdr server on {target} is running v{} protocol {}, but it does not advertise live handoff; run from an interactive terminal to approve updating the remote binary",
+            "remote herdr server on {target} is running v{} protocol {}; run from an interactive terminal to approve updating the remote binary",
             version_label(version.as_deref()),
             protocol_label(protocol)
         )));
@@ -660,10 +766,7 @@ fn confirm_remote_install_with_running_server(
         protocol_label(protocol)
     );
     eprintln!(
-        "this server does not advertise live handoff, so this attach cannot preserve its running panes during the update."
-    );
-    eprintln!(
-        "future remote updates can preserve panes after the remote server has run a handoff-capable version once."
+        "this attach will not preserve running panes unless you pass --handoff and the remote server supports live handoff."
     );
     eprintln!();
     eprint!("continue installing the remote herdr binary? [Y/n] ");
@@ -960,16 +1063,22 @@ fn download_release_asset(platform: &RemotePlatform) -> io::Result<InstallSource
 
     let manifest: RemoteUpdateManifest = serde_json::from_slice(&manifest_output.stdout)
         .map_err(|err| io::Error::other(format!("failed to parse update manifest JSON: {err}")))?;
-    if manifest.version.trim_start_matches('v') != CURRENT_VERSION {
-        return Err(io::Error::other(format!(
-            "remote host is {}, but this local herdr is {CURRENT_VERSION} and the latest release manifest is {}; build herdr for the remote platform or install it there manually",
-            platform.asset_key(),
-            manifest.version
-        )));
-    }
 
     let asset_key = platform.asset_key();
-    let url = manifest.assets.get(&asset_key).ok_or_else(|| {
+    let release = manifest.release_for_version(CURRENT_VERSION).ok_or_else(|| {
+        io::Error::other(format!(
+            "release manifest does not include herdr {CURRENT_VERSION}; build herdr for {} or install it there manually",
+            platform.asset_key()
+        ))
+    })?;
+    if let Some(protocol) = release.protocol {
+        if protocol != CURRENT_PROTOCOL {
+            return Err(io::Error::other(format!(
+                "release manifest has herdr {CURRENT_VERSION} protocol {protocol}, but this client needs protocol {CURRENT_PROTOCOL}; set {REMOTE_BINARY_ENV_VAR}=target/release/herdr or install a matching herdr on the remote host manually"
+            )));
+        }
+    }
+    let url = release.assets.get(&asset_key).ok_or_else(|| {
         io::Error::other(format!(
             "no {asset_key} binary in the release manifest for herdr {CURRENT_VERSION}"
         ))
@@ -1118,12 +1227,16 @@ fn reattach_command(
     target: &str,
     session_name: &str,
     keybindings: RemoteKeybindings,
+    live_handoff: bool,
 ) -> String {
     let program = if program.is_empty() { "herdr" } else { program };
     let mut command = format!("{} --remote {}", shell_quote(program), shell_quote(target));
     if keybindings != RemoteKeybindings::Local {
         command.push_str(" --remote-keybindings ");
         command.push_str(keybindings.as_str());
+    }
+    if live_handoff {
+        command.push_str(" --handoff");
     }
     if session_name != crate::session::DEFAULT_SESSION_NAME {
         command.push_str(" --session ");
@@ -1471,6 +1584,28 @@ mod tests {
     }
 
     #[test]
+    fn extract_remote_args_accepts_explicit_handoff() {
+        let args = vec!["herdr".into(), "--remote=dev".into(), "--handoff".into()];
+
+        let (cleaned, remote) = extract_remote_args(&args).unwrap();
+
+        assert_eq!(cleaned, vec!["herdr"]);
+        let remote = remote.unwrap();
+        assert_eq!(remote.target, "dev");
+        assert!(remote.live_handoff);
+    }
+
+    #[test]
+    fn extract_remote_args_preserves_handoff_without_remote() {
+        let args = vec!["herdr".into(), "update".into(), "--handoff".into()];
+
+        let (cleaned, remote) = extract_remote_args(&args).unwrap();
+
+        assert_eq!(cleaned, args);
+        assert!(remote.is_none());
+    }
+
+    #[test]
     fn extract_remote_args_rejects_remote_keybindings_without_remote() {
         let args = vec!["herdr".into(), "--remote-keybindings=server".into()];
         let err = extract_remote_args(&args).unwrap_err();
@@ -1551,6 +1686,7 @@ mod tests {
                 "user@host",
                 "work",
                 RemoteKeybindings::Local,
+                false,
             ),
             "target/release/herdr --remote user@host --session work"
         );
@@ -1560,6 +1696,7 @@ mod tests {
                 "host name",
                 crate::session::DEFAULT_SESSION_NAME,
                 RemoteKeybindings::Local,
+                false,
             ),
             "herdr --remote 'host name'"
         );
@@ -1569,8 +1706,19 @@ mod tests {
                 "host",
                 crate::session::DEFAULT_SESSION_NAME,
                 RemoteKeybindings::Server,
+                false,
             ),
             "herdr --remote host --remote-keybindings server"
+        );
+        assert_eq!(
+            reattach_command(
+                "herdr",
+                "host",
+                crate::session::DEFAULT_SESSION_NAME,
+                RemoteKeybindings::Local,
+                true,
+            ),
+            "herdr --remote host --handoff"
         );
     }
 
@@ -1741,6 +1889,122 @@ mod tests {
     }
 
     #[test]
+    fn remote_update_manifest_uses_root_assets_for_latest_version() {
+        let manifest: RemoteUpdateManifest = serde_json::from_str(
+            r#"{
+                "version": "1.2.3",
+                "assets": {
+                    "linux-x86_64": "https://example.com/latest"
+                },
+                "releases": {
+                    "1.2.3": {
+                        "assets": {
+                            "linux-x86_64": "https://example.com/archive"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            manifest
+                .release_for_version("1.2.3")
+                .and_then(|release| release.assets.get("linux-x86_64"))
+                .map(String::as_str),
+            Some("https://example.com/latest")
+        );
+    }
+
+    #[test]
+    fn remote_update_manifest_reads_archived_release_assets() {
+        let manifest: RemoteUpdateManifest = serde_json::from_str(
+            r#"{
+                "version": "1.2.4",
+                "assets": {
+                    "linux-x86_64": "https://example.com/latest"
+                },
+                "releases": {
+                    "1.2.3": {
+                        "notes": "ignored",
+                        "assets": {
+                            "linux-x86_64": "https://example.com/archive"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            manifest
+                .release_for_version("1.2.3")
+                .and_then(|release| release.assets.get("linux-x86_64"))
+                .map(String::as_str),
+            Some("https://example.com/archive")
+        );
+    }
+
+    #[test]
+    fn remote_update_manifest_uses_archived_release_protocol() {
+        let manifest: RemoteUpdateManifest = serde_json::from_str(
+            r#"{
+                "version": "1.2.4",
+                "protocol": 42,
+                "assets": {
+                    "linux-x86_64": "https://example.com/latest"
+                },
+                "releases": {
+                    "1.2.3": {
+                        "notes": "ignored",
+                        "protocol": 41,
+                        "assets": {
+                            "linux-x86_64": "https://example.com/archive"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            manifest
+                .release_for_version("1.2.3")
+                .and_then(|release| release.protocol),
+            Some(41)
+        );
+    }
+
+    #[test]
+    fn remote_update_manifest_does_not_inherit_latest_protocol_for_archived_assets() {
+        let manifest: RemoteUpdateManifest = serde_json::from_str(
+            r#"{
+                "version": "1.2.4",
+                "protocol": 42,
+                "assets": {
+                    "linux-x86_64": "https://example.com/latest"
+                },
+                "releases": {
+                    "1.2.3": {
+                        "notes": "ignored",
+                        "assets": {
+                            "linux-x86_64": "https://example.com/archive"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            manifest
+                .release_for_version("1.2.3")
+                .and_then(|release| release.protocol),
+            None
+        );
+    }
+
+    #[test]
     fn remote_server_restart_reason_requires_stop_for_protocol_mismatch() {
         assert_eq!(
             remote_server_restart_reason(Some(CURRENT_VERSION), Some(0), false),
@@ -1783,8 +2047,31 @@ mod tests {
             arch: "aarch64",
         };
         assert_eq!(
-            install_source_description(&platform, Some(Path::new("/tmp/herdr-aarch64"))),
+            install_source_description_for(&platform, Some(Path::new("/tmp/herdr-aarch64")), false),
             "HERDR_REMOTE_BINARY (/tmp/herdr-aarch64)"
+        );
+    }
+
+    #[test]
+    fn install_source_description_uses_local_binary_when_allowed() {
+        let platform = RemotePlatform::local();
+
+        assert_eq!(
+            install_source_description_for(&platform, None, true),
+            "the current local herdr binary"
+        );
+    }
+
+    #[test]
+    fn install_source_description_uses_release_asset_when_local_binary_cannot_seed_remote() {
+        let platform = RemotePlatform::local();
+
+        assert_eq!(
+            install_source_description_for(&platform, None, false),
+            format!(
+                "the {CURRENT_VERSION} release asset for {}",
+                platform.asset_key()
+            )
         );
     }
 

@@ -38,15 +38,6 @@ jobs:
             experimental-features = nix-command flakes
             always-allow-substitutes = true
 
-      - name: Enable Magic Nix Cache
-        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13
-        continue-on-error: true
-        with:
-          source-tag: v0.1.6
-          use-flakehub: disabled
-          diagnostic-endpoint: ""
-
       - name: Run Nix flake check
         run: |
           nix flake check --print-build-logs

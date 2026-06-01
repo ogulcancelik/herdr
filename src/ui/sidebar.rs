@@ -26,6 +26,7 @@ pub(crate) struct AgentPanelEntry {
     pub state: AgentState,
     pub seen: bool,
     pub custom_status: Option<String>,
+    pub state_labels: std::collections::HashMap<String, String>,
 }
 
 fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
@@ -153,6 +154,7 @@ fn agent_panel_entries_with_runtimes(
                     state: detail.state,
                     seen: detail.seen,
                     custom_status: detail.custom_status,
+                    state_labels: detail.state_labels,
                 })
                 .collect()
         }
@@ -175,9 +177,20 @@ fn agent_panel_entries_with_runtimes(
                         state: detail.state,
                         seen: detail.seen,
                         custom_status: detail.custom_status,
+                        state_labels: detail.state_labels,
                     })
             })
             .collect(),
+    }
+}
+
+pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static str {
+    match (state, seen) {
+        (AgentState::Idle, false) => "done",
+        (AgentState::Idle, true) => "idle",
+        (AgentState::Working, _) => "working",
+        (AgentState::Blocked, _) => "blocked",
+        (AgentState::Unknown, _) => "unknown",
     }
 }
 
@@ -1090,7 +1103,11 @@ fn render_agent_detail(
 
         let (icon, icon_style) = agent_icon(detail.state, detail.seen, app.spinner_tick, p);
         let label_color = state_label_color(detail.state, detail.seen, p);
-        let label = state_label(detail.state, detail.seen);
+        let label = detail
+            .state_labels
+            .get(agent_panel_status_key(detail.state, detail.seen))
+            .map(String::as_str)
+            .unwrap_or_else(|| state_label(detail.state, detail.seen));
 
         let row_style = if is_active {
             Style::default().bg(p.surface_dim)
@@ -1302,7 +1319,7 @@ mod tests {
             live_cwd.clone(),
             0,
             crate::terminal_theme::TerminalTheme::default(),
-            "/bin/sh",
+            crate::pane::PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::NonLogin),
             events,
             std::sync::Arc::new(tokio::sync::Notify::new()),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1367,6 +1384,7 @@ mod tests {
             state: AgentState::Idle,
             seen: true,
             custom_status: None,
+            state_labels: std::collections::HashMap::new(),
         };
 
         let label = format_agent_panel_primary_label(&entry, 18);

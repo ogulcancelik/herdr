@@ -29,6 +29,8 @@ If you want to end the session and stop its panes, stop the default server:
 herdr server stop
 ```
 
+When Herdr starts again after a full server stop, it restores the saved session shape. For what survives detach, server restart, screen history replay, native agent session restore, and live handoff, see [Session state and restore](/docs/session-state/).
+
 ## Named sessions
 
 Use named sessions when you want independent Herdr servers.
@@ -90,9 +92,15 @@ herdr --remote workbox
 
 Remote attach supports Linux and macOS hosts on x86_64 and aarch64. Herdr checks the remote platform, prefers a matching `herdr` already on the remote `PATH`, then checks `~/.local/bin/herdr`. If no matching binary exists, interactive runs prompt to install one to `~/.local/bin/herdr`; non-interactive runs fail instead of modifying the host. If `~/.local/bin` is not on the remote `PATH`, Herdr warns after install.
 
+By default, remote attach uses the normal restart/stop flow if it needs to replace or restart a running remote server. To opt into experimental live handoff for a supported running remote server, pass `--handoff`:
+
+```bash
+herdr --remote workbox --handoff
+```
+
 If you SSH into the server first and run `herdr` there, Herdr runs entirely on the server. That mode is useful and simple, but it cannot access your local desktop clipboard beyond normal terminal text paste.
 
-When your local and remote platforms match, Herdr can copy the current local binary. Otherwise it downloads the matching release asset from `https://herdr.dev/latest.json`.
+When your local and remote platforms match, Herdr can copy the current local binary for direct installs. For Homebrew and Nix installs, or when the platforms differ, it downloads the matching release asset for the current client version from `https://herdr.dev/latest.json`.
 
 For local builds or custom binaries, set `HERDR_REMOTE_BINARY` to a local file path before running remote attach.
 

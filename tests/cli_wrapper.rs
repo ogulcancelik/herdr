@@ -693,6 +693,135 @@ fn pane_run_sends_one_send_input_request_with_enter_key() {
 }
 
 #[test]
+fn pane_report_metadata_sends_presentation_request() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("herdr.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        reader.read_line(&mut line).unwrap();
+        stream
+            .write_all(br#"{"id":"cli:request","result":{"type":"ok"}}"#)
+            .unwrap();
+        stream.write_all(b"\n").unwrap();
+        stream.flush().unwrap();
+        line
+    });
+
+    let run = run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "report-metadata",
+            "1-1",
+            "--source",
+            "user:claude-title",
+            "--agent",
+            "claude",
+            "--applies-to-source",
+            "herdr:claude",
+            "--title",
+            "Refactor auth",
+            "--display-agent",
+            "Claude auth",
+            "--custom-status",
+            "middleware",
+            "--state-label",
+            "working=deep in the mines",
+            "--ttl-ms",
+            "3600000",
+        ],
+    );
+    assert!(
+        run.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let line = server.join().unwrap();
+    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(request["method"], "pane.report_metadata");
+    assert_eq!(request["params"]["pane_id"], "1-1");
+    assert_eq!(request["params"]["source"], "user:claude-title");
+    assert_eq!(request["params"]["agent"], "claude");
+    assert_eq!(request["params"]["applies_to_source"], "herdr:claude");
+    assert_eq!(request["params"]["title"], "Refactor auth");
+    assert_eq!(request["params"]["display_agent"], "Claude auth");
+    assert_eq!(request["params"]["custom_status"], "middleware");
+    assert_eq!(
+        request["params"]["state_labels"]["working"],
+        "deep in the mines"
+    );
+    assert_eq!(request["params"]["ttl_ms"], 3_600_000);
+
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn pane_report_metadata_rejects_blank_source_before_socket_request() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("missing.sock");
+
+    let run = run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "report-metadata",
+            "1-1",
+            "--source",
+            "   ",
+            "--custom-status",
+            "middleware",
+        ],
+    );
+
+    assert_eq!(run.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("missing required --source"),
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn pane_report_metadata_rejects_blank_applies_to_source_before_socket_request() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("missing.sock");
+
+    let run = run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "report-metadata",
+            "1-1",
+            "--source",
+            "user:claude-title",
+            "--applies-to-source",
+            "   ",
+            "--custom-status",
+            "middleware",
+        ],
+    );
+
+    assert_eq!(run.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("missing value for --applies-to-source"),
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn help_commands_exit_successfully() {
     let help_cases: &[&[&str]] = &[
         &["-h"],
@@ -1109,7 +1238,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {full_stdout}"
     );
     assert!(
-        full_stdout.contains("  protocol: 11"),
+        full_stdout.contains("  protocol: 12"),
         "stdout: {full_stdout}"
     );
     assert!(full_stdout.contains("server:\n"), "stdout: {full_stdout}");
@@ -1142,7 +1271,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {server_stdout}"
     );
     assert!(
-        server_stdout.contains("protocol: 11"),
+        server_stdout.contains("protocol: 12"),
         "stdout: {server_stdout}"
     );
 
@@ -1154,7 +1283,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {client_stdout}"
     );
     assert!(
-        client_stdout.contains("protocol: 11"),
+        client_stdout.contains("protocol: 12"),
         "stdout: {client_stdout}"
     );
     assert!(
@@ -1164,7 +1293,7 @@ fn status_commands_report_client_and_server_versions() {
 
     let full_json = run_cli_json(&socket_path, &["status", "--json"]);
     assert_eq!(full_json["client"]["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(full_json["client"]["protocol"], 11);
+    assert_eq!(full_json["client"]["protocol"], 12);
     assert_eq!(full_json["server"]["status"], "running");
     assert_eq!(full_json["server"]["running"], true);
     assert_eq!(full_json["server"]["compatible"], true);
@@ -1178,12 +1307,12 @@ fn status_commands_report_client_and_server_versions() {
     let server_json = run_cli_json(&socket_path, &["status", "server", "--json"]);
     assert_eq!(server_json["status"], "running");
     assert_eq!(server_json["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(server_json["protocol"], 11);
+    assert_eq!(server_json["protocol"], 12);
     assert_eq!(server_json["compatible"], true);
 
     let client_json = run_cli_json(&socket_path, &["status", "client", "--json"]);
     assert_eq!(client_json["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(client_json["protocol"], 11);
+    assert_eq!(client_json["protocol"], 12);
     assert!(client_json["binary"]
         .as_str()
         .is_some_and(|path| !path.is_empty()));
@@ -2061,6 +2190,7 @@ fn pane_run_read_and_wait_commands_work() {
     );
     assert!(create.status.success());
 
+    let started = Instant::now();
     let waited = run_cli(
         &socket_path,
         &[
@@ -2077,10 +2207,15 @@ fn pane_run_read_and_wait_commands_work() {
             "5000",
         ],
     );
+    let elapsed = started.elapsed();
     assert!(
         waited.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&waited.stderr)
+    );
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "already-matching wait took {elapsed:?}"
     );
     let waited_json: serde_json::Value = serde_json::from_slice(&waited.stdout).unwrap();
     assert_eq!(waited_json["result"]["type"], "output_matched");
@@ -2524,6 +2659,63 @@ fn wait_agent_status_exits_when_idle_status_matches() {
             "idle",
             "--timeout",
             "5000",
+        ],
+    );
+    assert!(
+        waited.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&waited.stderr)
+    );
+    let waited_json: serde_json::Value = serde_json::from_slice(&waited.stdout).unwrap();
+    assert_eq!(waited_json["event"], "pane.agent_status_changed");
+    assert_eq!(waited_json["data"]["agent_status"], "idle");
+    assert_eq!(waited_json["data"]["agent"], "pi");
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
+fn wait_agent_status_exits_immediately_when_status_already_matches() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_cli_immediate_1","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    let workspace_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let pane_id = format!("{workspace_id}-1");
+
+    let reported = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_cli_immediate_2","method":"pane.report_agent","params":{{"pane_id":"{}","source":"herdr:pi","agent":"pi","state":"idle"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(reported["result"]["type"], "ok");
+
+    let waited = run_cli(
+        &socket_path,
+        &[
+            "wait",
+            "agent-status",
+            "1-1",
+            "--status",
+            "idle",
+            "--timeout",
+            "1000",
         ],
     );
     assert!(

@@ -1,0 +1,17 @@
+title: "[question] "
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: question
+      description: what are you trying to understand?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: context
+      description: what version, os, terminal, config, or workflow matters here?
+    validations:
+      required: false

@@ -60,6 +60,39 @@ pub(super) fn render_prefix_overlay(app: &AppState, frame: &mut Frame, area: Rec
     render_bottom_bar(frame, overlay_area, line, app.palette.panel_bg);
 }
 
+pub(super) fn render_copy_mode_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
+    let key = Style::default()
+        .fg(app.palette.accent)
+        .add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(app.palette.overlay0);
+    let mode_style = Style::default()
+        .fg(panel_contrast_fg(&app.palette))
+        .bg(app.palette.accent)
+        .add_modifier(Modifier::BOLD);
+
+    let select = if app.copy_mode.is_some_and(|copy_mode| copy_mode.selecting) {
+        "selecting"
+    } else {
+        "select"
+    };
+    let line = Line::from(vec![
+        Span::styled(" COPY ", mode_style),
+        Span::raw(" "),
+        Span::styled("h/j/k/l w/b/e { }", key),
+        Span::styled(" move  ", dim),
+        Span::styled("v/space", key),
+        Span::styled(format!(" {select}  "), dim),
+        Span::styled("y/enter", key),
+        Span::styled(" copy  ", dim),
+        Span::styled("q/esc", key),
+        Span::styled(" exit", dim),
+    ]);
+
+    let overlay_y = area.y + area.height.saturating_sub(1);
+    let overlay_area = Rect::new(area.x, overlay_y, area.width, 1);
+    render_bottom_bar(frame, overlay_area, line, app.palette.panel_bg);
+}
+
 pub(super) fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     let key = Style::default()
         .fg(app.palette.accent)

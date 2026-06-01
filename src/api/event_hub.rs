@@ -36,4 +36,11 @@ impl EventHub {
             .cloned()
             .collect()
     }
+
+    pub fn current_sequence(&self) -> u64 {
+        let Ok(state) = self.inner.lock() else {
+            return 0;
+        };
+        state.next_sequence
+    }
 }

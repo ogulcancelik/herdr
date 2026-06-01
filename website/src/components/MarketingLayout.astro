@@ -1,0 +1,263 @@
+---
+interface Props {
+  title: string;
+  description: string;
+  canonicalPath: string;
+  ogType?: 'website' | 'article';
+}
+
+const { title, description, canonicalPath, ogType = 'website' } = Astro.props;
+const canonicalUrl = new URL(canonicalPath, 'https://herdr.dev').toString();
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <meta name="theme-color" content="#f0eee9" />
+    <link rel="canonical" href={canonicalUrl} />
+
+    <meta property="og:type" content={ogType} />
+    <meta property="og:site_name" content="Herdr" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonicalUrl} />
+    <meta property="og:image" content="https://herdr.dev/assets/og-card-v6.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Herdr — One terminal. The whole herd." />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content="https://herdr.dev/assets/og-card-v6.png" />
+    <meta name="twitter:image:alt" content="Herdr — One terminal. The whole herd." />
+
+    <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon.png?v=14" />
+    <link rel="apple-touch-icon" href="/assets/logo.png" />
+    <link rel="preload" href="/assets/jbm.woff2" as="font" type="font/woff2" crossorigin />
+    <script>
+      (function () {
+        var saved = localStorage.getItem("herdr-palette");
+        var system = window.matchMedia("(prefers-color-scheme: dark)").matches
+          ? "tokyo-night"
+          : "tokyo-night-day";
+        document.documentElement.setAttribute("data-palette", saved || system);
+      })();
+    </script>
+    <link rel="stylesheet" href="/css/style.css?v=21" />
+  </head>
+  <body>
+    <header class="site-header">
+      <nav class="nav" aria-label="Primary navigation">
+        <a class="brand" href="/" aria-label="Herdr home">
+          <span class="brand-logo" aria-hidden="true"></span>
+          <span>herdr</span>
+        </a>
+        <details class="nav-menu">
+          <summary class="nav-menu-button" aria-label="Open navigation">
+            <span></span>
+            <span></span>
+            <span></span>
+          </summary>
+          <div class="nav-menu-panel">
+            <a href="/">Home</a>
+            <a href="/compare/">Compare</a>
+            <a href="/releases/">Releases</a>
+            <a href="/blog/">Blog</a>
+            <a href="/docs/quick-start/">Quick start</a>
+            <a href="/docs/">Docs</a>
+            <a href="/docs/socket-api/">API</a>
+            <a href="/docs/install/">Install</a>
+            <a href="https://github.com/ogulcancelik/herdr">GitHub</a>
+          </div>
+        </details>
+        <div class="nav-links">
+          <a href="/">Home</a>
+          <a href="/compare/">Compare</a>
+          <a href="/releases/">Releases</a>
+          <a href="/blog/">Blog</a>
+          <a href="/docs/quick-start/">Quick start</a>
+          <a href="/docs/">Docs</a>
+          <a href="/docs/socket-api/">API</a>
+        </div>
+        <div class="nav-tools">
+          <a class="nav-icon-link" href="https://github.com/ogulcancelik/herdr" aria-label="Herdr on GitHub">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.64 7.64 0 0 1 8 3.87c.68 0 1.36.09 2 .26 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
+            </svg>
+          </a>
+          <a class="nav-icon-link" href="https://x.com/herdrdev" aria-label="Herdr on X">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231Zm-1.161 17.52h1.833L7.084 4.126H5.117Z" />
+            </svg>
+          </a>
+          <a class="nav-cta" href="/docs/install/">Install</a>
+        </div>
+      </nav>
+    </header>
+
+    <slot />
+
+    <div class="theme-hint" id="theme-hint" title="Press / or t to switch theme">
+      <span class="theme-hint-dot"></span>
+      <span class="theme-hint-label" id="theme-hint-label">light</span>
+      <span class="theme-hint-key">[/]</span>
+    </div>
+
+    <div class="theme-overlay" id="theme-overlay" hidden>
+      <div class="theme-overlay-panel" role="dialog" aria-label="Theme switcher" aria-modal="true">
+        <div class="theme-overlay-title">settings</div>
+        <div class="theme-overlay-tabs"><span class="active">theme</span></div>
+        <div class="theme-overlay-list" id="theme-overlay-list" role="listbox" aria-label="Themes">
+          <div class="theme-sep"><span>dark</span></div>
+          <button type="button" role="option" data-value="catppuccin">catppuccin</button>
+          <button type="button" role="option" data-value="terminal">terminal</button>
+          <button type="button" role="option" data-value="tokyo-night">tokyo night</button>
+          <button type="button" role="option" data-value="dracula">dracula</button>
+          <button type="button" role="option" data-value="nord">nord</button>
+          <button type="button" role="option" data-value="gruvbox">gruvbox</button>
+          <button type="button" role="option" data-value="one-dark">one dark</button>
+          <button type="button" role="option" data-value="solarized">solarized</button>
+          <button type="button" role="option" data-value="kanagawa">kanagawa</button>
+          <button type="button" role="option" data-value="rose-pine">rose pine</button>
+          <button type="button" role="option" data-value="vesper">vesper</button>
+          <div class="theme-sep"><span>light</span></div>
+          <button type="button" role="option" data-value="catppuccin-latte">catppuccin latte</button>
+          <button type="button" role="option" data-value="tokyo-night-day">tokyo day</button>
+          <button type="button" role="option" data-value="gruvbox-light">gruvbox light</button>
+          <button type="button" role="option" data-value="one-light">one light</button>
+          <button type="button" role="option" data-value="solarized-light">solarized light</button>
+          <button type="button" role="option" data-value="kanagawa-lotus">kanagawa lotus</button>
+          <button type="button" role="option" data-value="rose-pine-dawn">rose pine dawn</button>
+        </div>
+        <div class="theme-overlay-footer">
+          <span class="theme-overlay-hints"><span class="key">↑↓</span> select</span>
+          <span class="theme-overlay-actions"><span class="theme-apply-btn">↵ apply</span><button class="theme-close-btn" type="button" id="theme-close-btn">esc close</button></span>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      (function () {
+        var overlay = document.getElementById("theme-overlay");
+        var list = document.getElementById("theme-overlay-list");
+        var hintLabel = document.getElementById("theme-hint-label");
+        if (!overlay || !list) return;
+        var options = Array.prototype.slice.call(list.querySelectorAll("[role='option']"));
+        var media = window.matchMedia("(prefers-color-scheme: dark)");
+        var saved = localStorage.getItem("herdr-palette") || "";
+        var committed = saved || defaultPalette();
+
+        function defaultPalette() {
+          return media.matches ? "tokyo-night" : "tokyo-night-day";
+        }
+
+        function setPalette(value) {
+          document.documentElement.setAttribute("data-palette", value || defaultPalette());
+        }
+
+        function updateUI(value) {
+          var activeValue = value || defaultPalette();
+          options.forEach(function (opt) {
+            opt.setAttribute("aria-selected", String(opt.dataset.value === activeValue));
+          });
+          var active = options.find(function (opt) { return opt.dataset.value === activeValue; });
+          if (hintLabel && active) hintLabel.textContent = active.textContent.trim();
+        }
+
+        function openOverlay() {
+          overlay.hidden = false;
+          document.body.style.overflow = "hidden";
+          committed = localStorage.getItem("herdr-palette") || defaultPalette();
+          updateUI(committed);
+          var active = list.querySelector("[aria-selected='true']") || options[0];
+          if (active) active.focus();
+        }
+
+        function closeOverlay() {
+          overlay.hidden = true;
+          document.body.style.overflow = "";
+        }
+
+        function toggleOverlay() {
+          if (overlay.hidden) openOverlay();
+          else closeOverlay();
+        }
+
+        function preview(index) {
+          if (index < 0 || index >= options.length) return;
+          setPalette(options[index].dataset.value);
+          updateUI(options[index].dataset.value);
+          options[index].focus();
+        }
+
+        function commit(value) {
+          setPalette(value);
+          localStorage.setItem("herdr-palette", value);
+          updateUI(value);
+          closeOverlay();
+        }
+
+        function revert() {
+          setPalette(committed);
+          updateUI(committed);
+          closeOverlay();
+        }
+
+        media.addEventListener("change", function () {
+          if (!localStorage.getItem("herdr-palette")) {
+            setPalette("");
+            updateUI("");
+          }
+        });
+
+        options.forEach(function (opt, idx) {
+          opt.addEventListener("click", function () { commit(opt.dataset.value); });
+          opt.addEventListener("mouseenter", function () { preview(idx); });
+        });
+
+        document.addEventListener("keydown", function (e) {
+          if ((e.key === "t" || e.key === "/") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+            var tag = document.activeElement && document.activeElement.tagName;
+            if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+            e.preventDefault();
+            toggleOverlay();
+            return;
+          }
+          if (overlay.hidden) return;
+          var idx = options.indexOf(document.activeElement);
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            preview(idx >= 0 ? Math.min(options.length - 1, idx + 1) : 0);
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            preview(idx >= 0 ? Math.max(0, idx - 1) : options.length - 1);
+          } else if (e.key === "Enter" && idx >= 0) {
+            e.preventDefault();
+            commit(options[idx].dataset.value);
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            revert();
+          }
+        });
+
+        var themeHint = document.getElementById("theme-hint");
+        if (localStorage.getItem("herdr-theme-hint-seen") === "1") {
+          themeHint.classList.add("is-seen");
+        }
+        themeHint.addEventListener("mouseenter", function () {
+          localStorage.setItem("herdr-theme-hint-seen", "1");
+          themeHint.classList.add("is-seen");
+        }, { once: true });
+        themeHint.addEventListener("click", toggleOverlay);
+        document.getElementById("theme-close-btn").addEventListener("click", revert);
+        setPalette(saved);
+        updateUI(saved);
+      })();
+    </script>
+  </body>
+</html>

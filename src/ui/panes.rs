@@ -282,7 +282,7 @@ pub(super) fn render_panes(
                     .and_then(|terminal| {
                         terminal.border_label(app.show_agent_labels_on_pane_borders)
                     })
-                    .and_then(|label| pane_border_title(label, info.rect.width))
+                    .and_then(|label| pane_border_title(&label, info.rect.width))
                 {
                     block = block.title(Line::from(Span::styled(title, border_style)));
                 }
@@ -313,8 +313,34 @@ pub(super) fn render_panes(
                 rt.scroll_metrics(),
                 &app.palette,
             );
+            render_copy_mode_cursor(app, frame, info);
         }
     }
+}
+
+fn render_copy_mode_cursor(app: &AppState, frame: &mut Frame, info: &PaneInfo) {
+    if app.mode != Mode::Copy {
+        return;
+    }
+    let Some(copy_mode) = app.copy_mode else {
+        return;
+    };
+    if copy_mode.pane_id != info.id
+        || copy_mode.cursor_row >= info.inner_rect.height
+        || copy_mode.cursor_col >= info.inner_rect.width
+    {
+        return;
+    }
+
+    let x = info.inner_rect.x + copy_mode.cursor_col;
+    let y = info.inner_rect.y + copy_mode.cursor_row;
+    let cell = &mut frame.buffer_mut()[(x, y)];
+    cell.set_style(
+        Style::default()
+            .fg(panel_contrast_fg(&app.palette))
+            .bg(app.palette.accent)
+            .add_modifier(Modifier::BOLD),
+    );
 }
 
 fn render_selection_highlight(

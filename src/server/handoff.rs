@@ -9,7 +9,7 @@ use std::os::unix::process::CommandExt;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
-use std::process::Command;
+use std::process::{Child, Command};
 #[cfg(unix)]
 use std::time::Duration;
 
@@ -38,20 +38,7 @@ pub(crate) struct HandoffManifest {
     pub expected_version: Option<String>,
     pub expected_protocol: Option<u32>,
     pub snapshot: crate::persist::SessionSnapshot,
-    pub panes: Vec<HandoffPane>,
-}
-
-#[cfg(unix)]
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct HandoffPane {
-    pub pane_id: u32,
-    pub child_pid: u32,
-    pub rows: u16,
-    pub cols: u16,
-    pub cell_width_px: u32,
-    pub cell_height_px: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub initial_history_ansi: Option<String>,
+    pub panes: Vec<crate::handoff_runtime::HandoffRuntimeState>,
 }
 
 #[cfg(unix)]
@@ -71,7 +58,7 @@ pub(crate) fn spawn_handoff_import(
     import_exe: Option<&Path>,
     socket_path: &Path,
     token: &str,
-) -> io::Result<u32> {
+) -> io::Result<Child> {
     let fallback_exe;
     let exe = if let Some(import_exe) = import_exe {
         import_exe
@@ -94,7 +81,7 @@ pub(crate) fn spawn_handoff_import(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let child = command.spawn().map_err(|err| {
+    command.spawn().map_err(|err| {
         io::Error::new(
             err.kind(),
             format!(
@@ -102,8 +89,34 @@ pub(crate) fn spawn_handoff_import(
                 exe.display()
             ),
         )
-    })?;
-    Ok(child.id())
+    })
+}
+
+#[cfg(unix)]
+pub(crate) fn cleanup_failed_import_child(child: &mut Child) {
+    let pid = child.id();
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            info!(pid, status = %status, "handoff import server exited during rollback");
+            return;
+        }
+        Ok(None) => {}
+        Err(err) => {
+            warn!(pid, err = %err, "failed to inspect handoff import server before rollback");
+        }
+    }
+
+    if let Err(err) = child.kill() {
+        warn!(pid, err = %err, "failed to kill handoff import server during rollback");
+    }
+    match child.wait() {
+        Ok(status) => {
+            info!(pid, status = %status, "handoff import server reaped during rollback");
+        }
+        Err(err) => {
+            warn!(pid, err = %err, "failed to reap handoff import server during rollback");
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -281,7 +294,7 @@ pub(crate) fn report_owned(stream: &mut UnixStream) -> io::Result<()> {
 #[cfg(unix)]
 pub(crate) fn manifest_for(
     snapshot: crate::persist::SessionSnapshot,
-    panes: Vec<HandoffPane>,
+    panes: Vec<crate::handoff_runtime::HandoffRuntimeState>,
     expected_protocol: Option<u32>,
     expected_version: Option<String>,
 ) -> HandoffManifest {

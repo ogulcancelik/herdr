@@ -145,14 +145,13 @@ impl AppState {
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
                     if let Some(open) = &mut self.worktree_open {
-                        open.selected = open.selected.saturating_sub(1);
+                        open.select_previous_filtered();
                     }
                     return None;
                 }
                 MouseEventKind::ScrollDown => {
                     if let Some(open) = &mut self.worktree_open {
-                        open.selected =
-                            (open.selected + 1).min(open.entries.len().saturating_sub(1));
+                        open.select_next_filtered();
                     }
                     return None;
                 }
@@ -237,21 +236,28 @@ impl AppState {
                             self.screen_rect(),
                             open.entries.len(),
                         ) {
-                            let max_rows = inner.height.saturating_sub(4) as usize;
-                            let start = crate::ui::open_existing_worktree_visible_start(
-                                open.selected,
-                                max_rows,
-                            );
+                            let filtered = open.filtered_indices();
+                            let max_rows =
+                                crate::ui::open_existing_worktree_max_visible_rows(inner);
+                            let start =
+                                crate::ui::open_existing_worktree_visible_start(open, max_rows);
+                            if mouse.row == inner.y.saturating_add(1)
+                                && mouse.column >= inner.x
+                                && mouse.column < inner.x.saturating_add(inner.width)
+                            {
+                                if let Some(open) = &mut self.worktree_open {
+                                    open.search_focused = true;
+                                }
+                                return None;
+                            }
                             let row_idx = if rect_contains(inner, mouse.column, mouse.row) {
                                 mouse
                                     .row
-                                    .checked_sub(inner.y.saturating_add(2))
+                                    .checked_sub(inner.y.saturating_add(3))
                                     .map(usize::from)
+                                    .map(|row| row / 2)
                                     .filter(|row| *row < max_rows)
-                                    .and_then(|row| {
-                                        let entry_idx = start + row;
-                                        (entry_idx < open.entries.len()).then_some(entry_idx)
-                                    })
+                                    .and_then(|row| filtered.get(start + row).copied())
                             } else {
                                 None
                             };
@@ -455,12 +461,10 @@ impl AppState {
                             return None;
                         }
 
-                        if let Some((ws_idx, tab_idx, pane_id)) =
+                        if let Some((ws_idx, _tab_idx, pane_id)) =
                             self.collapsed_agent_detail_target_at(mouse.row)
                         {
-                            self.switch_workspace(ws_idx);
-                            self.switch_tab(tab_idx);
-                            self.focus_pane(pane_id);
+                            self.focus_pane_in_workspace(ws_idx, pane_id);
                             self.mode = Mode::Terminal;
                         }
                         return None;
@@ -550,11 +554,10 @@ impl AppState {
                         return None;
                     }
 
-                    if let Some((ws_idx, tab_idx, pane_id)) = self.agent_detail_target_at(mouse.row)
+                    if let Some((ws_idx, _tab_idx, pane_id)) =
+                        self.agent_detail_target_at(mouse.row)
                     {
-                        self.switch_workspace(ws_idx);
-                        self.switch_tab(tab_idx);
-                        self.focus_pane(pane_id);
+                        self.focus_pane_in_workspace(ws_idx, pane_id);
                         self.mode = Mode::Terminal;
                         return None;
                     }
@@ -728,16 +731,19 @@ impl AppState {
             }
 
             MouseEventKind::Up(MouseButton::Left) => {
-                if self.selection.is_some() {
+                // Mouse-up either finishes a drag selection or releases after a
+                // double-click copy; the latter is already copied.
+                if let Some(selection) = self.selection.as_ref() {
+                    let was_click = selection.was_just_click();
+                    let was_already_copied = selection.is_done();
+
                     self.workspace_press = None;
                     self.tab_press = None;
                     self.drag = None;
                     self.selection_autoscroll = None;
-                    let was_click = self.selection.as_ref().is_some_and(|s| s.was_just_click());
                     if was_click {
                         self.selection = None;
-                        self.selection_autoscroll = None;
-                    } else {
+                    } else if !was_already_copied {
                         self.copy_selection(terminal_runtimes);
                     }
                     return None;
@@ -794,13 +800,6 @@ impl AppState {
                                 self.mode = Mode::Terminal;
                                 return None;
                             }
-                        }
-                        let was_click = self.selection.as_ref().is_some_and(|s| s.was_just_click());
-                        if was_click {
-                            self.selection = None;
-                            self.selection_autoscroll = None;
-                        } else {
-                            self.copy_selection(terminal_runtimes);
                         }
                     }
                 }
@@ -1031,12 +1030,10 @@ impl AppState {
             }
             Some(crate::ui::MobileSwitcherTarget::Agent {
                 ws_idx,
-                tab_idx,
+                tab_idx: _,
                 pane_id,
             }) => {
-                self.switch_workspace(ws_idx);
-                self.switch_tab(tab_idx);
-                self.focus_pane(pane_id);
+                self.focus_pane_in_workspace(ws_idx, pane_id);
                 self.mode = Mode::Terminal;
             }
             Some(crate::ui::MobileSwitcherTarget::Menu(action_idx)) => {
@@ -1268,11 +1265,8 @@ impl AppState {
     }
 
     pub(super) fn focus_pane(&mut self, pane_id: crate::layout::PaneId) {
-        if let Some(ws) = self.active.and_then(|i| self.workspaces.get_mut(i)) {
-            if ws.layout.focused() != pane_id {
-                ws.layout.focus_pane(pane_id);
-                self.mark_session_dirty();
-            }
+        if let Some(ws_idx) = self.active {
+            self.focus_pane_in_workspace(ws_idx, pane_id);
         }
     }
 
@@ -1294,13 +1288,11 @@ impl AppState {
         else {
             return;
         };
-        let Some(tab_idx) = self.workspaces[ws_idx].find_tab_index_for_pane(target.pane_id) else {
+        let Some(_tab_idx) = self.workspaces[ws_idx].find_tab_index_for_pane(target.pane_id) else {
             return;
         };
 
-        self.switch_workspace(ws_idx);
-        self.switch_tab(tab_idx);
-        self.focus_pane(target.pane_id);
+        self.focus_pane_in_workspace(ws_idx, target.pane_id);
         self.toast = None;
         self.mode = Mode::Terminal;
     }
@@ -1671,6 +1663,8 @@ mod tests {
                 },
             ],
             selected: 0,
+            query: String::new(),
+            search_focused: false,
             error: None,
         }
     }
@@ -1742,6 +1736,14 @@ mod tests {
         assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(target_pane));
         assert!(app.state.toast.is_none());
         assert_eq!(app.state.mode, Mode::Terminal);
+
+        app.state.last_pane();
+
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(
+            app.state.workspaces[0].focused_pane_id(),
+            Some(app.state.workspaces[0].tabs[0].root_pane)
+        );
     }
 
     #[test]
@@ -1816,7 +1818,7 @@ mod tests {
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             inner.x + 1,
-            inner.y + 3,
+            inner.y + 5,
         ));
 
         assert_eq!(app.state.worktree_open.as_ref().unwrap().selected, 1);
@@ -1981,7 +1983,7 @@ mod tests {
             80,
             app.state.pane_scrollback_limit_bytes,
             app.state.host_terminal_theme,
-            &app.state.default_shell,
+            crate::pane::PaneShellConfig::new(&app.state.default_shell, app.state.shell_mode),
             app.event_tx.clone(),
             app.render_notify.clone(),
             app.render_dirty.clone(),
@@ -2308,6 +2310,7 @@ mod tests {
             mouse_protocol_mode: crate::input::MouseProtocolMode::ButtonMotion,
             mouse_protocol_encoding: crate::input::MouseProtocolEncoding::Sgr,
             mouse_alternate_scroll: true,
+            modify_other_keys: false,
         };
 
         assert_eq!(wheel_routing(input_state), WheelRouting::MouseReport);
@@ -2632,6 +2635,7 @@ mod tests {
             mouse_protocol_mode: crate::input::MouseProtocolMode::None,
             mouse_protocol_encoding: crate::input::MouseProtocolEncoding::Default,
             mouse_alternate_scroll: true,
+            modify_other_keys: false,
         };
 
         assert_eq!(wheel_routing(input_state), WheelRouting::AlternateScroll);
@@ -2647,6 +2651,7 @@ mod tests {
             mouse_protocol_mode: crate::input::MouseProtocolMode::None,
             mouse_protocol_encoding: crate::input::MouseProtocolEncoding::Default,
             mouse_alternate_scroll: true,
+            modify_other_keys: false,
         };
 
         assert_eq!(wheel_routing(input_state), WheelRouting::HostScroll);

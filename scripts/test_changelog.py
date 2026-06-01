@@ -12,9 +12,11 @@ from scripts.changelog import (
     canonicalize_manifest,
     DEFAULT_PRODUCT_ANNOUNCEMENT_PATH,
     default_release_assets,
+    ensure_current_release_assets_are_mirrored,
     ensure_manifest_is_outdated,
     ensure_manifest_matches_expected,
     extract_section_body,
+    infer_protocol_from_notes,
     load_product_announcement,
     manifest_from_release_payload,
     prepare_release,
@@ -80,6 +82,7 @@ class ChangelogScriptTests(unittest.TestCase):
                 "macos-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.1.1/herdr-macos-aarch64",
             },
         )
+        self.assertEqual(manifest["releases"]["0.1.1"]["assets"], manifest["assets"])
 
     def test_build_latest_json_embeds_product_announcement(self) -> None:
         manifest = json.loads(
@@ -111,22 +114,58 @@ class ChangelogScriptTests(unittest.TestCase):
         )
 
         self.assertEqual(list(manifest["releases"]), ["0.1.2", "0.1.1"])
-        self.assertEqual(manifest["releases"]["0.1.2"], {"notes": "### Fixed\n- Two"})
-        self.assertEqual(manifest["releases"]["0.1.1"], {"notes": "### Fixed\n- One"})
+        self.assertEqual(manifest["releases"]["0.1.2"]["notes"], "### Fixed\n- Two")
+        self.assertEqual(manifest["releases"]["0.1.2"]["protocol"], read_protocol_version())
+        self.assertEqual(manifest["releases"]["0.1.2"]["assets"], default_release_assets("0.1.2"))
+        self.assertEqual(manifest["releases"]["0.1.1"]["notes"], "### Fixed\n- One")
+        self.assertEqual(manifest["releases"]["0.1.1"]["assets"], default_release_assets("0.1.1"))
 
-    def test_build_latest_json_rejects_release_metadata_assets(self) -> None:
-        with self.assertRaisesRegex(ChangelogError, "unsupported"):
+    def test_build_latest_json_accepts_release_metadata_assets(self) -> None:
+        assets = default_release_assets("0.1.1")
+        manifest = json.loads(
             build_latest_json(
                 "0.1.2",
                 "### Fixed\n- Two",
                 default_release_assets("0.1.2"),
-                releases={"0.1.1": {"notes": "### Fixed\n- One", "assets": {}}},
+                releases={"0.1.1": {"notes": "### Fixed\n- One", "assets": assets}},
             )
+        )
+
+        self.assertEqual(manifest["releases"]["0.1.1"]["assets"], assets)
+
+    def test_build_latest_json_preserves_release_metadata_protocol(self) -> None:
+        manifest = json.loads(
+            build_latest_json(
+                "0.1.2",
+                "### Fixed\n- Two",
+                default_release_assets("0.1.2"),
+                releases={"0.1.1": {"notes": "### Fixed\n- One", "protocol": 7}},
+            )
+        )
+
+        self.assertEqual(manifest["releases"]["0.1.1"]["protocol"], 7)
+
+    def test_build_latest_json_infers_release_metadata_protocol_from_notes(self) -> None:
+        manifest = json.loads(
+            build_latest_json(
+                "0.1.2",
+                "### Fixed\n- Two",
+                default_release_assets("0.1.2"),
+                releases={
+                    "0.1.1": {
+                        "notes": "### Breaking Changes\n- The client/server protocol is now version 7."
+                    }
+                },
+            )
+        )
+
+        self.assertEqual(manifest["releases"]["0.1.1"]["protocol"], 7)
 
     def test_archived_releases_from_current_manifest_seeds_legacy_root(self) -> None:
         releases = archived_releases_from_current_manifest(
             {
                 "version": "0.1.1",
+                "protocol": 3,
                 "notes": "### Fixed\n- One",
                 "announcement": {
                     "id": "one",
@@ -141,6 +180,8 @@ class ChangelogScriptTests(unittest.TestCase):
             {
                 "0.1.1": {
                     "notes": "### Fixed\n- One",
+                    "protocol": 3,
+                    "assets": default_release_assets("0.1.1"),
                     "announcement": {
                         "id": "one",
                         "title": "One",
@@ -154,6 +195,7 @@ class ChangelogScriptTests(unittest.TestCase):
         releases = archived_releases_from_current_manifest(
             {
                 "version": "0.1.2",
+                "protocol": read_protocol_version(),
                 "notes": "### Fixed\n- Root",
                 "releases": {
                     "0.1.2": {"notes": "### Fixed\n- Stale"},
@@ -162,8 +204,22 @@ class ChangelogScriptTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(releases["0.1.2"], {"notes": "### Fixed\n- Root"})
-        self.assertEqual(releases["0.1.1"], {"notes": "### Fixed\n- One"})
+        self.assertEqual(releases["0.1.2"]["notes"], "### Fixed\n- Root")
+        self.assertEqual(releases["0.1.1"]["notes"], "### Fixed\n- One")
+        self.assertEqual(releases["0.1.2"]["protocol"], read_protocol_version())
+        self.assertEqual(releases["0.1.2"]["assets"], default_release_assets("0.1.2"))
+        self.assertEqual(releases["0.1.1"]["assets"], default_release_assets("0.1.1"))
+
+    def test_infer_protocol_from_notes(self) -> None:
+        self.assertEqual(
+            infer_protocol_from_notes("The client/server protocol is now version 10."),
+            10,
+        )
+        self.assertEqual(
+            infer_protocol_from_notes("The client/server protocol version 9."),
+            9,
+        )
+        self.assertIsNone(infer_protocol_from_notes("No wire changes."))
 
     def write_temp_json(self, content: str) -> Path:
         tmp = tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8")
@@ -345,6 +401,42 @@ class ChangelogScriptTests(unittest.TestCase):
 
         canonical = ensure_manifest_matches_expected(actual, expected, "test manifest")
         self.assertEqual(canonical, expected)
+
+    def test_current_release_assets_must_be_mirrored(self) -> None:
+        assets = default_release_assets("0.1.1")
+        ensure_current_release_assets_are_mirrored(
+            {
+                "version": "0.1.1",
+                "protocol": read_protocol_version(),
+                "notes": "### Fixed\n- One",
+                "assets": assets,
+                "releases": {
+                    "0.1.1": {
+                        "notes": "### Fixed\n- One",
+                        "assets": assets,
+                    }
+                },
+            },
+            "test manifest",
+        )
+
+    def test_current_release_assets_must_match_top_level_assets(self) -> None:
+        with self.assertRaisesRegex(ChangelogError, "assets must match top-level assets"):
+            ensure_current_release_assets_are_mirrored(
+                {
+                    "version": "0.1.1",
+                    "protocol": read_protocol_version(),
+                    "notes": "### Fixed\n- One",
+                    "assets": default_release_assets("0.1.1"),
+                    "releases": {
+                        "0.1.1": {
+                            "notes": "### Fixed\n- One",
+                            "assets": default_release_assets("0.1.0"),
+                        }
+                    },
+                },
+                "test manifest",
+            )
 
     def test_ensure_manifest_matches_expected_rejects_different_notes(self) -> None:
         with self.assertRaisesRegex(ChangelogError, "does not match the published GitHub release manifest"):

@@ -97,6 +97,8 @@ pub struct PaneSnapshot {
     pub agent_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session: Option<PaneAgentSessionSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_argv: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -314,6 +316,11 @@ fn capture_tab(
             .get(id)
             .and_then(|pane| terminals.get(&pane.attached_terminal_id))
             .and_then(|terminal| terminal.agent_name.clone());
+        let launch_argv = tab
+            .panes
+            .get(id)
+            .and_then(|pane| terminals.get(&pane.attached_terminal_id))
+            .and_then(|terminal| terminal.launch_argv.clone());
         let agent_session =
             tab.panes
                 .get(id)
@@ -345,6 +352,7 @@ fn capture_tab(
                 label,
                 agent_name,
                 agent_session,
+                launch_argv,
             },
         );
     }
@@ -580,6 +588,7 @@ mod tests {
                 label: None,
                 agent_name: None,
                 agent_session: None,
+                launch_argv: None,
             },
         );
         panes.insert(
@@ -589,6 +598,7 @@ mod tests {
                 label: Some("website".into()),
                 agent_name: None,
                 agent_session: None,
+                launch_argv: None,
             },
         );
 
@@ -1109,6 +1119,7 @@ mod tests {
                 label: None,
                 agent_name: None,
                 agent_session: None,
+                launch_argv: None,
             },
         );
         panes.insert(
@@ -1120,6 +1131,7 @@ mod tests {
                 label: None,
                 agent_name: None,
                 agent_session: None,
+                launch_argv: None,
             },
         );
 

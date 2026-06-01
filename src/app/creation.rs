@@ -110,12 +110,14 @@ impl App {
             initial_cwd,
             self.state.pane_scrollback_limit_bytes,
             self.state.host_terminal_theme,
-            &self.state.default_shell,
+            crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
         )?;
+        let root_pane = ws.tabs[idx].root_pane;
         self.terminal_runtimes.insert(terminal.id.clone(), runtime);
         self.state.terminals.insert(terminal.id.clone(), terminal);
+        self.state.remove_alias_shadowed_by_new_pane(root_pane);
         if focus {
-            ws.switch_tab(idx);
+            self.state.switch_workspace_tab(ws_idx, idx);
             self.state.mode = Mode::Terminal;
         }
         let workspace_id = self.state.workspaces[ws_idx].id.clone();
@@ -140,7 +142,7 @@ impl App {
             cols,
             self.state.pane_scrollback_limit_bytes,
             self.state.host_terminal_theme,
-            &self.state.default_shell,
+            crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
             self.event_tx.clone(),
             self.render_notify.clone(),
             self.render_dirty.clone(),
@@ -149,6 +151,8 @@ impl App {
         self.state.terminals.insert(terminal.id.clone(), terminal);
         self.state.workspaces.push(ws);
         let idx = self.state.workspaces.len() - 1;
+        self.state
+            .remove_alias_shadowed_by_new_pane(self.state.workspaces[idx].tabs[0].root_pane);
         let workspace_id = self.state.workspaces[idx].id.clone();
         let root_pane = self.state.workspaces[idx].tabs[0].root_pane.raw();
         crate::logging::workspace_created(&workspace_id, root_pane);
@@ -274,6 +278,7 @@ impl App {
             && ws
                 .focused_pane_id()
                 .is_some_and(|focused| focused == pane_id);
+        let presentation = terminal.effective_presentation();
         Some(crate::api::schema::PaneInfo {
             pane_id: self.public_pane_id(ws_idx, pane_id)?,
             terminal_id: terminal.id.to_string(),
@@ -283,10 +288,17 @@ impl App {
             cwd: ws.tabs[tab_idx]
                 .cwd_for_pane(pane_id, &self.state.terminals, &self.terminal_runtimes)
                 .map(|cwd| cwd.display().to_string()),
+            foreground_cwd: ws.tabs[tab_idx]
+                .foreground_cwd_for_pane(pane_id, &self.terminal_runtimes)
+                .map(|cwd| cwd.display().to_string()),
             label: terminal.manual_label.clone(),
             agent: terminal.effective_agent_label().map(str::to_string),
+            title: presentation.title,
+            display_agent: presentation.display_agent,
             agent_status: pane_agent_status(terminal.state, pane.seen),
-            custom_status: terminal.effective_custom_status().map(str::to_string),
+            custom_status: presentation.custom_status,
+            state_labels: presentation.state_labels,
+            agent_session: terminal_agent_session_info(terminal),
             revision: terminal.revision,
         })
     }
@@ -336,4 +348,29 @@ impl App {
                 }),
         }
     }
+}
+
+fn terminal_agent_session_info(
+    terminal: &crate::terminal::TerminalState,
+) -> Option<crate::api::schema::AgentSessionInfo> {
+    if let Some(authority) = terminal.hook_authority.as_ref() {
+        if let Some(session_ref) = authority.session_ref.as_ref() {
+            return Some(crate::api::schema::AgentSessionInfo {
+                source: authority.source.clone(),
+                agent: authority.agent_label.clone(),
+                kind: session_ref.kind,
+                value: session_ref.value.clone(),
+            });
+        }
+    }
+
+    terminal
+        .persisted_agent_session
+        .as_ref()
+        .map(|session| crate::api::schema::AgentSessionInfo {
+            source: session.source.clone(),
+            agent: session.agent.clone(),
+            kind: session.session_ref.kind,
+            value: session.session_ref.value.clone(),
+        })
 }

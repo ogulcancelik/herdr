@@ -18,6 +18,7 @@ pub struct PaneDetail {
     pub state: AgentState,
     pub seen: bool,
     pub custom_status: Option<String>,
+    pub state_labels: HashMap<String, String>,
 }
 
 impl Tab {
@@ -36,11 +37,15 @@ impl Tab {
             .filter_map(|id| {
                 let pane = self.panes.get(id)?;
                 let terminal = terminals.get(&pane.attached_terminal_id)?;
-                let agent_label = terminal
+                let fallback_agent_label = terminal
                     .agent_name
                     .as_deref()
                     .or_else(|| terminal.effective_agent_label())?
                     .to_string();
+                let agent_label = terminal
+                    .effective_display_agent()
+                    .unwrap_or_else(|| fallback_agent_label.clone());
+                let presentation = terminal.effective_presentation();
                 Some(PaneDetail {
                     pane_id: *id,
                     tab_idx: self.number.saturating_sub(1),
@@ -50,7 +55,8 @@ impl Tab {
                     agent: terminal.effective_known_agent(),
                     state: terminal.state,
                     seen: pane.seen,
-                    custom_status: terminal.effective_custom_status().map(str::to_string),
+                    custom_status: presentation.custom_status,
+                    state_labels: presentation.state_labels,
                 })
             })
             .collect()

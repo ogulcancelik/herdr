@@ -60,6 +60,11 @@ pub fn parse_raw_input_bytes_with_ranges(data: &[u8]) -> Vec<RawInputEventWithRa
                 start: offset,
                 len: 1,
             });
+        } else if matches!(
+            control_string(&buffer),
+            Some(ControlString::Incomplete { .. })
+        ) {
+            return events;
         } else if let Ok(text) = std::str::from_utf8(&buffer) {
             if let Some(key) = parse_terminal_key_sequence(text) {
                 events.push(RawInputEventWithRange {
@@ -79,27 +84,9 @@ pub fn parse_raw_input_bytes_with_ranges(data: &[u8]) -> Vec<RawInputEventWithRa
 /// Unlike `parse_raw_input_bytes`, this directly extracts events without
 /// going through a channel, making it suitable for synchronous use.
 pub fn parse_raw_input_bytes_sync(data: &[u8]) -> Vec<RawInputEvent> {
-    let mut buffer = data.to_vec();
-    let mut events = Vec::new();
-
-    while let Some((event, consumed)) = extract_one_event(&buffer) {
-        buffer.drain(..consumed);
-        events.push(event);
-    }
-
-    if !buffer.is_empty() {
-        if buffer.as_slice() == [ESC] {
-            events.push(RawInputEvent::Key(TerminalKey::new(
-                crossterm::event::KeyCode::Esc,
-                KeyModifiers::empty(),
-            )));
-        } else if let Ok(text) = std::str::from_utf8(&buffer) {
-            if let Some(key) = parse_terminal_key_sequence(text) {
-                events.push(RawInputEvent::Key(key));
-            }
-        }
-    }
-
+    let mut framer = RawInputFramer::default();
+    let mut events = framer.push(data);
+    events.extend(framer.flush_timeout());
     events
 }
 
@@ -128,6 +115,194 @@ pub enum RawInputEvent {
     Unsupported,
 }
 
+#[derive(Default)]
+pub(crate) struct RawInputFramer {
+    byte_framer: RawInputByteFramer,
+}
+
+impl RawInputFramer {
+    pub(crate) fn push(&mut self, data: &[u8]) -> Vec<RawInputEvent> {
+        Self::events_from_chunks(self.byte_framer.push(data))
+    }
+
+    pub(crate) fn flush_timeout(&mut self) -> Vec<RawInputEvent> {
+        Self::events_from_chunks(self.byte_framer.flush_timeout())
+    }
+
+    fn events_from_chunks(chunks: Vec<Vec<u8>>) -> Vec<RawInputEvent> {
+        chunks
+            .into_iter()
+            .filter_map(|chunk| {
+                if chunk.as_slice() == [ESC] {
+                    return Some(RawInputEvent::Key(TerminalKey::new(
+                        crossterm::event::KeyCode::Esc,
+                        KeyModifiers::empty(),
+                    )));
+                }
+                extract_one_event(&chunk).map(|(event, _consumed)| {
+                    tracing::debug!(raw_bytes = ?chunk, event = ?event, "raw input event parsed");
+                    event
+                })
+            })
+            .collect()
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct RawInputByteFramer {
+    buffer: Vec<u8>,
+    discard_until: Option<ControlStringFamily>,
+    discarded_tail_bytes: usize,
+}
+
+impl RawInputByteFramer {
+    pub(crate) fn push(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
+        self.buffer.extend_from_slice(data);
+        self.drain_available_chunks()
+    }
+
+    pub(crate) fn flush_timeout(&mut self) -> Vec<Vec<u8>> {
+        let mut chunks = self.drain_available_chunks();
+
+        if let Some(family) = self.discard_until {
+            let keep_split_st = self.buffer.last() == Some(&ESC);
+            let keep_discarding = plausible_control_string_tail(family, &self.buffer);
+            self.discarded_tail_bytes = self.discarded_tail_bytes.saturating_add(self.buffer.len());
+            self.buffer.clear();
+            if keep_discarding && self.discarded_tail_bytes <= MAX_DISCARDED_CONTROL_TAIL_BYTES {
+                if keep_split_st {
+                    self.buffer.push(ESC);
+                }
+            } else {
+                self.discard_until = None;
+                self.discarded_tail_bytes = 0;
+            }
+            return chunks;
+        }
+
+        if self.buffer.is_empty() {
+            return chunks;
+        }
+
+        if self.buffer.starts_with(BRACKETED_PASTE_START)
+            && find_subsequence(&self.buffer, BRACKETED_PASTE_END).is_none()
+        {
+            tracing::trace!(
+                len = self.buffer.len(),
+                "waiting for bracketed paste terminator"
+            );
+            return chunks;
+        }
+
+        if starts_with_incomplete_default_color_response(&self.buffer) {
+            tracing::trace!(
+                len = self.buffer.len(),
+                "waiting for host color response terminator"
+            );
+            return chunks;
+        }
+
+        if let Some(ControlString::Incomplete { family }) = control_string(&self.buffer) {
+            tracing::debug!(
+                len = self.buffer.len(),
+                "discarding incomplete host control string after input timeout"
+            );
+            // This intentionally gives host control replies precedence over legacy
+            // Alt forms like Alt+] after timeout, so later reply tails cannot leak.
+            self.discard_until = Some(family);
+            self.discarded_tail_bytes = 0;
+            self.buffer.clear();
+            return chunks;
+        }
+
+        if self.buffer.as_slice() == [ESC] {
+            tracing::warn!(
+                bytes = ?self.buffer,
+                "flushing lone escape after input timeout; if this follows an alt chord or focus switch it may reach the pane as plain esc"
+            );
+            chunks.push(std::mem::take(&mut self.buffer));
+            return chunks;
+        }
+
+        if let Ok(text) = std::str::from_utf8(&self.buffer) {
+            if parse_terminal_key_sequence(text).is_some() {
+                chunks.push(std::mem::take(&mut self.buffer));
+                return chunks;
+            }
+        }
+
+        if starts_with_incomplete_utf8_char(&self.buffer) {
+            tracing::trace!(bytes = ?self.buffer, "waiting for UTF-8 continuation bytes");
+            return chunks;
+        }
+
+        if self.buffer.first() == Some(&ESC) && starts_with_incomplete_utf8_char(&self.buffer[1..])
+        {
+            tracing::trace!(bytes = ?self.buffer, "waiting for escaped UTF-8 continuation bytes");
+            return chunks;
+        }
+
+        tracing::debug!(bytes = ?self.buffer, "dropping incomplete raw input buffer after timeout");
+        self.buffer.clear();
+        chunks
+    }
+
+    fn drain_available_chunks(&mut self) -> Vec<Vec<u8>> {
+        let mut chunks = Vec::new();
+
+        loop {
+            if let Some(family) = self.discard_until {
+                let Some(terminator_len) =
+                    control_string_terminator_for_family(&self.buffer, family)
+                else {
+                    break;
+                };
+                self.buffer.drain(..terminator_len);
+                self.discard_until = None;
+                self.discarded_tail_bytes = 0;
+                continue;
+            }
+
+            let Some((_event, consumed)) = extract_one_event(&self.buffer) else {
+                break;
+            };
+            chunks.push(self.buffer[..consumed].to_vec());
+            self.buffer.drain(..consumed);
+        }
+
+        chunks
+    }
+}
+
+const MAX_DISCARDED_CONTROL_TAIL_BYTES: usize = 128;
+
+fn plausible_control_string_tail(family: ControlStringFamily, buffer: &[u8]) -> bool {
+    match family {
+        ControlStringFamily::Osc => buffer.iter().all(|byte| {
+            byte.is_ascii_digit()
+                || matches!(
+                    *byte,
+                    b';' | b':'
+                        | b'/'
+                        | b'#'
+                        | b'?'
+                        | b'.'
+                        | b'_'
+                        | b'-'
+                        | b'+'
+                        | b'r'
+                        | b'g'
+                        | b'b'
+                        | b'R'
+                        | b'G'
+                        | b'B'
+                        | ESC
+                )
+        }),
+        ControlStringFamily::StTerminated => buffer.last() == Some(&ESC),
+    }
+}
+
 pub(crate) fn events_require_host_surface_redraw(
     events: &[RawInputEvent],
     redraw_on_focus_gained: bool,
@@ -145,17 +320,16 @@ pub fn spawn_input_reader() -> mpsc::Receiver<RawInputEvent> {
         let stdin = std::io::stdin();
         let mut reader = stdin.lock();
         let mut scratch = [0u8; 1024];
-        let mut buffer = Vec::<u8>::new();
+        let mut framer = RawInputFramer::default();
 
         loop {
             match reader.read(&mut scratch) {
                 Ok(0) => break,
                 Ok(n) => {
-                    buffer.extend_from_slice(&scratch[..n]);
-                    drain_buffer(&mut buffer, &tx);
+                    send_raw_input_events(framer.push(&scratch[..n]), &tx);
 
-                    if !buffer.is_empty() && stdin_read_ready(&reader, 10) == Some(false) {
-                        flush_incomplete_buffer(&mut buffer, &tx);
+                    if stdin_read_ready(&reader, 10) == Some(false) {
+                        send_raw_input_events(framer.flush_timeout(), &tx);
                     }
                 }
                 Err(_) => break,
@@ -166,6 +340,13 @@ pub fn spawn_input_reader() -> mpsc::Receiver<RawInputEvent> {
     rx
 }
 
+fn send_raw_input_events(events: Vec<RawInputEvent>, tx: &mpsc::Sender<RawInputEvent>) {
+    for event in events {
+        let _ = tx.blocking_send(event);
+    }
+}
+
+#[cfg(test)]
 fn drain_buffer(buffer: &mut Vec<u8>, tx: &mpsc::Sender<RawInputEvent>) {
     for bytes in drain_complete_input_bytes(buffer) {
         let Some((event, _consumed)) = extract_one_event(&bytes) else {
@@ -176,6 +357,7 @@ fn drain_buffer(buffer: &mut Vec<u8>, tx: &mpsc::Sender<RawInputEvent>) {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn drain_complete_input_bytes(buffer: &mut Vec<u8>) -> Vec<Vec<u8>> {
     let mut chunks = Vec::new();
 
@@ -187,6 +369,7 @@ pub(crate) fn drain_complete_input_bytes(buffer: &mut Vec<u8>) -> Vec<Vec<u8>> {
     chunks
 }
 
+#[cfg(test)]
 fn flush_incomplete_buffer(buffer: &mut Vec<u8>, tx: &mpsc::Sender<RawInputEvent>) {
     if let Some(bytes) = flush_incomplete_input_bytes(buffer) {
         if bytes.as_slice() == [ESC] {
@@ -204,45 +387,16 @@ fn flush_incomplete_buffer(buffer: &mut Vec<u8>, tx: &mpsc::Sender<RawInputEvent
     }
 }
 
+#[cfg(test)]
 pub(crate) fn flush_incomplete_input_bytes(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
-    if buffer.is_empty() {
-        return None;
-    }
-
-    if buffer.starts_with(BRACKETED_PASTE_START)
-        && find_subsequence(buffer, BRACKETED_PASTE_END).is_none()
-    {
-        tracing::trace!(len = buffer.len(), "waiting for bracketed paste terminator");
-        return None;
-    }
-
-    if buffer.as_slice() == [ESC] {
-        tracing::warn!(
-            bytes = ?buffer,
-            "flushing lone escape after input timeout; if this follows an alt chord or focus switch it may reach the pane as plain esc"
-        );
-        return Some(std::mem::take(buffer));
-    }
-
-    if let Ok(text) = std::str::from_utf8(buffer) {
-        if parse_terminal_key_sequence(text).is_some() {
-            return Some(std::mem::take(buffer));
-        }
-    }
-
-    if starts_with_incomplete_utf8_char(buffer) {
-        tracing::trace!(bytes = ?buffer, "waiting for UTF-8 continuation bytes");
-        return None;
-    }
-
-    if buffer.first() == Some(&ESC) && starts_with_incomplete_utf8_char(&buffer[1..]) {
-        tracing::trace!(bytes = ?buffer, "waiting for escaped UTF-8 continuation bytes");
-        return None;
-    }
-
-    tracing::debug!(bytes = ?buffer, "dropping incomplete raw input buffer after timeout");
-    buffer.clear();
-    None
+    let mut framer = RawInputByteFramer {
+        buffer: std::mem::take(buffer),
+        discard_until: None,
+        discarded_tail_bytes: 0,
+    };
+    let mut chunks = framer.flush_timeout();
+    *buffer = framer.buffer;
+    chunks.pop()
 }
 
 #[cfg(unix)]
@@ -334,6 +488,45 @@ fn extract_one_event(buffer: &[u8]) -> Option<(RawInputEvent, usize)> {
     Some((RawInputEvent::Key(key), consumed))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ControlStringFamily {
+    Osc,
+    StTerminated,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ControlString {
+    Complete {
+        len: usize,
+        family: ControlStringFamily,
+    },
+    Incomplete {
+        family: ControlStringFamily,
+    },
+}
+
+fn starts_with_incomplete_default_color_response(buffer: &[u8]) -> bool {
+    matches!(
+        control_string(buffer),
+        Some(ControlString::Incomplete {
+            family: ControlStringFamily::Osc
+        })
+    ) && matches!(buffer.get(..5), Some(b"\x1b]10;" | b"\x1b]11;"))
+}
+
+fn control_string(buffer: &[u8]) -> Option<ControlString> {
+    let family = match buffer.get(..2)? {
+        b"\x1b]" => ControlStringFamily::Osc,
+        b"\x1bP" | b"\x1b_" | b"\x1b^" | b"\x1bX" => ControlStringFamily::StTerminated,
+        _ => return None,
+    };
+
+    Some(match control_string_terminator_for_family(buffer, family) {
+        Some(len) => ControlString::Complete { len, family },
+        None => ControlString::Incomplete { family },
+    })
+}
+
 fn first_complete_utf8_char_len(buffer: &[u8]) -> Option<usize> {
     let width = utf8_char_width(*buffer.first()?)?;
 
@@ -385,12 +578,11 @@ fn complete_escape_sequence_len(buffer: &[u8]) -> Option<usize> {
         );
     }
 
-    if buffer.starts_with(b"\x1b]") {
-        return find_osc_terminator(buffer);
-    }
-
-    if buffer.starts_with(b"\x1bP") || buffer.starts_with(b"\x1b_") {
-        return find_subsequence(buffer, b"\x1b\\").map(|idx| idx + 2);
+    if let Some(control) = control_string(buffer) {
+        return match control {
+            ControlString::Complete { len, .. } => Some(len),
+            ControlString::Incomplete { .. } => None,
+        };
     }
 
     if buffer.starts_with(b"\x1bO") {
@@ -405,15 +597,33 @@ fn complete_escape_sequence_len(buffer: &[u8]) -> Option<usize> {
     Some(1 + escaped_char_width)
 }
 
-fn find_osc_terminator(buffer: &[u8]) -> Option<usize> {
-    find_subsequence(buffer, b"\x1b\\")
-        .map(|idx| idx + 2)
-        .or_else(|| {
-            buffer
-                .iter()
-                .position(|byte| *byte == b'\x07')
-                .map(|idx| idx + 1)
-        })
+fn osc_string_terminator(buffer: &[u8]) -> Option<usize> {
+    let st = find_subsequence(buffer, b"\x1b\\").map(|idx| idx + 2);
+    let bel = buffer
+        .iter()
+        .position(|byte| *byte == b'\x07')
+        .map(|idx| idx + 1);
+
+    match (st, bel) {
+        (Some(st), Some(bel)) => Some(st.min(bel)),
+        (Some(st), None) => Some(st),
+        (None, Some(bel)) => Some(bel),
+        (None, None) => None,
+    }
+}
+
+fn st_string_terminator(buffer: &[u8]) -> Option<usize> {
+    find_subsequence(buffer, b"\x1b\\").map(|idx| idx + 2)
+}
+
+fn control_string_terminator_for_family(
+    buffer: &[u8],
+    family: ControlStringFamily,
+) -> Option<usize> {
+    match family {
+        ControlStringFamily::Osc => osc_string_terminator(buffer),
+        ControlStringFamily::StTerminated => st_string_terminator(buffer),
+    }
 }
 
 fn find_csi_final(buffer: &[u8], finals: &[u8]) -> Option<usize> {
@@ -1284,5 +1494,202 @@ mod tests {
         assert_eq!(ranges[0].start, 0);
         assert_eq!(ranges[0].len, input.len());
         assert!(matches!(&ranges[0].event, RawInputEvent::Mouse(_)));
+    }
+
+    #[test]
+    fn parses_ghostty_default_background_response() {
+        let events = parse_raw_input_bytes_sync(b"\x1b]11;rgb:2828/2a2a/3636\x07");
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            RawInputEvent::HostDefaultColor {
+                kind: DefaultColorKind::Background,
+                color: RgbColor {
+                    r: 0x28,
+                    g: 0x2a,
+                    b: 0x36
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn drain_complete_input_bytes_keeps_split_default_background_response_buffered() {
+        let mut buffer = b"\x1b]11;rgb:2828".to_vec();
+
+        let chunks = drain_complete_input_bytes(&mut buffer);
+
+        assert!(chunks.is_empty());
+        assert_eq!(buffer, b"\x1b]11;rgb:2828");
+    }
+
+    #[test]
+    fn flush_incomplete_input_bytes_keeps_split_default_background_response_buffered() {
+        let mut buffer = b"\x1b]11;rgb:2828".to_vec();
+
+        let flushed = flush_incomplete_input_bytes(&mut buffer);
+
+        assert!(flushed.is_none());
+        assert_eq!(buffer, b"\x1b]11;rgb:2828");
+    }
+
+    #[test]
+    fn flush_incomplete_input_bytes_keeps_default_background_response_split_after_command() {
+        let mut buffer = b"\x1b]11;".to_vec();
+
+        let flushed = flush_incomplete_input_bytes(&mut buffer);
+
+        assert!(flushed.is_none());
+        assert_eq!(buffer, b"\x1b]11;");
+    }
+
+    #[test]
+    fn flush_incomplete_input_bytes_keeps_default_background_response_split_inside_st() {
+        let mut buffer = b"\x1b]11;rgb:2828/2a2a/3636\x1b".to_vec();
+
+        let flushed = flush_incomplete_input_bytes(&mut buffer);
+
+        assert!(flushed.is_none());
+        assert_eq!(buffer, b"\x1b]11;rgb:2828/2a2a/3636\x1b");
+    }
+
+    #[test]
+    fn drain_complete_input_bytes_keeps_bare_osc_introducer_buffered() {
+        let mut buffer = b"\x1b]".to_vec();
+
+        let chunks = drain_complete_input_bytes(&mut buffer);
+
+        assert!(chunks.is_empty());
+        assert_eq!(buffer, b"\x1b]");
+    }
+
+    #[test]
+    fn flush_incomplete_input_bytes_drops_bare_osc_introducer_after_timeout() {
+        let mut buffer = b"\x1b]".to_vec();
+
+        let flushed = flush_incomplete_input_bytes(&mut buffer);
+
+        assert!(flushed.is_none());
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn flush_incomplete_input_bytes_drops_string_introducers_after_timeout() {
+        for bytes in [
+            b"\x1b]".as_slice(),
+            b"\x1bP".as_slice(),
+            b"\x1b_".as_slice(),
+            b"\x1b^".as_slice(),
+            b"\x1bX".as_slice(),
+        ] {
+            let mut buffer = bytes.to_vec();
+
+            let flushed = flush_incomplete_input_bytes(&mut buffer);
+
+            assert!(flushed.is_none(), "flushed {bytes:?}");
+            assert!(buffer.is_empty(), "kept {bytes:?}");
+        }
+    }
+
+    #[test]
+    fn raw_input_framer_reassembles_split_default_background_response() {
+        let mut framer = RawInputFramer::default();
+
+        assert!(framer.push(b"\x1b]").is_empty());
+        let events = framer.push(b"11;#123456\x07");
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            RawInputEvent::HostDefaultColor {
+                kind: DefaultColorKind::Background,
+                color: RgbColor {
+                    r: 0x12,
+                    g: 0x34,
+                    b: 0x56,
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn raw_input_byte_framer_discards_split_control_string_after_timeout() {
+        let mut framer = RawInputByteFramer::default();
+
+        assert!(framer.push(b"\x1b]").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert!(framer.push(b"11;#123456\x07").is_empty());
+        assert_eq!(framer.push(b"a"), vec![b"a".to_vec()]);
+    }
+
+    #[test]
+    fn raw_input_byte_framer_keeps_discarding_tail_across_timeout() {
+        let mut framer = RawInputByteFramer::default();
+
+        assert!(framer.push(b"\x1b]").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert!(framer.push(b"1").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert!(framer.push(b"1;#123456\x07").is_empty());
+        assert_eq!(framer.push(b"a"), vec![b"a".to_vec()]);
+    }
+
+    #[test]
+    fn raw_input_byte_framer_releases_discard_on_implausible_tail() {
+        let mut framer = RawInputByteFramer::default();
+
+        assert!(framer.push(b"\x1b]").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert!(framer.push(b"a").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert_eq!(framer.push(b"b"), vec![b"b".to_vec()]);
+    }
+
+    #[test]
+    fn parse_raw_input_bytes_sync_does_not_parse_incomplete_strings_as_alt_keys() {
+        for bytes in [
+            b"\x1b]".as_slice(),
+            b"\x1bP".as_slice(),
+            b"\x1b_".as_slice(),
+            b"\x1b^".as_slice(),
+            b"\x1bX".as_slice(),
+        ] {
+            let events = parse_raw_input_bytes_sync(bytes);
+
+            assert!(events.is_empty(), "parsed {bytes:?} as {events:?}");
+        }
+    }
+
+    #[test]
+    fn non_osc_control_strings_ignore_bel_and_complete_at_st() {
+        let bytes = b"\x1bPabc\x07def\x1b\\x";
+
+        let (event, consumed) = extract_one_event(bytes).unwrap();
+
+        assert!(matches!(event, RawInputEvent::Unsupported));
+        assert_eq!(consumed, b"\x1bPabc\x07def\x1b\\".len());
+    }
+
+    #[test]
+    fn non_osc_default_color_text_remains_key_input() {
+        let events = parse_raw_input_bytes_sync(b"11;rgb:2828/2a2a/3636\x07");
+
+        assert_eq!(events.len(), 22);
+        assert_raw_key(
+            events.into_iter().next().unwrap(),
+            KeyCode::Char('1'),
+            KeyModifiers::empty(),
+        );
+    }
+
+    #[test]
+    fn flush_incomplete_input_bytes_does_not_hold_non_osc_default_color_text() {
+        let mut framer = RawInputByteFramer::default();
+
+        let chunks = framer.push(b"11;rgb:2828");
+
+        assert_eq!(chunks.len(), 11);
+        assert!(framer.flush_timeout().is_empty());
     }
 }

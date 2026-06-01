@@ -1,72 +1,63 @@
 ---
-import { logos } from 'virtual:starlight/user-images';
-import config from 'virtual:starlight/user-config';
-
 const { siteTitle, siteTitleHref } = Astro.locals.starlightRoute;
 ---
 
 <div class="title-row sl-flex">
   <a href={siteTitleHref} class="site-title sl-flex">
-    {
-      config.logo && logos.dark && (
-        <>
-          <img
-            class:list={{ 'light:sl-hidden print:hidden': !('src' in config.logo) }}
-            alt={config.logo.alt}
-            src={logos.dark.src}
-            width={logos.dark.width}
-            height={logos.dark.height}
-          />
-          {!('src' in config.logo) && (
-            <img
-              class="dark:sl-hidden print:block"
-              alt={config.logo.alt}
-              src={logos.light?.src}
-              width={logos.light?.width}
-              height={logos.light?.height}
-            />
-          )}
-        </>
-      )
-    }
-    <span class:list={{ 'sr-only': config.logo?.replacesTitle }} translate="no">
-      {siteTitle}
-    </span>
+    <span class="docs-brand-logo" aria-hidden="true"></span>
+    <span translate="no">{siteTitle}</span>
   </a>
   <nav class="title-nav" aria-label="Primary">
     <a href="/docs/">Docs</a>
+    <a href="/releases/">Releases</a>
+    <a href="/blog/">Blog</a>
   </nav>
 </div>
 
 <style>
   @layer starlight.core {
     .title-row {
-      align-items: baseline;
+      align-items: center;
       gap: 1rem;
       min-width: 0;
     }
 
     .site-title {
-      align-items: baseline;
-      gap: var(--sl-nav-gap);
+      align-items: center;
+      gap: 0.55rem;
+      font-family: var(--sl-font-mono);
       font-size: var(--sl-text-h4);
-      font-weight: 600;
-      color: var(--sl-color-text-accent);
+      font-weight: 700;
+      letter-spacing: -0.04em;
+      color: var(--sl-color-white);
       text-decoration: none;
       white-space: nowrap;
       min-width: 0;
+      transition: color 120ms ease;
     }
 
-    span {
+    .docs-brand-logo {
+      position: relative;
+      display: inline-block;
+      width: 32px;
+      height: 32px;
+      flex: 0 0 auto;
+      border: 1px solid var(--sl-color-hairline);
+      border-radius: 4px;
+      background: var(--sl-color-bg-nav);
+    }
+
+    .docs-brand-logo::before {
+      content: "";
+      position: absolute;
+      inset: 2px;
+      background: var(--sl-color-white);
+      -webkit-mask: url("/assets/agent-icons/herdr-mask.svg") center / contain no-repeat;
+      mask: url("/assets/agent-icons/herdr-mask.svg") center / contain no-repeat;
+    }
+
+    span:not(.docs-brand-logo) {
       overflow: hidden;
-    }
-
-    img {
-      height: calc(var(--sl-nav-height) - 2 * var(--sl-nav-pad-y));
-      width: auto;
-      max-width: 100%;
-      object-fit: contain;
-      object-position: 0 50%;
     }
 
     .title-nav {
@@ -79,12 +70,8 @@ const { siteTitle, siteTitleHref } = Astro.locals.starlightRoute;
     }
 
     .title-nav a {
-      color: var(--sl-color-text-accent);
+      color: var(--sl-color-white);
       text-decoration: none;
-      transition: color 120ms ease;
-    }
-
-    .site-title {
       transition: color 120ms ease;
     }
 

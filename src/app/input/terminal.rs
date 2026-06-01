@@ -201,7 +201,65 @@ mod tests {
         app_for_mouse_test, mouse, numbered_lines_bytes, unique_temp_path, wait_for_file,
     };
     use super::*;
-    use crate::{config::Config, workspace::Workspace};
+    use crate::{config::Config, events::AppEvent, workspace::Workspace};
+
+    fn app_with_screen_bytes(bytes: &[u8]) -> (App, crate::layout::PaneInfo) {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = pane_infos[0].clone();
+        ws.insert_test_runtime(
+            pane_id,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                bytes,
+            ),
+        );
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+        (app, info)
+    }
+
+    fn double_click(app: &mut App, col: u16, row: u16) {
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), col, row));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+    }
+
+    fn modified_mouse(
+        kind: MouseEventKind,
+        col: u16,
+        row: u16,
+        modifiers: KeyModifiers,
+    ) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers,
+        }
+    }
+
+    fn clipboard_write_content(app: &mut App) -> Vec<u8> {
+        match app.event_rx.try_recv().expect("clipboard write event") {
+            AppEvent::ClipboardWrite { content } => content,
+            event => panic!("unexpected event: {event:?}"),
+        }
+    }
+
+    fn assert_visible_selection(app: &App) {
+        assert!(app
+            .state
+            .selection
+            .as_ref()
+            .is_some_and(crate::selection::Selection::is_visible));
+    }
 
     #[tokio::test]
     async fn dragging_selection_above_pane_autoscrolls_and_extends_into_scrollback() {
@@ -307,6 +365,174 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), end_col, row));
 
         assert!(app.state.selection.is_none());
+    }
+
+    #[tokio::test]
+    async fn drag_copy_then_click_does_not_reuse_double_click_candidate() {
+        let (mut app, info) = app_with_screen_bytes(b"alpha beta");
+        let row = info.inner_rect.y;
+        let start_col = info.inner_rect.x;
+        let end_col = info.inner_rect.x + 4;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            start_col,
+            row,
+        ));
+        assert!(app.last_pane_click.is_some());
+
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), end_col, row));
+        assert!(app.last_pane_click.is_none());
+
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), end_col, row));
+        assert!(app.last_pane_click.is_none());
+        assert_eq!(clipboard_write_content(&mut app), b"alpha");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            start_col,
+            row,
+        ));
+
+        assert!(app.last_pane_click.is_some());
+        assert!(app.event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn double_click_selects_and_copies_word() {
+        let (mut app, info) = app_with_screen_bytes(b"alpha beta-gamma_delta@omega");
+        let col = info.inner_rect.x + 13;
+        let row = info.inner_rect.y;
+        double_click(&mut app, col, row);
+
+        assert_eq!(clipboard_write_content(&mut app), b"beta-gamma_delta@omega");
+        assert_visible_selection(&app);
+    }
+
+    #[tokio::test]
+    async fn double_click_uses_display_columns_for_wide_chars() {
+        let (mut app, info) = app_with_screen_bytes("echo 你好-world done".as_bytes());
+        let col = info.inner_rect.x + 8;
+        let row = info.inner_rect.y;
+        double_click(&mut app, col, row);
+
+        assert_eq!(clipboard_write_content(&mut app), "你好-world".as_bytes());
+        assert_visible_selection(&app);
+    }
+
+    #[tokio::test]
+    async fn double_click_copies_quoted_path_without_quotes() {
+        let line = r#"cat "/tmp/build output/log.txt""#;
+        let (mut app, info) = app_with_screen_bytes(line.as_bytes());
+        let col = info.inner_rect.x + line.find("output").expect("path segment") as u16;
+        let row = info.inner_rect.y;
+        double_click(&mut app, col, row);
+
+        assert_eq!(
+            clipboard_write_content(&mut app),
+            b"/tmp/build output/log.txt"
+        );
+        assert_visible_selection(&app);
+    }
+
+    #[tokio::test]
+    async fn double_click_excludes_trailing_punctuation() {
+        let (mut app, info) = app_with_screen_bytes(b"done.");
+        let col = info.inner_rect.x + 2;
+        let row = info.inner_rect.y;
+        double_click(&mut app, col, row);
+
+        assert_eq!(clipboard_write_content(&mut app), b"done");
+        assert_visible_selection(&app);
+    }
+
+    #[tokio::test]
+    async fn modified_pane_click_does_not_seed_double_click_copy() {
+        let (mut app, info) = app_with_screen_bytes(b"alpha beta");
+        let col = info.inner_rect.x + 7;
+        let row = info.inner_rect.y;
+
+        app.handle_mouse(modified_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            col,
+            row,
+            KeyModifiers::CONTROL,
+        ));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), col, row));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+
+        assert!(app.event_rx.try_recv().is_err());
+        assert!(app.selection_highlight_clear_deadline.is_none());
+    }
+
+    #[tokio::test]
+    async fn pane_cell_url_resolver_finds_visible_url() {
+        let line = "see https://example.com/pr/307.";
+        let (app, info) = app_with_screen_bytes(line.as_bytes());
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let col = line.find("example").expect("url host") as u16;
+
+        assert_eq!(
+            app.state
+                .url_at_pane_cell(&app.terminal_runtimes, pane_id, 0, col)
+                .as_deref(),
+            Some("https://example.com/pr/307")
+        );
+        assert_eq!(
+            app.state.url_at_pane_cell(
+                &app.terminal_runtimes,
+                pane_id,
+                0,
+                info.inner_rect.width - 1
+            ),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn pane_cell_url_resolver_prefers_osc8_hyperlink() {
+        let (app, _info) = app_with_screen_bytes(
+            b"\x1b]8;;https://example.com/hidden-target\x1b\\label\x1b]8;;\x1b\\",
+        );
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+        assert_eq!(
+            app.state
+                .url_at_pane_cell(&app.terminal_runtimes, pane_id, 0, 1)
+                .as_deref(),
+            Some("https://example.com/hidden-target")
+        );
+    }
+
+    #[tokio::test]
+    async fn double_click_highlight_clears_after_short_delay() {
+        let (mut app, info) = app_with_screen_bytes(b"copied");
+        let col = info.inner_rect.x + 2;
+        let row = info.inner_rect.y;
+        double_click(&mut app, col, row);
+        assert_eq!(clipboard_write_content(&mut app), b"copied");
+
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), col, row));
+
+        assert!(app.event_rx.try_recv().is_err());
+        assert!(app.state.selection.is_some());
+        let deadline = app
+            .selection_highlight_clear_deadline
+            .expect("highlight clear deadline");
+        assert!(app.handle_scheduled_tasks(deadline + std::time::Duration::from_millis(1)));
+        assert!(app.state.selection.is_none());
+    }
+
+    #[tokio::test]
+    async fn double_click_is_forwarded_when_mouse_reporting_is_enabled() {
+        let (mut app, info) = app_with_screen_bytes(b"\x1b[?1002halpha beta");
+        let col = info.inner_rect.x + 8;
+        let row = info.inner_rect.y;
+        double_click(&mut app, col, row);
+
+        assert!(app.event_rx.try_recv().is_err());
+        assert!(app.state.selection.is_none());
+        assert!(app.selection_highlight_clear_deadline.is_none());
     }
 
     #[tokio::test]
@@ -589,6 +815,7 @@ mod tests {
             label: "ctrl+alt+g".into(),
             command,
             action: crate::config::CustomCommandAction::Shell,
+            description: None,
         }];
 
         app.handle_terminal_key(TerminalKey::new(
@@ -619,7 +846,7 @@ mod tests {
             80,
             app.state.pane_scrollback_limit_bytes,
             app.state.host_terminal_theme,
-            &app.state.default_shell,
+            crate::pane::PaneShellConfig::new(&app.state.default_shell, app.state.shell_mode),
             app.event_tx.clone(),
             app.render_notify.clone(),
             app.render_dirty.clone(),
@@ -637,6 +864,7 @@ mod tests {
             label: "ctrl+alt+g".into(),
             command: "printf direct-pane".into(),
             action: crate::config::CustomCommandAction::Pane,
+            description: None,
         }];
 
         app.handle_terminal_key(TerminalKey::new(

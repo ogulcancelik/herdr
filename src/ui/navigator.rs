@@ -362,20 +362,30 @@ fn pane_detail(
     }
     if let Some(terminal_id) = tab.terminal_id(pane_id) {
         if let Some(terminal) = app.terminals.get(terminal_id) {
-            if let Some(agent) = terminal
-                .agent_name
-                .as_deref()
-                .or_else(|| terminal.effective_agent_label())
-            {
+            let presentation = terminal.effective_presentation();
+            if let Some(title) = presentation.title {
+                parts.push(title);
+            }
+            let display_agent = terminal.effective_display_agent();
+            if let Some(agent) = display_agent.as_deref().or_else(|| {
+                terminal
+                    .agent_name
+                    .as_deref()
+                    .or_else(|| terminal.effective_agent_label())
+            }) {
                 parts.push(agent.to_string());
                 let seen = tab
                     .panes
                     .get(&pane_id)
                     .map(|pane| pane.seen)
                     .unwrap_or(true);
-                parts.push(
-                    display_state(row_state(app, ws_idx, tab_idx, pane_id), seen).to_string(),
-                );
+                let state = row_state(app, ws_idx, tab_idx, pane_id);
+                let status = presentation
+                    .state_labels
+                    .get(display_state(state, seen))
+                    .cloned()
+                    .unwrap_or_else(|| display_state(state, seen).to_string());
+                parts.push(status);
             } else {
                 parts.push("shell".to_string());
             }

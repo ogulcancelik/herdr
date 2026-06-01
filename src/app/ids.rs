@@ -1,7 +1,7 @@
 use super::App;
 
 impl App {
-    pub(super) fn find_pane(
+    pub(crate) fn find_pane(
         &self,
         pane_id: crate::layout::PaneId,
     ) -> Option<(usize, &crate::pane::PaneState)> {
@@ -57,15 +57,27 @@ impl App {
         Some((ws_idx, tab_idx))
     }
 
+    fn resolve_raw_pane_id(&self, raw: u32) -> Option<crate::layout::PaneId> {
+        if let Some(alias) = self.state.pane_id_aliases.get(&raw).copied() {
+            return self.find_pane(alias).map(|_| alias);
+        }
+        let pane_id = crate::layout::PaneId::from_raw(raw);
+        if self.find_pane(pane_id).is_some() {
+            return Some(pane_id);
+        }
+        None
+    }
+
     pub(super) fn parse_pane_id(&self, id: &str) -> Option<(usize, crate::layout::PaneId)> {
         if let Some(rest) = id.strip_prefix("p_") {
             if let Some((ws_raw, pane_raw)) = rest.rsplit_once('_') {
                 let ws_idx = self.parse_workspace_id(ws_raw)?;
-                let pane_id = crate::layout::PaneId::from_raw(pane_raw.parse::<u32>().ok()?);
+                let pane_id = self.resolve_raw_pane_id(pane_raw.parse::<u32>().ok()?)?;
+                self.state.workspaces.get(ws_idx)?.pane_state(pane_id)?;
                 return Some((ws_idx, pane_id));
             }
 
-            let pane_id = crate::layout::PaneId::from_raw(rest.parse::<u32>().ok()?);
+            let pane_id = self.resolve_raw_pane_id(rest.parse::<u32>().ok()?)?;
             return self.find_pane(pane_id).map(|(ws_idx, _)| (ws_idx, pane_id));
         }
 

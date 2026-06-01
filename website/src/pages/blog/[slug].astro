@@ -1,0 +1,88 @@
+---
+import { getCollection, render } from 'astro:content';
+import MarketingLayout from '../../components/MarketingLayout.astro';
+
+export async function getStaticPaths() {
+  const posts = await getCollection('blog');
+  return posts
+    .filter((post) => !post.data.draft)
+    .map((post) => {
+      const slug = post.id.replace(/\.(md|mdx)$/i, '');
+      return {
+        params: { slug },
+        props: { post, slug },
+      };
+    });
+}
+
+const { post, slug } = Astro.props;
+const { Content, headings } = await render(post);
+const sectionHeadings = headings.filter((heading) => heading.depth === 2);
+---
+
+<MarketingLayout
+  title={`${post.data.title} — Herdr blog`}
+  description={post.data.description}
+  canonicalPath={`/blog/${slug}/`}
+  ogType="article"
+>
+  <main class="content-shell">
+    <div class="article-layout section">
+      <aside class="article-toc" aria-label="Article sections">
+        <p>Sections</p>
+        <nav>
+          {sectionHeadings.map((heading) => (
+            <a href={`#${heading.slug}`} data-heading-link={heading.slug}>{heading.text}</a>
+          ))}
+        </nav>
+      </aside>
+
+      <article class="article-shell">
+        <header class="article-header">
+          <p class="post-meta">
+            <a href="/blog/">Blog</a>
+            <time datetime={post.data.date.toISOString()}>{post.data.date.toLocaleDateString('en', {
+              year: 'numeric',
+              month: 'long',
+              day: 'numeric',
+            })}</time>
+          </p>
+          <h1>{post.data.title}</h1>
+          <p>{post.data.description}</p>
+        </header>
+        <div class="article-prose">
+          <Content />
+        </div>
+      </article>
+    </div>
+  </main>
+
+  <script>
+    const headings = Array.from(document.querySelectorAll('.article-prose h2[id]'));
+    const links = new Map(
+      Array.from(document.querySelectorAll('[data-heading-link]')).map((link) => [
+        link.getAttribute('data-heading-link'),
+        link,
+      ]),
+    );
+
+    function setActive(id) {
+      for (const link of links.values()) link.removeAttribute('aria-current');
+      links.get(id)?.setAttribute('aria-current', 'true');
+    }
+
+    if (headings.length > 0 && links.size > 0) {
+      setActive(headings[0].id);
+      const observer = new IntersectionObserver(
+        (entries) => {
+          const visible = entries
+            .filter((entry) => entry.isIntersecting)
+            .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+          if (visible?.target instanceof HTMLElement) setActive(visible.target.id);
+        },
+        { rootMargin: '-18% 0px -68% 0px', threshold: 0 },
+      );
+      for (const heading of headings) observer.observe(heading);
+    }
+  </script>
+</MarketingLayout>

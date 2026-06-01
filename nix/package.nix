@@ -42,7 +42,9 @@ rustPlatform.buildRustPackage {
     );
   };
 
-  cargoLock.lockFile = ../Cargo.lock;
+  cargoLock = {
+    lockFile = ../Cargo.lock;
+  };
 
   nativeBuildInputs = [
     git

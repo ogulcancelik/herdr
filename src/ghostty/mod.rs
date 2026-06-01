@@ -806,6 +806,64 @@ impl Terminal {
         )
     }
 
+    pub fn keyboard_state_ansi(&self) -> Result<String, Error> {
+        self.format_keyboard_state_ansi(false)
+    }
+
+    pub fn kitty_keyboard_state_ansi(&self) -> Result<String, Error> {
+        self.format_keyboard_state_ansi(true)
+    }
+
+    fn format_keyboard_state_ansi(&self, kitty_keyboard: bool) -> Result<String, Error> {
+        let mut formatter: ffi::GhosttyFormatter_ptr = ptr::null_mut();
+        let options = ffi::GhosttyFormatterTerminalOptions {
+            size: mem::size_of::<ffi::GhosttyFormatterTerminalOptions>(),
+            emit: FormatterFormat::Vt.as_raw(),
+            unwrap: false,
+            trim: false,
+            extra: ffi::GhosttyFormatterTerminalExtra {
+                size: mem::size_of::<ffi::GhosttyFormatterTerminalExtra>(),
+                keyboard: true,
+                screen: ffi::GhosttyFormatterScreenExtra {
+                    size: mem::size_of::<ffi::GhosttyFormatterScreenExtra>(),
+                    kitty_keyboard,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            selection: ptr::null(),
+        };
+        unsafe {
+            ffi::ghostty_formatter_terminal_new(ptr::null(), &mut formatter, self.raw, options)
+                .into_result()?;
+        }
+
+        let mut out_ptr = ptr::null_mut();
+        let mut out_len = 0usize;
+        let result = unsafe {
+            ffi::ghostty_formatter_format_alloc(formatter, ptr::null(), &mut out_ptr, &mut out_len)
+        };
+        unsafe {
+            ffi::ghostty_formatter_free(formatter);
+        }
+        result.into_result()?;
+
+        let text = if out_len == 0 {
+            String::new()
+        } else {
+            let bytes = unsafe { slice::from_raw_parts(out_ptr.cast_const(), out_len) };
+            String::from_utf8_lossy(bytes).into_owned()
+        };
+
+        if !out_ptr.is_null() {
+            unsafe {
+                ffi::ghostty_free(ptr::null(), out_ptr, out_len);
+            }
+        }
+
+        Ok(text)
+    }
+
     fn read_formatted_selection(
         &self,
         start: ffi::GhosttyPoint,

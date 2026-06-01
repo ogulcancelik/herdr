@@ -1,14 +1,15 @@
 //! Stdin input reading for the thin client.
 //!
-//! Reads raw bytes from stdin and forwards them to the main event loop.
-//! Unlike the monolithic herdr, the thin client does NOT parse the input
-//! into key/mouse/paste events — it just sends the raw bytes to the server
-//! as `ClientMessage::Input`. The server handles parsing.
+//! Reads stdin bytes and forwards framed input to the main event loop.
+//! Unlike the monolithic herdr, the thin client does NOT parse input into
+//! key/mouse/paste events. It keeps enough byte-framing state to avoid splitting
+//! terminal control strings, then sends bytes to the server as `ClientMessage::Input`.
+//! The server handles semantic parsing.
 //!
 //! This is simpler and more reliable because:
 //! - The server has the same input parsing code
 //! - We avoid duplicating parsing logic in the client
-//! - Raw forwarding preserves all escape sequences faithfully
+//! - Host terminal control replies can be buffered or discarded before they leak
 
 use std::io::{self, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,15 +34,13 @@ pub fn stdin_reader_loop(event_tx: mpsc::Sender<ClientLoopEvent>, should_quit: &
     let stdin = io::stdin();
     let mut reader = stdin.lock();
     let mut scratch = [0u8; 4096];
-    let mut buffer = Vec::new();
+    let mut framer = crate::raw_input::RawInputByteFramer::default();
 
     while !should_quit.load(Ordering::Acquire) {
         match reader.read(&mut scratch) {
             Ok(0) => break,
             Ok(n) => {
-                buffer.extend_from_slice(&scratch[..n]);
-
-                for data in crate::raw_input::drain_complete_input_bytes(&mut buffer) {
+                for data in framer.push(&scratch[..n]) {
                     if event_tx
                         .blocking_send(ClientLoopEvent::StdinInput(data))
                         .is_err()
@@ -50,9 +49,8 @@ pub fn stdin_reader_loop(event_tx: mpsc::Sender<ClientLoopEvent>, should_quit: &
                     }
                 }
 
-                if !buffer.is_empty() && stdin_read_ready(&reader, 10) == Some(false) {
-                    if let Some(data) = crate::raw_input::flush_incomplete_input_bytes(&mut buffer)
-                    {
+                if stdin_read_ready(&reader, 10) == Some(false) {
+                    for data in framer.flush_timeout() {
                         if event_tx
                             .blocking_send(ClientLoopEvent::StdinInput(data))
                             .is_err()

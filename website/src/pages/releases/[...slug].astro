@@ -1,0 +1,89 @@
+---
+import { getCollection, render } from 'astro:content';
+import MarketingLayout from '../../components/MarketingLayout.astro';
+
+export async function getStaticPaths() {
+  const releases = await getCollection('releases');
+  return releases
+    .filter((release) => !release.data.draft)
+    .map((release) => {
+      const slug = release.data.path;
+      return {
+        params: { slug },
+        props: { release, slug },
+      };
+    });
+}
+
+const { release, slug } = Astro.props;
+const { Content, headings } = await render(release);
+const sectionHeadings = headings.filter((heading) => heading.depth === 2);
+---
+
+<MarketingLayout
+  title={`${release.data.version}: ${release.data.title} — Herdr releases`}
+  description={release.data.description}
+  canonicalPath={`/releases/${slug}/`}
+  ogType="article"
+>
+  <main class="content-shell">
+    <div class="article-layout release-layout section">
+      <aside class="article-toc" aria-label="Release sections">
+        <p>Sections</p>
+        <nav>
+          {sectionHeadings.map((heading) => (
+            <a href={`#${heading.slug}`} data-heading-link={heading.slug}>{heading.text}</a>
+          ))}
+        </nav>
+      </aside>
+
+      <article class="article-shell release-shell">
+        <header class="article-header release-header">
+          <p class="post-meta">
+            <a href="/releases/">Releases</a>
+            <span>{release.data.version}</span>
+            <time datetime={release.data.date.toISOString()}>{release.data.date.toLocaleDateString('en', {
+              year: 'numeric',
+              month: 'long',
+              day: 'numeric',
+            })}</time>
+          </p>
+          <h1>{release.data.title}</h1>
+          <p>{release.data.description}</p>
+        </header>
+        <div class="article-prose release-prose">
+          <Content />
+        </div>
+      </article>
+    </div>
+  </main>
+
+  <script>
+    const headings = Array.from(document.querySelectorAll('.article-prose h2[id]'));
+    const links = new Map(
+      Array.from(document.querySelectorAll('[data-heading-link]')).map((link) => [
+        link.getAttribute('data-heading-link'),
+        link,
+      ]),
+    );
+
+    function setActive(id) {
+      for (const link of links.values()) link.removeAttribute('aria-current');
+      links.get(id)?.setAttribute('aria-current', 'true');
+    }
+
+    if (headings.length > 0 && links.size > 0) {
+      setActive(headings[0].id);
+      const observer = new IntersectionObserver(
+        (entries) => {
+          const visible = entries
+            .filter((entry) => entry.isIntersecting)
+            .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+          if (visible?.target instanceof HTMLElement) setActive(visible.target.id);
+        },
+        { rootMargin: '-18% 0px -68% 0px', threshold: 0 },
+      );
+      for (const heading of headings) observer.observe(heading);
+    }
+  </script>
+</MarketingLayout>

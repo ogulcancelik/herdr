@@ -15,6 +15,14 @@ curl -fsSL https://herdr.dev/install.sh | sh
 
 The installer downloads the right release binary for your platform and places it on your PATH.
 
+## Install with Homebrew
+
+If you already use Homebrew:
+
+```bash
+brew install herdr
+```
+
 ## Verify
 
 Start Herdr:
@@ -32,6 +40,18 @@ Herdr checks for new releases and notifies you in the app. You can update manual
 ```bash
 herdr update
 ```
+
+`herdr update` is for installs managed by Herdr's own installer. Homebrew and Nix installs are updated through those package managers instead.
+
+By default, `herdr update` installs the new binary and leaves compatible running sessions alone. If an update changes Herdr's client/server protocol, Herdr asks whether to stop the old server after installing. Stop the old server to use the new version. Stopping exits pane processes. For the default session, run `herdr server stop`, then run `herdr` again. For a named session, run `herdr session stop <name>`, then run `herdr session attach <name>` again.
+
+To opt into experimental live server handoff for supported running sessions, run:
+
+```bash
+herdr update --handoff
+```
+
+Live handoff does not apply to Homebrew or Nix package-manager updates. For those installs, update with the package manager, then restart that Herdr session when you are ready to use the new server. If a running session still uses the old server, stop it with `herdr server stop` or `herdr session stop <name>`, then run Herdr again.
 
 ## Install with Nix
 

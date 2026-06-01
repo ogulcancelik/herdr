@@ -6,12 +6,14 @@ use tracing::{info, warn};
 use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::{find_in_direction, NavDirection, PaneId};
+use crate::selection::Selection;
 use crate::terminal::{EffectiveStateChange, TerminalStateMutation};
 use crate::workspace::WorkspaceGitStatus;
+use unicode_width::UnicodeWidthChar;
 
 use super::state::{
-    AppState, Mode, NavigatorRow, NavigatorStateFilter, NavigatorTarget, ToastKind,
-    ToastNotification, ToastTarget, ViewLayout,
+    text_matches_query, AppState, Mode, NavigatorRow, NavigatorStateFilter, NavigatorTarget,
+    PaneFocusTarget, ToastKind, ToastNotification, ToastTarget, ViewLayout,
 };
 
 fn is_background_completion_transition(prev_state: AgentState, new_state: AgentState) -> bool {
@@ -71,10 +73,11 @@ fn toast_agent_label(agent_label: &str) -> &str {
 
 pub fn notification_context(
     ws: &crate::workspace::Workspace,
+    workspace_label: &str,
     ws_idx: usize,
     pane_id: PaneId,
 ) -> String {
-    let mut context = format!("{} · {}", ws.display_name(), ws_idx + 1);
+    let mut context = format!("{} · {}", workspace_label, ws_idx + 1);
     if ws.tabs.len() > 1 {
         if let Some(tab_idx) = ws.find_tab_index_for_pane(pane_id) {
             let tab = &ws.tabs[tab_idx];
@@ -91,10 +94,13 @@ pub struct PaneStateUpdate {
     pub previous_agent_label: Option<String>,
     pub previous_known_agent: Option<Agent>,
     pub previous_state: AgentState,
+    pub previous_seen: bool,
+    pub previous_presentation: crate::terminal::EffectivePresentation,
     pub agent_label: Option<String>,
     pub known_agent: Option<Agent>,
     pub state: AgentState,
-    pub custom_status: Option<String>,
+    pub seen: bool,
+    pub presentation: crate::terminal::EffectivePresentation,
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +108,80 @@ pub struct PaneStateUpdate {
 // ---------------------------------------------------------------------------
 
 impl AppState {
+    pub(crate) fn current_pane_focus_target(&self) -> Option<PaneFocusTarget> {
+        let ws_idx = self.active?;
+        let ws = self.workspaces.get(ws_idx)?;
+        let pane_id = ws.focused_pane_id()?;
+        Some(PaneFocusTarget {
+            workspace_id: ws.id.clone(),
+            pane_id,
+        })
+    }
+
+    fn pane_focus_target_indices(&self, target: &PaneFocusTarget) -> Option<(usize, usize)> {
+        let ws_idx = self
+            .workspaces
+            .iter()
+            .position(|ws| ws.id == target.workspace_id)?;
+        let tab_idx = self.workspaces[ws_idx].find_tab_index_for_pane(target.pane_id)?;
+        Some((ws_idx, tab_idx))
+    }
+
+    pub(crate) fn record_pane_focus_change(
+        &mut self,
+        previous: Option<PaneFocusTarget>,
+        ws_idx: usize,
+        pane_id: PaneId,
+    ) {
+        let Some(ws) = self.workspaces.get(ws_idx) else {
+            return;
+        };
+        let target = PaneFocusTarget {
+            workspace_id: ws.id.clone(),
+            pane_id,
+        };
+        if previous.as_ref() != Some(&target) {
+            self.previous_pane_focus = previous;
+        }
+    }
+
+    fn record_pane_focus_after_navigation(&mut self, previous: Option<PaneFocusTarget>) {
+        let current = self.current_pane_focus_target();
+        if previous != current {
+            self.previous_pane_focus = previous;
+        }
+    }
+
+    pub(crate) fn focus_pane_in_workspace(&mut self, ws_idx: usize, pane_id: PaneId) -> bool {
+        let Some(ws) = self.workspaces.get(ws_idx) else {
+            return false;
+        };
+        let Some(tab_idx) = ws.find_tab_index_for_pane(pane_id) else {
+            return false;
+        };
+        let previous = self.current_pane_focus_target();
+        let target = PaneFocusTarget {
+            workspace_id: ws.id.clone(),
+            pane_id,
+        };
+        if previous.as_ref() == Some(&target) {
+            return false;
+        }
+
+        self.switch_workspace_tab(ws_idx, tab_idx);
+        if let Some(tab) = self
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|ws| ws.tabs.get_mut(tab_idx))
+        {
+            tab.layout.focus_pane(pane_id);
+            self.previous_pane_focus = previous;
+            self.mark_session_dirty();
+            return true;
+        }
+        false
+    }
+
     pub(crate) fn open_navigator(&mut self) {
         self.navigator.query.clear();
         self.navigator.search_focused = false;
@@ -257,23 +337,37 @@ impl AppState {
             let terminal = self.terminals.get(&pane.attached_terminal_id);
             let pane_number = ws.public_pane_number(pane_id).unwrap_or(0);
             let label = terminal
-                .and_then(|terminal| terminal.manual_label.as_deref())
-                .or_else(|| terminal.and_then(|terminal| terminal.agent_name.as_deref()))
-                .or_else(|| terminal.and_then(|terminal| terminal.effective_agent_label()))
-                .map(str::to_string)
+                .and_then(|terminal| terminal.effective_title())
+                .or_else(|| {
+                    terminal
+                        .and_then(|terminal| terminal.manual_label.as_deref().map(str::to_string))
+                })
+                .or_else(|| {
+                    terminal.and_then(|terminal| terminal.agent_name.as_deref().map(str::to_string))
+                })
+                .or_else(|| {
+                    terminal
+                        .and_then(|terminal| terminal.effective_agent_label().map(str::to_string))
+                })
                 .or_else(|| {
                     launch_label(terminal.and_then(|terminal| terminal.launch_argv.as_ref()))
                 })
                 .unwrap_or_else(|| format!("pane {pane_number}"));
-            let agent_label = terminal
-                .and_then(|terminal| terminal.agent_name.as_deref())
-                .or_else(|| terminal.and_then(|terminal| terminal.effective_agent_label()));
+            let display_agent = terminal.and_then(|terminal| terminal.effective_display_agent());
+            let agent_label = display_agent.as_deref().or_else(|| {
+                terminal
+                    .and_then(|terminal| terminal.agent_name.as_deref())
+                    .or_else(|| terminal.and_then(|terminal| terminal.effective_agent_label()))
+            });
             let custom_status = terminal.and_then(|terminal| terminal.effective_custom_status());
             let state = terminal
                 .map(|terminal| terminal.state)
                 .unwrap_or(AgentState::Unknown);
+            let status_label = terminal
+                .map(|terminal| terminal.effective_presentation().state_labels)
+                .and_then(|labels| labels.get(state_label_text(state, pane.seen)).cloned());
             let status = custom_status
-                .map(str::to_string)
+                .or(status_label)
                 .or_else(|| agent_label.map(|_| state_label_text(state, pane.seen).to_string()));
             let meta = match (agent_label, status.as_deref()) {
                 (Some(agent_label), Some(status)) => format!("{agent_label} · {status}"),
@@ -401,8 +495,7 @@ impl AppState {
                 if !tab_exists {
                     return false;
                 }
-                self.switch_workspace(ws_idx);
-                self.switch_tab(tab_idx);
+                self.switch_workspace_tab(ws_idx, tab_idx);
                 self.mode = Mode::Terminal;
                 true
             }
@@ -414,19 +507,15 @@ impl AppState {
                 if ws_idx >= self.workspaces.len() {
                     return false;
                 }
-                self.switch_workspace(ws_idx);
-                self.switch_tab(tab_idx);
-                if let Some(tab) = self
+                if self
                     .workspaces
-                    .get_mut(ws_idx)
-                    .and_then(|ws| ws.tabs.get_mut(tab_idx))
+                    .get(ws_idx)
+                    .and_then(|ws| ws.tabs.get(tab_idx))
+                    .is_some_and(|tab| tab.panes.contains_key(&pane_id))
                 {
-                    if tab.panes.contains_key(&pane_id) {
-                        tab.layout.focus_pane(pane_id);
-                        self.mark_session_dirty();
-                        self.mode = Mode::Terminal;
-                        return true;
-                    }
+                    self.focus_pane_in_workspace(ws_idx, pane_id);
+                    self.mode = Mode::Terminal;
+                    return true;
                 }
                 false
             }
@@ -469,9 +558,7 @@ fn navigator_state_filter_matches(
 }
 
 fn navigator_matches(query: &str, text: &str) -> bool {
-    query
-        .split_whitespace()
-        .all(|part| text.contains(&part.to_lowercase()))
+    text_matches_query(query, text)
 }
 
 fn launch_label(argv: Option<&Vec<String>>) -> Option<String> {
@@ -585,6 +672,63 @@ fn activity_summary_for_panes<'a>(
 // ---------------------------------------------------------------------------
 
 impl AppState {
+    pub(crate) fn next_agent_metadata_expiry(&self) -> Option<std::time::Instant> {
+        self.terminals
+            .values()
+            .filter_map(|terminal| terminal.next_agent_metadata_expiry())
+            .min()
+    }
+
+    pub(crate) fn expire_agent_metadata_at(
+        &mut self,
+        scheduled_deadline: std::time::Instant,
+        now: std::time::Instant,
+    ) -> Vec<PaneStateUpdate> {
+        let pane_terminals: Vec<_> = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .flat_map(|(ws_idx, ws)| {
+                ws.tabs.iter().flat_map(move |tab| {
+                    tab.layout
+                        .pane_ids()
+                        .into_iter()
+                        .filter_map(move |pane_id| {
+                            ws.pane_state(pane_id)
+                                .map(|pane| (ws_idx, pane_id, pane.attached_terminal_id.clone()))
+                        })
+                })
+            })
+            .collect();
+        pane_terminals
+            .into_iter()
+            .filter_map(|(ws_idx, pane_id, terminal_id)| {
+                let previous_seen = self.workspaces[ws_idx].pane_state(pane_id)?.seen;
+                let mutation = self
+                    .terminals
+                    .get_mut(&terminal_id)?
+                    .expire_agent_metadata_at(scheduled_deadline, now)?;
+                let change = mutation.effective_state_change?;
+                let seen = self.apply_pane_state_change(ws_idx, pane_id, &change)?;
+                let update = PaneStateUpdate {
+                    pane_id,
+                    ws_idx,
+                    previous_agent_label: change.previous_agent_label.clone(),
+                    previous_known_agent: change.previous_known_agent,
+                    previous_state: change.previous_state,
+                    previous_seen,
+                    previous_presentation: change.previous_presentation.clone(),
+                    agent_label: change.agent_label.clone(),
+                    known_agent: change.known_agent,
+                    state: change.state,
+                    seen,
+                    presentation: change.presentation.clone(),
+                };
+                Some(update)
+            })
+            .collect()
+    }
+
     pub(crate) fn pane_is_in_active_tab(&self, ws_idx: usize, pane_id: PaneId) -> bool {
         let Some(active_ws_idx) = self.active else {
             return false;
@@ -599,6 +743,7 @@ impl AppState {
 
     pub fn switch_workspace(&mut self, idx: usize) {
         if idx < self.workspaces.len() {
+            let previous_focus = self.current_pane_focus_target();
             self.selection = None;
             self.selection_autoscroll = None;
             self.active = Some(idx);
@@ -621,7 +766,51 @@ impl AppState {
             }
             self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
+            self.record_pane_focus_after_navigation(previous_focus);
         }
+    }
+
+    pub(crate) fn switch_workspace_tab(&mut self, ws_idx: usize, tab_idx: usize) -> bool {
+        if ws_idx >= self.workspaces.len() {
+            return false;
+        }
+        if self
+            .workspaces
+            .get(ws_idx)
+            .is_none_or(|ws| tab_idx >= ws.tabs.len())
+        {
+            return false;
+        }
+
+        let previous_focus = self.current_pane_focus_target();
+        let workspace_changed = self.active != Some(ws_idx);
+        self.selection = None;
+        self.selection_autoscroll = None;
+        self.active = Some(ws_idx);
+        self.selected = ws_idx;
+        let workspace_id = self.workspaces[ws_idx].id.clone();
+        if workspace_changed {
+            crate::logging::workspace_focused(&workspace_id);
+        }
+        self.mark_session_dirty();
+        if workspace_changed
+            && matches!(
+                self.agent_panel_scope,
+                crate::app::state::AgentPanelScope::CurrentWorkspace
+            )
+        {
+            self.agent_panel_scroll = 0;
+        }
+        self.ensure_workspace_visible(ws_idx);
+        if let Some(ws) = self.workspaces.get_mut(ws_idx) {
+            ws.switch_tab(tab_idx);
+            let tab_id = format!("{}:{}", workspace_id, tab_idx + 1);
+            crate::logging::tab_focused(&workspace_id, &tab_id);
+        }
+        self.tab_scroll_follow_active = true;
+        self.refresh_tab_bar_view();
+        self.record_pane_focus_after_navigation(previous_focus);
+        true
     }
 
     pub(crate) fn ensure_workspace_visible(&mut self, idx: usize) {
@@ -705,6 +894,7 @@ impl AppState {
 
     pub fn switch_tab(&mut self, idx: usize) {
         if let Some(ws_idx) = self.active {
+            let previous_focus = self.current_pane_focus_target();
             self.selection = None;
             self.selection_autoscroll = None;
             let Some(ws) = self.workspaces.get_mut(ws_idx) else {
@@ -717,6 +907,7 @@ impl AppState {
             self.mark_session_dirty();
             self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
+            self.record_pane_focus_after_navigation(previous_focus);
         }
     }
 
@@ -891,22 +1082,17 @@ impl AppState {
             return false;
         };
         let ws_idx = target.ws_idx;
-        let tab_idx = target.tab_idx;
         let pane_id = target.pane_id;
 
-        self.switch_workspace(ws_idx);
-        self.switch_tab(tab_idx);
-        if let Some(tab) = self
-            .workspaces
-            .get_mut(ws_idx)
-            .and_then(|ws| ws.tabs.get_mut(tab_idx))
+        if self.active == Some(ws_idx) && self.workspaces[ws_idx].focused_pane_id() == Some(pane_id)
         {
-            if tab.panes.contains_key(&pane_id) {
-                tab.layout.focus_pane(pane_id);
-                self.mark_session_dirty();
-                self.ensure_agent_panel_entry_visible(idx);
-                return true;
-            }
+            self.ensure_agent_panel_entry_visible(idx);
+            return true;
+        }
+
+        if self.focus_pane_in_workspace(ws_idx, pane_id) {
+            self.ensure_agent_panel_entry_visible(idx);
+            return true;
         }
         false
     }
@@ -1122,14 +1308,7 @@ impl AppState {
 
         if let Some(focused) = panes.iter().find(|p| p.is_focused) {
             if let Some(target) = find_in_direction(focused, direction, &panes) {
-                if let Some(tab) = self
-                    .workspaces
-                    .get_mut(ws_idx)
-                    .and_then(|ws| ws.active_tab_mut())
-                {
-                    tab.layout.focus_pane(target);
-                    self.mark_session_dirty();
-                }
+                self.focus_pane_in_workspace(ws_idx, target);
             }
         }
     }
@@ -1153,16 +1332,45 @@ impl AppState {
     }
 
     pub fn cycle_pane(&mut self, reverse: bool) {
-        if let Some(tab) = self
-            .active
-            .and_then(|i| self.workspaces.get_mut(i))
-            .and_then(|ws| ws.active_tab_mut())
-        {
-            if reverse {
-                tab.layout.focus_prev();
+        let Some(ws_idx) = self.active else {
+            return;
+        };
+        let Some(tab) = self.workspaces.get(ws_idx).and_then(|ws| ws.active_tab()) else {
+            return;
+        };
+        let ids = tab.layout.pane_ids();
+        if let Some(pos) = ids.iter().position(|id| *id == tab.layout.focused()) {
+            let target = if reverse {
+                ids[(pos + ids.len() - 1) % ids.len()]
             } else {
-                tab.layout.focus_next();
-            }
+                ids[(pos + 1) % ids.len()]
+            };
+            self.focus_pane_in_workspace(ws_idx, target);
+        }
+    }
+
+    pub fn last_pane(&mut self) {
+        let Some(target) = self.previous_pane_focus.clone() else {
+            return;
+        };
+        let Some((ws_idx, tab_idx)) = self.pane_focus_target_indices(&target) else {
+            self.previous_pane_focus = None;
+            return;
+        };
+        let current = self.current_pane_focus_target();
+        if current.as_ref() == Some(&target) {
+            self.previous_pane_focus = None;
+            return;
+        }
+
+        self.switch_workspace_tab(ws_idx, tab_idx);
+        if let Some(tab) = self
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|ws| ws.tabs.get_mut(tab_idx))
+        {
+            tab.layout.focus_pane(target.pane_id);
+            self.previous_pane_focus = current;
             self.mark_session_dirty();
         }
     }
@@ -1180,11 +1388,68 @@ impl AppState {
         }
     }
 
-    pub fn close_pane(&mut self) {
+    pub(crate) fn workspace_close_would_close_worktree_group(&self, ws_idx: usize) -> bool {
+        self.workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.worktree_space())
+            .filter(|space| !space.is_linked_worktree)
+            .is_some_and(|space| {
+                self.workspaces
+                    .iter()
+                    .filter(|ws| {
+                        ws.worktree_space()
+                            .is_some_and(|member| member.key == space.key)
+                    })
+                    .count()
+                    >= 2
+            })
+    }
+
+    pub(crate) fn confirm_implicit_worktree_group_close(&mut self, ws_idx: usize) -> bool {
+        if self.confirm_close && self.workspace_close_would_close_worktree_group(ws_idx) {
+            self.selected = ws_idx;
+            self.mode = Mode::ConfirmClose;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn close_focused_pane_would_close_workspace(&self, ws_idx: usize) -> bool {
+        self.workspaces.get(ws_idx).is_some_and(|ws| {
+            let pane_count = ws
+                .active_tab()
+                .map(|tab| tab.layout.pane_count())
+                .unwrap_or(0);
+            pane_count <= 1 && ws.tabs.len() <= 1
+        })
+    }
+
+    pub(crate) fn close_pane_would_close_workspace(&self, ws_idx: usize, pane_id: PaneId) -> bool {
+        self.workspaces.get(ws_idx).is_some_and(|ws| {
+            ws.find_tab_index_for_pane(pane_id).is_some_and(|tab_idx| {
+                ws.tabs[tab_idx].layout.pane_count() <= 1 && ws.tabs.len() <= 1
+            })
+        })
+    }
+
+    /// Close the focused pane. Returns true when the close was deferred to confirmation.
+    pub fn close_pane(&mut self) -> bool {
+        let active = self.active;
+        if active.is_some_and(|ws_idx| {
+            self.close_focused_pane_would_close_workspace(ws_idx)
+                && self.workspace_close_would_close_worktree_group(ws_idx)
+        }) {
+            if let Some(ws_idx) = active {
+                if self.confirm_implicit_worktree_group_close(ws_idx) {
+                    return true;
+                }
+            }
+        }
+
         self.selection = None;
         self.selection_autoscroll = None;
         self.mark_session_dirty();
-        let active = self.active;
         let terminal_ids = active
             .and_then(|i| {
                 self.workspaces
@@ -1205,9 +1470,24 @@ impl AppState {
         } else {
             self.remove_unattached_terminal_ids(terminal_ids);
         }
+        false
     }
 
-    pub fn close_tab(&mut self) {
+    /// Close the active tab. Returns true when the close was deferred to confirmation.
+    pub fn close_tab(&mut self) -> bool {
+        if self.active.is_some_and(|ws_idx| {
+            self.workspaces
+                .get(ws_idx)
+                .is_some_and(|ws| ws.tabs.len() <= 1)
+                && self.workspace_close_would_close_worktree_group(ws_idx)
+        }) {
+            if let Some(ws_idx) = self.active {
+                if self.confirm_implicit_worktree_group_close(ws_idx) {
+                    return true;
+                }
+            }
+        }
+
         self.selection = None;
         self.selection_autoscroll = None;
         self.mark_session_dirty();
@@ -1220,7 +1500,7 @@ impl AppState {
                 self.selected = active;
             }
             self.close_selected_workspace();
-            return;
+            return false;
         }
         if let Some(ws_idx) = self.active {
             let terminal_ids = self
@@ -1229,7 +1509,7 @@ impl AppState {
                 .map(|ws| self.terminal_ids_for_tab(ws_idx, ws.active_tab))
                 .unwrap_or_default();
             let Some(ws) = self.workspaces.get_mut(ws_idx) else {
-                return;
+                return false;
             };
             let workspace_id = ws.id.clone();
             let closing_tab_id = format!("{}:{}", workspace_id, ws.active_tab + 1);
@@ -1239,6 +1519,7 @@ impl AppState {
             self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
         }
+        false
     }
 }
 
@@ -1254,6 +1535,114 @@ impl AppState {
 
     pub(crate) fn stop_selection_autoscroll_state(&mut self) {
         self.selection_autoscroll = None;
+    }
+
+    pub(crate) fn copy_word_at_pane_cell(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        pane_id: crate::layout::PaneId,
+        viewport_row: u16,
+        col: u16,
+    ) -> bool {
+        // Resolve the active pane cell the double-click landed on.
+        let Some(ws_idx) = self
+            .active
+            .filter(|idx| self.workspaces.get(*idx).is_some())
+        else {
+            return false;
+        };
+
+        let Some(info) = self.pane_info_by_id(pane_id) else {
+            return false;
+        };
+        if viewport_row >= info.inner_rect.height || col >= info.inner_rect.width {
+            return false;
+        }
+
+        // Leave mouse input to terminal apps that requested it.
+        let Some(rt) = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, pane_id)
+        else {
+            return false;
+        };
+        if rt
+            .input_state()
+            .is_some_and(crate::pane::InputState::mouse_reporting_enabled)
+        {
+            return false;
+        }
+
+        // Read the visible row and identify the clicked token bounds.
+        let metrics = self.pane_scroll_metrics(terminal_runtimes, pane_id);
+        let row_selection = Selection::range(
+            pane_id,
+            viewport_row,
+            0,
+            info.inner_rect.width.saturating_sub(1),
+            metrics,
+        );
+        let Some(row_text) = rt.extract_selection(&row_selection) else {
+            return false;
+        };
+        let Some((start_col, end_col)) = word_bounds_at_column(&row_text, col) else {
+            return false;
+        };
+
+        // Copy the token and keep its selection visible as short-lived feedback.
+        let mut selection = Selection::range(pane_id, viewport_row, start_col, end_col, metrics);
+        if !selection.finish() {
+            return false;
+        }
+
+        let Some(text) = rt
+            .extract_selection(&selection)
+            .filter(|text| !text.is_empty())
+        else {
+            self.clear_selection();
+            return false;
+        };
+        self.request_clipboard_write = Some(text.into_bytes());
+        self.selection = Some(selection);
+        self.selection_autoscroll = None;
+        info!("copied double-clicked token to clipboard");
+        true
+    }
+
+    pub(crate) fn url_at_pane_cell(
+        &self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        pane_id: crate::layout::PaneId,
+        viewport_row: u16,
+        col: u16,
+    ) -> Option<String> {
+        let ws_idx = self
+            .active
+            .filter(|idx| self.workspaces.get(*idx).is_some())?;
+        let info = self.pane_info_by_id(pane_id)?;
+        if viewport_row >= info.inner_rect.height || col >= info.inner_rect.width {
+            return None;
+        }
+
+        let rt = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, pane_id)?;
+        let screen_col = info.inner_rect.x.saturating_add(col);
+        let screen_row = info.inner_rect.y.saturating_add(viewport_row);
+        if let Some((_, _, uri)) = rt
+            .visible_hyperlinks(info.inner_rect)
+            .into_iter()
+            .find(|((x, y), _, _)| *x == screen_col && *y == screen_row)
+        {
+            return safe_web_url(&uri).map(str::to_owned);
+        }
+
+        let metrics = self.pane_scroll_metrics(terminal_runtimes, pane_id);
+        let row_selection = Selection::range(
+            pane_id,
+            viewport_row,
+            0,
+            info.inner_rect.width.saturating_sub(1),
+            metrics,
+        );
+        let row_text = rt.extract_selection(&row_selection)?;
+        url_at_column(&row_text, col).map(str::to_owned)
     }
 
     pub fn copy_selection(&mut self, terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry) {
@@ -1273,7 +1662,6 @@ impl AppState {
         let text = self
             .runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, sel.pane_id)
             .and_then(|rt| rt.extract_selection(&sel));
-
         if let Some(text) = text {
             if !text.is_empty() {
                 self.request_clipboard_write = Some(text.into_bytes());
@@ -1281,9 +1669,272 @@ impl AppState {
             }
         }
 
-        self.selection = None;
-        self.selection_autoscroll = None;
+        self.clear_selection();
     }
+}
+
+pub(crate) fn safe_web_url(url: &str) -> Option<&str> {
+    (url.starts_with("http://") || url.starts_with("https://")).then_some(url)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TextCell {
+    ch: char,
+    start_col: u16,
+    end_col: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CellSpan {
+    start: usize,
+    end: usize,
+}
+
+impl CellSpan {
+    fn contains(self, idx: usize) -> bool {
+        idx >= self.start && idx <= self.end
+    }
+
+    fn columns(self, cells: &[TextCell]) -> (u16, u16) {
+        (cells[self.start].start_col, cells[self.end].end_col)
+    }
+}
+
+/// Finds the terminal display-column bounds for the token under a double-click.
+///
+/// The algorithm first maps text to terminal cells so wide characters and
+/// zero-width marks use display columns, then prefers structured spans that
+/// users expect to copy whole (URLs and quoted paths), and finally falls back
+/// to a separator-delimited token.
+fn word_bounds_at_column(row: &str, col: u16) -> Option<(u16, u16)> {
+    // Map the row into display cells before doing any word-boundary work.
+    let cells = text_cells(row);
+    let clicked_idx = cell_index_at_column(&cells, col)?;
+
+    // Prefer spans that can legally include punctuation or spaces.
+    let span = url_span_at_column(&cells, clicked_idx)
+        .or_else(|| quoted_path_span_at_column(&cells, clicked_idx))
+        .or_else(|| token_span_at_column(&cells, clicked_idx))?;
+
+    // Convert the internal cell span back to inclusive terminal columns.
+    Some(span.columns(&cells))
+}
+
+pub(crate) fn url_at_column(row: &str, col: u16) -> Option<&str> {
+    let cells = text_cells(row);
+    let clicked_idx = cell_index_at_column(&cells, col)?;
+    let span = url_span_at_column(&cells, clicked_idx)?;
+    let start_byte = byte_index_for_cell(row, span.start);
+    let end_byte = byte_index_after_cell(row, span.end);
+    safe_web_url(row.get(start_byte..end_byte)?)
+}
+
+fn token_span_at_column(cells: &[TextCell], clicked_idx: usize) -> Option<CellSpan> {
+    if is_word_separator(cells[clicked_idx].ch) {
+        return None;
+    }
+
+    let mut start = clicked_idx;
+    while start > 0 && !is_word_separator(cells[start - 1].ch) {
+        start -= 1;
+    }
+
+    let mut end = clicked_idx;
+    while end + 1 < cells.len() && !is_word_separator(cells[end + 1].ch) {
+        end += 1;
+    }
+
+    trim_token_edges(cells, CellSpan { start, end }).filter(|span| span.contains(clicked_idx))
+}
+
+fn text_cells(row: &str) -> Vec<TextCell> {
+    let mut next_col = 0u16;
+    row.chars()
+        .map(|ch| {
+            let width = UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+            let start_col = if width == 0 {
+                next_col.saturating_sub(1)
+            } else {
+                next_col
+            };
+            if width > 0 {
+                next_col = next_col.saturating_add(width);
+            }
+            TextCell {
+                ch,
+                start_col,
+                end_col: next_col.saturating_sub(1),
+            }
+        })
+        .collect()
+}
+
+fn cell_index_at_column(cells: &[TextCell], col: u16) -> Option<usize> {
+    cells
+        .iter()
+        .position(|cell| cell.start_col <= col && col <= cell.end_col)
+}
+
+fn byte_index_for_cell(row: &str, cell_idx: usize) -> usize {
+    row.char_indices()
+        .nth(cell_idx)
+        .map(|(idx, _)| idx)
+        .unwrap_or(row.len())
+}
+
+fn byte_index_after_cell(row: &str, cell_idx: usize) -> usize {
+    row.char_indices()
+        .nth(cell_idx.saturating_add(1))
+        .map(|(idx, _)| idx)
+        .unwrap_or(row.len())
+}
+
+fn url_span_at_column(cells: &[TextCell], clicked_idx: usize) -> Option<CellSpan> {
+    let mut start = 0;
+    while start < cells.len() {
+        if starts_with_chars(&cells[start..], "http://")
+            || starts_with_chars(&cells[start..], "https://")
+        {
+            let mut end = start;
+            while end + 1 < cells.len() && !cells[end + 1].ch.is_whitespace() {
+                end += 1;
+            }
+            if clicked_idx >= start && clicked_idx <= end {
+                let span = trim_url_edges(cells, CellSpan { start, end })?;
+                return span.contains(clicked_idx).then_some(span);
+            }
+            start = end + 1;
+        } else {
+            start += 1;
+        }
+    }
+    None
+}
+
+fn trim_url_edges(cells: &[TextCell], span: CellSpan) -> Option<CellSpan> {
+    let start = span.start;
+    let mut end = span.end;
+    while start <= end && should_trim_trailing_url_cell(cells, start, end) {
+        if end == 0 {
+            return None;
+        }
+        end -= 1;
+    }
+    (start <= end).then_some(CellSpan { start, end })
+}
+
+fn should_trim_trailing_url_cell(cells: &[TextCell], start: usize, end: usize) -> bool {
+    match cells[end].ch {
+        '"' | '\'' | '`' | '.' | ',' | ';' | ':' | '!' | '?' => true,
+        ')' => !trailing_url_closer_is_balanced(cells, start, end, '(', ')'),
+        ']' => !trailing_url_closer_is_balanced(cells, start, end, '[', ']'),
+        '}' => !trailing_url_closer_is_balanced(cells, start, end, '{', '}'),
+        _ => false,
+    }
+}
+
+fn trailing_url_closer_is_balanced(
+    cells: &[TextCell],
+    start: usize,
+    end: usize,
+    open: char,
+    close: char,
+) -> bool {
+    let mut balance = 0i32;
+    for cell in &cells[start..end] {
+        if cell.ch == open {
+            balance += 1;
+        } else if cell.ch == close {
+            balance -= 1;
+        }
+    }
+    balance > 0
+}
+
+fn quoted_path_span_at_column(cells: &[TextCell], clicked_idx: usize) -> Option<CellSpan> {
+    let clicked = cells.get(clicked_idx)?.ch;
+    if clicked == '"' || clicked == '\'' || clicked == '`' {
+        return None;
+    }
+
+    for quote in ['"', '\'', '`'] {
+        let mut start = None;
+        for (idx, cell) in cells.iter().copied().enumerate() {
+            let ch = cell.ch;
+            if ch != quote || is_escaped(cells, idx) {
+                continue;
+            }
+            if let Some(open) = start {
+                if clicked_idx > open
+                    && clicked_idx < idx
+                    && cells[open + 1..idx].iter().any(|cell| cell.ch == '/')
+                {
+                    return Some(CellSpan {
+                        start: open + 1,
+                        end: idx - 1,
+                    });
+                }
+                start = None;
+            } else {
+                start = Some(idx);
+            }
+        }
+    }
+    None
+}
+
+fn is_escaped(cells: &[TextCell], idx: usize) -> bool {
+    let mut slashes = 0;
+    let mut cursor = idx;
+    while cursor > 0 && cells[cursor - 1].ch == '\\' {
+        slashes += 1;
+        cursor -= 1;
+    }
+    slashes % 2 == 1
+}
+
+fn starts_with_chars(cells: &[TextCell], prefix: &str) -> bool {
+    prefix
+        .chars()
+        .enumerate()
+        .all(|(idx, expected)| cells.get(idx).is_some_and(|cell| cell.ch == expected))
+}
+
+fn is_word_separator(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '|' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | '!'
+        )
+}
+
+fn trim_token_edges(cells: &[TextCell], span: CellSpan) -> Option<CellSpan> {
+    let mut start = span.start;
+    let mut end = span.end;
+    while start <= end && is_leading_token_wrapper(cells[start].ch) {
+        start += 1;
+    }
+    if start < end && cells[end].ch == '$' && is_trailing_token_wrapper(cells[end - 1].ch) {
+        end -= 1;
+    }
+    while start <= end && is_trailing_token_wrapper(cells[end].ch) {
+        if end == 0 {
+            return None;
+        }
+        end -= 1;
+    }
+    (start <= end).then_some(CellSpan { start, end })
+}
+
+fn is_leading_token_wrapper(ch: char) -> bool {
+    matches!(ch, '(' | '[' | '{' | '<' | '"' | '\'' | '`')
+}
+
+fn is_trailing_token_wrapper(ch: char) -> bool {
+    matches!(
+        ch,
+        ')' | ']' | '}' | '>' | '"' | '\'' | '`' | '.' | ',' | ';' | ':' | '!' | '?'
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1352,7 +2003,7 @@ impl AppState {
                     self.toast = Some(ToastNotification {
                         kind: ToastKind::UpdateInstalled,
                         title: format!("v{version} available"),
-                        context: format!("detach, then run `{install_command}`"),
+                        context: crate::update::update_install_instruction(&install_command),
                         target: None,
                     });
                 }
@@ -1404,6 +2055,41 @@ impl AppState {
                 })
                 .into_iter()
                 .collect(),
+            AppEvent::HookMetadataReported {
+                pane_id,
+                source,
+                agent_label,
+                applies_to_source,
+                title,
+                display_agent,
+                custom_status,
+                state_labels,
+                clear_title,
+                clear_display_agent,
+                clear_custom_status,
+                clear_state_labels,
+                seq,
+                ttl,
+            } => self
+                .update_terminal_state(pane_id, |terminal| {
+                    terminal.set_agent_metadata(crate::terminal::AgentMetadataReport {
+                        source,
+                        agent_label,
+                        applies_to_source,
+                        title,
+                        display_agent,
+                        custom_status,
+                        state_labels,
+                        clear_title,
+                        clear_display_agent,
+                        clear_custom_status,
+                        clear_state_labels,
+                        ttl,
+                        seq,
+                    })
+                })
+                .into_iter()
+                .collect(),
             AppEvent::HookAuthorityCleared {
                 pane_id,
                 source,
@@ -1429,8 +2115,12 @@ impl AppState {
             // Intercepted in App::handle_internal_event before reaching this
             // dispatch; never touches AppState.
             AppEvent::ClipboardWrite { .. } => Vec::new(),
-            AppEvent::GitStatusRefreshed { results } => {
+            AppEvent::GitStatusRefreshed {
+                results,
+                cache_updates,
+            } => {
                 let _ = results;
+                let _ = cache_updates;
                 Vec::new()
             }
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
@@ -1450,6 +2140,7 @@ impl AppState {
             .pane_state(pane_id)?
             .attached_terminal_id
             .clone();
+        let previous_seen = self.workspaces[ws_idx].pane_state(pane_id)?.seen;
         let mutation = {
             let terminal = self.terminals.get_mut(&terminal_id)?;
             update(terminal)?
@@ -1458,18 +2149,21 @@ impl AppState {
             self.mark_session_dirty();
         }
         let change = mutation.effective_state_change?;
+        let seen = self.apply_pane_state_change(ws_idx, pane_id, &change)?;
         let update = PaneStateUpdate {
             pane_id,
             ws_idx,
             previous_agent_label: change.previous_agent_label.clone(),
             previous_known_agent: change.previous_known_agent,
             previous_state: change.previous_state,
+            previous_seen,
+            previous_presentation: change.previous_presentation.clone(),
             agent_label: change.agent_label.clone(),
             known_agent: change.known_agent,
             state: change.state,
-            custom_status: change.custom_status.clone(),
+            seen,
+            presentation: change.presentation.clone(),
         };
-        self.apply_pane_state_change(ws_idx, pane_id, &change);
         Some(update)
     }
 
@@ -1478,23 +2172,21 @@ impl AppState {
         ws_idx: usize,
         pane_id: PaneId,
         change: &EffectiveStateChange,
-    ) {
+    ) -> Option<bool> {
         let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
         let suppress_active_tab_notifications =
             active_tab_suppresses_notifications(is_active_tab, self.outer_terminal_focus);
-        let Some(pane) = self.workspaces[ws_idx]
+        let pane = self.workspaces[ws_idx]
             .tabs
             .iter_mut()
-            .find_map(|tab| tab.panes.get_mut(&pane_id))
-        else {
-            return;
-        };
+            .find_map(|tab| tab.panes.get_mut(&pane_id))?;
 
         if change.state != AgentState::Idle {
             pane.seen = true;
         } else if is_background_completion_transition(change.previous_state, change.state) {
             pane.seen = suppress_active_tab_notifications;
         }
+        let seen = pane.seen;
 
         if self.local_sound_playback && self.sound.allows(change.known_agent) {
             if let Some(sound) = notification_sound_for_state_change(
@@ -1523,7 +2215,13 @@ impl AppState {
                     ToastKind::Finished => "finished",
                     ToastKind::UpdateInstalled => "updated",
                 };
-                let context = notification_context(&self.workspaces[ws_idx], ws_idx, pane_id);
+                let workspace_label = self.workspaces[ws_idx].display_name();
+                let context = notification_context(
+                    &self.workspaces[ws_idx],
+                    &workspace_label,
+                    ws_idx,
+                    pane_id,
+                );
                 self.toast = Some(ToastNotification {
                     kind,
                     title: format!("{} {}", toast_agent_label(agent_label), event_text),
@@ -1535,6 +2233,8 @@ impl AppState {
                 });
             }
         }
+
+        Some(seen)
     }
 
     fn handle_pane_died(&mut self, pane_id: PaneId) {
@@ -1559,6 +2259,7 @@ impl AppState {
 
         let pane_terminal_id = self.terminal_id_for_pane(ws_idx, pane_id);
         let workspace_terminal_ids = self.terminal_ids_for_workspace(ws_idx);
+        self.pane_id_aliases.retain(|_, alias| *alias != pane_id);
         let should_close_workspace = {
             let ws = &mut self.workspaces[ws_idx];
             ws.remove_pane(pane_id)
@@ -1623,6 +2324,221 @@ mod tests {
             checkout_path: format!("/repo/worktree-{ws_idx}").into(),
             is_linked_worktree: true,
         });
+    }
+
+    fn mark_parent_worktree(state: &mut AppState, ws_idx: usize) {
+        state.workspaces[ws_idx].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr".into(),
+            is_linked_worktree: false,
+        });
+    }
+
+    #[test]
+    fn notification_context_formats_resolved_workspace_label() {
+        let state = app_with_workspaces(&["stale"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+
+        assert_eq!(
+            notification_context(&state.workspaces[0], "__herdr_projects__", 0, root),
+            "__herdr_projects__ · 1"
+        );
+    }
+
+    fn selected_word(row: &str, col: u16) -> Option<String> {
+        let (start, end) = word_bounds_at_column(row, col)?;
+        Some(text_in_cell_range(row, start, end))
+    }
+
+    fn selected_url<'a>(row: &'a str, click: &str) -> Option<&'a str> {
+        url_at_column(row, col_of(row, click))
+    }
+
+    fn text_in_cell_range(row: &str, start_col: u16, end_col: u16) -> String {
+        text_cells(row)
+            .into_iter()
+            .filter(|cell| cell.start_col >= start_col && cell.end_col <= end_col)
+            .map(|cell| cell.ch)
+            .collect()
+    }
+
+    fn col_of(row: &str, needle: &str) -> u16 {
+        let byte_idx = row
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} not found in {row:?}"));
+        let prefix = &row[..byte_idx];
+        prefix
+            .chars()
+            .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0) as u16)
+            .sum()
+    }
+
+    fn assert_selects(row: &str, click: &str, expected: &str) {
+        assert_eq!(
+            selected_word(row, col_of(row, click)).as_deref(),
+            Some(expected),
+            "row={row:?}, click={click:?}"
+        );
+    }
+
+    fn assert_selects_nothing(row: &str, click: &str) {
+        assert_eq!(
+            selected_word(row, col_of(row, click)),
+            None,
+            "row={row:?}, click={click:?}"
+        );
+    }
+
+    #[test]
+    fn double_click_word_bounds_cover_terminal_text() {
+        let cases = [
+            (
+                "see https://example.com/a-b_c?q=x@y.",
+                "example.com",
+                "https://example.com/a-b_c?q=x@y",
+            ),
+            (
+                "open \"https://example.com/a,b;c?q=x\";",
+                "example.com",
+                "https://example.com/a,b;c?q=x",
+            ),
+            (
+                "see https://en.wikipedia.org/wiki/Foo_(bar_(baz)),",
+                "wikipedia",
+                "https://en.wikipedia.org/wiki/Foo_(bar_(baz))",
+            ),
+            (
+                "see https://example.com/a(b[c{d}e]f),",
+                "example.com",
+                "https://example.com/a(b[c{d}e]f)",
+            ),
+            (
+                "see (https://example.com/a(b(c)d)))",
+                "example.com",
+                "https://example.com/a(b(c)d)",
+            ),
+            (
+                "open /tmp/foo-bar/baz_qux/",
+                "foo-bar",
+                "/tmp/foo-bar/baz_qux/",
+            ),
+            (
+                "open ./src/app/actions.rs:795",
+                "actions",
+                "./src/app/actions.rs:795",
+            ),
+            (
+                "open ../herdr-worktrees/issue-1",
+                "herdr",
+                "../herdr-worktrees/issue-1",
+            ),
+            (
+                "edit src/app/actions.rs,then",
+                "actions",
+                "src/app/actions.rs",
+            ),
+            (
+                "cat \"/tmp/build output/log.txt\"",
+                "output",
+                "/tmp/build output/log.txt",
+            ),
+            (
+                "cat '/Users/me/Library/Application Support/app/config.json'",
+                "Support",
+                "/Users/me/Library/Application Support/app/config.json",
+            ),
+            ("echo 你好-world done", "好", "你好-world"),
+            ("先跑 cargo test", "cargo", "cargo"),
+            (
+                "export PATH=$HOME/.cargo/bin:$PATH",
+                "$HOME",
+                "PATH=$HOME/.cargo/bin:$PATH",
+            ),
+            (
+                "git checkout feature/foo-bar_baz",
+                "foo",
+                "feature/foo-bar_baz",
+            ),
+            ("refs #123 and @owner/name", "#123", "#123"),
+            ("refs #123 and @owner/name", "owner", "@owner/name"),
+            ("cargo test --package=herdr", "--package", "--package=herdr"),
+            (
+                "cargo test app::actions::tests",
+                "app::",
+                "app::actions::tests",
+            ),
+            (
+                "image ghcr.io/org/app:latest",
+                "ghcr",
+                "ghcr.io/org/app:latest",
+            ),
+            ("ERROR [worker-1] request_id=abc-123", "worker", "worker-1"),
+            (
+                "tmux|newhoo|fixhoo|newmoo|notification|window_bell|herdr",
+                "newhoo",
+                "newhoo",
+            ),
+            (
+                "render_status_line(app, area)",
+                "render",
+                "render_status_line",
+            ),
+            ("render_status_line(app, area)", "app", "app"),
+            ("render_status_line(app, area)", "area", "area"),
+            ("if !enabled {", "enabled", "enabled"),
+            ("println!(\"hi\")", "println", "println"),
+            ("( master)$", "master", "master"),
+            ("regex foo$", "foo", "foo$"),
+        ];
+
+        for (row, click, expected) in cases {
+            assert_selects(row, click, expected);
+        }
+
+        let row = "echo 你好-world done";
+        assert_eq!(
+            selected_word(row, col_of(row, "好") + 1).as_deref(),
+            Some("你好-world")
+        );
+    }
+
+    #[test]
+    fn double_click_word_bounds_ignore_delimiters() {
+        for (row, click) in [
+            (
+                "tmux|newhoo|fixhoo|newmoo|notification|window_bell|herdr",
+                "|",
+            ),
+            ("alpha,beta;gamma", ","),
+            ("alpha,beta;gamma", ";"),
+            ("render_status_line(app, area)", "("),
+            ("render_status_line(app, area)", ")"),
+            ("if !enabled {", "!"),
+            ("if !enabled {", "{"),
+            ("(done).", "("),
+            ("(done).", "."),
+        ] {
+            assert_selects_nothing(row, click);
+        }
+    }
+
+    #[test]
+    fn url_at_column_returns_safe_visible_url_only() {
+        assert_eq!(
+            selected_url("see https://example.com/a(b)c.", "example"),
+            Some("https://example.com/a(b)c")
+        );
+        assert_eq!(
+            selected_url("[docs](https://example.com/docs),", "example"),
+            Some("https://example.com/docs")
+        );
+        assert_eq!(
+            selected_url("[docs](https://example.com/docs)", "docs"),
+            None
+        );
+        assert_eq!(selected_url("open file:///tmp/report", "file"), None);
     }
 
     #[test]
@@ -1960,7 +2876,10 @@ mod tests {
         assert!(state.latest_release_notes_available);
         let toast = state.toast.as_ref().expect("update toast");
         assert_eq!(toast.title, "v0.5.0 available");
-        assert_eq!(toast.context, "detach, then run `herdr update`");
+        assert_eq!(
+            toast.context,
+            "detach, run `herdr update`, then follow its restart guidance"
+        );
     }
 
     fn mark_agent(state: &mut AppState, ws_idx: usize, tab_idx: usize, pane_id: PaneId) {
@@ -2035,6 +2954,18 @@ mod tests {
     }
 
     #[test]
+    fn focus_agent_entry_succeeds_for_already_focused_agent() {
+        let mut state = app_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        state.agent_panel_scope = crate::app::state::AgentPanelScope::AllWorkspaces;
+        mark_agent(&mut state, 0, 0, root);
+
+        assert!(state.focus_agent_entry(0));
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
+    }
+
+    #[test]
     fn next_agent_cycles_only_current_scope_entries() {
         let mut first = Workspace::test_new("one");
         let first_root = first.tabs[0].root_pane;
@@ -2095,6 +3026,122 @@ mod tests {
         state.switch_workspace(2);
         assert_eq!(state.active, Some(2));
         assert_eq!(state.selected, 2);
+    }
+
+    #[test]
+    fn last_pane_toggles_to_previous_focus_in_active_tab() {
+        let mut state = app_with_workspaces(&["test"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let right = state.workspaces[0].test_split(Direction::Horizontal);
+
+        state.focus_pane_in_workspace(0, root);
+        state.focus_pane_in_workspace(0, right);
+        state.last_pane();
+
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
+
+        state.last_pane();
+
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(right));
+    }
+
+    #[test]
+    fn removing_background_pane_preserves_last_pane_history() {
+        let mut state = app_with_workspaces(&["test"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let right = state.workspaces[0].test_split(Direction::Horizontal);
+        let background = state.workspaces[0].test_split(Direction::Horizontal);
+
+        state.focus_pane_in_workspace(0, root);
+        state.focus_pane_in_workspace(0, right);
+        state.workspaces[0].remove_pane(background);
+        state.last_pane();
+
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
+    }
+
+    #[test]
+    fn last_pane_jumps_across_workspaces_and_tabs() {
+        let mut state = app_with_workspaces(&["one", "two"]);
+        let first_root = state.workspaces[0].tabs[0].root_pane;
+        let second_tab = state.workspaces[1].test_add_tab(Some("logs"));
+        let second_tab_root = state.workspaces[1].tabs[second_tab].root_pane;
+
+        state.focus_pane_in_workspace(0, first_root);
+        state.focus_pane_in_workspace(1, second_tab_root);
+        state.last_pane();
+
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.workspaces[0].active_tab, 0);
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(first_root));
+
+        state.last_pane();
+
+        assert_eq!(state.active, Some(1));
+        assert_eq!(state.workspaces[1].active_tab, second_tab);
+        assert_eq!(state.workspaces[1].focused_pane_id(), Some(second_tab_root));
+    }
+
+    #[test]
+    fn last_pane_tracks_tab_and_workspace_switches() {
+        let mut state = app_with_workspaces(&["one", "two"]);
+        let first_root = state.workspaces[0].tabs[0].root_pane;
+        let first_second_tab = state.workspaces[0].test_add_tab(Some("logs"));
+        let first_second_root = state.workspaces[0].tabs[first_second_tab].root_pane;
+        let second_root = state.workspaces[1].tabs[0].root_pane;
+
+        state.switch_tab(first_second_tab);
+        state.last_pane();
+
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.workspaces[0].active_tab, 0);
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(first_root));
+
+        state.last_pane();
+
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.workspaces[0].active_tab, first_second_tab);
+        assert_eq!(
+            state.workspaces[0].focused_pane_id(),
+            Some(first_second_root)
+        );
+
+        state.switch_workspace(1);
+        state.last_pane();
+
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.workspaces[0].active_tab, first_second_tab);
+        assert_eq!(
+            state.workspaces[0].focused_pane_id(),
+            Some(first_second_root)
+        );
+
+        state.last_pane();
+
+        assert_eq!(state.active, Some(1));
+        assert_eq!(state.workspaces[1].focused_pane_id(), Some(second_root));
+    }
+
+    #[test]
+    fn last_pane_tracks_cross_workspace_tab_selection() {
+        let mut state = app_with_workspaces(&["one", "two"]);
+        let first_root = state.workspaces[0].tabs[0].root_pane;
+        let second_first_root = state.workspaces[1].tabs[0].root_pane;
+        let second_tab = state.workspaces[1].test_add_tab(Some("logs"));
+        let second_tab_root = state.workspaces[1].tabs[second_tab].root_pane;
+
+        state.switch_workspace_tab(1, second_tab);
+        state.last_pane();
+
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(first_root));
+
+        state.last_pane();
+
+        assert_eq!(state.active, Some(1));
+        assert_eq!(state.workspaces[1].active_tab, second_tab);
+        assert_eq!(state.workspaces[1].focused_pane_id(), Some(second_tab_root));
+        assert_ne!(second_first_root, second_tab_root);
     }
 
     #[test]
@@ -2793,7 +3840,10 @@ mod tests {
         let toast = state.toast.as_ref().expect("update toast");
         assert_eq!(toast.kind, ToastKind::UpdateInstalled);
         assert_eq!(toast.title, "v0.5.0 available");
-        assert_eq!(toast.context, "detach, then run `herdr update`");
+        assert_eq!(
+            toast.context,
+            "detach, run `herdr update`, then follow its restart guidance"
+        );
     }
 
     #[test]
@@ -2813,7 +3863,7 @@ mod tests {
         let toast = state.toast.as_ref().expect("update toast");
         assert_eq!(
             toast.context,
-            "detach, then run `brew update && brew upgrade herdr`"
+            "detach, run `brew update && brew upgrade herdr`, then restart this Herdr session when ready"
         );
     }
 
@@ -2907,7 +3957,7 @@ mod tests {
     }
 
     #[test]
-    fn close_tab_last_tab_closes_active_workspace_not_selected_workspace() {
+    fn close_tab_closes_active_workspace_not_selected_workspace() {
         let mut state = app_with_workspaces(&["selected", "active"]);
         let active_terminal_id = state
             .terminal_id_for_pane(1, state.workspaces[1].tabs[0].root_pane)
@@ -2939,7 +3989,23 @@ mod tests {
     }
 
     #[test]
-    fn close_tab_last_tab_in_linked_worktree_closes_workspace_only() {
+    fn close_pane_last_pane_in_parent_worktree_group_prompts() {
+        let mut state = app_with_workspaces(&["parent", "child"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree(&mut state, 1);
+        state.active = Some(0);
+        state.selected = 1;
+
+        let deferred = state.close_pane();
+
+        assert!(deferred);
+        assert_eq!(state.mode, Mode::ConfirmClose);
+        assert_eq!(state.selected, 0);
+        assert_eq!(state.workspaces.len(), 2);
+    }
+
+    #[test]
+    fn close_tab_in_linked_worktree_closes_workspace_only() {
         let mut state = app_with_workspaces(&["selected", "active"]);
         mark_linked_worktree(&mut state, 1);
         state.active = Some(1);
@@ -2950,6 +4016,22 @@ mod tests {
         assert_eq!(state.request_remove_linked_worktree, None);
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "selected");
+    }
+
+    #[test]
+    fn close_tab_last_tab_in_parent_worktree_group_prompts() {
+        let mut state = app_with_workspaces(&["parent", "child"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree(&mut state, 1);
+        state.active = Some(0);
+        state.selected = 1;
+
+        let deferred = state.close_tab();
+
+        assert!(deferred);
+        assert_eq!(state.mode, Mode::ConfirmClose);
+        assert_eq!(state.selected, 0);
+        assert_eq!(state.workspaces.len(), 2);
     }
 
     #[test]
@@ -2964,5 +4046,21 @@ mod tests {
         assert_eq!(state.request_remove_linked_worktree, None);
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "selected");
+    }
+
+    #[test]
+    fn close_pane_last_pane_in_parent_worktree_group_closes_when_confirmation_disabled() {
+        let mut state = app_with_workspaces(&["parent", "child", "notes"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree(&mut state, 1);
+        state.confirm_close = false;
+        state.active = Some(0);
+        state.selected = 0;
+
+        let deferred = state.close_pane();
+
+        assert!(!deferred);
+        assert_eq!(state.workspaces.len(), 1);
+        assert_eq!(state.workspaces[0].display_name(), "notes");
     }
 }

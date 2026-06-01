@@ -7,6 +7,8 @@
 //!   MouseUp           → Text extracted, copied via OSC 52, highlight stays
 //!   Next click / key  → Selection cleared
 //!
+//! Double-click copy also briefly highlights the selected word.
+//!
 //! Rows are stored in screen-buffer coordinates instead of viewport-relative
 //! coordinates. That keeps selection stable while the pane scrolls.
 
@@ -56,6 +58,23 @@ impl Selection {
             anchor,
             cursor: anchor,
             phase: Phase::Anchored,
+        }
+    }
+
+    /// Create an active selection from an explicit viewport-row range.
+    pub(crate) fn range(
+        pane_id: PaneId,
+        viewport_row: u16,
+        start_col: u16,
+        end_col: u16,
+        metrics: Option<ScrollMetrics>,
+    ) -> Self {
+        let row = absolute_row_for_viewport_row(viewport_row, metrics);
+        Self {
+            pane_id,
+            anchor: (row, start_col),
+            cursor: (row, end_col),
+            phase: Phase::Dragging,
         }
     }
 
@@ -112,6 +131,11 @@ impl Selection {
     /// Whether this selection should be rendered (highlight visible).
     pub fn is_visible(&self) -> bool {
         self.phase == Phase::Dragging || self.phase == Phase::Done
+    }
+
+    /// Whether this selection was already finalized and copied.
+    pub fn is_done(&self) -> bool {
+        self.phase == Phase::Done
     }
 
     /// Whether the user just clicked without dragging (not a selection).
@@ -219,14 +243,51 @@ fn osc52_sequence(bytes: &[u8]) -> String {
     format!("\x1b]52;c;{encoded}\x07")
 }
 
-fn should_prefer_osc52_for_env(ssh_connection: Option<&OsStr>, ssh_tty: Option<&OsStr>) -> bool {
-    ssh_connection.is_some() || ssh_tty.is_some()
+fn contains_wsl_marker(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("microsoft") || lower.contains("wsl2") || lower.contains("-wsl")
+}
+
+fn is_wsl_for_env(
+    os_release: Option<&str>,
+    proc_version: Option<&str>,
+    wsl_distro_name: Option<&OsStr>,
+    wsl_interop: Option<&OsStr>,
+    runtime_marker_exists: bool,
+) -> bool {
+    wsl_distro_name.is_some()
+        || wsl_interop.is_some()
+        || os_release.is_some_and(contains_wsl_marker)
+        || proc_version.is_some_and(contains_wsl_marker)
+        || runtime_marker_exists
+}
+
+fn is_wsl() -> bool {
+    let os_release = std::fs::read_to_string("/proc/sys/kernel/osrelease").ok();
+    let proc_version = std::fs::read_to_string("/proc/version").ok();
+    is_wsl_for_env(
+        os_release.as_deref(),
+        proc_version.as_deref(),
+        std::env::var_os("WSL_DISTRO_NAME").as_deref(),
+        std::env::var_os("WSL_INTEROP").as_deref(),
+        std::path::Path::new("/run/WSL").exists()
+            || std::path::Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists(),
+    )
+}
+
+fn should_prefer_osc52_for_env(
+    ssh_connection: Option<&OsStr>,
+    ssh_tty: Option<&OsStr>,
+    wsl: bool,
+) -> bool {
+    ssh_connection.is_some() || ssh_tty.is_some() || wsl
 }
 
 fn should_prefer_osc52() -> bool {
     should_prefer_osc52_for_env(
         std::env::var_os("SSH_CONNECTION").as_deref(),
         std::env::var_os("SSH_TTY").as_deref(),
+        is_wsl(),
     )
 }
 
@@ -267,13 +328,74 @@ mod tests {
     fn ssh_sessions_prefer_osc52() {
         assert!(should_prefer_osc52_for_env(
             Some(OsStr::new("1 2 3 4")),
-            None
+            None,
+            false
         ));
         assert!(should_prefer_osc52_for_env(
             None,
-            Some(OsStr::new("/dev/ttys001"))
+            Some(OsStr::new("/dev/ttys001")),
+            false
         ));
-        assert!(!should_prefer_osc52_for_env(None, None));
+        assert!(!should_prefer_osc52_for_env(None, None, false));
+    }
+
+    #[test]
+    fn wsl_sessions_prefer_osc52() {
+        assert!(should_prefer_osc52_for_env(None, None, true));
+    }
+
+    #[test]
+    fn wsl_detection_uses_env_vars() {
+        assert!(is_wsl_for_env(
+            None,
+            None,
+            Some(OsStr::new("Ubuntu")),
+            None,
+            false
+        ));
+        assert!(is_wsl_for_env(
+            None,
+            None,
+            None,
+            Some(OsStr::new("/run/WSL/123_interop")),
+            false
+        ));
+    }
+
+    #[test]
+    fn wsl_detection_uses_kernel_markers() {
+        assert!(is_wsl_for_env(
+            Some("5.15.167.4-microsoft-standard-WSL2"),
+            None,
+            None,
+            None,
+            false
+        ));
+        assert!(is_wsl_for_env(
+            None,
+            Some("Linux version 5.15.167.4-microsoft-standard-WSL2"),
+            None,
+            None,
+            false
+        ));
+    }
+
+    #[test]
+    fn wsl_detection_ignores_non_wsl_kernel_strings() {
+        assert!(!contains_wsl_marker("notwsl-kernel"));
+        assert!(!is_wsl_for_env(
+            Some("6.8.0-31-generic"),
+            Some("Linux version 6.8.0-31-generic"),
+            None,
+            None,
+            false
+        ));
+    }
+
+    #[test]
+    fn wsl_detection_uses_wsl_runtime_markers() {
+        assert!(is_wsl_for_env(None, None, None, None, true));
+        assert!(!is_wsl_for_env(None, None, None, None, false));
     }
 
     #[test]

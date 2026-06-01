@@ -33,39 +33,41 @@ brew install herdr
 
 or download the binary from [releases](https://github.com/ogulcancelik/herdr/releases). requires linux or macos.
 
-### update
-
-herdr notifies you when a new version is available. run manually to update:
-
-```bash
-herdr update
-```
-
 ## quick start
+
+Start Herdr in the directory where the work lives:
 
 ```bash
 herdr
 ```
 
-by default herdr launches or attaches to one background session server. `ctrl+b q` detaches the client. agents keep running. use `herdr server stop` to stop the default server. use `--no-session` for the old single-process mode.
+Herdr starts or attaches to one background session server. Press `ctrl+b`, then `shift+n` to create a workspace. Run an agent in the root pane. Press `ctrl+b`, then `v` or `minus` to split panes, `ctrl+b`, then `c` to create a tab, and `ctrl+b`, then `w` to switch workspaces.
 
-named sessions are runtime/socket namespaces for separate persistent herdr servers. they do not replace workspaces; each named session has its own panes, tabs, workspaces, sockets, and session state while sharing the same global config file.
+Press `ctrl+b q` to detach the client. The server and pane processes keep running. Open another terminal and run `herdr` again to reattach.
+
+## core concepts
+
+**Server and client.** By default, `herdr` attaches to a background server. Detaching closes only the client. `herdr server stop` stops the default server and kills its panes. Named sessions are separate server namespaces: use `herdr session attach work`, `herdr session stop work`, and `herdr session list` when you want fully separate runtime state.
+
+**Workspaces, tabs, panes.** A workspace is the project-level container. Tabs group panes inside a workspace. Panes are real terminal processes, not rewritten agent views.
+
+**Copy.** Herdr copies pane text, not the sidebar. Drag-select inside a pane, double-click a word or token, or press `prefix+[` for keyboard copy mode. In copy mode, move with `h/j/k/l`, `w/b/e`, and `{`/`}`, start selection with `v` or Space, copy with `y` or Enter, and leave with `q` or Esc. In PuTTY and some SSH terminals, hold `Shift` while dragging to use the terminal's own selection, and `Shift` + right click to paste.
+
+**Update and restore.** `herdr update` installs a new binary, but a running server keeps using the old process until it is stopped or handed off. Stop the old server to use the new version. Stopping exits pane processes. Run `herdr server stop`, then run `herdr` again for the default session. For a named session, run `herdr session stop <name>`, then run `herdr session attach <name>` again. `herdr update --handoff` is experimental and tries to move live panes, including foreground processes such as dev servers, from the old server to the new one. If `[session] resume_agents_on_restore = true` is enabled and current official integrations are installed, supported agent panes can restart from their native agent sessions after a server restart or update.
+
+**Keybindings.** Herdr uses explicit keybinding strings. `prefix+n` means press the configured prefix, then `n`. `ctrl+alt+n`, `cmd+k`, `alt+1`, and function-key chords are direct terminal-mode shortcuts and do not need the prefix. Plain direct printable keys such as `n` steal normal typing, so use `prefix+n` unless you intentionally want a modifier-gated direct binding.
+
+**Agent awareness.** The sidebar shows blocked, working, done, and idle states. Detection works with process names and terminal output by default. Official integrations make state reporting and native agent session restore more reliable, but Herdr still works as a terminal multiplexer without them.
+
+## update
+
+Herdr notifies you when a new version is available. Run manually:
 
 ```bash
-herdr session list
-herdr session attach work
-herdr session attach side-project
-herdr session stop work
-herdr session delete side-project
+herdr update
 ```
 
-1. press `ctrl+b`, then `shift+n` to create a workspace
-2. run an agent in the root pane
-3. press `ctrl+b`, then `w` to open workspace navigation
-4. use `ctrl+b`, then `v` or `minus` to split panes, or `ctrl+b`, then `c` to create a new tab
-5. watch the sidebar for blocked, working, and done states
-
-on first run herdr opens a short onboarding flow. after that, restored sessions land in terminal mode; fresh sessions start in **navigate mode**.
+`herdr update` is for installs managed by Herdr's own installer. Homebrew and Nix installs update through `brew upgrade herdr` or your Nix workflow, then use the same stop-and-run-again flow if a session is still running the old server. See [install docs](https://herdr.dev/docs/install/) and [session state docs](https://herdr.dev/docs/session-state/) for the full update, restart, restore, and handoff matrix.
 
 ## how it compares
 
@@ -83,44 +85,30 @@ on first run herdr opens a short onboarding flow. after that, restored sessions 
 
 tmux gives you persistence and panes, but it was built before agents existed. gui managers show agent state, but they make you leave your terminal and use their wrapped view. herdr is persistence and awareness in one tool that stays out of your way.
 
-## persistence
+## remote and attach
 
-start herdr where the work lives. locally, run `herdr`. it starts or attaches to the background session automatically, with no socket setup. run your agents, split panes, do your work. press `ctrl+b q` to detach. close your terminal, close your laptop; your agents keep running. open a new terminal, run `herdr`, you're back. same session, same panes, same agents. if you stop the server and later start herdr again, restored panes bring back workspaces, tabs, cwd, layout, and focus.
-
-pane screen history is off by default because pane output can include secrets, tokens, prompts, and command output. enable it with `[experimental] pane_history = true` or settings > experiments > pane screen history. when enabled, herdr writes saved pane history to `session-history.json` next to `session.json`; treat the herdr config/session directory like terminal history. if native agent session restore is enabled for a pane, herdr resumes that agent session instead of replaying saved pane history.
-
-### from anywhere
-
-need to check on your agents from your phone? just ssh in and run herdr. your shell is remote, herdr runs there, and the panes keep running there after detach. any ssh client works. no app to download, no account to create.
+Herdr works over normal SSH. Run it on the remote host, detach, and reattach later:
 
 ```
 ssh you@yourserver
 herdr
 ```
 
-or attach from your local terminal through ssh without opening a shell first. your local herdr acts as a thin client, connects over ssh, starts or attaches to the remote herdr server, and streams the ui back to your terminal. remote attach uses your local keybindings by default; pass `--remote-keybindings server` to use the remote server config instead.
+You can also attach from your local terminal without opening a shell first:
 
 ```bash
 herdr --remote workbox
 herdr --remote ssh://you@yourserver:2222
 ```
 
-for repeat targets, use your ssh config:
+Direct attach connects your current terminal to one server-owned terminal:
 
-```sshconfig
-Host workbox
-  HostName yourserver
-  User you
-  Port 2222
+```bash
+herdr agent attach <target>
+herdr terminal attach <terminal_id>
 ```
 
-same session, same agents, same state.
-
-### direct agent attach
-
-`herdr` and `herdr --remote` attach to the full herdr session ui. `herdr agent attach <target>` attaches your current terminal directly to one server-owned terminal, like a single-pane terminal attach. `herdr terminal attach <terminal_id>` does the same by terminal id.
-
-direct attach streams the current rendered terminal state first, then live ansi frames. your input goes straight to that terminal. scroll with the mouse wheel or plain page up/page down; normal input jumps back to the bottom. detach with `ctrl+b q`; send a literal `ctrl+b` with `ctrl+b ctrl+b`. one writable client owns input and resize for a terminal. a second attach fails unless you pass `--takeover`.
+See [persistence and remote docs](https://herdr.dev/docs/persistence-remote/) for remote keybinding, named-session, and handoff details.
 
 ## agent awareness
 
@@ -143,35 +131,14 @@ not a gui window, not a web dashboard, not electron. herdr runs inside whatever 
 
 - **workspaces** — organized around git repos or folder names, each with its own tabs and panes
 - **tabs** — first-class in the socket api and cli
-- **mouse-native** — click panes/tabs/workspaces/agents, drag borders, select text to copy, right-click menus; not keyboard-only
+- **copy-friendly** — drag-select pane text, double-click tokens, or use keyboard copy mode with `prefix+[`, `h/j/k/l`, `{`/`}`, `v`, and `y`
 - **notifications** — sounds and toasts for background events; tab-aware suppression
 - **18 built-in themes** — catppuccin, terminal, tokyo night, gruvbox, one, solarized, kanagawa, rosé pine, vesper, and light variants for the main palettes
 - **session persistence** — pane processes survive client detach; sessions restore panes after full restart, with opt-in recent screen history
 
 ## agents can use herdr too
 
-the local unix socket lets agents create workspaces, split panes, spawn helpers, read output, and wait for state changes.
-
-```bash
-# create a workspace and tab
-herdr workspace create --cwd ~/project --label "api"
-herdr tab create --label "logs"
-
-# split a pane and run
-herdr pane split 1-1 --direction right
-herdr pane run 1-2 "npm test"
-
-# wait for a pane-level ui attention state
-herdr wait agent-status 1-1 --status done
-
-# read output
-herdr pane read 1-2 --source recent --lines 50
-
-# read a rendered ansi snapshot for tui feedback loops
-herdr pane read 1-2 --source visible --ansi
-```
-
-full reference: [socket api](https://herdr.dev/docs/socket-api/) and [`SKILL.md`](./SKILL.md).
+The local Unix socket lets agents create workspaces, split panes, spawn helpers, read output, and wait for state changes. Start with the [socket API docs](https://herdr.dev/docs/socket-api/) and [`SKILL.md`](./SKILL.md).
 
 ## supported agents
 
@@ -191,6 +158,7 @@ automatic detection works out of the box. process name matching plus terminal ou
 | antigravity cli | ✓ | ✓ | ✓ |
 | kimi code cli | ✓ | ✓ | ✓ |
 | [github copilot cli](https://github.com/features/copilot) | ✓ | ✓ | ✓ |
+| [qodercli](https://qoder.com/cli) | ✓ | ✓ | ✓ |
 | [kiro cli](https://kiro.dev/docs/cli/) | ✓ | ✓ | — |
 
 detected but not fully tested: gemini cli, cline.
@@ -199,7 +167,7 @@ for agents outside the built-in list, herdr still works as a terminal multiplexe
 
 ### direct integrations
 
-the built-in pi, omp, claude code, codex, opencode, and hermes integrations forward semantic state to herdr over the socket api. install with:
+the built-in pi, omp, claude code, codex, opencode, hermes, and qodercli integrations forward semantic state to herdr over the socket api. install with:
 
 ```bash
 herdr integration install pi
@@ -208,13 +176,14 @@ herdr integration install claude
 herdr integration install codex
 herdr integration install opencode
 herdr integration install hermes
+herdr integration install qodercli
 ```
 
 see the [integrations docs](https://herdr.dev/docs/integrations/) for setup details.
 
 ## keybindings
 
-press `ctrl+b` to enter prefix mode. default actions are prefix-first and tmux-like:
+Press `ctrl+b` to enter prefix mode. Default actions are prefix-first and tmux-like:
 
 | key | action |
 |-----|--------|
@@ -235,22 +204,7 @@ press `ctrl+b` to enter prefix mode. default actions are prefix-first and tmux-l
 | `prefix+r` | resize mode |
 | `prefix+q` | detach |
 
-resize mode: `h`/`l` resize width, `j`/`k` resize height, `esc` exit.
-
-session navigator opens a searchable workspace, tab, and pane tree. use `/` for text search, `b`/`w`/`i`/`d` for blocked, working, idle, and done filters, `a` or backspace to clear a state filter, and enter to switch to the highlighted row.
-
-custom command keybindings can launch detached shell helpers or temporary panes:
-
-```toml
-[[keys.command]]
-key = "prefix+alt+g"
-type = "pane" # "shell" or "pane"
-command = "lazygit"
-```
-
-if you have old custom keybindings and want the new defaults, run `herdr config reset-keys`. herdr backs up `config.toml`, removes only keybinding config, and uses built-in v2 defaults after restart or config reload.
-
-mouse is supported throughout. full reference: [configuration docs](https://herdr.dev/docs/configuration/).
+Mouse is supported throughout. Resize mode uses `h`/`l` for width, `j`/`k` for height, and `esc` to exit. Full syntax, optional actions, indexed bindings, and custom command bindings live in the [configuration docs](https://herdr.dev/docs/configuration/).
 
 ## configuration
 
@@ -260,36 +214,15 @@ config file: `~/.config/herdr/config.toml`
 herdr --default-config   # print full default config
 ```
 
-in-app settings screen for theme, sound, and toast preferences. full reference: [configuration docs](https://herdr.dev/docs/configuration/).
-
-## logs
-
-herdr writes logs under `~/.config/herdr/`.
-
-common files:
-
-```text
-~/.config/herdr/herdr.log
-~/.config/herdr/herdr-client.log
-~/.config/herdr/herdr-server.log
-```
-
-in persistent session mode, the client and server logs are usually the useful ones. logs rotate automatically and keep a few older files like `.1` and `.2`.
-
-for issue reports, include the relevant current log plus rotated siblings if they exist. default logs are metadata-focused and avoid pane contents by default.
-
-use a higher log level only when needed:
-
-```bash
-HERDR_LOG=herdr=debug herdr
-```
-
-full logging and environment variable details: [configuration docs](https://herdr.dev/docs/configuration/).
+In-app settings cover theme, sound, and toast preferences. Herdr writes logs under `~/.config/herdr/`; in persistent session mode, `herdr-client.log` and `herdr-server.log` are usually the useful files. Full configuration and logging details live in the [configuration docs](https://herdr.dev/docs/configuration/).
 
 ## docs
 
+- [quick start](https://herdr.dev/docs/quick-start/) — first session, panes, copy, and named sessions
+- [install](https://herdr.dev/docs/install/) — install, update, Homebrew, and Nix
+- [session state](https://herdr.dev/docs/session-state/) — detach, restart restore, agent restore, and live handoff
 - [configuration](https://herdr.dev/docs/configuration/) — keybindings, themes, notifications, environment variables
-- [integrations](https://herdr.dev/docs/integrations/) — pi, omp, claude code, codex, opencode, hermes integrations
+- [integrations](https://herdr.dev/docs/integrations/) — pi, omp, claude code, codex, opencode, hermes, qodercli integrations
 - [`SKILL.md`](./SKILL.md) — reusable agent skill
 - [socket api](https://herdr.dev/docs/socket-api/) — socket protocol and cli reference
 
@@ -297,51 +230,26 @@ full logging and environment variable details: [configuration docs](https://herd
 
 if you are an ai agent helping with this repository, read [`AGENTS.md`](./AGENTS.md) before making changes and read [`CONTRIBUTING.md`](./CONTRIBUTING.md) before opening issues or PRs.
 
-## building from source
+## development
 
 ```bash
 git clone https://github.com/ogulcancelik/herdr
 cd herdr
 cargo build --release
 ./target/release/herdr
-```
 
-## nix
-
-herdr provides optional nix flake outputs for users who already use nix. the flake builds herdr from source.
-
-```bash
-nix run github:ogulcancelik/herdr/v0.x.y
-nix build github:ogulcancelik/herdr/v0.x.y
-nix develop github:ogulcancelik/herdr/v0.x.y
-```
-
-replace `v0.x.y` with the latest release tag. you can omit the tag to track `master`, but release tags are recommended for normal installs.
-
-the flake exposes `packages.<system>.default`, `apps.<system>.default`, `devShells.<system>.default`, and `overlays.default`.
-
-update through the same nix workflow you used to install herdr. for profile installs, run `nix profile list` and then `nix profile upgrade <index-or-name>`. for flake inputs, run `nix flake update herdr` in your own flake and rebuild.
-
-## testing
-
-```bash
 just test        # unit tests
 just check       # formatting, tests, and maintenance checks
 ```
 
 ## license
 
-agpl-3.0: free to use, modify, and distribute. modified versions must be open-sourced under the same license.
+Herdr is dual-licensed:
 
-## pi, ghostty, and shift+enter
+1. Open source: GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later).
+2. Commercial: commercial licenses are available for organizations that cannot comply with AGPL.
 
-herdr does not require or install terminal keybinds for pi.
-
-ghostty does not ship a default `shift+enter=text:\n` or `shift+enter=text:\x1b\r` keybind. if those lines exist in your ghostty config, they were added by user config or another tool, commonly claude code. they collapse shift+enter into legacy bytes, so downstream programs cannot reliably distinguish shift+enter from ctrl+j or alt+enter.
-
-if shift+enter behaves differently in pi inside herdr, first remove those custom terminal keybinds and retest. do not file this as a herdr keyboard encoding bug unless it reproduces with a clean terminal config.
-
-related context: #78, #81, #106, and earendil-works/pi#1872.
+Contact: hey@herdr.dev
 
 ## mandatory star history
 

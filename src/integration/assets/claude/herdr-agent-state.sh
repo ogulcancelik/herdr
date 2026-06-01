@@ -1,6 +1,7 @@
 #!/bin/sh
 # installed by herdr
-# safe to edit. this hook only activates inside herdr-managed panes.
+# managed by herdr; reinstalling or updating the integration overwrites this file.
+# add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=claude
 # HERDR_INTEGRATION_VERSION=4
 

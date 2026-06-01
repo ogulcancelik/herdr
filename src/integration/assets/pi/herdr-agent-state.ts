@@ -1,5 +1,6 @@
 // installed by herdr
-// safe to edit. this integration only activates inside herdr-managed panes.
+// managed by herdr; reinstalling or updating the integration overwrites this file.
+// add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=pi
 // HERDR_INTEGRATION_VERSION=2
 // @ts-nocheck

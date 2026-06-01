@@ -3,8 +3,8 @@ use bytes::Bytes;
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, PaneClearAgentAuthorityParams, PaneListParams,
     PaneReadParams, PaneReadResult, PaneReleaseAgentParams, PaneRenameParams,
-    PaneReportAgentParams, PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams,
-    PaneSplitParams, PaneTarget, ReadFormat, ReadSource, ResponseResult,
+    PaneReportAgentParams, PaneReportMetadataParams, PaneSendInputParams, PaneSendKeysParams,
+    PaneSendTextParams, PaneSplitParams, PaneTarget, ReadFormat, ReadSource, ResponseResult,
 };
 use crate::app::{App, Mode};
 
@@ -34,6 +34,7 @@ impl App {
         let default_shell = self.state.default_shell.clone();
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
         let host_terminal_theme = self.state.host_terminal_theme;
+        let previous_focus = self.state.current_pane_focus_target();
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return pane_not_found(id, &params.target_pane_id);
         };
@@ -49,7 +50,7 @@ impl App {
             split_cwd,
             scrollback_limit_bytes,
             host_terminal_theme,
-            &default_shell,
+            crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode),
             params.focus,
         ) {
             Some(Ok(result)) => result,
@@ -57,12 +58,15 @@ impl App {
             None => return pane_not_found(id, &params.target_pane_id),
         };
         if params.focus {
-            self.state.switch_workspace(ws_idx);
-            self.state.switch_tab(target_tab_idx);
+            self.state.switch_workspace_tab(ws_idx, target_tab_idx);
+            self.state
+                .record_pane_focus_change(previous_focus, ws_idx, new_pane.pane_id);
             self.state.mode = Mode::Terminal;
         }
         self.terminal_runtimes
             .insert(new_pane.terminal.id.clone(), new_pane.runtime);
+        self.state
+            .remove_alias_shadowed_by_new_pane(new_pane.pane_id);
         self.state
             .terminals
             .insert(new_pane.terminal.id.clone(), new_pane.terminal);
@@ -196,6 +200,102 @@ impl App {
         encode_success(id, ResponseResult::Ok {})
     }
 
+    pub(super) fn handle_pane_report_metadata(
+        &mut self,
+        id: String,
+        params: PaneReportMetadataParams,
+    ) -> String {
+        let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let agent_label = match params.agent.as_deref() {
+            Some(agent) => match normalize_reported_agent_label(agent) {
+                Some(agent_label) => Some(agent_label),
+                None => return invalid_agent(id),
+            },
+            None => None,
+        };
+        let Some(source) = normalize_optional_text(Some(params.source)) else {
+            return encode_error(id, "invalid_metadata_request", "missing metadata source");
+        };
+        let raw_title_set = params.title.is_some();
+        let raw_display_agent_set = params.display_agent.is_some();
+        let raw_custom_status_set = params.custom_status.is_some();
+        let raw_state_labels_set = !params.state_labels.is_empty();
+        let ttl = params.ttl_ms.map(std::time::Duration::from_millis);
+        let title = normalize_presentation_text(params.title);
+        let display_agent = normalize_presentation_text(params.display_agent);
+        let custom_status = normalize_custom_status(params.custom_status);
+        let applies_to_source = match params.applies_to_source {
+            Some(applies_to_source) => {
+                let Some(applies_to_source) = normalize_optional_text(Some(applies_to_source))
+                else {
+                    return encode_error(
+                        id,
+                        "invalid_metadata_request",
+                        "missing metadata authority source",
+                    );
+                };
+                Some(applies_to_source)
+            }
+            None => None,
+        };
+        let state_labels = match normalize_state_labels(params.state_labels) {
+            Ok(labels) => labels,
+            Err(status) => {
+                return encode_error(
+                    id,
+                    "invalid_state_label",
+                    format!("unknown state label: {status}"),
+                );
+            }
+        };
+        if raw_title_set && params.clear_title
+            || raw_display_agent_set && params.clear_display_agent
+            || raw_custom_status_set && params.clear_custom_status
+            || raw_state_labels_set && params.clear_state_labels
+        {
+            return encode_error(
+                id,
+                "invalid_metadata_request",
+                "cannot set and clear the same metadata field",
+            );
+        }
+        if title.is_none()
+            && display_agent.is_none()
+            && custom_status.is_none()
+            && state_labels.is_empty()
+            && !params.clear_title
+            && !params.clear_display_agent
+            && !params.clear_custom_status
+            && !params.clear_state_labels
+        {
+            return encode_error(
+                id,
+                "invalid_metadata_request",
+                "missing metadata field to set or clear",
+            );
+        }
+        self.handle_internal_event(crate::events::AppEvent::HookMetadataReported {
+            pane_id,
+            source,
+            agent_label,
+            applies_to_source,
+            title,
+            display_agent,
+            custom_status,
+            state_labels,
+            clear_title: params.clear_title,
+            clear_display_agent: params.clear_display_agent,
+            clear_custom_status: params.clear_custom_status,
+            clear_state_labels: params.clear_state_labels,
+            seq: params.seq,
+            ttl,
+        });
+
+        encode_success(id, ResponseResult::Ok {})
+    }
+
     pub(super) fn handle_pane_clear_agent_authority(
         &mut self,
         id: String,
@@ -287,6 +387,15 @@ impl App {
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
             return pane_not_found(id, &target.pane_id);
         };
+        if self.state.close_pane_would_close_workspace(ws_idx, pane_id)
+            && self.state.confirm_implicit_worktree_group_close(ws_idx)
+        {
+            return encode_error(
+                id,
+                "confirmation_required",
+                "closing this pane would close a worktree group",
+            );
+        }
         let workspace_id = self.state.workspaces[ws_idx].id.clone();
         let terminal_id = self.state.terminal_id_for_pane(ws_idx, pane_id);
         let should_close_workspace = {
@@ -349,6 +458,40 @@ impl App {
 
         encode_success(id, ResponseResult::Ok {})
     }
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    let value = value?.trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn normalize_presentation_text(value: Option<String>) -> Option<String> {
+    let trimmed = value?.trim().to_string();
+    let normalized: String = trimmed
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(80)
+        .collect();
+    (!normalized.trim().is_empty()).then(|| normalized.trim().to_string())
+}
+
+fn normalize_state_labels(
+    labels: std::collections::HashMap<String, String>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    labels
+        .into_iter()
+        .map(|(status, label)| {
+            let status = status.trim().to_ascii_lowercase();
+            if !matches!(
+                status.as_str(),
+                "idle" | "working" | "blocked" | "done" | "unknown"
+            ) {
+                return Err(status);
+            }
+            Ok(normalize_presentation_text(Some(label)).map(|label| (status, label)))
+        })
+        .filter_map(Result::transpose)
+        .collect()
 }
 
 fn pane_not_found(id: String, pane_id: &str) -> String {

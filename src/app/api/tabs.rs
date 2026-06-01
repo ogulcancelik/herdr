@@ -86,13 +86,16 @@ impl App {
                     cwd,
                     scrollback_limit_bytes,
                     host_terminal_theme,
-                    &default_shell,
+                    crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode),
                 )
             });
         match result {
             Ok((tab_idx, terminal, runtime)) => {
                 self.terminal_runtimes.insert(terminal.id.clone(), runtime);
                 self.state.terminals.insert(terminal.id.clone(), terminal);
+                self.state.remove_alias_shadowed_by_new_pane(
+                    self.state.workspaces[ws_idx].tabs[tab_idx].root_pane,
+                );
                 if let Some(label) = label {
                     let workspace_id = self.state.workspaces[ws_idx].id.clone();
                     let tab_id = self
@@ -109,8 +112,7 @@ impl App {
                     }
                 }
                 if focus {
-                    self.state.switch_workspace(ws_idx);
-                    self.state.switch_tab(tab_idx);
+                    self.state.switch_workspace_tab(ws_idx, tab_idx);
                     self.state.mode = Mode::Terminal;
                 }
                 self.schedule_session_save();
@@ -142,8 +144,7 @@ impl App {
         let Some((ws_idx, tab_idx)) = self.parse_tab_id(&target.tab_id) else {
             return tab_not_found(id, &target.tab_id);
         };
-        self.state.switch_workspace(ws_idx);
-        self.state.switch_tab(tab_idx);
+        self.state.switch_workspace_tab(ws_idx, tab_idx);
         let tab = self.tab_info(ws_idx, tab_idx).unwrap();
 
         encode_success(id, ResponseResult::TabInfo { tab })

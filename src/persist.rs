@@ -10,7 +10,7 @@ mod snapshot;
 pub use self::io::{clear, clear_history, load, load_history, save};
 pub use self::restore::restore;
 #[cfg(unix)]
-pub use self::restore::{restore_handoff, ImportedPaneRuntime};
+pub use self::restore::{handoff_pane_aliases, restore_handoff};
 pub use self::snapshot::{
     capture, capture_history, DirectionSnapshot, LayoutSnapshot, SessionHistorySnapshot,
     SessionSnapshot, TabSnapshot, WorkspaceSnapshot,

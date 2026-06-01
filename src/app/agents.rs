@@ -36,16 +36,8 @@ impl App {
         target: &str,
     ) -> Result<crate::api::schema::AgentInfo, TerminalTargetError> {
         let resolved = self.resolve_terminal_target(target)?;
-        self.state.switch_workspace(resolved.ws_idx);
-        self.state.switch_tab(resolved.tab_idx);
-        if let Some(tab) = self
-            .state
-            .workspaces
-            .get_mut(resolved.ws_idx)
-            .and_then(|ws| ws.tabs.get_mut(resolved.tab_idx))
-        {
-            tab.layout.focus_pane(resolved.pane_id);
-        }
+        self.state
+            .focus_pane_in_workspace(resolved.ws_idx, resolved.pane_id);
         self.state.mode = Mode::Terminal;
         self.agent_info(resolved.ws_idx, resolved.pane_id)
             .ok_or_else(|| TerminalTargetError::NotFound {
@@ -340,6 +332,8 @@ impl App {
         self.state.terminals.insert(terminal.id.clone(), terminal);
         self.state.workspaces.push(ws);
         let ws_idx = self.state.workspaces.len() - 1;
+        self.state
+            .remove_alias_shadowed_by_new_pane(self.state.workspaces[ws_idx].tabs[0].root_pane);
         if focus || self.state.active.is_none() {
             self.state.switch_workspace(ws_idx);
             self.state.mode = Mode::Terminal;
@@ -359,6 +353,7 @@ impl App {
         focus: bool,
     ) -> Result<(usize, usize, crate::layout::PaneId), AgentStartError> {
         let (rows, cols) = self.state.estimate_pane_size();
+        let previous_focus = self.state.current_pane_focus_target();
         let direction = match split {
             SplitDirection::Right => ratatui::layout::Direction::Horizontal,
             SplitDirection::Down => ratatui::layout::Direction::Vertical,
@@ -387,11 +382,14 @@ impl App {
         self.terminal_runtimes
             .insert(result.1.terminal.id.clone(), result.1.runtime);
         self.state
+            .remove_alias_shadowed_by_new_pane(result.1.pane_id);
+        self.state
             .terminals
             .insert(result.1.terminal.id.clone(), result.1.terminal);
         if focus {
-            self.state.switch_workspace(ws_idx);
-            self.state.switch_tab(result.0);
+            self.state.switch_workspace_tab(ws_idx, result.0);
+            self.state
+                .record_pane_focus_change(previous_focus, ws_idx, result.1.pane_id);
             self.state.mode = Mode::Terminal;
         }
         self.schedule_session_save();
@@ -414,12 +412,18 @@ impl App {
             terminal_id: pane.terminal_id,
             name: terminal.agent_name.clone(),
             agent: pane.agent,
+            title: pane.title,
+            display_agent: pane.display_agent,
             agent_status: pane.agent_status,
+            custom_status: pane.custom_status,
+            state_labels: pane.state_labels,
+            agent_session: pane.agent_session,
             workspace_id: pane.workspace_id,
             tab_id: pane.tab_id,
             pane_id: pane.pane_id,
             focused: pane.focused,
             cwd: pane.cwd,
+            foreground_cwd: pane.foreground_cwd,
             revision: pane.revision,
         })
     }
