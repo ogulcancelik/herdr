@@ -50,6 +50,11 @@ jobs:
             name: herdr-linux-aarch64
             libghostty_vt_optimize: ReleaseFast
             libghostty_vt_simd: 'true'
+          - target: riscv64gc-unknown-linux-gnu
+            os: ubuntu-latest
+            name: herdr-linux-riscv64
+            libghostty_vt_optimize: ReleaseFast
+            libghostty_vt_simd: 'false'
           - target: x86_64-apple-darwin
             os: macos-latest
             name: herdr-macos-x86_64
@@ -101,7 +106,7 @@ jobs:
 
       - name: Install Linux build tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build musl-tools gcc-aarch64-linux-gnu crossbuild-essential-arm64
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build musl-tools gcc-aarch64-linux-gnu crossbuild-essential-arm64 gcc-riscv64-linux-gnu
 
       - name: Install macOS build tools
         if: runner.os == 'macOS'
@@ -110,6 +115,10 @@ jobs:
       - name: Set Linux aarch64 linker
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: Set Linux riscv64 linker
+        if: matrix.target == 'riscv64gc-unknown-linux-gnu'
+        run: echo "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=riscv64-linux-gnu-gcc" >> $GITHUB_ENV
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
@@ -167,6 +176,7 @@ jobs:
           files: |
             herdr-linux-x86_64/herdr-linux-x86_64
             herdr-linux-aarch64/herdr-linux-aarch64
+            herdr-linux-riscv64/herdr-linux-riscv64
             herdr-macos-x86_64/herdr-macos-x86_64
             herdr-macos-aarch64/herdr-macos-aarch64
           body_path: RELEASE_NOTES.md

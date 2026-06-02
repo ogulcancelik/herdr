@@ -2735,7 +2735,7 @@ mod tests {
         // current unreleased checkout. Its protocol is updated by the release
         // flow together with the release assets.
         assert!(manifest.protocol.is_some());
-        assert_eq!(manifest.assets.len(), 4);
+        assert_eq!(manifest.assets.len(), 4, "bump asset count when website/latest.json gains riscv64");
         assert!(manifest.releases.contains_key(&manifest.version));
 
         for target in [

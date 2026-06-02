@@ -9,6 +9,7 @@ fn zig_target(target: &str) -> &str {
         "aarch64-unknown-linux-gnu" => "aarch64-linux-gnu",
         "x86_64-unknown-linux-musl" => "x86_64-linux-musl",
         "aarch64-unknown-linux-musl" => "aarch64-linux-musl",
+        "riscv64gc-unknown-linux-gnu" => "riscv64-linux-gnu",
         "x86_64-apple-darwin" => "x86_64-macos",
         "aarch64-apple-darwin" => "aarch64-macos",
         other => panic!("unsupported target for libghostty-vt build: {other}"),
@@ -44,9 +45,10 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let vendored_dir = manifest_dir.join("vendor/libghostty-vt");
     let optimize = env::var("LIBGHOSTTY_VT_OPTIMIZE").unwrap_or_else(|_| "ReleaseFast".into());
-    let simd = env_bool("LIBGHOSTTY_VT_SIMD").unwrap_or(true);
     let target = env::var("TARGET").expect("TARGET");
     let zig_target = zig_target(&target);
+    let simd = env_bool("LIBGHOSTTY_VT_SIMD")
+        .unwrap_or(!target.starts_with("riscv64"));
     let version_string = fs::read_to_string(vendored_dir.join("VERSION"))
         .expect("failed to read vendored libghostty-vt VERSION")
         .trim()

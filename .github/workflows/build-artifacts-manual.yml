@@ -51,6 +51,9 @@ jobs:
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             name: herdr-linux-aarch64
+          - target: riscv64gc-unknown-linux-gnu
+            os: ubuntu-latest
+            name: herdr-linux-riscv64
     env:
       LIBGHOSTTY_VT_OPTIMIZE: ${{ inputs.libghostty_optimize }}
       LIBGHOSTTY_VT_SIMD: ${{ inputs.libghostty_simd }}
@@ -79,11 +82,15 @@ jobs:
           fi
 
       - name: Install Linux build tools
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build musl-tools gcc-aarch64-linux-gnu crossbuild-essential-arm64
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build musl-tools gcc-aarch64-linux-gnu crossbuild-essential-arm64 gcc-riscv64-linux-gnu
 
       - name: Set Linux aarch64 linker
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: Set Linux riscv64 linker
+        if: matrix.target == 'riscv64gc-unknown-linux-gnu'
+        run: echo "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=riscv64-linux-gnu-gcc" >> $GITHUB_ENV
 
       - name: Remove Zig caches
         run: rm -rf .zig-cache vendor/libghostty-vt/.zig-cache vendor/libghostty-vt/zig-out
@@ -95,11 +102,13 @@ jobs:
         run: |
           cp target/${{ matrix.target }}/release/herdr ${{ matrix.name }}
           file ${{ matrix.name }} > BUILD_INFO.txt
-          ldd ${{ matrix.name }} 2>&1 | tee -a BUILD_INFO.txt
-          grep -q "statically linked" BUILD_INFO.txt
-          if nm -u ${{ matrix.name }} 2>/dev/null | grep -E '(__cxa|GLIBCXX|CXXABI|_ZSt)'; then
-            echo "error: Linux artifact has unresolved C++ runtime symbols" >&2
-            exit 1
+          ldd ${{ matrix.name }} 2>&1 | tee -a BUILD_INFO.txt || true
+          if [ "${{ matrix.target }}" != "riscv64gc-unknown-linux-gnu" ]; then
+            grep -q "statically linked" BUILD_INFO.txt
+            if nm -u ${{ matrix.name }} 2>/dev/null | grep -E '(__cxa|GLIBCXX|CXXABI|_ZSt)'; then
+              echo "error: Linux artifact has unresolved C++ runtime symbols" >&2
+              exit 1
+            fi
           fi
           {
             echo "commit=$GITHUB_SHA"

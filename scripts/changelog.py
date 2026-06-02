@@ -22,6 +22,7 @@ PROTOCOL_SOURCE_PATH = Path("src/protocol/wire.rs")
 ASSET_TARGETS = (
     "linux-x86_64",
     "linux-aarch64",
+    "linux-riscv64",
     "macos-x86_64",
     "macos-aarch64",
 )
