@@ -215,6 +215,52 @@ pub(crate) fn encode_local_pane_graphics(
     bytes
 }
 
+pub(crate) fn has_visible_pane_graphics(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    cell_size: HostCellSize,
+) -> bool {
+    if app.mode != Mode::Terminal || !cell_size.is_known() {
+        return false;
+    }
+
+    let Some(ws_idx) = app.active else {
+        return false;
+    };
+    if app
+        .workspaces
+        .get(ws_idx)
+        .and_then(crate::workspace::Workspace::active_tab)
+        .is_none()
+    {
+        return false;
+    }
+
+    for info in &app.view.pane_infos {
+        let Some(runtime) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)
+        else {
+            continue;
+        };
+        let scrollback_offset = runtime
+            .scroll_metrics()
+            .map(|m| m.offset_from_bottom as u32)
+            .unwrap_or(0);
+        for placement in runtime.kitty_image_placements_with_data_filter(|_| false) {
+            let host_placement = HostPlacement {
+                pane_id: info.id,
+                area: info.inner_rect,
+                cell_size,
+                placement,
+                scrollback_offset,
+            };
+            if clipped_placement(&host_placement).is_some() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn encode_graphics_update(
     bytes: &mut Vec<u8>,
     placements: &[HostPlacement],
@@ -328,6 +374,24 @@ pub(crate) fn clear_all_host_graphics() -> io::Result<()> {
 }
 
 impl HostGraphicsCache {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.images.is_empty() && self.placements.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_mark_non_empty(&mut self) {
+        self.images.insert(
+            HOST_IMAGE_ID_BASE,
+            ImageSignature {
+                image_width: 1,
+                image_height: 1,
+                format_code: 32,
+                data_len: 4,
+                data_fingerprint: 1,
+            },
+        );
+    }
+
     pub(crate) fn clear_bytes(&mut self) -> Vec<u8> {
         let mut bytes = Vec::new();
         for id in self.images.keys().copied().collect::<Vec<_>>() {

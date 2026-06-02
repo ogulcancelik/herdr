@@ -17,6 +17,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::mem;
+use std::ops::RangeInclusive;
 use std::os::raw::c_char;
 use std::ptr;
 use std::slice;
@@ -69,6 +70,18 @@ pub enum Dirty {
     Clean,
     Partial,
     Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowSelection {
+    pub start_x: u16,
+    pub end_x: u16,
+}
+
+impl RowSelection {
+    pub fn range(self) -> RangeInclusive<u16> {
+        self.start_x..=self.end_x
+    }
 }
 
 impl Dirty {
@@ -410,8 +423,15 @@ unsafe extern "C" fn write_pty_trampoline(
     if userdata.is_null() {
         return;
     }
+    if data.is_null() && len != 0 {
+        return;
+    }
     let state = unsafe { &mut *(userdata.cast::<WritePtyCallbackState>()) };
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    let bytes = if len == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(data, len) }
+    };
     (state.callback)(bytes);
 }
 
@@ -565,6 +585,8 @@ impl Terminal {
         cell_width_px: u32,
         cell_height_px: u32,
     ) -> Result<(), Error> {
+        let cell_width_px = cell_width_px.max(1);
+        let cell_height_px = cell_height_px.max(1);
         // SAFETY: self.raw is valid and sizes are plain values.
         unsafe {
             ffi::ghostty_terminal_resize(self.raw, cols, rows, cell_width_px, cell_height_px)
@@ -724,6 +746,19 @@ impl Terminal {
     pub fn screen_graphemes(&self, x: u16, y: u32) -> Result<Vec<u32>, Error> {
         let grid_ref = self.grid_ref(ghostty_screen_point(x, y))?;
         grid_ref_graphemes(&grid_ref)
+    }
+
+    fn viewport_graphemes_and_style(&self, x: u16, y: u32) -> Result<(Vec<u32>, CellStyle), Error> {
+        let grid_ref = self.grid_ref(ghostty_viewport_point(x, y))?;
+        let graphemes = grid_ref_graphemes(&grid_ref)?;
+        let mut style = ffi::GhosttyStyle {
+            size: mem::size_of::<ffi::GhosttyStyle>(),
+            ..Default::default()
+        };
+        unsafe {
+            ffi::ghostty_grid_ref_style(&grid_ref, &mut style).into_result()?;
+        }
+        Ok((graphemes, style.into()))
     }
 
     pub fn viewport_hyperlink_uri(&self, x: u16, y: u32) -> Result<Option<String>, Error> {
@@ -1182,29 +1217,20 @@ impl Terminal {
             return Ok(Vec::new());
         }
 
-        let cols = self.cols()?.max(1) as u32;
-        let rows = self.rows()?.max(1) as u32;
-        let cell_width = (self.width_px()? / cols).max(1);
-        let cell_height = (self.height_px()? / rows).max(1);
-        let mut render_state = RenderState::new()?;
-        render_state.update(self)?;
-        let mut row_iterator = RowIterator::new()?;
-        let mut row_cells = RowCells::new()?;
-        let mut row_iter = render_state.populate_row_iterator(&mut row_iterator)?;
-        let mut graphemes = Vec::new();
+        let viewport_cols = self.cols()?.max(1);
+        let viewport_rows = self.rows()?.max(1);
+        let cell_width = (self.width_px()? / u32::from(viewport_cols)).max(1);
+        let cell_height = (self.height_px()? / u32::from(viewport_rows)).max(1);
         let mut runs = Vec::new();
-        let mut y = 0u16;
-        while row_iter.next() {
-            let mut cells = row_iter.populate_cells(&mut row_cells)?;
+        for y in 0..viewport_rows {
             let mut current: Option<KittyVirtualRun> = None;
-            let mut x = 0u16;
-            while cells.next() {
-                let cell = kitty_virtual_cell(x, y, &cells, &mut graphemes)?;
+            for x in 0..viewport_cols {
+                let (graphemes, style) = self.viewport_graphemes_and_style(x, u32::from(y))?;
+                let cell = kitty_virtual_cell(x, y, &graphemes, style);
                 match cell {
                     Some(cell) => {
                         if let Some(run) = current.as_mut() {
                             if run.append(cell) {
-                                x = x.saturating_add(1);
                                 continue;
                             }
                             runs.push(*run);
@@ -1217,12 +1243,10 @@ impl Terminal {
                         }
                     }
                 }
-                x = x.saturating_add(1);
             }
             if let Some(run) = current {
                 runs.push(run);
             }
-            y = y.saturating_add(1);
         }
 
         let mut placements = Vec::new();
@@ -1455,14 +1479,12 @@ fn find_virtual_placement_spec(
 fn kitty_virtual_cell(
     x: u16,
     y: u16,
-    cells: &RowCellIter<'_>,
-    graphemes: &mut Vec<u32>,
-) -> Result<Option<KittyVirtualCell>, Error> {
-    cells.graphemes_into(graphemes)?;
+    graphemes: &[u32],
+    style: CellStyle,
+) -> Option<KittyVirtualCell> {
     if graphemes.first().copied() != Some(KITTY_UNICODE_PLACEHOLDER) {
-        return Ok(None);
+        return None;
     }
-    let style = cells.style()?;
     let image_id_low = style
         .fg_color
         .map(kitty_placeholder_color_to_id)
@@ -1482,7 +1504,7 @@ fn kitty_virtual_cell(
         .and_then(|codepoint| kitty_placeholder_diacritic_index(*codepoint))
         .filter(|high| *high <= u32::from(u8::MAX));
 
-    Ok(Some(KittyVirtualCell {
+    Some(KittyVirtualCell {
         x,
         y,
         image_id_low,
@@ -1490,7 +1512,7 @@ fn kitty_virtual_cell(
         placement_id,
         row,
         col,
-    }))
+    })
 }
 
 fn kitty_placeholder_color_to_id(color: CellColor) -> u32 {
@@ -2177,6 +2199,44 @@ impl<'a> RowIter<'a> {
         Ok(dirty)
     }
 
+    pub fn clear_dirty(&mut self) -> Result<(), Error> {
+        self.set_dirty(false)
+    }
+
+    pub fn set_dirty(&mut self, dirty: bool) -> Result<(), Error> {
+        // SAFETY: dirty pointer matches the expected row option type.
+        unsafe {
+            ffi::ghostty_render_state_row_set(
+                self.iterator.raw,
+                ffi::GhosttyRenderStateRowOption_GHOSTTY_RENDER_STATE_ROW_OPTION_DIRTY,
+                (&dirty as *const bool).cast(),
+            )
+            .into_result()
+        }
+    }
+
+    pub fn selection(&self) -> Result<Option<RowSelection>, Error> {
+        let mut selection = ffi::GhosttyRenderStateRowSelection {
+            size: mem::size_of::<ffi::GhosttyRenderStateRowSelection>(),
+            ..Default::default()
+        };
+        let result = unsafe {
+            ffi::ghostty_render_state_row_get(
+                self.iterator.raw,
+                ffi::GhosttyRenderStateRowData_GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION,
+                (&mut selection as *mut ffi::GhosttyRenderStateRowSelection).cast(),
+            )
+        };
+        match result {
+            ffi::GhosttyResult_GHOSTTY_SUCCESS => Ok(Some(RowSelection {
+                start_x: selection.start_x,
+                end_x: selection.end_x,
+            })),
+            ffi::GhosttyResult_GHOSTTY_NO_VALUE => Ok(None),
+            other => Err(Error(other)),
+        }
+    }
+
     pub fn populate_cells<'b>(
         &'b mut self,
         cells: &'b mut RowCells,
@@ -2225,6 +2285,25 @@ pub struct RowCellIter<'a> {
     cells: &'a mut RowCells,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CellBasicData {
+    pub wide: CellWide,
+    pub has_hyperlink: bool,
+    pub has_styling: bool,
+    pub style: CellStyle,
+}
+
+impl Default for CellBasicData {
+    fn default() -> Self {
+        Self {
+            wide: CellWide::Narrow,
+            has_hyperlink: false,
+            has_styling: false,
+            style: CellStyle::default(),
+        }
+    }
+}
+
 impl<'a> RowCellIter<'a> {
     pub fn next(&mut self) -> bool {
         // SAFETY: cells handle is valid while self is alive.
@@ -2246,6 +2325,64 @@ impl<'a> RowCellIter<'a> {
             .into_result()?;
         }
         Ok(raw)
+    }
+
+    pub fn basic_data(&self) -> Result<CellBasicData, Error> {
+        let mut raw = ffi::GhosttyCell::default();
+        let mut style = ffi::GhosttyStyle {
+            size: mem::size_of::<ffi::GhosttyStyle>(),
+            ..Default::default()
+        };
+        let mut has_styling = false;
+        let row_keys = [
+            ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW,
+            ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE,
+            ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_HAS_STYLING,
+        ];
+        let mut row_values = [
+            (&mut raw as *mut ffi::GhosttyCell).cast::<c_void>(),
+            (&mut style as *mut ffi::GhosttyStyle).cast::<c_void>(),
+            (&mut has_styling as *mut bool).cast::<c_void>(),
+        ];
+        let mut written = 0usize;
+        unsafe {
+            ffi::ghostty_render_state_row_cells_get_multi(
+                self.cells.raw,
+                row_keys.len(),
+                row_keys.as_ptr(),
+                row_values.as_mut_ptr(),
+                &mut written,
+            )
+            .into_result()?;
+        }
+
+        let mut wide = ffi::GhosttyCellWide_GHOSTTY_CELL_WIDE_NARROW;
+        let mut has_hyperlink = false;
+        let cell_keys = [
+            ffi::GhosttyCellData_GHOSTTY_CELL_DATA_WIDE,
+            ffi::GhosttyCellData_GHOSTTY_CELL_DATA_HAS_HYPERLINK,
+        ];
+        let mut cell_values = [
+            (&mut wide as *mut ffi::GhosttyCellWide).cast::<c_void>(),
+            (&mut has_hyperlink as *mut bool).cast::<c_void>(),
+        ];
+        unsafe {
+            ffi::ghostty_cell_get_multi(
+                raw,
+                cell_keys.len(),
+                cell_keys.as_ptr(),
+                cell_values.as_mut_ptr(),
+                &mut written,
+            )
+            .into_result()?;
+        }
+
+        Ok(CellBasicData {
+            wide: CellWide::from_raw(wide),
+            has_hyperlink,
+            has_styling,
+            style: style.into(),
+        })
     }
 
     pub fn wide(&self) -> Result<CellWide, Error> {
@@ -2365,41 +2502,94 @@ impl<'a> RowCellIter<'a> {
         }
     }
 
-    pub fn grapheme_len(&self) -> Result<u32, Error> {
-        let mut len = 0u32;
-        // SAFETY: len output matches requested cell data type.
+    fn raw_cell_text_into(&self, text: &mut String) -> Result<(), Error> {
+        let raw = self.raw_cell()?;
+        let mut has_text = false;
         unsafe {
-            ffi::ghostty_render_state_row_cells_get(
-                self.cells.raw,
-                ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN,
-                (&mut len as *mut u32).cast(),
+            ffi::ghostty_cell_get(
+                raw,
+                ffi::GhosttyCellData_GHOSTTY_CELL_DATA_HAS_TEXT,
+                (&mut has_text as *mut bool).cast(),
             )
             .into_result()?;
         }
-        Ok(len)
-    }
-
-    pub fn graphemes(&self) -> Result<Vec<u32>, Error> {
-        let mut out = Vec::new();
-        self.graphemes_into(&mut out)?;
-        Ok(out)
-    }
-
-    pub fn graphemes_into(&self, out: &mut Vec<u32>) -> Result<(), Error> {
-        let len = self.grapheme_len()? as usize;
-        out.clear();
-        out.resize(len, 0);
-        if len == 0 {
+        if !has_text {
             return Ok(());
         }
-        // SAFETY: out buffer is allocated for the grapheme count returned by the API.
+
+        let mut codepoint = 0u32;
+        unsafe {
+            ffi::ghostty_cell_get(
+                raw,
+                ffi::GhosttyCellData_GHOSTTY_CELL_DATA_CODEPOINT,
+                (&mut codepoint as *mut u32).cast(),
+            )
+            .into_result()?;
+        }
+        if let Some(ch) = char::from_u32(codepoint) {
+            text.push(ch);
+        }
+        Ok(())
+    }
+
+    pub fn grapheme_text(&self) -> Result<String, Error> {
+        let mut bytes = Vec::new();
+        let mut text = String::new();
+        self.grapheme_text_into(&mut bytes, &mut text)?;
+        Ok(text)
+    }
+
+    pub fn grapheme_text_into(&self, bytes: &mut Vec<u8>, text: &mut String) -> Result<(), Error> {
+        text.clear();
+        bytes.clear();
+
+        let mut buffer = ffi::GhosttyBuffer {
+            ptr: ptr::null_mut(),
+            cap: 0,
+            len: 0,
+        };
+        let result = unsafe {
+            ffi::ghostty_render_state_row_cells_get(
+                self.cells.raw,
+                ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_UTF8,
+                (&mut buffer as *mut ffi::GhosttyBuffer).cast(),
+            )
+        };
+        match result {
+            ffi::GhosttyResult_GHOSTTY_SUCCESS if buffer.len == 0 => {
+                return self.raw_cell_text_into(text);
+            }
+            ffi::GhosttyResult_GHOSTTY_SUCCESS => {
+                return Err(Error(ffi::GhosttyResult_GHOSTTY_INVALID_VALUE));
+            }
+            ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE => {}
+            other => return Err(Error(other)),
+        }
+
+        if buffer.len == 0 {
+            return self.raw_cell_text_into(text);
+        }
+        bytes.resize(buffer.len, 0);
+        let mut buffer = ffi::GhosttyBuffer {
+            ptr: bytes.as_mut_ptr(),
+            cap: bytes.len(),
+            len: 0,
+        };
         unsafe {
             ffi::ghostty_render_state_row_cells_get(
                 self.cells.raw,
-                ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF,
-                out.as_mut_ptr().cast::<c_void>(),
+                ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_UTF8,
+                (&mut buffer as *mut ffi::GhosttyBuffer).cast(),
             )
             .into_result()?;
+        }
+        if buffer.len > bytes.len() {
+            return Err(Error(ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE));
+        }
+        bytes.truncate(buffer.len);
+        match std::str::from_utf8(bytes) {
+            Ok(value) => text.push_str(value),
+            Err(_) => text.push_str(&String::from_utf8_lossy(bytes)),
         }
         Ok(())
     }
@@ -2513,7 +2703,8 @@ mod tests {
         let mut terminal = Terminal::new(10, 5, 0).unwrap();
         terminal.enable_kitty_graphics().unwrap();
         terminal.resize(10, 5, 8, 16).unwrap();
-        terminal.write(b"\x1b_Gq=2,a=T,C=1,U=1,f=32,s=1,v=1,i=1193046,c=2,r=1,m=0;/wAA/w==\x1b\\");
+        terminal.write(b"\x1b_Gq=2,a=t,t=d,f=32,s=1,v=1,i=1193046,m=0;/wAA/w==\x1b\\");
+        terminal.write(b"\x1b_Gq=2,a=p,U=1,i=1193046,c=2,r=1\x1b\\");
         terminal.write("\x1b[2;3H\x1b[38;2;18;52;86m\u{10eeee}\u{0305}\u{0305}\u{10eeee}\u{0305}\u{030d}\x1b[0m".as_bytes());
 
         let placements = terminal.kitty_image_placements().unwrap();
@@ -2721,13 +2912,11 @@ mod tests {
             let mut cells = row_iter.populate_cells(&mut row_cells).unwrap();
             let mut line = String::new();
             while cells.next() {
-                let graphemes = cells.graphemes().unwrap();
-                if let Some(codepoint) = graphemes.first().copied() {
-                    if let Some(ch) = char::from_u32(codepoint) {
-                        line.push(ch);
-                    }
-                } else {
+                let text = cells.grapheme_text().unwrap();
+                if text.is_empty() {
                     line.push(' ');
+                } else {
+                    line.push_str(&text);
                 }
             }
             let trimmed = line.trim_end().to_string();
@@ -2745,5 +2934,88 @@ mod tests {
 
         render_state.set_dirty(Dirty::Clean).unwrap();
         assert_eq!(render_state.dirty().unwrap(), Dirty::Clean);
+    }
+
+    #[test]
+    fn render_state_row_dirty_can_be_cleared_independently() {
+        let mut terminal = Terminal::new(8, 3, 100).unwrap();
+        let mut render_state = RenderState::new().unwrap();
+
+        render_state.update(&terminal).unwrap();
+        {
+            let mut row_iterator = RowIterator::new().unwrap();
+            let mut rows = render_state
+                .populate_row_iterator(&mut row_iterator)
+                .unwrap();
+            while rows.next() {
+                rows.clear_dirty().unwrap();
+                assert!(!rows.dirty().unwrap());
+            }
+        }
+        render_state.set_dirty(Dirty::Clean).unwrap();
+        assert_eq!(render_state.dirty().unwrap(), Dirty::Clean);
+
+        terminal.write(b"A");
+        render_state.update(&terminal).unwrap();
+        assert_eq!(render_state.dirty().unwrap(), Dirty::Partial);
+
+        let mut dirty_rows = 0usize;
+        {
+            let mut row_iterator = RowIterator::new().unwrap();
+            let mut rows = render_state
+                .populate_row_iterator(&mut row_iterator)
+                .unwrap();
+            while rows.next() {
+                if rows.dirty().unwrap() {
+                    dirty_rows += 1;
+                    rows.clear_dirty().unwrap();
+                    assert!(!rows.dirty().unwrap());
+                }
+            }
+        }
+        assert_eq!(dirty_rows, 1);
+        assert_eq!(render_state.dirty().unwrap(), Dirty::Partial);
+
+        render_state.set_dirty(Dirty::Clean).unwrap();
+        assert_eq!(render_state.dirty().unwrap(), Dirty::Clean);
+    }
+
+    #[test]
+    fn row_selection_returns_none_without_selection() {
+        let terminal = Terminal::new(8, 3, 100).unwrap();
+        let mut render_state = RenderState::new().unwrap();
+        render_state.update(&terminal).unwrap();
+
+        let mut row_iterator = RowIterator::new().unwrap();
+        let mut rows = render_state
+            .populate_row_iterator(&mut row_iterator)
+            .unwrap();
+        assert!(rows.next());
+        assert_eq!(rows.selection().unwrap(), None);
+    }
+
+    #[test]
+    fn row_cell_basic_data_uses_batched_vendor_reads() {
+        let mut terminal = Terminal::new(8, 3, 100).unwrap();
+        terminal.write(b"\x1b[31mA\x1b[0m");
+
+        let mut render_state = RenderState::new().unwrap();
+        render_state.update(&terminal).unwrap();
+
+        let mut row_iterator = RowIterator::new().unwrap();
+        let mut rows = render_state
+            .populate_row_iterator(&mut row_iterator)
+            .unwrap();
+        assert!(rows.next());
+
+        let mut row_cells = RowCells::new().unwrap();
+        let mut cells = rows.populate_cells(&mut row_cells).unwrap();
+        assert!(cells.next());
+
+        let basic = cells.basic_data().unwrap();
+        assert_eq!(basic.wide, CellWide::Narrow);
+        assert!(basic.has_styling);
+        assert_eq!(basic.style.fg_color, Some(CellColor::Palette(1)));
+        assert!(!basic.has_hyperlink);
     }
 }

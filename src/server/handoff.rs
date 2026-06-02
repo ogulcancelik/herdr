@@ -245,12 +245,12 @@ pub(crate) fn receive(socket_path: &Path, token: &str) -> io::Result<ReceivedHan
     if manifest
         .expected_version
         .as_deref()
-        .is_some_and(|version| version != env!("CARGO_PKG_VERSION"))
+        .is_some_and(|version| version != crate::build_info::version())
     {
         return Err(io::Error::other(format!(
             "handoff expected herdr v{}, but this server is v{}",
             manifest.expected_version.as_deref().unwrap_or("unknown"),
-            env!("CARGO_PKG_VERSION")
+            crate::build_info::version()
         )));
     }
     stream.write_all(b"validated\n")?;
@@ -300,7 +300,7 @@ pub(crate) fn manifest_for(
 ) -> HandoffManifest {
     HandoffManifest {
         version: HANDOFF_VERSION,
-        source_version: env!("CARGO_PKG_VERSION").to_string(),
+        source_version: crate::build_info::version(),
         source_protocol: crate::protocol::PROTOCOL_VERSION,
         expected_version,
         expected_protocol,

@@ -1,0 +1,49 @@
+---
+import MobileMenuFooter from 'virtual:starlight/components/MobileMenuFooter';
+import SidebarPersister from '@astrojs/starlight/components/SidebarPersister.astro';
+import SidebarSublist from '@astrojs/starlight/components/SidebarSublist.astro';
+
+const { sidebar } = Astro.locals.starlightRoute;
+const pathname = Astro.url.pathname;
+const isPreview = pathname === '/docs/preview/' || pathname.startsWith('/docs/preview/');
+const channelSidebar = isPreview ? rewriteSidebar(sidebar) : sidebar;
+
+function rewriteSidebar(entries) {
+  return entries.map((entry) => {
+    if (entry.type === 'link') {
+      const href = previewHref(entry.href);
+      return {
+        ...entry,
+        href,
+        isCurrent: samePath(href, pathname),
+      };
+    }
+    const rewrittenEntries = rewriteSidebar(entry.entries);
+    return {
+      ...entry,
+      entries: rewrittenEntries,
+    };
+  });
+}
+
+function previewHref(href) {
+  if (!href.startsWith('/docs/') || href.startsWith('/docs/preview/')) return href;
+  return href === '/docs/' ? '/docs/preview/' : href.replace(/^\/docs\//, '/docs/preview/');
+}
+
+function samePath(left, right) {
+  return stripTrailingSlash(left) === stripTrailingSlash(right);
+}
+
+function stripTrailingSlash(path) {
+  return path.length > 1 ? path.replace(/\/$/, '') : path;
+}
+---
+
+<SidebarPersister>
+  <SidebarSublist sublist={channelSidebar} />
+</SidebarPersister>
+
+<div class="md:sl-hidden">
+  <MobileMenuFooter />
+</div>

@@ -1,5 +1,7 @@
 ---
 const { siteTitle, siteTitleHref } = Astro.locals.starlightRoute;
+const isPreview = Astro.url.pathname === '/docs/preview/' || Astro.url.pathname.startsWith('/docs/preview/');
+const docsHref = isPreview ? '/docs/preview/' : '/docs/';
 ---
 
 <div class="title-row sl-flex">
@@ -8,7 +10,7 @@ const { siteTitle, siteTitleHref } = Astro.locals.starlightRoute;
     <span translate="no">{siteTitle}</span>
   </a>
   <nav class="title-nav" aria-label="Primary">
-    <a href="/docs/">Docs</a>
+    <a href={docsHref}>Docs</a>
     <a href="/releases/">Releases</a>
     <a href="/blog/">Blog</a>
   </nav>

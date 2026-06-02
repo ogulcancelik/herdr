@@ -43,6 +43,22 @@ herdr update
 
 `herdr update` is for installs managed by Herdr's own installer. Homebrew and Nix installs are updated through those package managers instead.
 
+Herdr uses the stable update channel by default. To opt into preview builds from `master`, set the channel first, then update:
+
+```bash
+herdr channel set preview
+herdr update
+```
+
+Switch back to stable the same way:
+
+```bash
+herdr channel set stable
+herdr update
+```
+
+Preview builds are GitHub prereleases published from the current development branch. They are useful when you want fixes before the next stable release, but they can regress. Homebrew and Nix installs do not use the preview channel.
+
 By default, `herdr update` installs the new binary and leaves compatible running sessions alone. If an update changes Herdr's client/server protocol, Herdr asks whether to stop the old server after installing. Stop the old server to use the new version. Stopping exits pane processes. For the default session, run `herdr server stop`, then run `herdr` again. For a named session, run `herdr session stop <name>`, then run `herdr session attach <name>` again.
 
 To opt into experimental live server handoff for supported running sessions, run:

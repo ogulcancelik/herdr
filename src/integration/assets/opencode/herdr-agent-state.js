@@ -2,7 +2,7 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=opencode
-// HERDR_INTEGRATION_VERSION=3
+// HERDR_INTEGRATION_VERSION=4
 
 import net from "node:net";
 
@@ -20,7 +20,10 @@ function sessionIDFromProperties(properties) {
     : undefined;
 }
 
-function reportState(action, sessionID) {
+function reportSession(sessionID) {
+  if (!sessionID) {
+    return Promise.resolve();
+  }
   const paneId = process.env.HERDR_PANE_ID;
   const socketPath = process.env.HERDR_SOCKET_PATH;
 
@@ -31,26 +34,16 @@ function reportState(action, sessionID) {
   const requestId = `${SOURCE}:${Date.now()}:${Math.floor(Math.random() * 1_000_000)
     .toString()
     .padStart(6, "0")}`;
-  const params =
-    action === "release"
-      ? {
-          pane_id: paneId,
-          source: SOURCE,
-          agent: "opencode",
-          seq: nextReportSeq(),
-        }
-      : {
-          pane_id: paneId,
-          source: SOURCE,
-          agent: "opencode",
-          state: action,
-          seq: nextReportSeq(),
-          ...(sessionID ? { agent_session_id: sessionID } : {}),
-        };
   const request = {
     id: requestId,
-    method: action === "release" ? "pane.release_agent" : "pane.report_agent",
-    params,
+    method: "pane.report_agent_session",
+    params: {
+      pane_id: paneId,
+      source: SOURCE,
+      agent: "opencode",
+      seq: nextReportSeq(),
+      agent_session_id: sessionID,
+    },
   };
 
   return new Promise((resolve) => {
@@ -81,53 +74,16 @@ export const HerdrAgentStatePlugin = async () => {
   }
 
   return {
-    dispose: async () => {
-      await reportState("release");
-    },
     event: async ({ event }) => {
       const type = event?.type;
       const properties = event?.properties ?? {};
       const sessionID = sessionIDFromProperties(properties);
 
       switch (type) {
-        case "permission.asked":
-        case "question.asked":
-          await reportState("blocked", sessionID);
-          break;
-        case "permission.replied": {
-          const reply = properties.reply ?? properties.response;
-          if (reply === "reject") {
-            await reportState("idle", sessionID);
-          } else if (reply === "once" || reply === "always") {
-            await reportState("working", sessionID);
-          }
-          break;
-        }
-        case "question.replied":
-          await reportState("working", sessionID);
-          break;
-        case "question.rejected":
-          await reportState("idle", sessionID);
-          break;
         case "session.created":
         case "session.updated":
-          // session.created and session.updated are metadata events; lifecycle
-          // state comes from session.status and the deprecated session.idle.
-          break;
-        case "session.status": {
-          const status =
-            typeof properties.status === "string"
-              ? properties.status
-              : properties.status?.type;
-          if (status === "busy" || status === "retry") {
-            await reportState("working", sessionID);
-          } else if (status === "idle") {
-            await reportState("idle", sessionID);
-          }
-          break;
-        }
-        case "session.idle":
-          await reportState("idle", sessionID);
+        case "session.status":
+          await reportSession(sessionID);
           break;
         default:
           break;

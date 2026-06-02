@@ -25,12 +25,6 @@ pub struct AgentResumePlan {
     pub dedupe_key: String,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct AgentResumeLaunch<'a> {
-    pub plan: &'a AgentResumePlan,
-    pub initial_history_ansi: Option<&'a str>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistedAgentSession {
     pub source: String,
@@ -75,6 +69,13 @@ pub fn session_ref_from_report(
     agent_session_id.and_then(AgentSessionRef::id)
 }
 
+pub fn is_reserved_native_state_source(source: &str, agent: &str) -> bool {
+    matches!(
+        (source, agent),
+        ("herdr:claude", "claude") | ("herdr:codex", "codex") | ("herdr:opencode", "opencode")
+    )
+}
+
 pub fn session_ref_from_snapshot(
     source: &str,
     agent: &str,
@@ -111,6 +112,9 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
         }
         ("herdr:codex", "codex", AgentSessionRefKind::Id) => {
             vec!["codex".into(), "resume".into(), session_ref.value.clone()]
+        }
+        ("herdr:copilot", "copilot", AgentSessionRefKind::Id) => {
+            vec!["copilot".into(), format!("--resume={}", session_ref.value)]
         }
         ("herdr:pi", "pi", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
             vec!["pi".into(), "--session".into(), session_ref.value.clone()]
@@ -151,6 +155,7 @@ fn is_official_agent_source(source: &str, agent: &str) -> bool {
         (source, agent),
         ("herdr:claude", "claude")
             | ("herdr:codex", "codex")
+            | ("herdr:copilot", "copilot")
             | ("herdr:pi", "pi")
             | ("herdr:hermes", "hermes")
             | ("herdr:opencode", "opencode")
@@ -193,6 +198,16 @@ mod tests {
             .unwrap()
             .argv,
             vec!["codex", "resume", "codex-session"]
+        );
+        assert_eq!(
+            plan(
+                "herdr:copilot",
+                "copilot",
+                &AgentSessionRef::id("copilot-session").unwrap()
+            )
+            .unwrap()
+            .argv,
+            vec!["copilot", "--resume=copilot-session"]
         );
         assert_eq!(
             plan(
@@ -267,13 +282,34 @@ mod tests {
             Some("/tmp/claude-session".into())
         )
         .is_none());
+
+        let session_ref =
+            session_ref_from_report("herdr:copilot", "copilot", Some("copilot-id".into()), None)
+                .unwrap();
+        assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
+        assert_eq!(session_ref.value, "copilot-id");
+        assert!(session_ref_from_report(
+            "herdr:copilot",
+            "copilot",
+            None,
+            Some("/tmp/copilot-session".into())
+        )
+        .is_none());
     }
 
     #[test]
     fn ids_are_data_not_shell_text() {
         let id = "abc; rm -rf /";
-        let plan = plan("herdr:codex", "codex", &AgentSessionRef::id(id).unwrap()).unwrap();
-        assert_eq!(plan.argv, vec!["codex", "resume", id]);
+        let codex_plan = plan("herdr:codex", "codex", &AgentSessionRef::id(id).unwrap()).unwrap();
+        assert_eq!(codex_plan.argv, vec!["codex", "resume", id]);
+
+        let copilot_plan = plan(
+            "herdr:copilot",
+            "copilot",
+            &AgentSessionRef::id(id).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(copilot_plan.argv, vec!["copilot", "--resume=abc; rm -rf /"]);
     }
 
     #[test]
@@ -290,6 +326,12 @@ mod tests {
             &AgentSessionRef::path("/tmp/opencode-session").unwrap()
         )
         .is_none());
+        assert!(plan(
+            "herdr:copilot",
+            "copilot",
+            &AgentSessionRef::path("/tmp/copilot-session").unwrap()
+        )
+        .is_none());
         assert!(session_ref_from_snapshot(
             "herdr:hermes",
             "hermes",
@@ -302,6 +344,13 @@ mod tests {
             "opencode",
             AgentSessionRefKind::Id,
             "opencode-session"
+        )
+        .is_some());
+        assert!(session_ref_from_snapshot(
+            "herdr:copilot",
+            "copilot",
+            AgentSessionRefKind::Id,
+            "copilot-session"
         )
         .is_some());
     }

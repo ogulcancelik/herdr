@@ -252,7 +252,7 @@ fn handle_request(
         Method::Ping(_) => serde_json::to_string(&SuccessResponse {
             id: request.id,
             result: ResponseResult::Pong {
-                version: env!("CARGO_PKG_VERSION").into(),
+                version: crate::build_info::version(),
                 protocol: crate::protocol::PROTOCOL_VERSION,
                 capabilities,
             },
@@ -303,6 +303,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PaneSendInput(_) => "pane.send_input",
         Method::PaneRead(_) => "pane.read",
         Method::PaneReportAgent(_) => "pane.report_agent",
+        Method::PaneReportAgentSession(_) => "pane.report_agent_session",
         Method::PaneReportMetadata(_) => "pane.report_metadata",
         Method::PaneClearAgentAuthority(_) => "pane.clear_agent_authority",
         Method::PaneReleaseAgent(_) => "pane.release_agent",

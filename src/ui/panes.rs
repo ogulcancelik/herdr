@@ -1,6 +1,6 @@
 use ratatui::{
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
     Frame,
@@ -312,6 +312,7 @@ pub(super) fn render_panes(
                 info.inner_rect,
                 rt.scroll_metrics(),
                 &app.palette,
+                app.host_terminal_theme,
             );
             render_copy_mode_cursor(app, frame, info);
         }
@@ -350,19 +351,116 @@ fn render_selection_highlight(
     inner: Rect,
     scroll_metrics: Option<crate::pane::ScrollMetrics>,
     p: &Palette,
+    host_theme: crate::terminal_theme::TerminalTheme,
 ) {
     if let Some(sel) = selection {
         if sel.is_visible() && sel.pane_id == pane_id {
             let buf = frame.buffer_mut();
+            let style = automatic_selection_style(p, host_theme);
             for y in 0..inner.height {
                 for x in 0..inner.width {
                     if sel.contains(y, x, scroll_metrics) {
                         let cell = &mut buf[(inner.x + x, inner.y + y)];
-                        cell.set_style(Style::default().fg(panel_contrast_fg(p)).bg(p.blue));
+                        cell.set_style(style);
                     }
                 }
             }
         }
+    }
+}
+
+type Rgb = (u8, u8, u8);
+
+fn automatic_selection_style(
+    p: &Palette,
+    host_theme: crate::terminal_theme::TerminalTheme,
+) -> Style {
+    let bg = automatic_selection_bg(p, host_theme);
+    Style::reset().fg(selection_fg_for_bg(bg, p)).bg(bg)
+}
+
+fn automatic_selection_bg(p: &Palette, host_theme: crate::terminal_theme::TerminalTheme) -> Color {
+    let Some(background) = host_theme.background.map(terminal_theme_to_rgb) else {
+        return selection_palette_background(p);
+    };
+
+    let target = if relative_luminance(background) < 0.5 {
+        (255, 255, 255)
+    } else {
+        (0, 0, 0)
+    };
+    let selected = mix_rgb(background, target, 0.28);
+    Color::Rgb(selected.0, selected.1, selected.2)
+}
+
+fn selection_palette_background(p: &Palette) -> Color {
+    if p.panel_bg == Color::Reset {
+        p.surface_dim
+    } else {
+        p.panel_bg
+    }
+}
+
+fn terminal_theme_to_rgb(color: crate::terminal_theme::RgbColor) -> Rgb {
+    (color.r, color.g, color.b)
+}
+
+fn selection_fg_for_bg(bg: Color, p: &Palette) -> Color {
+    color_to_rgb(bg)
+        .map(|bg| {
+            if relative_luminance(bg) < 0.5 {
+                Color::White
+            } else {
+                Color::Black
+            }
+        })
+        .unwrap_or_else(|| panel_contrast_fg(p))
+}
+
+fn mix_rgb(base: Rgb, target: Rgb, amount: f32) -> Rgb {
+    fn channel(base: u8, target: u8, amount: f32) -> u8 {
+        (f32::from(base) + (f32::from(target) - f32::from(base)) * amount).round() as u8
+    }
+    (
+        channel(base.0, target.0, amount),
+        channel(base.1, target.1, amount),
+        channel(base.2, target.2, amount),
+    )
+}
+
+fn relative_luminance(color: Rgb) -> f32 {
+    fn channel(value: u8) -> f32 {
+        let value = f32::from(value) / 255.0;
+        if value <= 0.03928 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    0.2126 * channel(color.0) + 0.7152 * channel(color.1) + 0.0722 * channel(color.2)
+}
+
+fn color_to_rgb(color: Color) -> Option<Rgb> {
+    match color {
+        Color::Reset => None,
+        Color::Black => Some((0, 0, 0)),
+        Color::Red => Some((128, 0, 0)),
+        Color::Green => Some((0, 128, 0)),
+        Color::Yellow => Some((128, 128, 0)),
+        Color::Blue => Some((0, 0, 128)),
+        Color::Magenta => Some((128, 0, 128)),
+        Color::Cyan => Some((0, 128, 128)),
+        Color::Gray => Some((192, 192, 192)),
+        Color::DarkGray => Some((128, 128, 128)),
+        Color::LightRed => Some((255, 0, 0)),
+        Color::LightGreen => Some((0, 255, 0)),
+        Color::LightYellow => Some((255, 255, 0)),
+        Color::LightBlue => Some((0, 0, 255)),
+        Color::LightMagenta => Some((255, 0, 255)),
+        Color::LightCyan => Some((0, 255, 255)),
+        Color::White => Some((255, 255, 255)),
+        Color::Rgb(r, g, b) => Some((r, g, b)),
+        Color::Indexed(_) => None,
     }
 }
 
@@ -410,6 +508,8 @@ fn render_empty(app: &AppState, frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::PaneId;
+    use crate::selection::Selection;
     use crate::terminal::TerminalRuntime;
     use crate::workspace::Workspace;
 
@@ -570,5 +670,89 @@ mod tests {
         assert_eq!(info.rect, area);
         assert_eq!(info.scrollbar_rect, Some(Rect::new(49, 3, 1, 8)));
         assert_eq!(info.inner_rect, Rect::new(10, 3, 39, 8));
+    }
+
+    #[test]
+    fn selection_highlight_uses_one_uniform_style() {
+        let palette = Palette::catppuccin();
+        let host_theme = crate::terminal_theme::TerminalTheme {
+            foreground: None,
+            background: Some(crate::terminal_theme::RgbColor {
+                r: 12,
+                g: 14,
+                b: 16,
+            }),
+        };
+        let expected_style = automatic_selection_style(&palette, host_theme);
+        let selection = Some(Selection::range(PaneId::from_raw(1), 0, 0, 2, None));
+        let backend = ratatui::backend::TestBackend::new(4, 1);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                let buf = frame.buffer_mut();
+                buf[(0, 0)].set_style(
+                    Style::default()
+                        .fg(Color::Rgb(10, 220, 120))
+                        .bg(Color::Black),
+                );
+                buf[(1, 0)].set_style(
+                    Style::default()
+                        .fg(Color::Rgb(220, 180, 40))
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                );
+                buf[(2, 0)].set_style(Style::default().fg(Color::Blue).bg(Color::Reset));
+                render_selection_highlight(
+                    &selection,
+                    frame,
+                    PaneId::from_raw(1),
+                    Rect::new(0, 0, 4, 1),
+                    None,
+                    &palette,
+                    host_theme,
+                );
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let first = buffer[(0, 0)].style();
+        let second = buffer[(1, 0)].style();
+        let third = buffer[(2, 0)].style();
+
+        assert_eq!(first.fg, expected_style.fg);
+        assert_eq!(second.fg, expected_style.fg);
+        assert_eq!(third.fg, expected_style.fg);
+        assert_eq!(first.bg, expected_style.bg);
+        assert_eq!(second.bg, expected_style.bg);
+        assert_eq!(third.bg, expected_style.bg);
+        assert_eq!(first.add_modifier, expected_style.add_modifier);
+        assert_eq!(second.add_modifier, expected_style.add_modifier);
+        assert_eq!(third.add_modifier, expected_style.add_modifier);
+        assert!(!second.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn automatic_selection_background_uses_host_background() {
+        let bg = automatic_selection_bg(
+            &Palette::terminal(),
+            crate::terminal_theme::TerminalTheme {
+                foreground: Some(crate::terminal_theme::RgbColor {
+                    r: 230,
+                    g: 230,
+                    b: 230,
+                }),
+                background: Some(crate::terminal_theme::RgbColor {
+                    r: 12,
+                    g: 14,
+                    b: 16,
+                }),
+            },
+        );
+
+        let Color::Rgb(r, g, b) = bg else {
+            panic!("selection background should resolve to rgb");
+        };
+        assert!(relative_luminance((r, g, b)) > relative_luminance((12, 14, 16)));
     }
 }

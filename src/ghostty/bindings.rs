@@ -86,6 +86,8 @@ pub const GhosttyResult_GHOSTTY_OUT_OF_MEMORY: GhosttyResult = -1;
 pub const GhosttyResult_GHOSTTY_INVALID_VALUE: GhosttyResult = -2;
 #[doc = " Operation failed because the provided buffer was too small"]
 pub const GhosttyResult_GHOSTTY_OUT_OF_SPACE: GhosttyResult = -3;
+#[doc = " Operation completed but the requested value was not present"]
+pub const GhosttyResult_GHOSTTY_NO_VALUE: GhosttyResult = -4;
 #[doc = " Result codes for libghostty-vt operations."]
 pub type GhosttyResult = ::std::os::raw::c_int;
 #[doc = " A borrowed byte string (pointer + length).\n\n The memory is not owned by this struct. The pointer is only valid\n for the lifetime documented by the API that produces or consumes it."]
@@ -104,6 +106,34 @@ const _: () = {
     ["Offset of field: GhosttyString::ptr"][::std::mem::offset_of!(GhosttyString, ptr) - 0usize];
     ["Offset of field: GhosttyString::len"][::std::mem::offset_of!(GhosttyString, len) - 8usize];
 };
+#[doc = " A caller-provided byte buffer.\n\n APIs that write to this type use `len` for the number of bytes written on\n GHOSTTY_SUCCESS and the required byte capacity on GHOSTTY_OUT_OF_SPACE."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct GhosttyBuffer {
+    #[doc = " Destination buffer for bytes. May be NULL when cap is 0 to query required size."]
+    pub ptr: *mut u8,
+    #[doc = " Capacity of ptr in bytes."]
+    pub cap: usize,
+    #[doc = " Bytes written on success, or required byte capacity on GHOSTTY_OUT_OF_SPACE."]
+    pub len: usize,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of GhosttyBuffer"][::std::mem::size_of::<GhosttyBuffer>() - 24usize];
+    ["Alignment of GhosttyBuffer"][::std::mem::align_of::<GhosttyBuffer>() - 8usize];
+    ["Offset of field: GhosttyBuffer::ptr"][::std::mem::offset_of!(GhosttyBuffer, ptr) - 0usize];
+    ["Offset of field: GhosttyBuffer::cap"][::std::mem::offset_of!(GhosttyBuffer, cap) - 8usize];
+    ["Offset of field: GhosttyBuffer::len"][::std::mem::offset_of!(GhosttyBuffer, len) - 16usize];
+};
+impl Default for GhosttyBuffer {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
 impl Default for GhosttyString {
     fn default() -> Self {
         let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
@@ -547,11 +577,31 @@ unsafe extern "C" {
     ) -> GhosttyResult;
 }
 unsafe extern "C" {
+    #[doc = " Get multiple data fields from a cell in a single call."]
+    pub fn ghostty_cell_get_multi(
+        cell: GhosttyCell,
+        count: usize,
+        keys: *const GhosttyCellData,
+        values: *mut *mut ::std::os::raw::c_void,
+        out_written: *mut usize,
+    ) -> GhosttyResult;
+}
+unsafe extern "C" {
     #[doc = " Get data from a row.\n\n Extracts typed data from the given row based on the specified\n data type. The output pointer must be of the appropriate type for the\n requested data kind. Valid data types and output types are documented\n in the `GhosttyRowData` enum.\n\n @param row The row value\n @param data The type of data to extract\n @param out Pointer to store the extracted data (type depends on data parameter)\n @return GHOSTTY_SUCCESS on success, GHOSTTY_INVALID_VALUE if the\n         data type is invalid\n\n @ingroup screen"]
     pub fn ghostty_row_get(
         row: GhosttyRow,
         data: GhosttyRowData,
         out: *mut ::std::os::raw::c_void,
+    ) -> GhosttyResult;
+}
+unsafe extern "C" {
+    #[doc = " Get multiple data fields from a row in a single call."]
+    pub fn ghostty_row_get_multi(
+        row: GhosttyRow,
+        count: usize,
+        keys: *const GhosttyRowData,
+        values: *mut *mut ::std::os::raw::c_void,
+        out_written: *mut usize,
     ) -> GhosttyResult;
 }
 #[doc = " Style identifier type.\n\n Used to look up the full style from a grid reference.\n Obtain this from a cell via GHOSTTY_CELL_DATA_STYLE_ID.\n\n @ingroup style"]
@@ -1451,6 +1501,9 @@ pub const GhosttyRenderStateRowData_GHOSTTY_RENDER_STATE_ROW_DATA_RAW: GhosttyRe
 #[doc = " Populate a pre-allocated GhosttyRenderStateRowCells with cell data for\n  the current row (GhosttyRenderStateRowCells). Cell data is only\n  valid as long as the underlying render state is not updated.\n  It is unsafe to use cell data after updating the render state."]
 pub const GhosttyRenderStateRowData_GHOSTTY_RENDER_STATE_ROW_DATA_CELLS: GhosttyRenderStateRowData =
     3;
+#[doc = " Row-local selected cell range (GhosttyRenderStateRowSelection)."]
+pub const GhosttyRenderStateRowData_GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION:
+    GhosttyRenderStateRowData = 4;
 #[doc = " Queryable data kinds for ghostty_render_state_row_get().\n\n @ingroup render"]
 pub type GhosttyRenderStateRowData = ::std::os::raw::c_uint;
 #[doc = " Set dirty state for the current row (bool)."]
@@ -1458,6 +1511,30 @@ pub const GhosttyRenderStateRowOption_GHOSTTY_RENDER_STATE_ROW_OPTION_DIRTY:
     GhosttyRenderStateRowOption = 0;
 #[doc = " Settable options for ghostty_render_state_row_set().\n\n @ingroup render"]
 pub type GhosttyRenderStateRowOption = ::std::os::raw::c_uint;
+#[doc = " Row-local selection range."]
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct GhosttyRenderStateRowSelection {
+    #[doc = " Size of this struct in bytes."]
+    pub size: usize,
+    #[doc = " Start column of the row-local selection range, inclusive."]
+    pub start_x: u16,
+    #[doc = " End column of the row-local selection range, inclusive."]
+    pub end_x: u16,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of GhosttyRenderStateRowSelection"]
+        [::std::mem::size_of::<GhosttyRenderStateRowSelection>() - 16usize];
+    ["Alignment of GhosttyRenderStateRowSelection"]
+        [::std::mem::align_of::<GhosttyRenderStateRowSelection>() - 8usize];
+    ["Offset of field: GhosttyRenderStateRowSelection::size"]
+        [::std::mem::offset_of!(GhosttyRenderStateRowSelection, size) - 0usize];
+    ["Offset of field: GhosttyRenderStateRowSelection::start_x"]
+        [::std::mem::offset_of!(GhosttyRenderStateRowSelection, start_x) - 8usize];
+    ["Offset of field: GhosttyRenderStateRowSelection::end_x"]
+        [::std::mem::offset_of!(GhosttyRenderStateRowSelection, end_x) - 10usize];
+};
 #[doc = " Render-state color information.\n\n This struct uses the sized-struct ABI pattern. Initialize with\n GHOSTTY_INIT_SIZED(GhosttyRenderStateColors) before calling\n ghostty_render_state_colors_get().\n\n Example:\n @code\n GhosttyRenderStateColors colors = GHOSTTY_INIT_SIZED(GhosttyRenderStateColors);\n GhosttyResult result = ghostty_render_state_colors_get(state, &colors);\n @endcode\n\n @ingroup render"]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -1530,6 +1607,16 @@ unsafe extern "C" {
     ) -> GhosttyResult;
 }
 unsafe extern "C" {
+    #[doc = " Get multiple data fields from a render state in a single call."]
+    pub fn ghostty_render_state_get_multi(
+        state: GhosttyRenderState_ptr,
+        count: usize,
+        keys: *const GhosttyRenderStateData,
+        values: *mut *mut ::std::os::raw::c_void,
+        out_written: *mut usize,
+    ) -> GhosttyResult;
+}
+unsafe extern "C" {
     #[doc = " Set an option on a render state.\n\n The `value` pointer must point to a value of the type corresponding to the\n requested option kind (see GhosttyRenderStateOption).\n\n @param state The render state handle (NULL returns GHOSTTY_INVALID_VALUE)\n @param option The option to set\n @param[in] value Pointer to the value to set (NULL returns\n            GHOSTTY_INVALID_VALUE)\n @return GHOSTTY_SUCCESS on success, GHOSTTY_INVALID_VALUE if `state` or\n         `value` is NULL\n\n @ingroup render"]
     pub fn ghostty_render_state_set(
         state: GhosttyRenderState_ptr,
@@ -1570,6 +1657,16 @@ unsafe extern "C" {
     ) -> GhosttyResult;
 }
 unsafe extern "C" {
+    #[doc = " Get multiple data fields from the current row in a single call."]
+    pub fn ghostty_render_state_row_get_multi(
+        iterator: GhosttyRenderStateRowIterator_ptr,
+        count: usize,
+        keys: *const GhosttyRenderStateRowData,
+        values: *mut *mut ::std::os::raw::c_void,
+        out_written: *mut usize,
+    ) -> GhosttyResult;
+}
+unsafe extern "C" {
     #[doc = " Set an option on the current row in a render-state row iterator.\n\n The `value` pointer must point to a value of the type corresponding to the\n requested option kind (see GhosttyRenderStateRowOption).\n Call ghostty_render_state_row_iterator_next() at least once before\n calling this function.\n\n @param iterator The iterator handle to update (NULL returns GHOSTTY_INVALID_VALUE)\n @param option The option to set\n @param[in] value Pointer to the value to set (NULL returns\n            GHOSTTY_INVALID_VALUE)\n @return GHOSTTY_SUCCESS on success, GHOSTTY_INVALID_VALUE if\n         `iterator` is NULL or the iterator is not positioned on a row\n\n @ingroup render"]
     pub fn ghostty_render_state_row_set(
         iterator: GhosttyRenderStateRowIterator_ptr,
@@ -1605,6 +1702,15 @@ pub const GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_
 #[doc = " The resolved foreground color of the cell (GhosttyColorRgb).\n  Resolves palette indices through the palette. Bold color handling\n  is not applied; the caller should handle bold styling separately.\n  Returns GHOSTTY_INVALID_VALUE if the cell has no explicit foreground\n  color, in which case the caller should use whatever default foreground\n  color it wants (e.g. the terminal foreground)."]
 pub const GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR:
     GhosttyRenderStateRowCellsData = 6;
+#[doc = " Whether the cell is contained within the current selection (bool)."]
+pub const GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_SELECTED:
+    GhosttyRenderStateRowCellsData = 7;
+#[doc = " Whether the cell has any explicit styling (bool)."]
+pub const GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_HAS_STYLING:
+    GhosttyRenderStateRowCellsData = 8;
+#[doc = " Encode the current cell's full grapheme cluster as UTF-8 into a GhosttyBuffer."]
+pub const GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_UTF8:
+    GhosttyRenderStateRowCellsData = 9;
 #[doc = " Queryable data kinds for ghostty_render_state_row_cells_get().\n\n @ingroup render"]
 pub type GhosttyRenderStateRowCellsData = ::std::os::raw::c_uint;
 unsafe extern "C" {
@@ -1624,6 +1730,16 @@ unsafe extern "C" {
         cells: GhosttyRenderStateRowCells_ptr,
         data: GhosttyRenderStateRowCellsData,
         out: *mut ::std::os::raw::c_void,
+    ) -> GhosttyResult;
+}
+unsafe extern "C" {
+    #[doc = " Get multiple data fields from the current cell in a single call."]
+    pub fn ghostty_render_state_row_cells_get_multi(
+        cells: GhosttyRenderStateRowCells_ptr,
+        count: usize,
+        keys: *const GhosttyRenderStateRowCellsData,
+        values: *mut *mut ::std::os::raw::c_void,
+        out_written: *mut usize,
     ) -> GhosttyResult;
 }
 unsafe extern "C" {

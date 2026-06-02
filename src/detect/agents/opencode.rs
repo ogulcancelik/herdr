@@ -7,7 +7,10 @@ pub(super) fn detect(content: &str) -> AgentState {
     }
 
     // Working
-    if has_interrupt_pattern(&content.to_lowercase()) {
+    if has_interrupt_pattern(&content.to_lowercase())
+        || has_opencode_interrupt_footer(content)
+        || has_opencode_progress_run(content)
+    {
         return AgentState::Working;
     }
 
@@ -22,4 +25,30 @@ fn has_opencode_question_prompt(content: &str) -> bool {
     let has_question_nav = content.contains("↑↓ select") || content.contains("⇆ tab");
 
     lower.contains("esc dismiss") && has_enter_action && has_question_nav
+}
+
+fn has_opencode_interrupt_footer(content: &str) -> bool {
+    content.lines().any(|line| {
+        let lower = line.to_lowercase();
+        if !(lower.contains("esc interrupt") || lower.contains("esc again to interrupt")) {
+            return false;
+        }
+
+        lower.contains("opencode")
+    })
+}
+
+fn has_opencode_progress_run(line: &str) -> bool {
+    let mut run = 0usize;
+    for ch in line.chars() {
+        if matches!(ch, '■' | '⬝') {
+            run += 1;
+            if run >= 4 {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
 }

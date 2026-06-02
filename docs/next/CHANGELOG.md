@@ -3,16 +3,23 @@
 ## Unreleased
 
 ### Added
+- Added an opt-in preview update channel with `herdr channel set preview`, automated preview manifests, and GitHub prerelease publishing for users who want fixes before stable releases.
 - Added `ui.right_click_passthrough_modifier` so a configured modifier such as `ctrl` can forward right-click hold and drag gestures to mouse-reporting pane apps while normal right-click still opens Herdr's pane menu. (#148)
 - Added Kilo Code CLI automatic detection for idle, working, and blocked terminal states. (#270)
+- Added `herdr integration install copilot` for GitHub Copilot CLI hooks that report prompt, tool, post-approval progress, permission, `ask_user`, `exit_plan_mode`, idle, session-exit state, and session ids through Herdr's socket API. When `[session] resume_agents_on_restore = true` is enabled, Herdr can resume Copilot panes with `copilot --resume=<id>`.
 
 ### Changed
-- Removed the automatic GitHub star prompt from `herdr update`.
+- Native agent session restore is now enabled by default for supported panes with current official integrations. Set `[session] resume_agents_on_restore = false` to disable it.
+- Claude Code, Codex, and OpenCode integrations now report session identity only. Native state for those agents comes from Herdr's screen detection, while Pi, OMP, GitHub Copilot CLI, Hermes Agent, Qoder CLI, and custom socket integrations can still report state.
 
 ### Fixed
+- Kiro sub-agent tool approval prompts are now detected as blocked instead of working. (#388)
+- Restored native agent sessions now resume across background workspaces and tabs after the first client provides terminal context instead of waiting until each pane is focused.
 - Pane input no longer waits behind the PTY actor's idle read poll, restoring responsive typing at quiet shell prompts. (#379)
 - Pane apps that query OSC 4 ANSI palette colors now receive the active terminal palette response, so OpenCode and similar TUIs can enable system-theme behavior inside Herdr. (#387)
+- Pane text selection now derives its highlight colors from the host terminal or active Herdr palette instead of forcing the theme's blue accent. (#298)
 - Plain `herdr update` and remote binary replacement now ask before stopping running sessions, avoid protocol-heavy prompt text, and leave the current install untouched when the user chooses not to stop active pane processes. Explicit `--handoff` update flows try live handoff without a second handoff prompt.
+- Remote bootstrap now uses the remote shell only for PATH discovery and runs internal probes through `/bin/sh`, so `herdr --remote` can detect existing installs when the remote login shell is fish. (#396)
 
 ## [0.6.6] - 2026-05-31
 

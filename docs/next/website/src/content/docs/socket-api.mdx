@@ -73,7 +73,7 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.close` |
-| Pane | `pane.split`, `pane.list`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.list`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.send`, `agent.rename`, `agent.focus`, `agent.start` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
@@ -163,7 +163,22 @@ Integrations report agent state with `pane.report_agent`.
 
 `custom_status` is visual. It can show a short label like `indexing` without changing semantic behavior.
 
-Official integrations can also report a native session reference. `pane.get`, `pane.list`, `agent.get`, and `agent.list` expose a read-only `agent_session` object when Herdr has a stored native session reference:
+Session-only official integrations report native session references with `pane.report_agent_session`. State-reporting integrations can still include native session references in `pane.report_agent`. State-independent session reports do not affect waits, notifications, or rollups.
+
+```json
+{
+  "id": "req_2",
+  "method": "pane.report_agent_session",
+  "params": {
+    "pane_id": "1-1",
+    "source": "herdr:codex",
+    "agent": "codex",
+    "agent_session_id": "..."
+  }
+}
+```
+
+`pane.get`, `pane.list`, `agent.get`, and `agent.list` expose a read-only `agent_session` object when Herdr has a stored native session reference:
 
 ```json
 {
@@ -190,7 +205,6 @@ Use `pane.report_metadata` when a user hook wants to customize presentation with
     "pane_id": "1-1",
     "source": "user:claude-title",
     "agent": "claude",
-    "applies_to_source": "herdr:claude",
     "title": "Refactor auth middleware",
     "display_agent": "Claude: auth",
     "custom_status": "refactor auth",
@@ -204,7 +218,7 @@ Use `pane.report_metadata` when a user hook wants to customize presentation with
 }
 ```
 
-Metadata reports are display-only. Valid metadata can override the pane title, displayed agent name, compact custom status, and visible state labels. `working`, `blocked`, `idle`, waits, notifications, session restore, and rollups still come from the active agent state report. `agent` is an optional guard for the authoritative agent label; `applies_to_source` is an optional guard for the active lifecycle authority source. Use `display_agent` to change the visible name. `state_labels` keys must be `idle`, `working`, `blocked`, `done`, or `unknown`. Use clear fields such as `clear_custom_status: true` with the same `source` to remove one presentation override.
+Metadata reports are display-only. Valid metadata can override the pane title, displayed agent name, compact custom status, and visible state labels. `working`, `blocked`, `idle`, waits, notifications, and rollups still come from semantic state. Native session restore comes from stored official session references. `agent` is an optional guard for the authoritative agent label; `applies_to_source` is an optional guard for the active lifecycle authority source. Use `display_agent` to change the visible name. `state_labels` keys must be `idle`, `working`, `blocked`, `done`, or `unknown`. Use clear fields such as `clear_custom_status: true` with the same `source` to remove one presentation override.
 
 ## Event subscriptions
 

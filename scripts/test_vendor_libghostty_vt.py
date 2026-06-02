@@ -5,8 +5,9 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from scripts.vendor_libghostty_vt import parse_archive_root
+from scripts.vendor_libghostty_vt import ensure_dist_archive, parse_archive_root
 
 
 class VendorLibghosttyVtTests(unittest.TestCase):
@@ -20,6 +21,23 @@ class VendorLibghosttyVtTests(unittest.TestCase):
                 tar.addfile(info, io.BytesIO(data))
 
             self.assertEqual(parse_archive_root(archive), "libghostty-vt-1.0.0")
+
+    def test_ensure_dist_archive_refuses_stale_archives_without_head_match(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            dist = repo / "zig-out" / "dist"
+            dist.mkdir(parents=True)
+            (dist / "libghostty-vt-1.3.2-main-+deadbeef0.tar.gz").write_bytes(b"stale")
+
+            with (
+                mock.patch("scripts.vendor_libghostty_vt.subprocess.run"),
+                mock.patch(
+                    "scripts.vendor_libghostty_vt.subprocess.check_output",
+                    return_value="0123456789abcdef\n",
+                ),
+            ):
+                with self.assertRaisesRegex(FileNotFoundError, "HEAD 012345678"):
+                    ensure_dist_archive(repo)
 
     def test_vendored_tree_contains_required_upstream_files(self) -> None:
         root = Path(__file__).resolve().parent.parent / "vendor" / "libghostty-vt"

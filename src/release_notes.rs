@@ -71,7 +71,7 @@ fn load_stored_from_path(path: &Path) -> Option<StoredReleaseNotes> {
 }
 
 pub fn load_latest() -> Option<ReleaseNotes> {
-    load_latest_from_path(&pending_path(), env!("CARGO_PKG_VERSION"))
+    load_latest_from_path(&pending_path(), &crate::build_info::version())
 }
 
 fn load_latest_from_path(path: &Path, current_version: &str) -> Option<ReleaseNotes> {
@@ -104,7 +104,7 @@ fn release_notes_from_stored(
 }
 
 pub fn mark_current_version_seen() -> std::io::Result<()> {
-    mark_current_version_seen_at(&pending_path(), env!("CARGO_PKG_VERSION"))
+    mark_current_version_seen_at(&pending_path(), &crate::build_info::version())
 }
 
 fn mark_current_version_seen_at(path: &Path, current_version: &str) -> std::io::Result<()> {

@@ -36,6 +36,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         }
         "status" => status::run_status_command(&args[2..])?,
         "config" => run_config_command(&args[2..])?,
+        "channel" => run_channel_command(&args[2..])?,
         "workspace" => workspace::run_workspace_command(&args[2..])?,
         "worktree" => worktree::run_worktree_command(&args[2..])?,
         "tab" => tab::run_tab_command(&args[2..])?,
@@ -49,6 +50,89 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
     };
 
     Ok(CommandOutcome::Handled(exit_code))
+}
+
+fn run_channel_command(args: &[String]) -> std::io::Result<i32> {
+    match args.first().map(|arg| arg.as_str()) {
+        Some("set") => channel_set(&args[1..]),
+        Some("show") if args.len() == 1 => {
+            let config = crate::config::Config::load().config;
+            println!("{}", config.update.channel.as_str());
+            Ok(0)
+        }
+        Some("help" | "--help" | "-h") => {
+            print_channel_help();
+            Ok(0)
+        }
+        _ => {
+            print_channel_help();
+            Ok(2)
+        }
+    }
+}
+
+fn channel_set(args: &[String]) -> std::io::Result<i32> {
+    let Some(channel) = parse_channel_set_arg(args) else {
+        eprintln!("usage: herdr channel set <stable|preview>");
+        return Ok(2);
+    };
+
+    let path = crate::config::config_path();
+    let content = if path.exists() {
+        std::fs::read_to_string(&path)?
+    } else {
+        String::new()
+    };
+    if let Err(err) = content.parse::<toml::Value>() {
+        eprintln!(
+            "config file at {} is invalid TOML: {err}. Fix it before changing the update channel.",
+            path.display()
+        );
+        return Ok(1);
+    }
+
+    let updated = crate::config::upsert_section_value(
+        &content,
+        "update",
+        "channel",
+        &format!("\"{channel}\""),
+    );
+    if let Err(err) = updated.parse::<toml::Value>() {
+        eprintln!(
+            "changing the update channel would make {} invalid TOML: {err}; leaving config unchanged",
+            path.display()
+        );
+        return Ok(1);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, updated)?;
+    println!(
+        "Herdr update channel set to {channel} in {}.",
+        path.display()
+    );
+    if channel == "preview" {
+        println!("Run `herdr update` to install the latest preview build when ready.");
+    } else {
+        println!("Run `herdr update` to install the latest stable release when ready.");
+    }
+    Ok(0)
+}
+
+fn parse_channel_set_arg(args: &[String]) -> Option<&str> {
+    let channel = args.first().map(|arg| arg.as_str())?;
+    if args.len() == 1 && matches!(channel, "stable" | "preview") {
+        Some(channel)
+    } else {
+        None
+    }
+}
+
+fn print_channel_help() {
+    eprintln!("herdr channel commands:");
+    eprintln!("  herdr channel show                  print the configured update channel");
+    eprintln!("  herdr channel set <stable|preview>  choose the update channel");
 }
 
 fn run_config_command(args: &[String]) -> std::io::Result<i32> {
@@ -744,4 +828,24 @@ fn print_session_help() {
 
 fn _print_json<T: Serialize>(value: &T) {
     println!("{}", serde_json::to_string(value).unwrap());
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn parses_channel_set_argument() {
+        assert_eq!(
+            super::parse_channel_set_arg(&["preview".to_string()]),
+            Some("preview")
+        );
+        assert_eq!(
+            super::parse_channel_set_arg(&["stable".to_string()]),
+            Some("stable")
+        );
+        assert_eq!(super::parse_channel_set_arg(&["nightly".to_string()]), None);
+        assert_eq!(
+            super::parse_channel_set_arg(&["preview".to_string(), "stable".to_string()]),
+            None
+        );
+    }
 }

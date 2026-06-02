@@ -84,6 +84,8 @@ pub enum Method {
     PaneRead(PaneReadParams),
     #[serde(rename = "pane.report_agent")]
     PaneReportAgent(PaneReportAgentParams),
+    #[serde(rename = "pane.report_agent_session")]
+    PaneReportAgentSession(PaneReportAgentSessionParams),
     #[serde(rename = "pane.report_metadata")]
     PaneReportMetadata(PaneReportMetadataParams),
     #[serde(rename = "pane.clear_agent_authority")]
@@ -354,6 +356,19 @@ pub struct PaneReportAgentParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneReportAgentSessionParams {
+    pub pane_id: String,
+    pub source: String,
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneReportMetadataParams {
     pub pane_id: String,
     pub source: String,
@@ -508,6 +523,7 @@ pub enum IntegrationTarget {
     Omp,
     Claude,
     Codex,
+    Copilot,
     Opencode,
     Hermes,
     Qodercli,
@@ -1063,6 +1079,25 @@ mod tests {
                 seq: Some(42),
                 agent_session_id: Some("pi-session".into()),
                 agent_session_path: Some("/tmp/pi-session.jsonl".into()),
+            }),
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        let restored: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, request);
+    }
+
+    #[test]
+    fn request_round_trips_for_pane_report_agent_session() {
+        let request = Request {
+            id: "req_session".into(),
+            method: Method::PaneReportAgentSession(PaneReportAgentSessionParams {
+                pane_id: "1-1".into(),
+                source: "herdr:claude".into(),
+                agent: "claude".into(),
+                seq: Some(42),
+                agent_session_id: Some("claude-session".into()),
+                agent_session_path: None,
             }),
         };
 

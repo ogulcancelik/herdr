@@ -23,16 +23,20 @@ pub(super) fn detect(content: &str) -> AgentState {
         return AgentState::Idle;
     }
 
-    // --- Blocked detection (full content including prompt box) ---
-
-    if has_claude_blocked_prompt(content, &lower) {
+    if has_live_blocked_form(content) {
         return AgentState::Blocked;
     }
 
-    // --- Working detection (content above the prompt box) ---
-
     if has_working_chrome(content) {
         return AgentState::Working;
+    }
+
+    if !has_prompt_box(content) && has_claude_blocked_prompt(content, &lower) {
+        return AgentState::Blocked;
+    }
+
+    if has_prompt_box(content) {
+        return AgentState::Idle;
     }
 
     AgentState::Idle
@@ -40,13 +44,14 @@ pub(super) fn detect(content: &str) -> AgentState {
 
 pub(super) fn has_visible_blocker(content: &str) -> bool {
     let lower = content.to_lowercase();
-    lower.contains("do you want to proceed?")
-        && has_claude_yes_no_choice(content)
-        && (lower.contains("bash command")
-            || lower.contains("bash(")
-            || lower.contains("contains expansion")
-            || lower.contains("tab to amend")
-            || lower.contains("ctrl+e to explain"))
+    has_live_blocked_form(content)
+        || lower.contains("do you want to proceed?")
+            && has_claude_yes_no_choice(content)
+            && (lower.contains("bash command")
+                || lower.contains("bash(")
+                || lower.contains("contains expansion")
+                || lower.contains("tab to amend")
+                || lower.contains("ctrl+e to explain"))
 }
 
 pub(super) fn has_working_chrome(content: &str) -> bool {
@@ -54,6 +59,7 @@ pub(super) fn has_working_chrome(content: &str) -> bool {
     let above_lower = above.to_lowercase();
     above_lower.contains("esc to interrupt")
         || above_lower.contains("ctrl+c to interrupt")
+        || has_background_agent_wait(above)
         || has_spinner_activity(above)
 }
 
@@ -84,6 +90,26 @@ fn has_claude_blocked_prompt(content: &str, lower_content: &str) -> bool {
         || lower_content.contains("review your answers")
         || lower_content.contains("skip interview and plan immediately")
         || (has_selection_prompt(content) && has_claude_yes_no_choice(content))
+}
+
+fn has_live_blocked_form(content: &str) -> bool {
+    let region = content_after_last_horizontal_rule(content);
+    region.lines().any(|line| {
+        let lower = line.to_lowercase();
+        lower.contains("enter to select")
+            && lower.contains("esc to cancel")
+            && (lower.contains("tab/arrow keys to navigate")
+                || lower.contains("arrow keys to navigate"))
+    })
+}
+
+fn has_background_agent_wait(content_above_prompt: &str) -> bool {
+    content_above_prompt.lines().rev().take(8).any(|line| {
+        let lower = line.to_lowercase();
+        lower.contains("waiting for")
+            && lower.contains("background agent")
+            && lower.contains("to finish")
+    })
 }
 
 fn has_claude_yes_no_choice(content: &str) -> bool {
@@ -138,6 +164,20 @@ pub(in crate::detect) fn content_above_prompt_box(content: &str) -> &str {
 
     // No prompt box found, return all content
     content
+}
+
+fn content_after_last_horizontal_rule(content: &str) -> &str {
+    let mut last_rule_end = 0usize;
+    let mut offset = 0usize;
+    for line in content.lines() {
+        let next_offset = offset + line.len() + 1;
+        if is_horizontal_rule(line) {
+            last_rule_end = next_offset.min(content.len());
+        }
+        offset = next_offset;
+    }
+
+    &content[last_rule_end..]
 }
 
 fn claude_prompt_box_top_border_index(lines: &[&str]) -> Option<usize> {
