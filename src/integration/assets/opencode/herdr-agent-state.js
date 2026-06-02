@@ -8,6 +8,7 @@ import net from "node:net";
 
 const SOURCE = "herdr:opencode";
 let reportSeq = Date.now() * 1000;
+let currentSessionTitle;
 
 function nextReportSeq() {
   reportSeq += 1;
@@ -18,6 +19,32 @@ function sessionIDFromProperties(properties) {
   return typeof properties?.sessionID === "string" && properties.sessionID
     ? properties.sessionID
     : undefined;
+}
+
+function sendRequest(request) {
+  const paneId = process.env.HERDR_PANE_ID;
+  const socketPath = process.env.HERDR_SOCKET_PATH;
+
+  if (!paneId || !socketPath) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    const client = net.createConnection(socketPath, () => {
+      client.write(`${JSON.stringify(request)}\n`);
+    });
+
+    const finish = () => {
+      client.destroy();
+      resolve();
+    };
+
+    client.setTimeout(500, finish);
+    client.on("data", finish);
+    client.on("error", finish);
+    client.on("end", finish);
+    client.on("close", resolve);
+  });
 }
 
 function reportSession(sessionID) {
@@ -46,22 +73,34 @@ function reportSession(sessionID) {
     },
   };
 
-  return new Promise((resolve) => {
-    const client = net.createConnection(socketPath, () => {
-      client.write(`${JSON.stringify(request)}\n`);
-    });
+  return sendRequest(request);
+}
 
-    const finish = () => {
-      client.destroy();
-      resolve();
-    };
+function reportSessionTitle(title) {
+  const paneId = process.env.HERDR_PANE_ID;
+  const socketPath = process.env.HERDR_SOCKET_PATH;
 
-    client.setTimeout(500, finish);
-    client.on("data", finish);
-    client.on("error", finish);
-    client.on("end", finish);
-    client.on("close", resolve);
-  });
+  if (!paneId || !socketPath || !title) {
+    return Promise.resolve();
+  }
+
+  const requestId = `${SOURCE}:meta:${Date.now()}:${Math.floor(Math.random() * 1_000_000)
+    .toString()
+    .padStart(6, "0")}`;
+  const request = {
+    id: requestId,
+    method: "pane.report_metadata",
+    params: {
+      pane_id: paneId,
+      source: SOURCE,
+      agent: "opencode",
+      applies_to_source: SOURCE,
+      custom_status: title,
+      seq: nextReportSeq(),
+    },
+  };
+
+  return sendRequest(request);
 }
 
 export const HerdrAgentStatePlugin = async () => {
@@ -81,7 +120,16 @@ export const HerdrAgentStatePlugin = async () => {
 
       switch (type) {
         case "session.created":
-        case "session.updated":
+        case "session.updated": {
+          // Extract the session title from the event info for display.
+          const infoTitle = properties?.info?.title;
+          if (typeof infoTitle === "string" && infoTitle.trim()) {
+            currentSessionTitle = infoTitle.trim();
+            await reportSessionTitle(currentSessionTitle);
+          }
+          await reportSession(sessionID);
+          break;
+        }
         case "session.status":
           await reportSession(sessionID);
           break;

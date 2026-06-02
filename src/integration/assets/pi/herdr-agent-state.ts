@@ -2,7 +2,7 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=pi
-// HERDR_INTEGRATION_VERSION=2
+// HERDR_INTEGRATION_VERSION=3
 // @ts-nocheck
 
 import { createConnection } from "node:net";
@@ -55,6 +55,7 @@ const retryableErrorPattern =
 let reportSeq = Date.now() * 1000;
 let currentAgentSessionId: string | undefined;
 let currentAgentSessionPath: string | undefined;
+let currentSessionTitle: string | undefined;
 
 function nextReportSeq(): number {
   reportSeq += 1;
@@ -92,10 +93,12 @@ function updateSessionRef(ctx: any): void {
 
 function withSessionRef(params: Record<string, unknown>): Record<string, unknown> {
   if (currentAgentSessionPath) {
-    return { ...params, agent_session_path: currentAgentSessionPath };
+    params = { ...params, agent_session_path: currentAgentSessionPath };
+  } else if (currentAgentSessionId) {
+    params = { ...params, agent_session_id: currentAgentSessionId };
   }
-  if (currentAgentSessionId) {
-    return { ...params, agent_session_id: currentAgentSessionId };
+  if (currentSessionTitle) {
+    params = { ...params, custom_status: currentSessionTitle };
   }
   return params;
 }
@@ -250,8 +253,18 @@ export default function (pi) {
     idleTimer.unref?.();
   }
 
+  function updateSessionTitle(): void {
+    try {
+      const name = pi.getSessionName?.();
+      currentSessionTitle = typeof name === "string" && name.trim() ? name.trim() : undefined;
+    } catch {
+      currentSessionTitle = undefined;
+    }
+  }
+
   pi.on("session_start", (_event, ctx) => {
     updateSessionRef(ctx);
+    updateSessionTitle();
     publishState(true);
   });
 
@@ -291,6 +304,7 @@ export default function (pi) {
     clearPendingTimers();
     clearFailureState();
     agentActive = true;
+    updateSessionTitle();
     publishState();
   });
 

@@ -12,10 +12,10 @@ use crate::layout::PaneId;
 pub(crate) const HERDR_PANE_ID_ENV_VAR: &str = "HERDR_PANE_ID";
 const PI_EXTENSION_INSTALL_NAME: &str = "herdr-agent-state.ts";
 const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/herdr-agent-state.ts");
-const PI_INTEGRATION_VERSION: u32 = 2;
+const PI_INTEGRATION_VERSION: u32 = 3;
 const OMP_EXTENSION_INSTALL_NAME: &str = "herdr-omp-agent-state.ts";
 const OMP_EXTENSION_ASSET: &str = include_str!("assets/omp/herdr-agent-state.ts");
-const OMP_INTEGRATION_VERSION: u32 = 2;
+const OMP_INTEGRATION_VERSION: u32 = 3;
 const PI_CODING_AGENT_DIR_ENV_VAR: &str = "PI_CODING_AGENT_DIR";
 const CLAUDE_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const CLAUDE_HOOK_ASSET: &str = include_str!("assets/claude/herdr-agent-state.sh");
@@ -40,7 +40,7 @@ const HERMES_PLUGIN_INIT_ASSET: &str = include_str!("assets/hermes/__init__.py")
 const HERMES_INTEGRATION_VERSION: u32 = 2;
 const QODERCLI_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const QODERCLI_HOOK_ASSET: &str = include_str!("assets/qodercli/herdr-agent-state.sh");
-const QODERCLI_INTEGRATION_VERSION: u32 = 1;
+const QODERCLI_INTEGRATION_VERSION: u32 = 2;
 const QODERCLI_CONFIG_DIR_ENV_VAR: &str = "QODER_CONFIG_DIR";
 const INTEGRATION_VERSION_MARKER: &str = "HERDR_INTEGRATION_VERSION=";
 

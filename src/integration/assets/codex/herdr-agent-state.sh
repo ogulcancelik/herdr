@@ -48,6 +48,46 @@ if hook_input_file:
     except Exception:
         hook_input = {}
 
+def send_rpc(request):
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(0.5)
+        client.connect(socket_path)
+        client.sendall((json.dumps(request) + "\n").encode())
+        try:
+            client.recv(4096)
+        except Exception:
+            pass
+        client.close()
+    except Exception:
+        pass
+
+def resolve_session_title():
+    # Priority 1: session_title provided directly in hook input.
+    title = hook_input.get("session_title")
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+
+    # Priority 2: read summary from sessions-index.json in the transcript dir.
+    try:
+        transcript_path = hook_input.get("transcript_path")
+        session_id_val = hook_input.get("session_id")
+        if not isinstance(transcript_path, str) or not isinstance(session_id_val, str):
+            return None
+        import pathlib
+        index_path = pathlib.Path(transcript_path).parent / "sessions-index.json"
+        with open(index_path, encoding="utf-8") as fh:
+            index = json.loads(fh.read())
+        sessions = index if isinstance(index, list) else index.get("sessions", [])
+        for entry in sessions:
+            if entry.get("id") == session_id_val or entry.get("session_id") == session_id_val:
+                summary = entry.get("summary") or entry.get("title") or entry.get("name")
+                if isinstance(summary, str) and summary.strip():
+                    return summary.strip()
+    except Exception:
+        pass
+    return None
+
 request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
 report_seq = time.time_ns()
 session_id = hook_input.get("session_id")
@@ -67,16 +107,21 @@ if agent_session_id:
 else:
     raise SystemExit(0)
 
-try:
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(0.5)
-    client.connect(socket_path)
-    client.sendall((json.dumps(request) + "\n").encode())
-    try:
-        client.recv(4096)
-    except Exception:
-        pass
-    client.close()
-except Exception:
-    pass
+send_rpc(request)
+
+session_title = resolve_session_title()
+if session_title:
+    meta_request = {
+        "id": f"{source}:meta:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}",
+        "method": "pane.report_metadata",
+        "params": {
+            "pane_id": pane_id,
+            "source": source,
+            "agent": "codex",
+            "applies_to_source": source,
+            "custom_status": session_title,
+            "seq": report_seq + 1,
+        },
+    }
+    send_rpc(meta_request)
 PY

@@ -3,7 +3,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=qodercli
-# HERDR_INTEGRATION_VERSION=1
+# HERDR_INTEGRATION_VERSION=2
 #
 # Reports qodercli agent state changes to herdr. Registered as a Command hook
 # in ~/.qoder/settings.json by `herdr integration install qodercli` and
@@ -69,6 +69,46 @@ if is_subagent and action in ("idle", "release"):
     # Subagent completion must not make the parent pane look done early.
     raise SystemExit(0)
 
+def send_rpc(request):
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(0.5)
+        client.connect(socket_path)
+        client.sendall((json.dumps(request) + "\n").encode())
+        try:
+            client.recv(4096)
+        except Exception:
+            pass
+        client.close()
+    except Exception:
+        pass
+
+def resolve_session_title():
+    # Priority 1: session_title provided directly in hook input.
+    title = hook_input.get("session_title")
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+
+    # Priority 2: read summary from sessions-index.json in the transcript dir.
+    try:
+        transcript_path = hook_input.get("transcript_path")
+        session_id_val = hook_input.get("session_id")
+        if not isinstance(transcript_path, str) or not isinstance(session_id_val, str):
+            return None
+        import pathlib
+        index_path = pathlib.Path(transcript_path).parent / "sessions-index.json"
+        with open(index_path, encoding="utf-8") as fh:
+            index = json.loads(fh.read())
+        sessions = index if isinstance(index, list) else index.get("sessions", [])
+        for entry in sessions:
+            if entry.get("id") == session_id_val or entry.get("session_id") == session_id_val:
+                summary = entry.get("summary") or entry.get("title") or entry.get("name")
+                if isinstance(summary, str) and summary.strip():
+                    return summary.strip()
+    except Exception:
+        pass
+    return None
+
 request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
 report_seq = time.time_ns()
 session_id = hook_input.get("session_id")
@@ -85,30 +125,23 @@ if action == "release":
         },
     }
 else:
+    params = {
+        "pane_id": pane_id,
+        "source": source,
+        "agent": "qodercli",
+        "state": action,
+        "seq": report_seq,
+    }
+    if agent_session_id:
+        params["agent_session_id"] = agent_session_id
+    session_title = resolve_session_title()
+    if session_title:
+        params["custom_status"] = session_title
     request = {
         "id": request_id,
         "method": "pane.report_agent",
-        "params": {
-            "pane_id": pane_id,
-            "source": source,
-            "agent": "qodercli",
-            "state": action,
-            "seq": report_seq,
-        },
+        "params": params,
     }
-    if agent_session_id:
-        request["params"]["agent_session_id"] = agent_session_id
 
-try:
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(0.5)
-    client.connect(socket_path)
-    client.sendall((json.dumps(request) + "\n").encode())
-    try:
-        client.recv(4096)
-    except Exception:
-        pass
-    client.close()
-except Exception:
-    pass
+send_rpc(request)
 PY

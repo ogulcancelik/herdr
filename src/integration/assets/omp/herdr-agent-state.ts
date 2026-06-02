@@ -2,7 +2,7 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=omp
-// HERDR_INTEGRATION_VERSION=2
+// HERDR_INTEGRATION_VERSION=3
 // @ts-nocheck
 
 import { createConnection } from "node:net";
@@ -53,6 +53,7 @@ const retryGraceMs = parseDurationEnv("HERDR_OMP_RETRY_GRACE_MS", 2500);
 const retryableErrorPattern =
   /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i;
 let reportSeq = Date.now() * 1000;
+let currentSessionTitle: string | undefined;
 
 function nextReportSeq(): number {
   reportSeq += 1;
@@ -82,6 +83,7 @@ function sendState(state: AgentState, message?: string, seq = nextReportSeq()): 
       state,
       message,
       seq,
+      ...(currentSessionTitle ? { custom_status: currentSessionTitle } : {}),
     },
   });
 }
@@ -253,14 +255,25 @@ export default function (pi) {
     publishState();
   });
 
-  pi.on("session_start", () => {
+  function updateSessionTitle(ctx: any): void {
+    try {
+      const name = ctx?.sessionManager?.getSessionName?.();
+      currentSessionTitle = typeof name === "string" && name.trim() ? name.trim() : undefined;
+    } catch {
+      currentSessionTitle = undefined;
+    }
+  }
+
+  pi.on("session_start", (_event, ctx) => {
+    updateSessionTitle(ctx);
     publishState();
   });
 
-  pi.on("agent_start", () => {
+  pi.on("agent_start", (_event, ctx) => {
     clearPendingTimers();
     clearFailureState();
     agentActive = true;
+    updateSessionTitle(ctx);
     publishState();
   });
 
