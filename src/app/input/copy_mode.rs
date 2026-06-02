@@ -61,12 +61,16 @@ impl AppState {
                 )
             })
             .unwrap_or_else(|| (info.inner_rect.height.saturating_sub(1), 0));
+        let entry_offset_from_bottom = self
+            .pane_scroll_metrics(terminal_runtimes, pane_id)
+            .map_or(0, |metrics| metrics.offset_from_bottom);
 
         self.clear_selection();
         self.copy_mode = Some(CopyModeState {
             pane_id,
             cursor_row: cursor.0.min(info.inner_rect.height.saturating_sub(1)),
             cursor_col: cursor.1.min(info.inner_rect.width.saturating_sub(1)),
+            entry_offset_from_bottom,
             selection: None,
         });
         self.mode = Mode::Copy;
@@ -158,10 +162,16 @@ impl AppState {
     }
 
     fn exit_copy_mode(&mut self, terminal_runtimes: &TerminalRuntimeRegistry, copy: bool) {
+        let restore_scroll = self
+            .copy_mode
+            .map(|copy_mode| (copy_mode.pane_id, copy_mode.entry_offset_from_bottom));
         if copy {
             self.copy_selection(terminal_runtimes);
         } else {
             self.clear_selection();
+        }
+        if let Some((pane_id, offset_from_bottom)) = restore_scroll {
+            self.set_pane_scroll_offset(terminal_runtimes, pane_id, offset_from_bottom);
         }
         self.copy_mode = None;
         self.mode = if self.active.is_some() {
@@ -682,6 +692,14 @@ mod tests {
             .saturating_sub(metrics.offset_from_bottom)
     }
 
+    fn copy_mode_offset_from_bottom(app: &App, pane_id: crate::layout::PaneId) -> usize {
+        app.state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .and_then(crate::terminal::TerminalRuntime::scroll_metrics)
+            .expect("copy mode scroll metrics")
+            .offset_from_bottom
+    }
+
     #[tokio::test]
     async fn enter_copy_mode_tracks_focused_pane() {
         let (mut app, pane_id) = app_with_copy_screen(b"alpha\nbeta\n");
@@ -830,6 +848,43 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(copy_mode_clipboard_text(&mut app), expected);
+        assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), 0);
+    }
+
+    #[tokio::test]
+    async fn copy_mode_q_exits_and_returns_to_bottom_after_scrollback() {
+        let bytes = numbered_lines_bytes(64);
+        let (mut app, pane_id) = app_with_copy_scrollback(&bytes);
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()));
+        assert!(copy_mode_offset_from_bottom(&app, pane_id) > 0);
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('q'), KeyModifiers::empty()));
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app.state.copy_mode.is_none());
+        assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), 0);
+    }
+
+    #[tokio::test]
+    async fn copy_mode_q_restores_entry_scrollback_offset() {
+        let bytes = numbered_lines_bytes(64);
+        let (mut app, pane_id) = app_with_copy_scrollback(&bytes);
+        let entry_offset = 3;
+        app.state
+            .set_pane_scroll_offset(&app.terminal_runtimes, pane_id, entry_offset);
+        assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), entry_offset);
+
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()));
+        assert!(copy_mode_offset_from_bottom(&app, pane_id) > entry_offset);
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('q'), KeyModifiers::empty()));
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app.state.copy_mode.is_none());
+        assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), entry_offset);
     }
 
     #[tokio::test]
