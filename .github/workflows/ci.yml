@@ -56,7 +56,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install Rust tools
-        uses: taiki-e/install-action@b550161ef8a7bc4f2a671c0b03a18ac9ccedea1e # v2
+        uses: taiki-e/install-action@6887963ccf37a9ddcd8c5fa4baeb3e1e5fd61fa1 # v2
         with:
           tool: just,cargo-nextest
 
