@@ -110,11 +110,14 @@ fn git_common_dir_for_git_dir(git_dir: &Path) -> PathBuf {
 
 pub fn git_branch(cwd: &Path) -> Option<String> {
     let repo_root = git_repo_root(cwd)?;
-    git_symbolic_head_short(&repo_root).or_else(|| {
-        let git_dir = git_dir_for_repo_root(&repo_root)?;
-        let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
-        parse_git_head_branch(&head)
-    })
+    let git_dir = git_dir_for_repo_root(&repo_root)?;
+    let git_common_dir = git_common_dir_for_git_dir(&git_dir);
+    if git_ref_storage_is_reftable(&git_common_dir) {
+        return git_symbolic_head_short(&repo_root);
+    }
+
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    parse_git_head_branch(&head)
 }
 
 pub(super) fn git_dir_for_repo_root(repo_root: &Path) -> Option<PathBuf> {
@@ -145,9 +148,56 @@ pub(super) fn git_rev_parse_verify(repo_root: &Path, revision: &str) -> Option<S
     git_trimmed_stdout(repo_root, &["rev-parse", "--verify", revision])
 }
 
+pub(super) fn git_ref_storage_is_reftable(git_common_dir: &Path) -> bool {
+    read_git_config_value(&git_common_dir.join("config"), "extensions", "refstorage")
+        .is_some_and(|value| value.eq_ignore_ascii_case("reftable"))
+}
+
 fn parse_git_head_branch(head: &str) -> Option<String> {
     let branch = head.trim().strip_prefix("ref: refs/heads/")?;
     (!branch.is_empty()).then(|| branch.to_string())
+}
+
+fn read_git_config_value(path: &Path, section: &str, key: &str) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let mut in_section = false;
+    for raw_line in contents.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(section_name) = simple_git_config_section(line) {
+            in_section = section_name.eq_ignore_ascii_case(section);
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case(key) {
+            return Some(strip_git_config_comment(value).trim().to_string());
+        }
+    }
+    None
+}
+
+fn simple_git_config_section(line: &str) -> Option<&str> {
+    let section = line.strip_prefix('[')?.split_once(']')?.0.trim();
+    (!section.contains('"')).then_some(section)
+}
+
+fn strip_git_config_comment(value: &str) -> &str {
+    let value = value.trim();
+    for marker in ['#', ';'] {
+        if let Some((prefix, _)) = value.split_once(marker) {
+            if prefix.chars().next_back().is_some_and(char::is_whitespace) {
+                return prefix;
+            }
+        }
+    }
+    value
 }
 
 fn git_trimmed_stdout(repo_root: &Path, args: &[&str]) -> Option<String> {
