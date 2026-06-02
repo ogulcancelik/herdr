@@ -27,6 +27,7 @@ mod kitty_keyboard;
 mod osc;
 mod state;
 mod terminal;
+mod xtgettcap;
 
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
 pub(crate) use self::terminal::{TerminalDirtyPatch, TerminalDirtyPatchOutcome};

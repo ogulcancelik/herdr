@@ -29,6 +29,12 @@ pub(super) enum DefaultColorEvent {
     PaletteQuery(u8),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DefaultColorTrackedEvent {
+    pub(super) end_offset: usize,
+    pub(super) event: DefaultColorEvent,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct DefaultColorOscTracker {
     state: DefaultColorOscTrackerState,
@@ -145,12 +151,12 @@ fn is_default_color_set_osc(body: &[u8]) -> bool {
 pub(super) struct DefaultColorEventTracker {
     state: DefaultColorOscTrackerState,
     body: Vec<u8>,
-    pending: Vec<DefaultColorEvent>,
+    pending: Vec<DefaultColorTrackedEvent>,
 }
 
 impl DefaultColorEventTracker {
     pub(super) fn observe(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
+        for (index, &byte) in bytes.iter().enumerate() {
             match self.state {
                 DefaultColorOscTrackerState::Ground => {
                     if byte == 0x1b {
@@ -172,7 +178,7 @@ impl DefaultColorEventTracker {
                 }
                 DefaultColorOscTrackerState::OscBody => match byte {
                     0x07 => {
-                        self.finalize();
+                        self.finalize(index + 1);
                         self.state = DefaultColorOscTrackerState::Ground;
                     }
                     0x1b => self.state = DefaultColorOscTrackerState::OscEscape,
@@ -180,7 +186,7 @@ impl DefaultColorEventTracker {
                 },
                 DefaultColorOscTrackerState::OscEscape => {
                     if byte == b'\\' {
-                        self.finalize();
+                        self.finalize(index + 1);
                         self.state = DefaultColorOscTrackerState::Ground;
                     } else {
                         self.body.push(0x1b);
@@ -223,14 +229,15 @@ impl DefaultColorEventTracker {
         }
     }
 
-    fn finalize(&mut self) {
+    fn finalize(&mut self, end_offset: usize) {
         if let Some(event) = parse_default_color_event(&self.body) {
-            self.pending.push(event);
+            self.pending
+                .push(DefaultColorTrackedEvent { end_offset, event });
         }
         self.body.clear();
     }
 
-    pub(super) fn drain_pending(&mut self) -> Vec<DefaultColorEvent> {
+    pub(super) fn drain_pending(&mut self) -> Vec<DefaultColorTrackedEvent> {
         std::mem::take(&mut self.pending)
     }
 }
@@ -571,6 +578,12 @@ mod tests {
         }
     }
 
+    fn tracked_default_color_events(
+        events: Vec<DefaultColorTrackedEvent>,
+    ) -> Vec<DefaultColorEvent> {
+        events.into_iter().map(|event| event.event).collect()
+    }
+
     #[test]
     fn default_color_tracker_detects_split_osc_11_sequences() {
         let mut tracker = DefaultColorOscTracker::default();
@@ -596,7 +609,7 @@ mod tests {
         );
 
         assert_eq!(
-            tracker.drain_pending(),
+            tracked_default_color_events(tracker.drain_pending()),
             vec![
                 DefaultColorEvent::Query(DefaultColorQuery::Foreground),
                 DefaultColorEvent::Query(DefaultColorQuery::Background),
@@ -618,7 +631,7 @@ mod tests {
         tracker.observe(b"\\");
 
         assert_eq!(
-            tracker.drain_pending(),
+            tracked_default_color_events(tracker.drain_pending()),
             vec![DefaultColorEvent::Query(DefaultColorQuery::Background)]
         );
     }
@@ -634,7 +647,7 @@ mod tests {
         tracker.observe(b"\\");
 
         assert_eq!(
-            tracker.drain_pending(),
+            tracked_default_color_events(tracker.drain_pending()),
             vec![DefaultColorEvent::PaletteQuery(255)]
         );
     }
@@ -651,7 +664,7 @@ mod tests {
         tracker.observe(b"\x1b]4;0;?\x07");
 
         assert_eq!(
-            tracker.drain_pending(),
+            tracked_default_color_events(tracker.drain_pending()),
             vec![DefaultColorEvent::PaletteQuery(0)]
         );
     }
@@ -680,7 +693,7 @@ mod tests {
 
         tracker.observe(b"\x1b]11;?\x07");
         assert_eq!(
-            tracker.drain_pending(),
+            tracked_default_color_events(tracker.drain_pending()),
             vec![DefaultColorEvent::Query(DefaultColorQuery::Background)]
         );
     }
