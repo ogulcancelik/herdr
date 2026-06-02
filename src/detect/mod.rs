@@ -268,11 +268,11 @@ fn detect_kilo(content: &str) -> AgentState {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// Check for "do you want"/"would you like" followed by "yes" or "❯"
+/// Check for action confirmations followed by "yes" or "❯".
 fn has_confirmation_prompt(lower_content: &str) -> bool {
     if let Some(pos) = lower_content
-        .find("do you want")
-        .or_else(|| lower_content.find("would you like"))
+        .find("do you want to")
+        .or_else(|| lower_content.find("would you like to"))
     {
         let after = &lower_content[pos..];
         return after.contains("yes") || after.contains('❯');
@@ -990,6 +990,26 @@ mod tests {
     }
 
     #[test]
+    fn claude_question_form_selected_top_is_visible_blocker() {
+        let screen = "❯ ask again\n─────────────────────────────────────────────────────────────────────────────────────────\n←  ☐ Subject  ☐ Tone  ✔ Submit  →\n\nWhat should I ask you about?\n\n❯ 1. Today\n     Your current plan or priority.\n  2. Project\n     A codebase, feature, bug, or PR.\n  3. Preference\n     How you want me to work with you.\n  4. Random\n     A casual question with no work context.\n  5. Type something.\n─────────────────────────────────────────────────────────────────────────────────────────\n  6. Chat about this\n\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Blocked);
+        assert!(detection.visible_blocker);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
+    fn claude_question_form_selected_bottom_is_visible_blocker() {
+        let screen = "❯ ask again\n─────────────────────────────────────────────────────────────────────────────────────────\n←  ☐ Subject  ☐ Tone  ✔ Submit  →\n\nWhat should I ask you about?\n\n  1. Today\n     Your current plan or priority.\n  2. Project\n     A codebase, feature, bug, or PR.\n  3. Preference\n     How you want me to work with you.\n  4. Random\n     A casual question with no work context.\n  5. Type something.\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ 6. Chat about this\n\nEnter to select · Tab/Arrow keys to navigate · ctrl+g to edit in Zed · Esc to cancel";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Blocked);
+        assert!(detection.visible_blocker);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
     fn claude_idle_hooks_menu() {
         let screen = "Hooks\n0 hooks configured\nℹ This menu is read-only. To add or modify hooks, edit settings.json directly or ask Claude. Learn more\n\n❯ 1. PreToolUse\n  2. PostToolUse\n  3. PostToolUseFailure\n\nEnter to confirm · Esc to cancel";
         assert_eq!(detect_claude(screen), AgentState::Idle);
@@ -1028,6 +1048,28 @@ mod tests {
     }
 
     #[test]
+    fn claude_declined_questions_in_scrollback_with_prompt_box_are_idle() {
+        let screen = "● User declined to answer questions\n  ⎿  · What do you want help with? (Code task / PR review / Research / Claude setup)\n     · How detailed should I be? (Short / Medium / Detailed)\n\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ \n─────────────────────────────────────────────────────────────────────────────────────────\n  ~ ⊘ no git ▱▱▱▱▱ 0%";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(detection.visible_idle);
+        assert!(!detection.visible_working);
+        assert!(!detection.visible_blocker);
+    }
+
+    #[test]
+    fn claude_old_permission_prompt_with_live_prompt_box_is_idle() {
+        let screen = "● Bash(rm -rf /tmp/test)\n  ⎿  Waiting…\n\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n\nEsc to cancel · Tab to amend · ctrl+e to explain\n\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ \n─────────────────────────────────────────────────────────────────────────────────────────\n  ~/P/herdr ⎇ master ▱▱▱▱▱ 0%";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(detection.visible_idle);
+        assert!(!detection.visible_working);
+        assert!(!detection.visible_blocker);
+    }
+
+    #[test]
     fn claude_spinner_after_interrupted_permission_is_visible_working() {
         let screen = "❯ this is a test, create some dummy files on /tmp and -rm rf them i wanna test\n    permissions\n\n  Thought for 7s (ctrl+o to expand)\n\n● Bash(tmpdir=$(mktemp -d /tmp/claude-perm-test.XXXXXX) && touch \"$tmpdir/file1.txt\"\n      \"$tmpdir/file2.log\" && mkdir \"$tmpdir/subdir\" && touch\n      \"$tmpdir/subdir/nested.txt\"…)\n  ⎿  Interrupted · What should Claude do instead?\n\n❯ test\n\n✢ Garnishing… (1s · thinking with high effort)\n  ⎿  Tip: Run claude --continue or claude --resume to resume a conversation\n\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ \n─────────────────────────────────────────────────────────────────────────────────────────\n  ~/P/herdr ⎇ master ▱▱▱▱▱ 0%";
         let detection = detect_agent(Some(Agent::Claude), screen);
@@ -1055,6 +1097,17 @@ mod tests {
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
         assert!(!detection.visible_idle);
+    }
+
+    #[test]
+    fn claude_waiting_for_background_agent_is_working() {
+        let screen = "● Done. I’ve delegated a read-only repo investigation to a subagent, and it will come back with a detailed report.\n\n✻ Waiting for 1 background agent to finish\n\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ \n─────────────────────────────────────────────────────────────────────────────────────────\n  ~/P/llm-proxy ⎇ master ▱▱▱▱▱ 0%\n\n  ● main      ↑/↓ to select · Enter to view\n  ◯ Explore   Investigate repo and report   33s · ↓ 225 tokens";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Working);
+        assert!(detection.visible_working);
+        assert!(!detection.visible_idle);
+        assert!(!detection.visible_blocker);
     }
 
     #[test]
@@ -1569,6 +1622,49 @@ mod tests {
         assert_eq!(
             detect_opencode("running tool\nesc to interrupt"),
             AgentState::Working
+        );
+    }
+
+    #[test]
+    fn opencode_working_on_footer_interrupt() {
+        let screen = "\
+     ▣  Build · MiniMax M3 Free\n\
+\n\
+  ┃\n\
+  ┃  Build · MiniMax M3 Free OpenCode Zen              ~/Projects/llm-proxy:master\n\
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n\
+   ⬝⬝⬝■■■■■  esc interrupt       24.4K (12%)  ctrl+p commands    • OpenCode 1.15.13";
+        assert_eq!(detect_opencode(screen), AgentState::Working);
+    }
+
+    #[test]
+    fn opencode_working_on_progress_footer_without_product_text() {
+        assert_eq!(
+            detect_opencode("■■■■■■⬝⬝  esc interrupt"),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn opencode_working_on_escape_again_footer() {
+        assert_eq!(
+            detect_opencode(
+                "⬝⬝■■■■■■  esc again to interrupt    14.3K (7%)  ctrl+p commands    • OpenCode 1.15.13"
+            ),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn opencode_progress_row_alone_is_working() {
+        assert_eq!(detect_opencode("■■■■■■⬝⬝"), AgentState::Working);
+    }
+
+    #[test]
+    fn opencode_ctrl_p_commands_alone_is_not_working() {
+        assert_eq!(
+            detect_opencode("esc interrupt       24.4K (12%)  ctrl+p commands"),
+            AgentState::Idle
         );
     }
 

@@ -62,6 +62,8 @@ export default defineConfig({
         },
       ],
       components: {
+        Header: './src/components/Header.astro',
+        Sidebar: './src/components/Sidebar.astro',
         SiteTitle: './src/components/SiteTitle.astro',
       },
       customCss: ['./src/styles/starlight.css'],
@@ -129,6 +131,7 @@ export default defineConfig({
           label: 'Updates',
           items: [
             { label: 'Releases', link: '/releases/' },
+            { label: 'Preview docs', slug: 'docs/preview' },
             { label: 'Blog', link: '/blog/' },
           ],
         },

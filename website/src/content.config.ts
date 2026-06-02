@@ -5,7 +5,8 @@ import { docsSchema } from '@astrojs/starlight/schema';
 
 function docsPath({ entry }: { entry: string }) {
   const slug = entry.replace(/\.(md|mdx|markdown|mdown|mkdn|mkd|mdwn)$/i, '');
-  return slug === 'index' ? 'docs' : `docs/${slug}`;
+  const normalized = slug.replace(/\/index$/, '');
+  return normalized === 'index' ? 'docs' : `docs/${normalized}`;
 }
 
 export const collections = {

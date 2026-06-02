@@ -21,6 +21,8 @@ const NESTED_HERDR_MESSAGES: [&str; 6] = [
 mod agent_resume;
 mod api;
 mod app;
+mod build_info;
+mod checksum;
 mod cli;
 mod client;
 mod config;
@@ -94,6 +96,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Use "follow" to inherit the source pane/workspace, "home" for $HOME,
 # "current" for Herdr's process directory, or a fixed path such as "~/Projects".
 # new_cwd = "follow"
+
+[update]
+# Update channel used by background checks and `herdr update`.
+# Use "stable" for normal releases or "preview" for opt-in preview builds.
+# channel = "stable"
 
 [keys]
 # Prefix key to enter prefix mode (default: "ctrl+b")
@@ -404,9 +411,11 @@ fn main() -> io::Result<()> {
         println!("       herdr --remote <ssh-target> [--session <name>]");
         println!("       herdr session attach <name>");
         println!("       herdr update [--handoff]");
+        println!("       herdr channel set <stable|preview>");
         println!("       herdr server stop");
         println!("       herdr server reload-config");
         println!("       herdr config <subcommand> ...");
+        println!("       herdr channel <subcommand> ...");
         println!("       herdr workspace <subcommand> ...");
         println!("       herdr worktree <subcommand> ...");
         println!("       herdr tab <subcommand> ...");
@@ -429,12 +438,20 @@ fn main() -> io::Result<()> {
                 "Stop the running server via the API socket",
             ),
             (
+                "herdr channel set <stable|preview>",
+                "Choose the stable or preview update channel",
+            ),
+            (
                 "herdr server reload-config",
                 "Reload config.toml in the running server",
             ),
             (
                 "herdr config reset-keys",
                 "Back up config.toml and remove custom keybindings",
+            ),
+            (
+                "herdr channel <subcommand>",
+                "Manage the stable or preview update channel",
             ),
             (
                 "herdr workspace <subcommand>",
@@ -491,7 +508,7 @@ fn main() -> io::Result<()> {
     }
 
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("herdr {}", env!("CARGO_PKG_VERSION"));
+        println!("herdr {}", crate::build_info::version());
         return Ok(());
     }
 
@@ -527,6 +544,7 @@ fn main() -> io::Result<()> {
                 "update",
                 "status",
                 "config",
+                "channel",
                 "workspace",
                 "worktree",
                 "pane",

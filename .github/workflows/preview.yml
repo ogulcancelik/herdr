@@ -1,0 +1,329 @@
+name: Preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Optional master commit SHA to publish
+        required: false
+        type: string
+  schedule:
+    - cron: "0 3 * * 3,5"
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+concurrency:
+  group: preview-publish
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      should_publish: ${{ steps.plan.outputs.should_publish }}
+      commit: ${{ steps.plan.outputs.commit }}
+      short_sha: ${{ steps.plan.outputs.short_sha }}
+      build_id: ${{ steps.plan.outputs.build_id }}
+      tag: ${{ steps.plan.outputs.tag }}
+      built_at: ${{ steps.plan.outputs.built_at }}
+      base_version: ${{ steps.plan.outputs.base_version }}
+      protocol: ${{ steps.plan.outputs.protocol }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: master
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select preview commit
+        id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin master --tags
+          requested="${{ github.event.inputs.commit || '' }}"
+          if [ -n "$requested" ]; then
+            commit="$(git rev-parse "$requested^{commit}")"
+            if ! git merge-base --is-ancestor "$commit" origin/master; then
+              echo "error: requested commit $commit is not reachable from origin/master" >&2
+              exit 1
+            fi
+          else
+            commit="$(python3 scripts/preview.py select-commit --ref origin/master)"
+          fi
+          current_preview="$(python3 scripts/preview.py current-commit --manifest website/preview.json || true)"
+          if [ "$current_preview" = "$commit" ]; then
+            echo "Preview already points at $commit; skipping."
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git checkout --detach "$commit"
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          day="$(git show -s --format=%cs HEAD)"
+          built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          build_id="$day-$short_sha"
+          tag="preview-$build_id"
+          base_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          protocol="$(python3 -c 'import re; print(re.search(r"pub const PROTOCOL_VERSION: u32 = (\d+);", open("src/protocol/wire.rs").read()).group(1))')"
+          {
+            echo "should_publish=true"
+            echo "commit=$commit"
+            echo "short_sha=$short_sha"
+            echo "build_id=$build_id"
+            echo "tag=$tag"
+            echo "built_at=$built_at"
+            echo "base_version=$base_version"
+            echo "protocol=$protocol"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        if: steps.plan.outputs.should_publish == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust tools
+        if: steps.plan.outputs.should_publish == 'true'
+        uses: taiki-e/install-action@b550161ef8a7bc4f2a671c0b03a18ac9ccedea1e # v2
+        with:
+          tool: just,cargo-nextest
+
+      - name: Install Zig
+        if: steps.plan.outputs.should_publish == 'true'
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+
+      - name: Restore cargo cache
+        if: steps.plan.outputs.should_publish == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+
+      - name: Run checks
+        if: steps.plan.outputs.should_publish == 'true'
+        run: just check
+
+  build:
+    needs: preflight
+    if: needs.preflight.outputs.should_publish == 'true'
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            name: herdr-linux-x86_64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            name: herdr-linux-aarch64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            name: herdr-macos-x86_64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: herdr-macos-aarch64
+    runs-on: ${{ matrix.os }}
+    env:
+      LIBGHOSTTY_VT_OPTIMIZE: ReleaseFast
+      LIBGHOSTTY_VT_SIMD: 'true'
+      HERDR_BUILD_CHANNEL: preview
+      HERDR_BUILD_ID: ${{ needs.preflight.outputs.build_id }}
+      HERDR_BUILD_COMMIT: ${{ needs.preflight.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+
+      - name: Prefer official Ubuntu mirrors over Azure
+        if: runner.os == 'Linux'
+        run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
+            cat /etc/apt/apt-mirrors.txt
+          fi
+
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build musl-tools gcc-aarch64-linux-gnu crossbuild-essential-arm64
+
+      - name: Install macOS build tools
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja
+
+      - name: Set Linux aarch64 linker
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: preview-${{ matrix.target }}
+
+      - name: Remove Zig caches
+        run: rm -rf .zig-cache vendor/libghostty-vt/.zig-cache vendor/libghostty-vt/zig-out
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp target/${{ matrix.target }}/release/herdr ${{ matrix.name }}
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            file ${{ matrix.name }} > BUILD_INFO.txt
+            ldd ${{ matrix.name }} 2>&1 | tee -a BUILD_INFO.txt
+            grep -q "statically linked" BUILD_INFO.txt
+            if nm -u ${{ matrix.name }} 2>/dev/null | grep -E '(__cxa|GLIBCXX|CXXABI|_ZSt)'; then
+              echo "error: Linux artifact has unresolved C++ runtime symbols" >&2
+              exit 1
+            fi
+          else
+            file ${{ matrix.name }} > BUILD_INFO.txt
+          fi
+          python3 - <<'PY' | tee ${{ matrix.name }}.sha256
+          import hashlib, pathlib
+          path = pathlib.Path('${{ matrix.name }}')
+          print(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}")
+          PY
+          {
+            echo "commit=${{ needs.preflight.outputs.commit }}"
+            echo "build_id=${{ needs.preflight.outputs.build_id }}"
+            echo "target=${{ matrix.target }}"
+            echo "channel=preview"
+          } >> BUILD_INFO.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            ${{ matrix.name }}
+            ${{ matrix.name }}.sha256
+            BUILD_INFO.txt
+
+  publish:
+    needs: [preflight, build]
+    if: needs.preflight.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: master
+          fetch-depth: 0
+          ssh-key: ${{ secrets.PREVIEW_DEPLOY_KEY }}
+
+      - name: Verify built commit is still current master
+        run: |
+          set -euo pipefail
+          git fetch origin master --tags
+          remote_head="$(git rev-parse origin/master)"
+          if [ "$remote_head" != "${{ needs.preflight.outputs.commit }}" ]; then
+            echo "error: origin/master moved from built commit; aborting preview publish" >&2
+            exit 1
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Generate notes and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/preview.py notes \
+            --commit '${{ needs.preflight.outputs.commit }}' \
+            --build-id '${{ needs.preflight.outputs.build_id }}' \
+            --base-version '${{ needs.preflight.outputs.base_version }}' \
+            --output PREVIEW_NOTES.md
+          python3 - <<'PY'
+          import json, pathlib
+          result = {}
+          for path in pathlib.Path('artifacts').glob('herdr-*/*.sha256'):
+              digest, name = path.read_text().split()[:2]
+              target = name.removeprefix('herdr-')
+              result[target] = digest
+          pathlib.Path('preview-sha256.json').write_text(json.dumps(result, indent=2) + '\n')
+          PY
+
+      - name: Create preview prerelease
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.preflight.outputs.tag }}
+          name: Preview build ${{ needs.preflight.outputs.build_id }}
+          body_path: PREVIEW_NOTES.md
+          prerelease: true
+          make_latest: false
+          overwrite_files: true
+          target_commitish: ${{ needs.preflight.outputs.commit }}
+          files: |
+            artifacts/herdr-linux-x86_64/herdr-linux-x86_64
+            artifacts/herdr-linux-aarch64/herdr-linux-aarch64
+            artifacts/herdr-macos-x86_64/herdr-macos-x86_64
+            artifacts/herdr-macos-aarch64/herdr-macos-aarch64
+
+      - name: Update preview manifest
+        run: |
+          python3 scripts/preview.py manifest \
+            --output website/preview.json \
+            --tag '${{ needs.preflight.outputs.tag }}' \
+            --build-id '${{ needs.preflight.outputs.build_id }}' \
+            --commit '${{ needs.preflight.outputs.commit }}' \
+            --built-at '${{ needs.preflight.outputs.built_at }}' \
+            --base-version '${{ needs.preflight.outputs.base_version }}' \
+            --protocol '${{ needs.preflight.outputs.protocol }}' \
+            --notes PREVIEW_NOTES.md \
+            --sha-file preview-sha256.json \
+            --retain 30
+
+      - name: Commit preview manifest
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add website/preview.json
+          git diff --cached --quiet || git commit -m "docs: update preview manifest"
+          git push origin HEAD:master
+
+      - name: Prune old preview prereleases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,isPrerelease,createdAt > preview-releases.json
+          python3 - <<'PY' > old-preview-tags.txt
+          import json
+          with open("preview-releases.json", encoding="utf-8") as handle:
+              data = json.load(handle)
+          releases = [
+              release for release in data
+              if release.get("isPrerelease") and str(release.get("tagName", "")).startswith("preview-")
+          ]
+          releases.sort(key=lambda release: str(release.get("createdAt", "")), reverse=True)
+          for release in releases[30:]:
+              print(release["tagName"])
+          PY
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          done < old-preview-tags.txt

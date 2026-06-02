@@ -69,6 +69,13 @@ pub fn session_ref_from_report(
     agent_session_id.and_then(AgentSessionRef::id)
 }
 
+pub fn is_reserved_native_state_source(source: &str, agent: &str) -> bool {
+    matches!(
+        (source, agent),
+        ("herdr:claude", "claude") | ("herdr:codex", "codex") | ("herdr:opencode", "opencode")
+    )
+}
+
 pub fn session_ref_from_snapshot(
     source: &str,
     agent: &str,

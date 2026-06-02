@@ -2041,17 +2041,38 @@ impl AppState {
                 custom_status,
                 seq,
                 session_ref,
+            } => {
+                if crate::agent_resume::is_reserved_native_state_source(&source, &agent_label) {
+                    self.update_terminal_state(pane_id, |terminal| {
+                        terminal.set_agent_session_ref(source, agent_label, session_ref, seq)
+                    })
+                    .into_iter()
+                    .collect()
+                } else {
+                    self.update_terminal_state(pane_id, |terminal| {
+                        terminal.set_hook_authority_with_session_ref(
+                            source,
+                            agent_label,
+                            state,
+                            message,
+                            custom_status,
+                            session_ref,
+                            seq,
+                        )
+                    })
+                    .into_iter()
+                    .collect()
+                }
+            }
+            AppEvent::AgentSessionReported {
+                pane_id,
+                source,
+                agent_label,
+                seq,
+                session_ref,
             } => self
                 .update_terminal_state(pane_id, |terminal| {
-                    terminal.set_hook_authority_with_session_ref(
-                        source,
-                        agent_label,
-                        state,
-                        message,
-                        custom_status,
-                        session_ref,
-                        seq,
-                    )
+                    terminal.set_agent_session_ref(source, agent_label, session_ref, seq)
                 })
                 .into_iter()
                 .collect(),
@@ -2106,12 +2127,17 @@ impl AppState {
                 agent_label,
                 seq,
                 ..
-            } => self
-                .update_terminal_state(pane_id, |terminal| {
-                    terminal.release_agent_with_mutation(&source, &agent_label, seq)
-                })
-                .into_iter()
-                .collect(),
+            } => {
+                if crate::agent_resume::is_reserved_native_state_source(&source, &agent_label) {
+                    Vec::new()
+                } else {
+                    self.update_terminal_state(pane_id, |terminal| {
+                        terminal.release_agent_with_mutation(&source, &agent_label, seq)
+                    })
+                    .into_iter()
+                    .collect()
+                }
+            }
             // Intercepted in App::handle_internal_event before reaching this
             // dispatch; never touches AppState.
             AppEvent::ClipboardWrite { .. } => Vec::new(),
@@ -3603,20 +3629,20 @@ mod tests {
     }
 
     #[test]
-    fn visible_idle_waits_before_overriding_claude_hook_working() {
-        let mut state = app_with_workspaces(&["active", "background"]);
+    fn reserved_native_state_report_does_not_override_screen_state() {
+        let mut state = app_with_workspaces(&["active"]);
         state.active = Some(0);
         state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
-        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
-        let bg_terminal_id = state.workspaces[1]
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0]
             .panes
-            .get(&bg_pane_id)
+            .get(&pane_id)
             .unwrap()
             .attached_terminal_id
             .clone();
 
         state.handle_app_event(AppEvent::StateChanged {
-            pane_id: bg_pane_id,
+            pane_id,
             agent: Some(Agent::Claude),
             state: AgentState::Working,
             visible_blocker: false,
@@ -3626,17 +3652,22 @@ mod tests {
             observed_at: std::time::Instant::now(),
         });
         state.handle_app_event(AppEvent::HookStateReported {
-            pane_id: bg_pane_id,
+            pane_id,
             source: "herdr:claude".into(),
             agent_label: "claude".into(),
-            state: AgentState::Working,
+            state: AgentState::Blocked,
             message: None,
             custom_status: None,
             seq: Some(1),
-            session_ref: None,
+            session_ref: crate::agent_resume::AgentSessionRef::id("claude-session"),
         });
+        let terminal = state.terminals.get(&terminal_id).unwrap();
+        assert_eq!(terminal.state, AgentState::Working);
+        assert!(terminal.hook_authority.is_none());
+        assert!(terminal.persisted_agent_session.is_some());
+
         state.handle_app_event(AppEvent::StateChanged {
-            pane_id: bg_pane_id,
+            pane_id,
             agent: Some(Agent::Claude),
             state: AgentState::Idle,
             visible_blocker: false,
@@ -3646,9 +3677,43 @@ mod tests {
             observed_at: std::time::Instant::now(),
         });
 
-        let terminal = state.terminals.get(&bg_terminal_id).unwrap();
-        assert_eq!(terminal.state, AgentState::Working);
+        let terminal = state.terminals.get(&terminal_id).unwrap();
+        assert_eq!(terminal.state, AgentState::Idle);
         assert!(state.toast.is_none());
+    }
+
+    #[test]
+    fn reserved_native_release_report_does_not_clear_screen_state() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0]
+            .panes
+            .get(&pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Claude),
+            state: AgentState::Working,
+            visible_blocker: false,
+            visible_idle: false,
+            visible_working: true,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+        state.handle_app_event(AppEvent::HookAgentReleased {
+            pane_id,
+            source: "herdr:claude".into(),
+            agent_label: "claude".into(),
+            known_agent: Some(Agent::Claude),
+            seq: Some(1),
+        });
+
+        let terminal = state.terminals.get(&terminal_id).unwrap();
+        assert_eq!(terminal.state, AgentState::Working);
+        assert_eq!(terminal.detected_agent, Some(Agent::Claude));
     }
 
     #[test]

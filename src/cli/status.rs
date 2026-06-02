@@ -92,7 +92,11 @@ fn print_full_status(json: bool) -> std::io::Result<i32> {
     }
 
     println!("client:");
-    println!("  version: {}", env!("CARGO_PKG_VERSION"));
+    println!("  version: {}", crate::build_info::version());
+    println!(
+        "  channel: {}",
+        crate::config::Config::load().config.update.channel.as_str()
+    );
     println!("  protocol: {}", crate::protocol::PROTOCOL_VERSION);
     println!();
     println!("server:");
@@ -120,7 +124,11 @@ fn print_client_status(json: bool) -> std::io::Result<()> {
         return Ok(());
     }
 
-    println!("version: {}", env!("CARGO_PKG_VERSION"));
+    println!("version: {}", crate::build_info::version());
+    println!(
+        "channel: {}",
+        crate::config::Config::load().config.update.channel.as_str()
+    );
     println!("protocol: {}", crate::protocol::PROTOCOL_VERSION);
     println!("binary: {}", current_exe_label());
     Ok(())
@@ -193,7 +201,7 @@ fn compatibility_label(protocol: Option<u32>) -> &'static str {
 fn restart_needed_label(server: &ServerRuntimeStatus) -> &'static str {
     match server {
         ServerRuntimeStatus::Running { version, .. } => match version.as_deref() {
-            Some(env!("CARGO_PKG_VERSION")) => "no",
+            Some(version) if version == crate::build_info::version() => "no",
             Some(_) => "yes",
             None => "unknown",
         },
@@ -210,7 +218,8 @@ struct FullStatusJson {
 
 #[derive(Serialize)]
 struct ClientStatusJson {
-    version: &'static str,
+    version: String,
+    channel: &'static str,
     protocol: u32,
     binary: String,
     session: Option<String>,
@@ -241,7 +250,8 @@ struct UpdateStatusJson {
 
 fn client_status_json() -> ClientStatusJson {
     ClientStatusJson {
-        version: env!("CARGO_PKG_VERSION"),
+        version: crate::build_info::version(),
+        channel: crate::config::Config::load().config.update.channel.as_str(),
         protocol: crate::protocol::PROTOCOL_VERSION,
         binary: current_exe_label(),
         session: crate::session::active_name(),
@@ -292,7 +302,7 @@ fn update_status_json(server: &ServerRuntimeStatus) -> UpdateStatusJson {
 fn restart_needed_bool(server: &ServerRuntimeStatus) -> Option<bool> {
     match server {
         ServerRuntimeStatus::Running { version, .. } => match version.as_deref() {
-            Some(env!("CARGO_PKG_VERSION")) => Some(false),
+            Some(version) if version == crate::build_info::version() => Some(false),
             Some(_) => Some(true),
             None => None,
         },

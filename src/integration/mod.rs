@@ -19,11 +19,11 @@ const OMP_INTEGRATION_VERSION: u32 = 2;
 const PI_CODING_AGENT_DIR_ENV_VAR: &str = "PI_CODING_AGENT_DIR";
 const CLAUDE_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const CLAUDE_HOOK_ASSET: &str = include_str!("assets/claude/herdr-agent-state.sh");
-const CLAUDE_INTEGRATION_VERSION: u32 = 4;
+const CLAUDE_INTEGRATION_VERSION: u32 = 5;
 const CLAUDE_CONFIG_DIR_ENV_VAR: &str = "CLAUDE_CONFIG_DIR";
 const CODEX_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const CODEX_HOOK_ASSET: &str = include_str!("assets/codex/herdr-agent-state.sh");
-const CODEX_INTEGRATION_VERSION: u32 = 4;
+const CODEX_INTEGRATION_VERSION: u32 = 5;
 const CODEX_HOME_ENV_VAR: &str = "CODEX_HOME";
 const COPILOT_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const COPILOT_HOOK_ASSET: &str = include_str!("assets/copilot/herdr-agent-state.sh");
@@ -31,7 +31,7 @@ const COPILOT_INTEGRATION_VERSION: u32 = 1;
 const COPILOT_HOME_ENV_VAR: &str = "COPILOT_HOME";
 const OPENCODE_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state.js";
 const OPENCODE_PLUGIN_ASSET: &str = include_str!("assets/opencode/herdr-agent-state.js");
-const OPENCODE_INTEGRATION_VERSION: u32 = 3;
+const OPENCODE_INTEGRATION_VERSION: u32 = 4;
 const HERMES_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state";
 const HERMES_PLUGIN_MANIFEST_INSTALL_NAME: &str = "plugin.yaml";
 const HERMES_PLUGIN_INIT_INSTALL_NAME: &str = "__init__.py";
@@ -813,45 +813,36 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
         "SubagentStop",
         &format!("bash {quoted_hook_path} working"),
     )?;
+    remove_command_hook(
+        hooks,
+        "PermissionRequest",
+        &format!("bash {quoted_hook_path} blocked"),
+    )?;
+    remove_command_hook(
+        hooks,
+        "SessionStart",
+        &format!("bash {quoted_hook_path} idle"),
+    )?;
+    remove_command_hook(
+        hooks,
+        "UserPromptSubmit",
+        &format!("bash {quoted_hook_path} working"),
+    )?;
+    remove_command_hook(
+        hooks,
+        "PreToolUse",
+        &format!("bash {quoted_hook_path} working"),
+    )?;
+    remove_command_hook(hooks, "Stop", &format!("bash {quoted_hook_path} idle"))?;
+    remove_command_hook(
+        hooks,
+        "SessionEnd",
+        &format!("bash {quoted_hook_path} release"),
+    )?;
     ensure_command_hook(
         hooks,
         "SessionStart",
-        format!("bash {quoted_hook_path} idle"),
-        10,
-        Some("*"),
-    )?;
-    ensure_command_hook(
-        hooks,
-        "UserPromptSubmit",
-        format!("bash {quoted_hook_path} working"),
-        10,
-        Some("*"),
-    )?;
-    ensure_command_hook(
-        hooks,
-        "PreToolUse",
-        format!("bash {quoted_hook_path} working"),
-        10,
-        Some("*"),
-    )?;
-    ensure_command_hook(
-        hooks,
-        "PermissionRequest",
-        format!("bash {quoted_hook_path} blocked"),
-        10,
-        Some("*"),
-    )?;
-    ensure_command_hook(
-        hooks,
-        "Stop",
-        format!("bash {quoted_hook_path} idle"),
-        10,
-        Some("*"),
-    )?;
-    ensure_command_hook(
-        hooks,
-        "SessionEnd",
-        format!("bash {quoted_hook_path} release"),
+        format!("bash {quoted_hook_path} session"),
         10,
         Some("*"),
     )?;
@@ -893,38 +884,31 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
         "codex hooks file hooks",
     )?;
     let quoted_hook_path = shell_single_quote(&hook_path.display().to_string());
+    remove_command_hook(
+        hooks,
+        "PermissionRequest",
+        &format!("bash {quoted_hook_path} blocked"),
+    )?;
+    remove_command_hook(
+        hooks,
+        "SessionStart",
+        &format!("bash {quoted_hook_path} idle"),
+    )?;
+    remove_command_hook(
+        hooks,
+        "UserPromptSubmit",
+        &format!("bash {quoted_hook_path} working"),
+    )?;
+    remove_command_hook(
+        hooks,
+        "PreToolUse",
+        &format!("bash {quoted_hook_path} working"),
+    )?;
+    remove_command_hook(hooks, "Stop", &format!("bash {quoted_hook_path} idle"))?;
     ensure_command_hook(
         hooks,
         "SessionStart",
-        format!("bash {quoted_hook_path} idle"),
-        10,
-        None,
-    )?;
-    ensure_command_hook(
-        hooks,
-        "UserPromptSubmit",
-        format!("bash {quoted_hook_path} working"),
-        10,
-        None,
-    )?;
-    ensure_command_hook(
-        hooks,
-        "PreToolUse",
-        format!("bash {quoted_hook_path} working"),
-        10,
-        None,
-    )?;
-    ensure_command_hook(
-        hooks,
-        "PermissionRequest",
-        format!("bash {quoted_hook_path} blocked"),
-        10,
-        None,
-    )?;
-    ensure_command_hook(
-        hooks,
-        "Stop",
-        format!("bash {quoted_hook_path} idle"),
+        format!("bash {quoted_hook_path} session"),
         10,
         None,
     )?;
@@ -1114,6 +1098,11 @@ pub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {
             )?;
             updated_settings |= remove_command_hook(
                 hooks,
+                "SessionStart",
+                &format!("bash {quoted_hook_path} session"),
+            )?;
+            updated_settings |= remove_command_hook(
+                hooks,
                 "UserPromptSubmit",
                 &format!("bash {quoted_hook_path} working"),
             )?;
@@ -1190,6 +1179,11 @@ pub(crate) fn uninstall_codex() -> io::Result<CodexUninstallResult> {
                 hooks,
                 "SessionStart",
                 &format!("bash {quoted_hook_path} idle"),
+            )?;
+            updated_hooks |= remove_command_hook(
+                hooks,
+                "SessionStart",
+                &format!("bash {quoted_hook_path} session"),
             )?;
             updated_hooks |= remove_command_hook(
                 hooks,
@@ -2408,35 +2402,15 @@ mod tests {
         assert!(settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap()
-            .contains(" idle"));
-        assert_eq!(settings["hooks"]["UserPromptSubmit"][0]["matcher"], "*");
-        assert!(
-            settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
-                .as_str()
-                .unwrap()
-                .contains(" working")
-        );
-        assert!(settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .contains(" working"));
-        assert!(
-            settings["hooks"]["PermissionRequest"][0]["hooks"][0]["command"]
-                .as_str()
-                .unwrap()
-                .contains(" blocked")
-        );
+            .contains(" session"));
+        assert!(settings["hooks"].get("UserPromptSubmit").is_none());
+        assert!(settings["hooks"].get("PreToolUse").is_none());
+        assert!(settings["hooks"].get("PermissionRequest").is_none());
         assert!(settings["hooks"].get("PostToolUse").is_none());
         assert!(settings["hooks"].get("PostToolUseFailure").is_none());
         assert!(settings["hooks"].get("SubagentStop").is_none());
-        assert!(settings["hooks"]["Stop"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .contains(" idle"));
-        assert!(settings["hooks"]["SessionEnd"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .contains(" release"));
+        assert!(settings["hooks"].get("Stop").is_none());
+        assert!(settings["hooks"].get("SessionEnd").is_none());
 
         std::env::remove_var("HOME");
         let _ = fs::remove_dir_all(base);
@@ -2478,29 +2452,17 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(claude_dir.join("settings.json")).unwrap())
                 .unwrap();
         assert_eq!(
-            settings["hooks"]["UserPromptSubmit"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(settings["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
-        assert_eq!(
-            settings["hooks"]["PermissionRequest"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(
             settings["hooks"]["SessionStart"].as_array().unwrap().len(),
             1
         );
+        assert!(settings["hooks"].get("UserPromptSubmit").is_none());
+        assert!(settings["hooks"].get("PreToolUse").is_none());
+        assert!(settings["hooks"].get("PermissionRequest").is_none());
         assert!(settings["hooks"].get("PostToolUse").is_none());
         assert!(settings["hooks"].get("PostToolUseFailure").is_none());
         assert!(settings["hooks"].get("SubagentStop").is_none());
-        assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 1);
-        assert_eq!(settings["hooks"]["SessionEnd"].as_array().unwrap().len(), 1);
+        assert!(settings["hooks"].get("Stop").is_none());
+        assert!(settings["hooks"].get("SessionEnd").is_none());
 
         std::env::remove_var("HOME");
         let _ = fs::remove_dir_all(base);
@@ -2518,7 +2480,8 @@ mod tests {
         fs::write(
             claude_dir.join("settings.json"),
             format!(
-                r#"{{"hooks":{{"PostToolUse":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}},{{"type":"command","command":"echo keep-post","timeout":10}}]}}],"PostToolUseFailure":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}},{{"type":"command","command":"echo keep-failure","timeout":10}}]}}],"SubagentStop":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}},{{"type":"command","command":"echo keep-subagent","timeout":10}}]}}]}}}}"#,
+                r#"{{"hooks":{{"PostToolUse":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}},{{"type":"command","command":"echo keep-post","timeout":10}}]}}],"PostToolUseFailure":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}},{{"type":"command","command":"echo keep-failure","timeout":10}}]}}],"SubagentStop":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}},{{"type":"command","command":"echo keep-subagent","timeout":10}}]}}],"SessionEnd":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' release","timeout":10}},{{"type":"command","command":"echo keep-session-end","timeout":10}}]}}]}}}}"#,
+                hook_path.display(),
                 hook_path.display(),
                 hook_path.display(),
                 hook_path.display(),
@@ -2545,14 +2508,12 @@ mod tests {
             "echo keep-subagent"
         );
         assert_eq!(
-            settings["hooks"]["UserPromptSubmit"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
+            settings["hooks"]["SessionEnd"][0]["hooks"][0]["command"],
+            "echo keep-session-end"
         );
-        assert_eq!(settings["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
-        assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        assert!(settings["hooks"].get("UserPromptSubmit").is_none());
+        assert!(settings["hooks"].get("PreToolUse").is_none());
+        assert!(settings["hooks"].get("Stop").is_none());
 
         std::env::remove_var("HOME");
         let _ = fs::remove_dir_all(base);
@@ -2581,7 +2542,7 @@ mod tests {
 
         assert_eq!(claude.path, hook_path);
         assert_eq!(claude.installed_version, Some(1));
-        assert_eq!(claude.expected_version, 4);
+        assert_eq!(claude.expected_version, 5);
         assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
         std::env::remove_var("HOME");
@@ -2611,7 +2572,7 @@ mod tests {
 
         assert_eq!(claude.path, hook_path);
         assert_eq!(claude.installed_version, Some(2));
-        assert_eq!(claude.expected_version, 4);
+        assert_eq!(claude.expected_version, 5);
         assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
         std::env::remove_var("HOME");
@@ -2715,7 +2676,7 @@ mod tests {
 
         assert_eq!(codex.path, hook_path);
         assert_eq!(codex.installed_version, Some(2));
-        assert_eq!(codex.expected_version, 4);
+        assert_eq!(codex.expected_version, 5);
         assert_eq!(codex.state, IntegrationStatusKind::Outdated);
 
         std::env::remove_var("HOME");
@@ -2745,25 +2706,11 @@ mod tests {
         assert!(hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap()
-            .contains(" idle"));
-        assert!(hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .contains(" working"));
-        assert!(hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .contains(" working"));
-        assert!(
-            hooks["hooks"]["PermissionRequest"][0]["hooks"][0]["command"]
-                .as_str()
-                .unwrap()
-                .contains(" blocked")
-        );
-        assert!(hooks["hooks"]["Stop"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .contains(" idle"));
+            .contains(" session"));
+        assert!(hooks["hooks"].get("UserPromptSubmit").is_none());
+        assert!(hooks["hooks"].get("PreToolUse").is_none());
+        assert!(hooks["hooks"].get("PermissionRequest").is_none());
+        assert!(hooks["hooks"].get("Stop").is_none());
         assert!(config.contains("model = \"gpt-5.4\""));
         assert!(config.contains("[features]"));
         assert!(config.contains("hooks = true"));
@@ -2815,19 +2762,10 @@ mod tests {
         let config = fs::read_to_string(codex_dir.join("config.toml")).unwrap();
 
         assert_eq!(hooks["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
-        assert_eq!(
-            hooks["hooks"]["UserPromptSubmit"].as_array().unwrap().len(),
-            1
-        );
-        assert_eq!(hooks["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
-        assert_eq!(
-            hooks["hooks"]["PermissionRequest"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(hooks["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        assert!(hooks["hooks"].get("UserPromptSubmit").is_none());
+        assert!(hooks["hooks"].get("PreToolUse").is_none());
+        assert!(hooks["hooks"].get("PermissionRequest").is_none());
+        assert!(hooks["hooks"].get("Stop").is_none());
         assert_eq!(config.matches("hooks = true").count(), 1);
         assert!(!config.contains("codex_hooks"));
         assert!(config.contains("other = true"));
@@ -3297,18 +3235,27 @@ mod tests {
         assert!(PI_EXTENSION_ASSET.contains("agent_session_id: currentAgentSessionId"));
         assert!(PI_EXTENSION_ASSET.contains("publishState(true)"));
         assert!(CLAUDE_HOOK_ASSET.contains("agent_session_id"));
+        assert!(CLAUDE_HOOK_ASSET.contains("pane.report_agent_session"));
+        assert!(!CLAUDE_HOOK_ASSET.contains("\"state\": action"));
+        assert!(!CLAUDE_HOOK_ASSET.contains("pane.release_agent"));
         assert!(CODEX_HOOK_ASSET.contains("HERDR_HOOK_INPUT_FILE"));
         assert!(CODEX_HOOK_ASSET.contains("agent_session_id"));
+        assert!(CODEX_HOOK_ASSET.contains("pane.report_agent_session"));
+        assert!(!CODEX_HOOK_ASSET.contains("\"state\": action"));
+        assert!(!CODEX_HOOK_ASSET.contains("pane.release_agent"));
         assert!(COPILOT_HOOK_ASSET.contains("agent_session_id"));
         assert!(COPILOT_HOOK_ASSET.contains("notification_type"));
         assert!(COPILOT_HOOK_ASSET.contains("ask_user"));
         assert!(COPILOT_HOOK_ASSET.contains("exit_plan_mode"));
         assert!(OPENCODE_PLUGIN_ASSET.contains("properties?.sessionID"));
-        assert!(OPENCODE_PLUGIN_ASSET.contains("dispose: async"));
         assert!(OPENCODE_PLUGIN_ASSET.contains("agent_session_id: sessionID"));
-        assert!(!OPENCODE_PLUGIN_ASSET.contains("await reportState(\"idle\", sessionID);\n          }\n          break;\n        case \"session.status\""));
+        assert!(OPENCODE_PLUGIN_ASSET.contains("pane.report_agent_session"));
+        assert!(!OPENCODE_PLUGIN_ASSET.contains("reportState"));
+        assert!(!OPENCODE_PLUGIN_ASSET.contains("pane.release_agent"));
         assert!(HERMES_PLUGIN_INIT_ASSET.contains("session_id = _session_id(kwargs)"));
         assert!(HERMES_PLUGIN_INIT_ASSET.contains("agent_session_id"));
+        assert!(HERMES_PLUGIN_INIT_ASSET.contains("pane.report_agent\","));
+        assert!(HERMES_PLUGIN_INIT_ASSET.contains("pane.release_agent"));
         // Qoder hook reads the event from the stdin JSON payload (per
         // https://docs.qoder.com/zh/cli/hooks). Make sure the bundled script
         // never reaches for a QODER_HOOK_EVENT environment variable.

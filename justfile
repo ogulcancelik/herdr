@@ -3,7 +3,7 @@
 # Run tests
 test:
     cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
-    python3 -m unittest scripts.test_changelog scripts.test_vendor_libghostty_vt
+    python3 -m unittest scripts.test_changelog scripts.test_preview scripts.test_vendor_libghostty_vt
 
 # Run one nextest filter, e.g. `just test-one codex_stale_working`
 test-one filter:
@@ -20,13 +20,14 @@ ci: lint
 
 # Check formatting + run unit tests + maintenance script tests
 check: ci
-    python3 -m unittest scripts.test_changelog scripts.test_vendor_libghostty_vt
+    python3 -m unittest scripts.test_changelog scripts.test_preview scripts.test_vendor_libghostty_vt
     @echo "docs reminder: if this changes user-facing behavior, make sure the relevant release docs are updated or called out before release."
 
 # Install repo-local git hooks
 install-hooks:
     git config core.hooksPath .githooks
     chmod +x .githooks/pre-commit
+    chmod +x .githooks/commit-msg
     @echo "installed git hooks from .githooks"
 
 # Build release binary

@@ -111,6 +111,7 @@ fn is_routine_api_method(method: &str) -> bool {
             | "workspace.list"
             | "tab.list"
             | "pane.report_agent"
+            | "pane.report_agent_session"
             | "pane.report_metadata"
     )
 }

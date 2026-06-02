@@ -57,9 +57,10 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: Herdr version, operating system, and terminal are required. Shell and relevant config are optional.
+      description: Herdr version, update channel, operating system, and terminal are required. Shell and relevant config are optional.
       value: |
         - Herdr version:
+        - Update channel (stable or preview):
         - Operating system:
         - Terminal:
         - Shell, if relevant:

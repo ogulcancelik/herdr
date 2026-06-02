@@ -2,3 +2,4 @@ node_modules/
 public/
 dist/
 .astro/
+src/content/docs/preview/

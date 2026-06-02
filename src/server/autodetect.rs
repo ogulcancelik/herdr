@@ -103,7 +103,7 @@ fn validate_running_server_compatibility() -> io::Result<()> {
             .protocol
             .map(|value| value.to_string())
             .unwrap_or_else(|| "unknown".to_string()),
-        env!("CARGO_PKG_VERSION"),
+        crate::build_info::version(),
         crate::protocol::PROTOCOL_VERSION,
         crate::session::active_restart_after_update_guidance()
     )))
