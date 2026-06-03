@@ -508,7 +508,29 @@ fn run_copilot_hook(hook_input: &str) -> Option<serde_json::Value> {
     )
 }
 
+fn run_devin_hook(
+    action: &str,
+    hook_input: &str,
+    envs: &[(&str, &str)],
+) -> Option<serde_json::Value> {
+    run_shell_hook_with_env(
+        "src/integration/assets/devin/herdr-agent-state.sh",
+        &[action],
+        hook_input,
+        envs,
+    )
+}
+
 fn run_shell_hook(asset_path: &str, args: &[&str], hook_input: &str) -> Option<serde_json::Value> {
+    run_shell_hook_with_env(asset_path, args, hook_input, &[])
+}
+
+fn run_shell_hook_with_env(
+    asset_path: &str,
+    args: &[&str],
+    hook_input: &str,
+    envs: &[(&str, &str)],
+) -> Option<serde_json::Value> {
     let base = unique_test_dir();
     fs::create_dir_all(&base).unwrap();
     let socket_path = base.join("herdr.sock");
@@ -538,7 +560,8 @@ fn run_shell_hook(asset_path: &str, args: &[&str], hook_input: &str) -> Option<s
     });
 
     let hook_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(asset_path);
-    let mut child = Command::new("bash")
+    let mut command = Command::new("bash");
+    command
         .arg(hook_path)
         .args(args)
         .env("HERDR_ENV", "1")
@@ -546,9 +569,11 @@ fn run_shell_hook(asset_path: &str, args: &[&str], hook_input: &str) -> Option<s
         .env("HERDR_PANE_ID", "p_test")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::piped());
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().unwrap();
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(hook_input.as_bytes()).unwrap();
     drop(stdin);
@@ -782,6 +807,58 @@ fn copilot_hook_releases_on_user_exit_only() {
     .expect("copilot user exit should release");
     assert_eq!(user_exit["method"], "pane.release_agent");
     assert_eq!(user_exit["params"]["agent"], "copilot");
+}
+
+#[test]
+fn devin_hook_reports_working_and_resolves_session_from_list() {
+    let request = run_devin_hook(
+        "working",
+        r#"{"hook_event_name":"UserPromptSubmit","prompt":"run tests"}"#,
+        &[
+            ("DEVIN_PROJECT_DIR", "/tmp/project"),
+            (
+                "HERDR_DEVIN_LIST_JSON",
+                r#"[{"id":"older-session","working_directory":"/tmp/other"},{"id":"devin-session","working_directory":"/tmp/project"}]"#,
+            ),
+        ],
+    )
+    .expect("devin user prompt should report working");
+
+    assert_eq!(request["method"], "pane.report_agent");
+    assert_eq!(request["params"]["agent"], "devin");
+    assert_eq!(request["params"]["state"], "working");
+    assert_eq!(request["params"]["agent_session_id"], "devin-session");
+}
+
+#[test]
+fn devin_hook_reports_blocked_without_session_when_list_is_empty() {
+    let request = run_devin_hook(
+        "blocked",
+        r#"{"hook_event_name":"PermissionRequest","tool_name":"exec","tool_input":{"command":"sleep 30"}}"#,
+        &[
+            ("DEVIN_PROJECT_DIR", "/tmp/project"),
+            ("HERDR_DEVIN_LIST_JSON", "[]"),
+        ],
+    )
+    .expect("devin permission request should report blocked");
+
+    assert_eq!(request["method"], "pane.report_agent");
+    assert_eq!(request["params"]["agent"], "devin");
+    assert_eq!(request["params"]["state"], "blocked");
+    assert!(request["params"].get("agent_session_id").is_none());
+}
+
+#[test]
+fn devin_hook_releases_agent_on_session_end() {
+    let request = run_devin_hook(
+        "release",
+        r#"{"hook_event_name":"SessionEnd","reason":"session_complete"}"#,
+        &[("DEVIN_PROJECT_DIR", "/tmp/project")],
+    )
+    .expect("devin session end should release");
+
+    assert_eq!(request["method"], "pane.release_agent");
+    assert_eq!(request["params"]["agent"], "devin");
 }
 
 #[test]

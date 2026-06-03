@@ -4,6 +4,7 @@ pub(super) mod claude_code;
 pub(super) mod cline;
 pub(super) mod codex;
 pub(super) mod cursor;
+pub(super) mod devin;
 pub(super) mod droid;
 pub(super) mod gemini;
 pub(super) mod github_copilot;
@@ -25,6 +26,7 @@ pub(super) fn detect(agent: Agent, screen_content: &str) -> AgentDetection {
         Agent::Codex => codex::detect(screen_content),
         Agent::Gemini => gemini::detect(screen_content),
         Agent::Cursor => cursor::detect(screen_content),
+        Agent::Devin => devin::detect(screen_content),
         Agent::Antigravity => antigravity::detect(screen_content),
         Agent::Cline => cline::detect(screen_content),
         Agent::OpenCode => opencode::detect(screen_content),
@@ -63,6 +65,7 @@ pub(super) fn should_skip_state_update(agent: Agent, content: &str) -> bool {
     match agent {
         Agent::Claude => claude_code::is_transcript_viewer(content),
         Agent::Codex => codex::is_transcript_viewer(content),
+        Agent::Devin => false,
         _ => false,
     }
 }
@@ -79,6 +82,7 @@ fn has_visible_blocker(agent: Agent, content: &str, state: AgentState) -> bool {
         // is known to be structural and live.
         Agent::Claude => claude_code::has_visible_blocker(content),
         Agent::Codex => codex::has_visible_blocker(content),
+        Agent::Devin => devin::has_visible_blocker(content),
         _ => false,
     }
 }
@@ -91,6 +95,7 @@ fn has_visible_idle(agent: Agent, content: &str, state: AgentState) -> bool {
     match agent {
         Agent::Claude => claude_code::has_prompt_box(content),
         Agent::Codex => codex::has_prompt(content),
+        Agent::Devin => devin::has_idle_prompt(content),
         _ => false,
     }
 }
@@ -103,6 +108,7 @@ fn has_visible_working(agent: Agent, content: &str, state: AgentState) -> bool {
     match agent {
         Agent::Claude => claude_code::has_working_chrome(content),
         Agent::Codex => codex::has_visible_working(content),
+        Agent::Devin => devin::has_visible_working(content),
         _ => false,
     }
 }

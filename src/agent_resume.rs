@@ -116,6 +116,9 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
         ("herdr:copilot", "copilot", AgentSessionRefKind::Id) => {
             vec!["copilot".into(), format!("--resume={}", session_ref.value)]
         }
+        ("herdr:devin", "devin", AgentSessionRefKind::Id) => {
+            vec!["devin".into(), "--resume".into(), session_ref.value.clone()]
+        }
         ("herdr:pi", "pi", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
             vec!["pi".into(), "--session".into(), session_ref.value.clone()]
         }
@@ -156,6 +159,7 @@ fn is_official_agent_source(source: &str, agent: &str) -> bool {
         ("herdr:claude", "claude")
             | ("herdr:codex", "codex")
             | ("herdr:copilot", "copilot")
+            | ("herdr:devin", "devin")
             | ("herdr:pi", "pi")
             | ("herdr:hermes", "hermes")
             | ("herdr:opencode", "opencode")
@@ -208,6 +212,16 @@ mod tests {
             .unwrap()
             .argv,
             vec!["copilot", "--resume=copilot-session"]
+        );
+        assert_eq!(
+            plan(
+                "herdr:devin",
+                "devin",
+                &AgentSessionRef::id("devin-session").unwrap()
+            )
+            .unwrap()
+            .argv,
+            vec!["devin", "--resume", "devin-session"]
         );
         assert_eq!(
             plan(
@@ -310,6 +324,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(copilot_plan.argv, vec!["copilot", "--resume=abc; rm -rf /"]);
+
+        let devin_plan = plan("herdr:devin", "devin", &AgentSessionRef::id(id).unwrap()).unwrap();
+        assert_eq!(devin_plan.argv, vec!["devin", "--resume", id]);
     }
 
     #[test]
@@ -332,6 +349,12 @@ mod tests {
             &AgentSessionRef::path("/tmp/copilot-session").unwrap()
         )
         .is_none());
+        assert!(plan(
+            "herdr:devin",
+            "devin",
+            &AgentSessionRef::path("/tmp/devin-session").unwrap()
+        )
+        .is_none());
         assert!(session_ref_from_snapshot(
             "herdr:hermes",
             "hermes",
@@ -351,6 +374,13 @@ mod tests {
             "copilot",
             AgentSessionRefKind::Id,
             "copilot-session"
+        )
+        .is_some());
+        assert!(session_ref_from_snapshot(
+            "herdr:devin",
+            "devin",
+            AgentSessionRefKind::Id,
+            "devin-session"
         )
         .is_some());
     }

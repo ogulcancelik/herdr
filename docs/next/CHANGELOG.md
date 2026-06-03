@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Added Devin CLI automatic detection for idle, working, and blocked terminal states plus `herdr integration install devin` hooks that report semantic state and native session ids for restore with `devin --resume <id>`.
+
 ## [0.6.7] - 2026-06-03
 
 ### Added

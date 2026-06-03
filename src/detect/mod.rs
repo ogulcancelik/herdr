@@ -47,6 +47,7 @@ pub enum Agent {
     Codex,
     Gemini,
     Cursor,
+    Devin,
     Antigravity,
     Cline,
     OpenCode,
@@ -68,6 +69,7 @@ pub fn agent_label(agent: Agent) -> &'static str {
         Agent::Codex => "codex",
         Agent::Gemini => "gemini",
         Agent::Cursor => "cursor",
+        Agent::Devin => "devin",
         Agent::Antigravity => "agy",
         Agent::Cline => "cline",
         Agent::OpenCode => "opencode",
@@ -91,6 +93,7 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
         "codex" => Some(Agent::Codex),
         "gemini" => Some(Agent::Gemini),
         "cursor" | "cursor-agent" => Some(Agent::Cursor),
+        "devin" | "devin-cli" | "devin cli" => Some(Agent::Devin),
         "agy" | "antigravity" | "antigravity-cli" => Some(Agent::Antigravity),
         "cline" => Some(Agent::Cline),
         "opencode" | "open-code" => Some(Agent::OpenCode),
@@ -118,6 +121,7 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
         "codex" => Some(Agent::Codex),
         "gemini" => Some(Agent::Gemini),
         "cursor" | "cursor-agent" => Some(Agent::Cursor),
+        "devin" | "devin-cli" | "devin cli" => Some(Agent::Devin),
         "agy" | "antigravity" | "antigravity-cli" => Some(Agent::Antigravity),
         "cline" => Some(Agent::Cline),
         "opencode" | "open-code" => Some(Agent::OpenCode),
@@ -216,6 +220,11 @@ fn detect_gemini(content: &str) -> AgentState {
 #[cfg(test)]
 fn detect_cursor(content: &str) -> AgentState {
     detect_state(Some(Agent::Cursor), content)
+}
+
+#[cfg(test)]
+fn detect_devin(content: &str) -> AgentState {
+    detect_state(Some(Agent::Devin), content)
 }
 
 #[cfg(test)]
@@ -563,6 +572,11 @@ mod tests {
             (Agent::Gemini, "Esc to cancel", AgentState::Working),
             (Agent::Cursor, "Ctrl+C to stop", AgentState::Working),
             (
+                Agent::Devin,
+                "⠀⡆ Running tools · 27s (esc to interrupt)\n❭ Guide Devin while it works",
+                AgentState::Working,
+            ),
+            (
                 Agent::Antigravity,
                 "⠋ Thinking through the request",
                 AgentState::Working,
@@ -612,6 +626,8 @@ mod tests {
         assert_eq!(identify_agent("gemini"), Some(Agent::Gemini));
         assert_eq!(identify_agent("cursor"), Some(Agent::Cursor));
         assert_eq!(identify_agent("cursor-agent"), Some(Agent::Cursor));
+        assert_eq!(identify_agent("devin"), Some(Agent::Devin));
+        assert_eq!(identify_agent("devin-cli"), Some(Agent::Devin));
         assert_eq!(identify_agent("agy"), Some(Agent::Antigravity));
         assert_eq!(identify_agent("antigravity-cli"), Some(Agent::Antigravity));
         assert_eq!(identify_agent("cline"), Some(Agent::Cline));
@@ -635,6 +651,7 @@ mod tests {
         assert_eq!(parse_agent_label("pi"), Some(Agent::Pi));
         assert_eq!(parse_agent_label("claude"), Some(Agent::Claude));
         assert_eq!(parse_agent_label("cursor-agent"), Some(Agent::Cursor));
+        assert_eq!(parse_agent_label("devin-cli"), Some(Agent::Devin));
         assert_eq!(parse_agent_label("agy"), Some(Agent::Antigravity));
         assert_eq!(parse_agent_label("antigravity"), Some(Agent::Antigravity));
         assert_eq!(parse_agent_label("copilot"), Some(Agent::GithubCopilot));
@@ -655,6 +672,7 @@ mod tests {
         assert_eq!(agent_label(Agent::Pi), "pi");
         assert_eq!(agent_label(Agent::GithubCopilot), "copilot");
         assert_eq!(agent_label(Agent::OpenCode), "opencode");
+        assert_eq!(agent_label(Agent::Devin), "devin");
         assert_eq!(agent_label(Agent::Antigravity), "agy");
         assert_eq!(agent_label(Agent::Kiro), "kiro");
         assert_eq!(agent_label(Agent::Grok), "grok");
@@ -675,6 +693,7 @@ mod tests {
         assert_eq!(identify_agent("Pi"), Some(Agent::Pi));
         assert_eq!(identify_agent("CLAUDE"), Some(Agent::Claude));
         assert_eq!(identify_agent("Codex"), Some(Agent::Codex));
+        assert_eq!(identify_agent("Devin"), Some(Agent::Devin));
     }
 
     #[test]
@@ -1845,6 +1864,32 @@ mod tests {
     #[test]
     fn opencode_idle() {
         assert_eq!(detect_opencode("> "), AgentState::Idle);
+    }
+
+    // ---- Devin ----
+
+    #[test]
+    fn devin_idle_on_primary_prompt() {
+        let screen = "─────────────────────────────────────────────────────\n❭ Ask Devin to build features, fix bugs, or work on\n  your code\n─────────────────────────────────────────────────────\nSWE-1.6               Context: 16k / 200k tokens (7%)";
+        assert_eq!(detect_devin(screen), AgentState::Idle);
+    }
+
+    #[test]
+    fn devin_working_on_running_tools_footer() {
+        let screen = "◔ Reading shell 91b655\n  │ Timeout: 35s\n\n⠀⡆ Running tools · 27s (esc to interrupt)\n─────────────────────────────────────────────────────\n❭ Guide Devin while it works";
+        assert_eq!(detect_devin(screen), AgentState::Working);
+    }
+
+    #[test]
+    fn devin_blocked_on_workspace_trust_prompt() {
+        let screen = "Do you trust the authors of this directory?\nFor security, devin should not be run in directories\nwith untrusted content.\n❭ 1 Yes, trust /private/tmp/devin-hook-probe\n· 2 No, exit";
+        assert_eq!(detect_devin(screen), AgentState::Blocked);
+    }
+
+    #[test]
+    fn devin_blocked_on_permission_prompt() {
+        let screen = "⏺ Running command\n  └ $ sleep 30\n\n❭ 1 Yes  (Approve once)\n· 2 Yes, allow `sleep` commands\n· 3 Yes, always allow `sleep` commands in `devin-…\n· 4 No\n↑↓ select · ↵ confirm · esc cancel";
+        assert_eq!(detect_devin(screen), AgentState::Blocked);
     }
 
     // ---- Kilo ----

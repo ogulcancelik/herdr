@@ -139,7 +139,7 @@ states:
 - 🔵 **done** — work finished, you have not looked at it yet
 - 🟢 **idle** — done and seen
 
-detection works by reading foreground process and terminal output. zero config, no hooks required. official claude code, codex, and opencode integrations provide session restore identity; pi, omp, github copilot cli, hermes, qodercli, and custom socket integrations can report their own state.
+detection works by reading foreground process and terminal output. zero config, no hooks required. official claude code, codex, and opencode integrations provide session restore identity; pi, omp, github copilot cli, devin, hermes, qodercli, and custom socket integrations can report their own state.
 
 ## lives in your terminal
 
@@ -173,6 +173,7 @@ automatic detection works out of the box. process name matching plus terminal ou
 | [grok cli](https://x.ai/grok) | ✓ | ✓ | ✓ |
 | [hermes agent](https://github.com/NousResearch/hermes-agent) | ✓ | ✓ | ✓ |
 | [kilo code cli](https://kilo.ai/) | ✓ | ✓ | ✓ |
+| [devin cli](https://docs.devin.ai/cli) | ✓ | ✓ | ✓ |
 | cursor agent | ✓ | ✓ | ✓ |
 | antigravity cli | ✓ | ✓ | ✓ |
 | kimi code cli | ✓ | ✓ | ✓ |
@@ -186,7 +187,7 @@ for agents outside the built-in list, herdr still works as a terminal multiplexe
 
 ### direct integrations
 
-official integrations have two roles. claude code, codex, and opencode report session identity for native restore, while their state still comes from screen detection. pi, github copilot cli, and hermes report both semantic state and session identity. omp and qodercli report semantic state without native session restore. install with:
+official integrations have two roles. claude code, codex, and opencode report session identity for native restore, while their state still comes from screen detection. pi, github copilot cli, devin, and hermes report both semantic state and session identity. omp and qodercli report semantic state without native session restore. install with:
 
 ```bash
 herdr integration install pi
@@ -194,6 +195,7 @@ herdr integration install omp
 herdr integration install claude
 herdr integration install codex
 herdr integration install copilot
+herdr integration install devin
 herdr integration install opencode
 herdr integration install hermes
 herdr integration install qodercli

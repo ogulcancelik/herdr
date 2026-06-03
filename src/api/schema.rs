@@ -524,6 +524,7 @@ pub enum IntegrationTarget {
     Claude,
     Codex,
     Copilot,
+    Devin,
     Opencode,
     Hermes,
     Qodercli,
