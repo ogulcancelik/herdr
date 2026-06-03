@@ -595,6 +595,95 @@ fn tab_methods_round_trip_over_socket() {
     cleanup_spawned_herdr(child, base);
 }
 
+#[test]
+fn tab_move_round_trip_over_socket() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let child = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    // Create a workspace.
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_m1","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    let workspace_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Create two more tabs (3 total).
+    let tab2 = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_m2","method":"tab.create","params":{{"workspace_id":"{}","label":"alpha","focus":true}}}}"#,
+            workspace_id
+        ),
+    );
+    let tab2_id = tab2["result"]["tab"]["tab_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let tab3 = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_m3","method":"tab.create","params":{{"workspace_id":"{}","label":"beta","focus":true}}}}"#,
+            workspace_id
+        ),
+    );
+    let tab3_id = tab3["result"]["tab"]["tab_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Move tab 3 (beta) to position 1.
+    let moved = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_m4","method":"tab.move","params":{{"tab_id":"{}","position":1}}}}"#,
+            tab3_id
+        ),
+    );
+    assert_eq!(moved["result"]["type"], "tab_info");
+    assert_eq!(moved["result"]["tab"]["label"], "beta");
+    assert_eq!(moved["result"]["tab"]["number"], 1);
+
+    // Verify the full order via tab.list.
+    let tab_list = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_m5","method":"tab.list","params":{{"workspace_id":"{}"}}}}"#,
+            workspace_id
+        ),
+    );
+    let tabs = tab_list["result"]["tabs"].as_array().unwrap();
+    assert_eq!(tabs.len(), 3);
+    assert_eq!(tabs[0]["label"], "beta");
+    assert_eq!(tabs[0]["number"], 1);
+    assert_eq!(tabs[2]["label"], "alpha");
+    assert_eq!(tabs[2]["number"], 3);
+
+    // Invalid position returns an error.
+    let bad_pos = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_m6","method":"tab.move","params":{{"tab_id":"{}","position":0}}}}"#,
+            tab2_id
+        ),
+    );
+    assert!(bad_pos["error"]["code"].as_str().unwrap() == "invalid_position");
+
+    cleanup_spawned_herdr(child, base);
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn pane_info_reports_foreground_cwd_without_changing_pane_cwd() {

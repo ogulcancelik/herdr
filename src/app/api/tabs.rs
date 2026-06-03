@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, ResponseResult, TabCreateParams, TabListParams,
-    TabRenameParams, TabTarget,
+    TabMoveParams, TabRenameParams, TabTarget,
 };
 use crate::app::{App, Mode};
 
@@ -216,6 +216,76 @@ impl App {
         });
 
         encode_success(id, ResponseResult::Ok {})
+    }
+
+    pub(super) fn handle_tab_move(&mut self, id: String, params: TabMoveParams) -> String {
+        let Some((ws_idx, source_tab_idx)) = self.parse_tab_id(&params.tab_id) else {
+            return tab_not_found(id, &params.tab_id);
+        };
+        let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
+            return tab_not_found(id, &params.tab_id);
+        };
+        let tab_count = ws.tabs.len();
+        if params.position == 0 || params.position > tab_count {
+            return encode_error(
+                id,
+                "invalid_position",
+                format!(
+                    "position must be between 1 and {} (got {})",
+                    tab_count, params.position
+                ),
+            );
+        }
+        // Convert 1-based position to 0-based insert_idx.
+        let insert_idx = params.position - 1;
+        // move_tab uses insertion semantics: to place the tab *at* index N,
+        // we pass insert_idx = N when source is after N, or insert_idx = N + 1
+        // when source is before N. The simplest correct mapping: pass the raw
+        // target index when source >= target (moving left), or target + 1 when
+        // source < target (moving right), because remove-then-insert shifts
+        // indices. But Workspace::move_tab already handles this internally —
+        // it normalises `insert_idx` by subtracting 1 when source < insert_idx.
+        // So we can pass `params.position` directly (which equals target + 1 in
+        // 0-based remove-then-insert terms when moving right, and target when
+        // moving left... actually let's just map cleanly).
+        //
+        // Workspace::move_tab(source, insert) does:
+        //   target = if source < insert { insert - 1 } else { insert }
+        //   remove(source); insert(target)
+        //
+        // We want the tab to end up at 0-based index `desired = position - 1`.
+        // If source < desired: target = insert - 1 = desired => insert = desired + 1
+        //                                                      = position
+        // If source > desired: target = insert = desired => insert = desired
+        //                                                  = position - 1
+        // If source == desired: no-op (move_tab returns false)
+        let insert_idx = if source_tab_idx < insert_idx {
+            insert_idx + 1
+        } else {
+            insert_idx
+        };
+        let workspace_id = self.state.workspaces[ws_idx].id.clone();
+        let ws = self.state.workspaces.get_mut(ws_idx).unwrap();
+        ws.move_tab(source_tab_idx, insert_idx);
+        let new_tab_idx = params.position - 1;
+        let tab_id = self
+            .public_tab_id(ws_idx, new_tab_idx)
+            .unwrap_or_else(|| format!("{}:{}", workspace_id, params.position));
+        crate::logging::tab_moved(&workspace_id, &tab_id);
+        self.schedule_session_save();
+        self.emit_event(EventEnvelope {
+            event: EventKind::TabMoved,
+            data: EventData::TabMoved {
+                tab_id: self
+                    .public_tab_id(ws_idx, new_tab_idx)
+                    .unwrap_or_else(|| format!("{}:{}", workspace_id, params.position)),
+                workspace_id: self.public_workspace_id(ws_idx),
+                position: params.position,
+            },
+        });
+        let tab = self.tab_info(ws_idx, new_tab_idx).unwrap();
+
+        encode_success(id, ResponseResult::TabInfo { tab })
     }
 }
 

@@ -1,5 +1,5 @@
 use crate::api::schema::{
-    Method, Request, TabCreateParams, TabListParams, TabRenameParams, TabTarget,
+    Method, Request, TabCreateParams, TabListParams, TabMoveParams, TabRenameParams, TabTarget,
 };
 
 pub(super) fn run_tab_command(args: &[String]) -> std::io::Result<i32> {
@@ -14,6 +14,7 @@ pub(super) fn run_tab_command(args: &[String]) -> std::io::Result<i32> {
         "get" => tab_get(&args[1..]),
         "focus" => tab_focus(&args[1..]),
         "rename" => tab_rename(&args[1..]),
+        "move" => tab_move(&args[1..]),
         "close" => tab_close(&args[1..]),
         "help" | "--help" | "-h" => {
             print_tab_help();
@@ -163,6 +164,29 @@ fn tab_rename(args: &[String]) -> std::io::Result<i32> {
     })?)
 }
 
+fn tab_move(args: &[String]) -> std::io::Result<i32> {
+    if args.len() != 2 {
+        eprintln!("usage: herdr tab move <tab_id> <position>");
+        return Ok(2);
+    }
+
+    let position: usize = match args[1].parse() {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("position must be a positive integer");
+            return Ok(2);
+        }
+    };
+
+    super::print_response(&super::send_request(&Request {
+        id: "cli:tab:move".into(),
+        method: Method::TabMove(TabMoveParams {
+            tab_id: super::normalize_tab_id(&args[0]),
+            position,
+        }),
+    })?)
+}
+
 fn tab_close(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_tab_id) = args.first() else {
         eprintln!("usage: herdr tab close <tab_id>");
@@ -190,5 +214,6 @@ fn print_tab_help() {
     eprintln!("  herdr tab get <tab_id>");
     eprintln!("  herdr tab focus <tab_id>");
     eprintln!("  herdr tab rename <tab_id> <label>");
+    eprintln!("  herdr tab move <tab_id> <position>");
     eprintln!("  herdr tab close <tab_id>");
 }

@@ -52,6 +52,8 @@ pub enum Method {
     TabRename(TabRenameParams),
     #[serde(rename = "tab.close")]
     TabClose(TabTarget),
+    #[serde(rename = "tab.move")]
+    TabMove(TabMoveParams),
     #[serde(rename = "agent.list")]
     AgentList(EmptyParams),
     #[serde(rename = "agent.get")]
@@ -214,6 +216,13 @@ pub struct TabListParams {
 pub struct TabRenameParams {
     pub tab_id: String,
     pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TabMoveParams {
+    pub tab_id: String,
+    /// 1-based target position for the tab.
+    pub position: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -458,6 +467,8 @@ pub enum Subscription {
     TabFocused {},
     #[serde(rename = "tab.renamed")]
     TabRenamed {},
+    #[serde(rename = "tab.moved")]
+    TabMoved {},
     #[serde(rename = "pane.created")]
     PaneCreated {},
     #[serde(rename = "pane.closed")]
@@ -574,6 +585,9 @@ pub enum EventMatch {
     TabFocused {
         tab_id: String,
     },
+    TabMoved {
+        tab_id: String,
+    },
     PaneCreated {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pane_id: Option<String>,
@@ -617,6 +631,7 @@ pub enum EventKind {
     TabClosed,
     TabRenamed,
     TabFocused,
+    TabMoved,
     PaneCreated,
     PaneClosed,
     PaneFocused,
@@ -976,6 +991,11 @@ pub enum EventData {
     TabFocused {
         tab_id: String,
         workspace_id: String,
+    },
+    TabMoved {
+        tab_id: String,
+        workspace_id: String,
+        position: usize,
     },
     PaneCreated {
         pane: PaneInfo,

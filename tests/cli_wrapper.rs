@@ -2096,6 +2096,77 @@ fn tab_management_commands_work() {
 }
 
 #[test]
+fn tab_move_command_works() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = run_cli(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    assert!(created.status.success());
+    let created_json: serde_json::Value = serde_json::from_slice(&created.stdout).unwrap();
+    let workspace_id = created_json["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Create two more tabs (3 total).
+    let tab2 = run_cli(
+        &socket_path,
+        &[
+            "tab",
+            "create",
+            "--workspace",
+            &workspace_id,
+            "--label",
+            "alpha",
+        ],
+    );
+    assert!(tab2.status.success());
+
+    let tab3 = run_cli(
+        &socket_path,
+        &[
+            "tab",
+            "create",
+            "--workspace",
+            &workspace_id,
+            "--label",
+            "beta",
+        ],
+    );
+    assert!(tab3.status.success());
+    let tab3_json: serde_json::Value = serde_json::from_slice(&tab3.stdout).unwrap();
+    let tab3_id = tab3_json["result"]["tab"]["tab_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Move tab 3 (beta) to position 1.
+    let moved = run_cli(&socket_path, &["tab", "move", &tab3_id, "1"]);
+    assert!(moved.status.success());
+    let moved_json: serde_json::Value = serde_json::from_slice(&moved.stdout).unwrap();
+    assert_eq!(moved_json["result"]["tab"]["label"], "beta");
+    assert_eq!(moved_json["result"]["tab"]["number"], 1);
+
+    // Verify via tab list.
+    let listed = run_cli(&socket_path, &["tab", "list", "--workspace", &workspace_id]);
+    assert!(listed.status.success());
+    let listed_json: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let tabs = listed_json["result"]["tabs"].as_array().unwrap();
+    assert_eq!(tabs[0]["label"], "beta");
+    assert_eq!(tabs[0]["number"], 1);
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
 fn agent_start_command_works() {
     let base = unique_test_dir();
     let config_home = base.join("config");

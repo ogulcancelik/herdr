@@ -3518,4 +3518,112 @@ last_pane = "prefix+tab"
             b"a"
         );
     }
+
+    #[test]
+    fn tab_move_changes_order_and_returns_updated_info() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("api-tab-move");
+        workspace.test_add_tab(Some("alpha"));
+        workspace.test_add_tab(Some("beta"));
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        // Tab order before: [1: api-tab-move, 2: alpha, 3: beta]
+        // Move tab 3 (beta) to position 1.
+        let third_tab_id = app.public_tab_id(0, 2).unwrap();
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_tab_move".into(),
+            method: crate::api::schema::Method::TabMove(crate::api::schema::TabMoveParams {
+                tab_id: third_tab_id,
+                position: 1,
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["result"]["type"], "tab_info");
+        assert_eq!(response["result"]["tab"]["number"], 1);
+        assert_eq!(response["result"]["tab"]["label"], "beta");
+
+        // Verify the full order is now [beta, <auto:2>, alpha].
+        // The first tab is auto-named (no custom_name), so display_name returns
+        // its renumbered position "2".
+        let labels: Vec<_> = app.state.workspaces[0]
+            .tabs
+            .iter()
+            .map(|t| t.display_name())
+            .collect();
+        assert_eq!(labels, vec!["beta", "2", "alpha"]);
+    }
+
+    #[test]
+    fn tab_move_rejects_invalid_position() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("api-tab-move-err");
+        workspace.test_add_tab(None);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+
+        // Position 0 is invalid (1-based).
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_tab_move_zero".into(),
+            method: crate::api::schema::Method::TabMove(crate::api::schema::TabMoveParams {
+                tab_id: tab_id.clone(),
+                position: 0,
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(response["error"]["code"].as_str().unwrap() == "invalid_position");
+
+        // Position 3 is beyond tab count of 2.
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_tab_move_oob".into(),
+            method: crate::api::schema::Method::TabMove(crate::api::schema::TabMoveParams {
+                tab_id,
+                position: 3,
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(response["error"]["code"].as_str().unwrap() == "invalid_position");
+    }
+
+    #[test]
+    fn tab_move_to_same_position_is_noop() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("api-tab-move-noop");
+        workspace.test_add_tab(Some("second"));
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+
+        // Move tab 1 to position 1 — should be a no-op but still succeed.
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_tab_move_noop".into(),
+            method: crate::api::schema::Method::TabMove(crate::api::schema::TabMoveParams {
+                tab_id,
+                position: 1,
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["result"]["type"], "tab_info");
+        assert_eq!(response["result"]["tab"]["number"], 1);
+
+        // Order unchanged. The first tab is auto-named, so display_name
+        // returns its number "1".
+        let labels: Vec<_> = app.state.workspaces[0]
+            .tabs
+            .iter()
+            .map(|t| t.display_name())
+            .collect();
+        assert_eq!(labels, vec!["1", "second"]);
+    }
 }
