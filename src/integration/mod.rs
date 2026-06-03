@@ -38,6 +38,10 @@ const QODERCLI_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const QODERCLI_HOOK_ASSET: &str = include_str!("assets/qodercli/herdr-agent-state.sh");
 const QODERCLI_INTEGRATION_VERSION: u32 = 1;
 const QODERCLI_CONFIG_DIR_ENV_VAR: &str = "QODER_CONFIG_DIR";
+const MASTRACODE_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
+const MASTRACODE_HOOK_ASSET: &str = include_str!("assets/mastracode/herdr-agent-state.sh");
+const MASTRACODE_INTEGRATION_VERSION: u32 = 1;
+const MASTRACODE_HOOK_TIMEOUT_MS: u64 = 10_000;
 const INTEGRATION_VERSION_MARKER: &str = "HERDR_INTEGRATION_VERSION=";
 
 #[derive(Debug)]
@@ -82,6 +86,20 @@ pub(crate) struct QodercliUninstallResult {
     pub settings_path: PathBuf,
     pub removed_hook_file: bool,
     pub updated_settings: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct MastracodeInstallPaths {
+    pub hook_path: PathBuf,
+    pub hooks_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct MastracodeUninstallResult {
+    pub hook_path: PathBuf,
+    pub hooks_path: PathBuf,
+    pub removed_hook_file: bool,
+    pub updated_hooks: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,6 +278,19 @@ pub(crate) fn install_target(
                 ),
             ]
         }
+        crate::api::schema::IntegrationTarget::Mastracode => {
+            let installed = install_mastracode()?;
+            vec![
+                format!(
+                    "installed mastracode integration hook to {}",
+                    installed.hook_path.display()
+                ),
+                format!(
+                    "ensured mastracode hooks at {}",
+                    installed.hooks_path.display()
+                ),
+            ]
+        }
     };
 
     crate::logging::integration_action("install", integration_target_label(target), "ok");
@@ -424,6 +455,33 @@ pub(crate) fn uninstall_target(
             }
             messages
         }
+        crate::api::schema::IntegrationTarget::Mastracode => {
+            let result = uninstall_mastracode()?;
+            let mut messages = Vec::new();
+            if result.removed_hook_file {
+                messages.push(format!(
+                    "removed mastracode hook at {}",
+                    result.hook_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no mastracode hook found at {}",
+                    result.hook_path.display()
+                ));
+            }
+            if result.updated_hooks {
+                messages.push(format!(
+                    "removed herdr mastracode hook entries from {}",
+                    result.hooks_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no herdr mastracode hook entries found in {}",
+                    result.hooks_path.display()
+                ));
+            }
+            messages
+        }
     };
 
     crate::logging::integration_action("uninstall", integration_target_label(target), "ok");
@@ -441,6 +499,7 @@ pub(crate) fn integration_target_label(
         crate::api::schema::IntegrationTarget::Opencode => "opencode",
         crate::api::schema::IntegrationTarget::Hermes => "hermes",
         crate::api::schema::IntegrationTarget::Qodercli => "qodercli",
+        crate::api::schema::IntegrationTarget::Mastracode => "mastracode",
     }
 }
 
@@ -453,6 +512,7 @@ fn integration_target_command(target: crate::api::schema::IntegrationTarget) -> 
         crate::api::schema::IntegrationTarget::Opencode => "opencode",
         crate::api::schema::IntegrationTarget::Hermes => "hermes",
         crate::api::schema::IntegrationTarget::Qodercli => "qodercli",
+        crate::api::schema::IntegrationTarget::Mastracode => "mastracode",
     }
 }
 
@@ -526,7 +586,7 @@ fn integration_specs() -> [(
     crate::api::schema::IntegrationTarget,
     io::Result<PathBuf>,
     u32,
-); 7] {
+); 8] {
     [
         (
             crate::api::schema::IntegrationTarget::Pi,
@@ -562,6 +622,11 @@ fn integration_specs() -> [(
             crate::api::schema::IntegrationTarget::Qodercli,
             qodercli_dir().map(|dir| dir.join("hooks").join(QODERCLI_HOOK_INSTALL_NAME)),
             QODERCLI_INTEGRATION_VERSION,
+        ),
+        (
+            crate::api::schema::IntegrationTarget::Mastracode,
+            mastracode_dir().map(|dir| dir.join("hooks").join(MASTRACODE_HOOK_INSTALL_NAME)),
+            MASTRACODE_INTEGRATION_VERSION,
         ),
     ]
 }
@@ -1299,6 +1364,133 @@ pub(crate) fn uninstall_qodercli() -> io::Result<QodercliUninstallResult> {
     })
 }
 
+pub(crate) fn install_mastracode() -> io::Result<MastracodeInstallPaths> {
+    let dir = mastracode_dir()?;
+    let hooks_dir = dir.join("hooks");
+    fs::create_dir_all(&hooks_dir)?;
+
+    let hook_path = hooks_dir.join(MASTRACODE_HOOK_INSTALL_NAME);
+    fs::write(&hook_path, MASTRACODE_HOOK_ASSET)?;
+    make_executable(&hook_path)?;
+
+    let hooks_path = mastracode_hooks_json_path()?;
+    let mut hooks_file = if hooks_path.is_file() {
+        serde_json::from_str::<Value>(&fs::read_to_string(&hooks_path)?).map_err(|err| {
+            io::Error::other(format!("failed to parse {}: {err}", hooks_path.display()))
+        })?
+    } else {
+        json!({})
+    };
+
+    let hooks = hooks_file.as_object_mut().ok_or_else(|| {
+        io::Error::other(format!(
+            "mastracode hooks at {} must be a JSON object",
+            hooks_path.display()
+        ))
+    })?;
+    let quoted_hook_path = shell_single_quote(&hook_path.display().to_string());
+
+    ensure_flat_command_hook(
+        hooks,
+        "SessionStart",
+        format!("bash {quoted_hook_path} idle"),
+        "Report idle state to Herdr",
+    )?;
+    ensure_flat_command_hook(
+        hooks,
+        "UserPromptSubmit",
+        format!("bash {quoted_hook_path} working"),
+        "Report working state to Herdr",
+    )?;
+    ensure_flat_command_hook(
+        hooks,
+        "PreToolUse",
+        format!("bash {quoted_hook_path} working"),
+        "Report working state to Herdr",
+    )?;
+    ensure_flat_command_hook(
+        hooks,
+        "Stop",
+        format!("bash {quoted_hook_path} idle"),
+        "Report idle state to Herdr",
+    )?;
+    ensure_flat_command_hook(
+        hooks,
+        "SessionEnd",
+        format!("bash {quoted_hook_path} release"),
+        "Release Herdr agent state",
+    )?;
+
+    fs::write(&hooks_path, serde_json::to_string_pretty(&hooks_file)?)?;
+
+    Ok(MastracodeInstallPaths {
+        hook_path,
+        hooks_path,
+    })
+}
+
+pub(crate) fn uninstall_mastracode() -> io::Result<MastracodeUninstallResult> {
+    let hook_path = mastracode_dir()?
+        .join("hooks")
+        .join(MASTRACODE_HOOK_INSTALL_NAME);
+    let hooks_path = mastracode_hooks_json_path()?;
+    let mut updated_hooks = false;
+
+    if hooks_path.is_file() {
+        let mut hooks_file = serde_json::from_str::<Value>(&fs::read_to_string(&hooks_path)?)
+            .map_err(|err| {
+                io::Error::other(format!("failed to parse {}: {err}", hooks_path.display()))
+            })?;
+
+        let hooks = hooks_file.as_object_mut().ok_or_else(|| {
+            io::Error::other(format!(
+                "mastracode hooks at {} must be a JSON object",
+                hooks_path.display()
+            ))
+        })?;
+        let quoted_hook_path = shell_single_quote(&hook_path.display().to_string());
+
+        updated_hooks |= remove_flat_command_hook(
+            hooks,
+            "SessionStart",
+            &format!("bash {quoted_hook_path} idle"),
+        )?;
+        updated_hooks |= remove_flat_command_hook(
+            hooks,
+            "UserPromptSubmit",
+            &format!("bash {quoted_hook_path} working"),
+        )?;
+        updated_hooks |= remove_flat_command_hook(
+            hooks,
+            "PreToolUse",
+            &format!("bash {quoted_hook_path} working"),
+        )?;
+        updated_hooks |= remove_flat_command_hook(
+            hooks,
+            "Stop",
+            &format!("bash {quoted_hook_path} idle"),
+        )?;
+        updated_hooks |= remove_flat_command_hook(
+            hooks,
+            "SessionEnd",
+            &format!("bash {quoted_hook_path} release"),
+        )?;
+
+        if updated_hooks {
+            fs::write(&hooks_path, serde_json::to_string_pretty(&hooks_file)?)?;
+        }
+    }
+
+    let removed_hook_file = remove_file_if_exists(&hook_path)?;
+
+    Ok(MastracodeUninstallResult {
+        hook_path,
+        hooks_path,
+        removed_hook_file,
+        updated_hooks,
+    })
+}
+
 fn ensure_hooks_object<'a>(
     settings: &'a mut Value,
     settings_path: &Path,
@@ -1429,6 +1621,57 @@ fn remove_command_hook(
 
     let remove_event = entries.is_empty();
     if remove_event {
+        hooks.remove(event);
+    }
+
+    Ok(removed)
+}
+
+fn ensure_flat_command_hook(
+    hooks: &mut Map<String, Value>,
+    event: &str,
+    command: String,
+    description: &str,
+) -> io::Result<()> {
+    let entries = hooks
+        .entry(event.to_string())
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| io::Error::other(format!("hook entries for {event} must be an array")))?;
+
+    let already_installed = entries
+        .iter()
+        .any(|entry| is_matching_command_hook(entry, &command));
+    if already_installed {
+        return Ok(());
+    }
+
+    entries.push(json!({
+        "type": "command",
+        "command": command,
+        "timeout": MASTRACODE_HOOK_TIMEOUT_MS,
+        "description": description,
+    }));
+    Ok(())
+}
+
+fn remove_flat_command_hook(
+    hooks: &mut Map<String, Value>,
+    event: &str,
+    command: &str,
+) -> io::Result<bool> {
+    let Some(entries_value) = hooks.get_mut(event) else {
+        return Ok(false);
+    };
+
+    let entries = entries_value
+        .as_array_mut()
+        .ok_or_else(|| io::Error::other(format!("hook entries for {event} must be an array")))?;
+
+    let before = entries.len();
+    entries.retain(|hook| !is_matching_command_hook(hook, command));
+    let removed = entries.len() != before;
+    if entries.is_empty() {
         hooks.remove(event);
     }
 
@@ -1759,6 +2002,14 @@ fn hermes_plugin_dir() -> io::Result<PathBuf> {
 
 fn qodercli_dir() -> io::Result<PathBuf> {
     config_dir_from_env_or_home(QODERCLI_CONFIG_DIR_ENV_VAR, &[".qoder"])
+}
+
+fn mastracode_dir() -> io::Result<PathBuf> {
+    Ok(home_dir()?.join(".mastracode"))
+}
+
+fn mastracode_hooks_json_path() -> io::Result<PathBuf> {
+    Ok(mastracode_dir()?.join("hooks.json"))
 }
 
 fn home_dir() -> io::Result<PathBuf> {
@@ -2103,6 +2354,32 @@ mod tests {
         assert!(outdated_installed_integrations().is_empty());
 
         std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn mastracode_status_reads_current_and_outdated_version_markers() {
+        let base = unique_base();
+        let hook_path = base.join(MASTRACODE_HOOK_INSTALL_NAME);
+        fs::create_dir_all(&base).unwrap();
+        fs::write(&hook_path, MASTRACODE_HOOK_ASSET).unwrap();
+
+        let current = integration_status_at(
+            crate::api::schema::IntegrationTarget::Mastracode,
+            hook_path.clone(),
+            MASTRACODE_INTEGRATION_VERSION,
+        );
+        assert_eq!(current.state, IntegrationStatusKind::Current);
+        assert_eq!(current.installed_version, Some(MASTRACODE_INTEGRATION_VERSION));
+
+        let outdated = integration_status_at(
+            crate::api::schema::IntegrationTarget::Mastracode,
+            hook_path,
+            MASTRACODE_INTEGRATION_VERSION + 1,
+        );
+        assert_eq!(outdated.state, IntegrationStatusKind::Outdated);
+        assert_eq!(outdated.installed_version, Some(MASTRACODE_INTEGRATION_VERSION));
+
         let _ = fs::remove_dir_all(base);
     }
 
@@ -2868,6 +3145,8 @@ mod tests {
         assert!(QODERCLI_HOOK_ASSET.contains("hook_event_name"));
         assert!(QODERCLI_HOOK_ASSET.contains("agent_session_id"));
         assert!(!QODERCLI_HOOK_ASSET.contains("QODER_HOOK_EVENT"));
+        assert!(MASTRACODE_HOOK_ASSET.contains("source = \"herdr:mastracode\""));
+        assert!(MASTRACODE_HOOK_ASSET.contains("agent_session_id"));
     }
 
     #[test]
@@ -3013,6 +3292,175 @@ mod tests {
         );
 
         std::env::remove_var(QODERCLI_CONFIG_DIR_ENV_VAR);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_mastracode_writes_hook_and_updates_hooks_json() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let mastracode_dir = home.join(".mastracode");
+        fs::create_dir_all(&mastracode_dir).unwrap();
+        fs::write(
+            mastracode_dir.join("hooks.json"),
+            r#"{"PostToolUse":[{"type":"command","command":"echo keep","timeout":10000}]}"#,
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        let installed = install_mastracode().unwrap();
+        let hook_content = fs::read_to_string(&installed.hook_path).unwrap();
+        let hooks: Value =
+            serde_json::from_str(&fs::read_to_string(&installed.hooks_path).unwrap()).unwrap();
+
+        assert_eq!(
+            installed.hook_path,
+            mastracode_dir
+                .join("hooks")
+                .join(MASTRACODE_HOOK_INSTALL_NAME)
+        );
+        assert_eq!(installed.hooks_path, mastracode_dir.join("hooks.json"));
+        assert_eq!(hook_content, MASTRACODE_HOOK_ASSET);
+        for (event, action) in [
+            ("SessionStart", "idle"),
+            ("UserPromptSubmit", "working"),
+            ("PreToolUse", "working"),
+            ("Stop", "idle"),
+            ("SessionEnd", "release"),
+        ] {
+            let entry = &hooks[event][0];
+            assert_eq!(entry["type"], "command");
+            assert_eq!(entry["timeout"], MASTRACODE_HOOK_TIMEOUT_MS);
+            assert!(entry["command"].as_str().unwrap().contains(action));
+            assert!(entry["description"].as_str().unwrap().contains("Herdr"));
+        }
+        assert_eq!(hooks["PostToolUse"][0]["command"], "echo keep");
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_mastracode_is_idempotent_for_hook_entries() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+
+        install_mastracode().unwrap();
+        install_mastracode().unwrap();
+
+        let hooks: Value = serde_json::from_str(
+            &fs::read_to_string(home.join(".mastracode/hooks.json")).unwrap(),
+        )
+        .unwrap();
+        for event in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "Stop",
+            "SessionEnd",
+        ] {
+            let entries = hooks[event].as_array().unwrap();
+            assert_eq!(
+                entries.len(),
+                1,
+                "expected {event} to contain exactly one entry, got {entries:?}"
+            );
+        }
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn uninstall_mastracode_removes_herdr_hooks_and_preserves_others() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+
+        install_mastracode().unwrap();
+        let hooks_path = home.join(".mastracode/hooks.json");
+        let mut hooks: Value =
+            serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+        hooks["UserPromptSubmit"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "type": "command",
+                "command": "echo user-defined",
+                "timeout": 10000,
+            }));
+        fs::write(&hooks_path, serde_json::to_string_pretty(&hooks).unwrap()).unwrap();
+
+        let result = uninstall_mastracode().unwrap();
+
+        assert!(result.removed_hook_file);
+        assert!(result.updated_hooks);
+        assert!(!result.hook_path.exists());
+        let hooks: Value =
+            serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+        assert!(hooks.get("SessionStart").is_none());
+        assert!(hooks.get("PreToolUse").is_none());
+        assert!(hooks.get("Stop").is_none());
+        assert!(hooks.get("SessionEnd").is_none());
+        let remaining = hooks["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0]["command"], "echo user-defined");
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_mastracode_errors_when_event_value_is_not_array() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let mastracode_dir = home.join(".mastracode");
+        fs::create_dir_all(&mastracode_dir).unwrap();
+        fs::write(
+            mastracode_dir.join("hooks.json"),
+            r#"{"SessionStart":{"type":"command","command":"echo no"}}"#,
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        let err = install_mastracode().unwrap_err().to_string();
+        assert!(
+            err.contains("hook entries for SessionStart must be an array"),
+            "unexpected error: {err}"
+        );
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn uninstall_mastracode_errors_when_event_value_is_not_array() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let mastracode_dir = home.join(".mastracode");
+        fs::create_dir_all(&mastracode_dir).unwrap();
+        fs::write(
+            mastracode_dir.join("hooks.json"),
+            r#"{"SessionStart":{"type":"command","command":"echo no"}}"#,
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        let err = uninstall_mastracode().unwrap_err().to_string();
+        assert!(
+            err.contains("hook entries for SessionStart must be an array"),
+            "unexpected error: {err}"
+        );
+
+        std::env::remove_var("HOME");
         let _ = fs::remove_dir_all(base);
     }
 }

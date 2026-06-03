@@ -511,6 +511,7 @@ pub enum IntegrationTarget {
     Opencode,
     Hermes,
     Qodercli,
+    Mastracode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
