@@ -19,6 +19,7 @@ Automatic detection works out of the box for common coding agents.
 | OpenCode | yes | yes | yes |
 | Grok CLI | yes | yes | yes |
 | Hermes Agent | yes | yes | yes |
+| Kilo Code CLI | yes | yes | yes |
 | Cursor Agent | yes | yes | yes |
 | Antigravity CLI | yes | yes | yes |
 | Kimi Code CLI | yes | yes | yes |
@@ -36,9 +37,9 @@ Herdr combines three signals:
 
 1. foreground process detection
 2. terminal output heuristics
-3. integration state reports
+3. integration session identity or state reports
 
-Process detection tells Herdr which pane owns an agent. Heuristics infer state when no hook is available. Integrations provide the most precise semantic state.
+Process detection tells Herdr which pane owns an agent. Heuristics infer native agent state from terminal screen snapshots. Claude Code, Codex, and OpenCode integrations provide session identity for restore; Pi, OMP, GitHub Copilot CLI, Hermes Agent, Qoder CLI, and custom socket integrations can report state when they define state outside the native terminal UI.
 
 ## State rollups
 
@@ -57,6 +58,7 @@ herdr integration install pi
 herdr integration install omp
 herdr integration install claude
 herdr integration install codex
+herdr integration install copilot
 herdr integration install opencode
 herdr integration install hermes
 herdr integration install qodercli

@@ -63,6 +63,20 @@ pub(super) fn has_working_chrome(content: &str) -> bool {
         || has_spinner_activity(above)
 }
 
+pub(super) fn is_transcript_viewer(content: &str) -> bool {
+    let bottom_lines = bottom_non_empty_lines(content, 3);
+    let Some(last_line) = bottom_lines.last() else {
+        return false;
+    };
+    let bottom_text = normalize_lines(&bottom_lines);
+
+    bottom_text.contains("showing detailed transcript")
+        && bottom_text.contains("ctrl+o to toggle")
+        && (bottom_text.contains("ctrl+e to show all")
+            || bottom_text.contains("ctrl+e to collapse"))
+        && transcript_control_tail(last_line)
+}
+
 pub(super) fn has_prompt_box(content: &str) -> bool {
     let lines: Vec<&str> = content.lines().collect();
     let Some(top_border_index) = claude_prompt_box_top_border_index(&lines) else {
@@ -231,4 +245,32 @@ fn claude_prompt_box_top_border_index(lines: &[&str]) -> Option<usize> {
 fn is_horizontal_rule(line: &str) -> bool {
     let trimmed = line.trim();
     !trimmed.is_empty() && trimmed.chars().all(|c| c == '─')
+}
+
+fn bottom_non_empty_lines(content: &str, max_lines: usize) -> Vec<&str> {
+    let mut lines: Vec<&str> = content
+        .lines()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(max_lines)
+        .collect();
+    lines.reverse();
+    lines
+}
+
+fn normalize_lines(lines: &[&str]) -> String {
+    lines
+        .iter()
+        .flat_map(|line| line.split_whitespace())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn transcript_control_tail(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    lower.contains("ctrl+e")
+        || lower.contains("show all")
+        || lower.contains("collapse")
+        || lower.contains("verbose")
 }

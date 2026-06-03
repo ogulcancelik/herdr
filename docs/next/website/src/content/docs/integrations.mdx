@@ -3,9 +3,9 @@ title: Integrations
 description: Install Herdr integrations for Pi, OMP, Claude Code, Codex, GitHub Copilot CLI, OpenCode, Hermes Agent, and Qoder CLI.
 ---
 
-Herdr detects supported agents automatically. Native Claude Code, Codex, and OpenCode state comes from screen detection. Their official integrations add session identity for restore; Pi, OMP, GitHub Copilot CLI, Hermes Agent, Qoder CLI, and custom integrations can report their own state.
+Herdr detects supported agents automatically. Official integrations can add native session identity for restore, semantic state reports, or both. Claude Code, Codex, and OpenCode state comes from screen detection even when their session identity integrations are installed.
 
-Use integrations when you want native agent session restore or custom extension state from Pi/OMP/Copilot/Hermes/Qoder-style hooks or plugins.
+Use integrations when you want native agent session restore, direct state reports from Pi/OMP/Copilot/Hermes/Qoder-style hooks or plugins, or both.
 
 ## Install integrations
 
@@ -43,9 +43,9 @@ Herdr combines three signals:
 | --- | --- |
 | Process detection | Identifies which pane owns which running process. |
 | Screen heuristics | Infers visible native agent state such as `working` or `blocked`. |
-| Integration events | Reports native session identity, or state for Pi/OMP/Copilot/Hermes/Qoder-style extensions. |
+| Integration events | Reports native session identity, semantic state, or both depending on the integration. |
 
-Claude Code, Codex, and OpenCode state detection is screen-read first. Their Herdr-owned integrations do not author `idle`, `working`, or `blocked` state. Pi, OMP, GitHub Copilot CLI, Hermes Agent, Qoder CLI, and custom socket integrations can still report state when they define state that is not visible in the native terminal UI.
+Claude Code, Codex, and OpenCode state detection is screen-read first. Their Herdr-owned integrations do not author `idle`, `working`, or `blocked` state. Pi, GitHub Copilot CLI, and Hermes Agent report semantic state and session identity. OMP and Qoder CLI report semantic state but do not provide native session restore. Custom socket integrations can report state when they define state that is not visible in the native terminal UI.
 
 Some integrations report native agent session references. Herdr uses official session references to resume Claude Code, Codex, GitHub Copilot CLI, Pi, Hermes Agent, and OpenCode panes after a Herdr server restart unless `[session] resume_agents_on_restore = false` disables it.
 
