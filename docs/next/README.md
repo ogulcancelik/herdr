@@ -31,6 +31,12 @@ or install with homebrew:
 brew install herdr
 ```
 
+or install with mise:
+
+```bash
+mise use -g herdr
+```
+
 or download the binary from [releases](https://github.com/ogulcancelik/herdr/releases). requires linux or macos.
 
 ## quick start
@@ -57,7 +63,7 @@ Press `ctrl+b q` to detach the client. The server and pane processes keep runnin
 
 **Keybindings.** Herdr uses explicit keybinding strings. `prefix+n` means press the configured prefix, then `n`. `ctrl+alt+n`, `cmd+k`, `alt+1`, and function-key chords are direct terminal-mode shortcuts and do not need the prefix. Plain direct printable keys such as `n` steal normal typing, so use `prefix+n` unless you intentionally want a modifier-gated direct binding.
 
-**Agent awareness.** The sidebar shows blocked, working, done, and idle states. Detection works with process names and terminal output by default. Official Claude Code, Codex, and OpenCode integrations add session restore identity, while Pi, OMP, GitHub Copilot CLI, Hermes Agent, Qoder CLI, and custom socket integrations can still report their own state.
+**Agent awareness.** The sidebar shows blocked, working, done, and idle states. Detection works with process names and terminal output by default. Official integrations can add native session identity for restore, semantic state reports, or both.
 
 ## update
 
@@ -67,7 +73,23 @@ Herdr notifies you when a new version is available. Run manually:
 herdr update
 ```
 
-`herdr update` is for installs managed by Herdr's own installer. Homebrew and Nix installs update through `brew upgrade herdr` or your Nix workflow, then use the same stop-and-run-again flow if a session is still running the old server. Direct installs can opt into development preview builds with `herdr channel set preview` and return to stable with `herdr channel set stable`. See [install docs](https://herdr.dev/docs/install/) and [session state docs](https://herdr.dev/docs/session-state/) for the full update, restart, restore, and handoff matrix.
+`herdr update` is for installs managed by Herdr's own installer. Homebrew, mise, and Nix installs update through `brew upgrade herdr`, `mise upgrade herdr`, or your Nix workflow, then use the same stop-and-run-again flow if a session is still running the old server. Direct installs can opt into development preview builds with `herdr channel set preview` and return to stable with `herdr channel set stable`. See [install docs](https://herdr.dev/docs/install/) and [session state docs](https://herdr.dev/docs/session-state/) for the full update, restart, restore, and handoff matrix.
+
+Herdr uses the stable update channel by default. To test preview builds from `master` before the next stable release:
+
+```bash
+herdr channel set preview
+```
+
+To return to stable:
+
+```bash
+herdr channel set stable
+```
+
+For direct installs, changing channels also checks that channel and installs its latest binary. If that update fails, run `herdr update` to retry from the configured channel.
+
+Preview is only for direct installs managed by Herdr's updater. Homebrew, mise, and Nix stay on stable and update through their package managers.
 
 ## how it compares
 
@@ -100,6 +122,8 @@ You can also attach from your local terminal without opening a shell first:
 herdr --remote workbox
 herdr --remote ssh://you@yourserver:2222
 ```
+
+Remote attach adds fallback SSH keepalives by default while preserving your own SSH config. Set `[remote].manage_ssh_config = false` to use plain `ssh`.
 
 Direct attach connects your current terminal to one server-owned terminal:
 
@@ -168,7 +192,7 @@ for agents outside the built-in list, herdr still works as a terminal multiplexe
 
 ### direct integrations
 
-the built-in pi, omp, github copilot cli, hermes, and qodercli integrations forward semantic state to herdr over the socket api. claude code, codex, and opencode integrations provide session-start identity while native state comes from screen detection. install with:
+official integrations have two roles. claude code, codex, and opencode report session identity for native restore, while their state still comes from screen detection. pi, github copilot cli, and hermes report both semantic state and session identity. omp and qodercli report semantic state without native session restore. install with:
 
 ```bash
 herdr integration install pi
@@ -221,7 +245,7 @@ In-app settings cover theme, sound, and toast preferences. Herdr writes logs und
 ## docs
 
 - [quick start](https://herdr.dev/docs/quick-start/) — first session, panes, copy, and named sessions
-- [install](https://herdr.dev/docs/install/) — install, update, Homebrew, and Nix
+- [install](https://herdr.dev/docs/install/) — install, update, Homebrew, mise, and Nix
 - [session state](https://herdr.dev/docs/session-state/) — detach, restart restore, agent restore, and live handoff
 - [configuration](https://herdr.dev/docs/configuration/) — keybindings, themes, notifications, environment variables
 - [integrations](https://herdr.dev/docs/integrations/) — pi, omp, claude code, codex, github copilot cli, opencode, hermes, qodercli integrations

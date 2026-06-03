@@ -16,8 +16,8 @@ use crate::protocol::CellData;
 use super::{
     input::{
         ghostty_key_event_from_terminal_key, ghostty_mouse_encoder_for_terminal,
-        ghostty_mouse_event_from_button_kind, ghostty_mouse_event_from_wheel_kind,
-        ghostty_prefers_herdr_text_encoding,
+        ghostty_mouse_event_from_button_kind, ghostty_mouse_event_from_motion_kind,
+        ghostty_mouse_event_from_wheel_kind, ghostty_prefers_herdr_text_encoding,
     },
     kitty_keyboard::KittyKeyboardTracker,
     osc::{
@@ -281,6 +281,17 @@ impl PaneTerminal {
     ) -> Option<Vec<u8>> {
         self.ghostty
             .encode_mouse_button(kind, column, row, modifiers)
+    }
+
+    pub fn encode_mouse_motion(
+        &self,
+        kind: crossterm::event::MouseEventKind,
+        column: u16,
+        row: u16,
+        modifiers: crossterm::event::KeyModifiers,
+    ) -> Option<Vec<u8>> {
+        self.ghostty
+            .encode_mouse_motion(kind, column, row, modifiers)
     }
 
     pub fn encode_mouse_wheel(
@@ -884,6 +895,24 @@ impl GhosttyPaneTerminal {
         };
         let mut encoder = ghostty_mouse_encoder_for_terminal(&core.terminal)?;
         let event = ghostty_mouse_event_from_button_kind(kind, column, row, modifiers)?;
+        encoder.encode(&event).ok()
+    }
+
+    pub fn encode_mouse_motion(
+        &self,
+        kind: crossterm::event::MouseEventKind,
+        column: u16,
+        row: u16,
+        modifiers: crossterm::event::KeyModifiers,
+    ) -> Option<Vec<u8>> {
+        let Ok(core) = self.core.lock() else {
+            return None;
+        };
+        if !core.terminal.mode_get(MODE_MOUSE_ANY_MOTION).ok()? {
+            return None;
+        }
+        let mut encoder = ghostty_mouse_encoder_for_terminal(&core.terminal)?;
+        let event = ghostty_mouse_event_from_motion_kind(kind, column, row, modifiers)?;
         encoder.encode(&event).ok()
     }
 
@@ -2348,6 +2377,40 @@ mod tests {
         );
 
         assert_eq!(encoded.as_deref(), Some(&b"\x1b[<36;5;7M"[..]));
+    }
+
+    #[test]
+    fn ghostty_mouse_moved_encoding_uses_any_motion_state() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.write(b"\x1b[?1003h\x1b[?1006h");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let encoded = pane.encode_mouse_motion(
+            crossterm::event::MouseEventKind::Moved,
+            4,
+            6,
+            crossterm::event::KeyModifiers::empty(),
+        );
+
+        assert_eq!(encoded.as_deref(), Some(&b"\x1b[<35;5;7M"[..]));
+    }
+
+    #[test]
+    fn ghostty_mouse_sgr_pixels_downgrades_to_cell_coordinates() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.write(b"\x1b[?1003h\x1b[?1006h\x1b[?1016h");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let encoded = pane.encode_mouse_motion(
+            crossterm::event::MouseEventKind::Moved,
+            4,
+            6,
+            crossterm::event::KeyModifiers::empty(),
+        );
+
+        assert_eq!(encoded.as_deref(), Some(&b"\x1b[<35;5;7M"[..]));
     }
 
     #[test]

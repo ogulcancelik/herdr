@@ -887,6 +887,7 @@ mod tests {
             AgentState::Working,
             AgentDetection {
                 state: AgentState::Idle,
+                skip_state_update: false,
                 visible_blocker: false,
                 visible_idle: false,
                 visible_working: false,
@@ -909,6 +910,7 @@ mod tests {
             AgentState::Working,
             AgentDetection {
                 state: AgentState::Idle,
+                skip_state_update: false,
                 visible_blocker: false,
                 visible_idle: true,
                 visible_working: false,

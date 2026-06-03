@@ -58,6 +58,14 @@ pub(super) fn ghostty_mouse_encoder_for_terminal(
 ) -> Option<crate::ghostty::MouseEncoder> {
     let mut encoder = crate::ghostty::MouseEncoder::new().ok()?;
     encoder.set_from_terminal(terminal);
+    if terminal
+        .mode_get(crate::ghostty::MODE_MOUSE_SGR_PIXELS)
+        .ok()?
+    {
+        // Herdr receives host mouse positions in terminal cells. Downgrade
+        // SGR-pixels to normal SGR so forwarded coordinates stay cell-local.
+        encoder.set_format(crate::ghostty::MOUSE_FORMAT_SGR);
+    }
     let cols = terminal.cols().ok()? as u32;
     let rows = terminal.rows().ok()? as u32;
     encoder.set_size(cols, rows, 1, 1);
@@ -116,6 +124,24 @@ pub(super) fn ghostty_mouse_event_from_button_kind(
     } else {
         event.clear_button();
     }
+    event.set_mods(ghostty_mods_from_key_modifiers(modifiers));
+    event.set_position(column as f32, row as f32);
+    Some(event)
+}
+
+pub(super) fn ghostty_mouse_event_from_motion_kind(
+    kind: crossterm::event::MouseEventKind,
+    column: u16,
+    row: u16,
+    modifiers: crossterm::event::KeyModifiers,
+) -> Option<crate::ghostty::MouseEvent> {
+    if kind != crossterm::event::MouseEventKind::Moved {
+        return None;
+    }
+
+    let mut event = crate::ghostty::MouseEvent::new().ok()?;
+    event.set_action(crate::ghostty::MOUSE_ACTION_MOTION);
+    event.clear_button();
     event.set_mods(ghostty_mods_from_key_modifiers(modifiers));
     event.set_position(column as f32, row as f32);
     Some(event)

@@ -33,6 +33,17 @@ Herdr shows first-run setup when `onboarding` is missing or true. Continuing fro
 onboarding = false
 ```
 
+## Update channel
+
+Direct installs use the stable update channel by default.
+
+```toml
+[update]
+channel = "stable"
+```
+
+Set `channel = "preview"` to make `herdr update` install preview builds from the current development branch. Homebrew, mise, and Nix installs ignore the preview channel and update through their package managers.
+
 ## Reload config
 
 Reload a running server after editing `config.toml`:
@@ -90,6 +101,17 @@ Worktree actions are available from Git workspace rows. `New worktree` creates a
 Grouped worktrees still behave like normal Herdr workspaces: they can be focused, renamed, closed, and contain their own tabs and panes. The parent row is the original workspace. Closing the parent row closes the whole Herdr group, but it does not delete checkout folders or branches.
 
 Deleting a worktree checkout is explicit. Use `Delete worktree checkout...` on a grouped child workspace to run `git worktree remove`. Herdr first asks Git to remove safely. If Git refuses because the checkout has modified or untracked files, Herdr asks again before running the forced remove. Branches are not deleted.
+
+## Remote attach
+
+Remote attach manages its SSH bridge with a temporary keepalive fallback by default.
+
+```toml
+[remote]
+manage_ssh_config = true
+```
+
+When enabled, `herdr --remote` writes a private temporary SSH config that includes your `~/.ssh/config` and `/etc/ssh/ssh_config` first, then adds fallback `ServerAliveInterval` and `ServerAliveCountMax` values. Your own SSH keepalive settings win. Set `manage_ssh_config = false` to run the bridge through plain `ssh` without Herdr's generated config.
 
 ## Keybindings
 

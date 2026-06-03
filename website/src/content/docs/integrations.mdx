@@ -1,11 +1,11 @@
 ---
 title: Integrations
-description: Install Herdr integrations for Pi, OMP, Claude Code, Codex, OpenCode, Hermes Agent, and Qoder CLI.
+description: Install Herdr integrations for Pi, OMP, Claude Code, Codex, GitHub Copilot CLI, OpenCode, Hermes Agent, and Qoder CLI.
 ---
 
-Herdr detects supported agents automatically. Integrations make that detection more precise by reporting semantic state directly to Herdr.
+Herdr detects supported agents automatically. Official integrations can add native session identity for restore, semantic state reports, or both. Claude Code, Codex, and OpenCode state comes from screen detection even when their session identity integrations are installed.
 
-Use integrations when you want reliable `working`, `blocked`, `idle`, and `done` state from agent hooks or plugins.
+Use integrations when you want native agent session restore, direct state reports from Pi/OMP/Copilot/Hermes/Qoder-style hooks or plugins, or both.
 
 ## Install integrations
 
@@ -16,6 +16,7 @@ herdr integration install pi
 herdr integration install omp
 herdr integration install claude
 herdr integration install codex
+herdr integration install copilot
 herdr integration install opencode
 herdr integration install hermes
 herdr integration install qodercli
@@ -28,6 +29,7 @@ herdr integration uninstall pi
 herdr integration uninstall omp
 herdr integration uninstall claude
 herdr integration uninstall codex
+herdr integration uninstall copilot
 herdr integration uninstall opencode
 herdr integration uninstall hermes
 herdr integration uninstall qodercli
@@ -40,14 +42,14 @@ Herdr combines three signals:
 | Signal | Purpose |
 | --- | --- |
 | Process detection | Identifies which pane owns which running process. |
-| Agent integration events | Reports semantic state such as `working` or `blocked`. |
-| Screen heuristics | Fills gaps when hooks are unavailable or incomplete. |
+| Screen heuristics | Infers visible native agent state such as `working` or `blocked`. |
+| Integration events | Reports native session identity, semantic state, or both depending on the integration. |
 
-Integrations enrich state reporting. They do not replace process detection.
+Claude Code, Codex, and OpenCode state detection is screen-read first. Their Herdr-owned integrations do not author `idle`, `working`, or `blocked` state. Pi, GitHub Copilot CLI, and Hermes Agent report semantic state and session identity. OMP and Qoder CLI report semantic state but do not provide native session restore. Custom socket integrations can report state when they define state that is not visible in the native terminal UI.
 
-Some integrations also report native agent session references. If `[session] resume_agents_on_restore = true` is enabled, Herdr uses official session references to resume Claude Code, Codex, Pi, Hermes Agent, and OpenCode panes after a Herdr server restart.
+Some integrations report native agent session references. Herdr uses official session references to resume Claude Code, Codex, GitHub Copilot CLI, Pi, Hermes Agent, and OpenCode panes after a Herdr server restart unless `[session] resume_agents_on_restore = false` disables it.
 
-Native session restore requires current Herdr integrations: Pi integration version `2`, Claude Code version `4`, Codex version `4`, OpenCode version `2`, or Hermes Agent version `2`. OMP integration version `2` reports agent state only. Check installed versions with `herdr integration status`.
+Native session restore requires current Herdr integrations: Pi integration version `2`, Claude Code version `5`, Codex version `5`, GitHub Copilot CLI version `1`, OpenCode version `4`, or Hermes Agent version `2`. OMP integration version `2` and Qoder CLI integration version `1` report agent state only. Check installed versions with `herdr integration status`.
 
 ## Pi
 
@@ -91,7 +93,7 @@ Install the Claude Code hook:
 herdr integration install claude
 ```
 
-The hook reports agent state to the local Herdr socket when Claude Code exposes hook events.
+The hook reports Claude Code session identity to the local Herdr socket on session start. Claude Code state comes from Herdr's screen detection.
 
 Herdr uses `~/.claude` by default, or `CLAUDE_CONFIG_DIR` when set. The Claude config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and updates `settings.json` with Herdr hook entries. Uninstall removes the matching hook entries and deletes the hook script.
 
@@ -103,9 +105,23 @@ Install the Codex hook:
 herdr integration install codex
 ```
 
-Codex state is reported through the same local socket API used by other integrations.
+The Codex hook reports session identity through the same local socket API used by other integrations. Codex state comes from Herdr's screen detection.
 
 Herdr uses `~/.codex` by default, or `CODEX_HOME` when set. The Codex config directory must already exist. Install writes `herdr-agent-state.sh`, updates `hooks.json`, and ensures `[features] hooks = true` in `config.toml`. It also removes the deprecated top-level `codex_hooks` flag when present. Uninstall removes Herdr entries from `hooks.json` and deletes the hook script, but leaves `config.toml` unchanged.
+
+## GitHub Copilot CLI
+
+Install the GitHub Copilot CLI hook:
+
+```bash
+herdr integration install copilot
+```
+
+Copilot state is reported through the same local socket API used by other integrations.
+
+Herdr uses `~/.copilot` by default, or `COPILOT_HOME` when set. The Copilot config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and updates `settings.json` with Herdr hook entries. The hook maps prompt submission, tool use, post-tool progress after approvals, `ask_user` prompts, `exit_plan_mode` plan review prompts, permission notifications, agent idle notifications, turn stops, and session exits into Herdr state. Uninstall removes Herdr entries from `settings.json` and deletes the hook script.
+
+After Copilot emits a session-bearing event, Herdr can use the reported session id to resume the pane with `copilot --resume=<id>`.
 
 ## OpenCode
 
@@ -117,7 +133,7 @@ herdr integration install opencode
 
 Herdr writes the plugin to `~/.config/opencode/plugins/herdr-agent-state.js`. The OpenCode config directory must already exist. Uninstall removes only that plugin file.
 
-The plugin reports semantic state while OpenCode runs inside a Herdr pane. After OpenCode emits a session-bearing event, Herdr can use the reported session id to resume the pane with `opencode --session <id>`.
+The plugin reports session identity while OpenCode runs inside a Herdr pane. After OpenCode emits a session-bearing event, Herdr can use the reported session id to resume the pane with `opencode --session <id>`. OpenCode state comes from Herdr's screen detection.
 
 ## Hermes Agent
 
@@ -165,7 +181,6 @@ User hooks that run next to a Herdr-managed integration should use metadata inst
 herdr pane report-metadata "$HERDR_PANE_ID" \
   --source user:claude-title \
   --agent claude \
-  --applies-to-source herdr:claude \
   --title "Refactor auth middleware" \
   --display-agent "Claude: auth" \
   --custom-status "refactor auth" \

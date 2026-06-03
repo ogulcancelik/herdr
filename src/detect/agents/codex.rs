@@ -48,6 +48,25 @@ pub(super) fn has_visible_working(content: &str) -> bool {
         || (!has_codex_current_prompt(content) && has_codex_visible_working_without_prompt(content))
 }
 
+pub(super) fn is_transcript_viewer(content: &str) -> bool {
+    let bottom_lines = bottom_non_empty_lines(content, 3);
+    let Some(last_line) = bottom_lines.last() else {
+        return false;
+    };
+    let bottom_text = normalize_lines(&bottom_lines);
+
+    bottom_text.contains("↑/↓ to scroll")
+        && bottom_text.contains("pgup/pgdn to page")
+        && bottom_text.contains("home/end to jump")
+        && bottom_text.contains("q to quit")
+        && has_codex_edit_prev_controls(&bottom_text)
+        && transcript_control_tail(last_line)
+}
+
+fn has_codex_edit_prev_controls(bottom_text: &str) -> bool {
+    bottom_text.contains("esc to edit prev") || bottom_text.contains("esc/← to edit prev")
+}
+
 fn has_codex_visible_working_without_prompt(content: &str) -> bool {
     let mut recent_lines = content.lines().rev().filter(|line| !line.trim().is_empty());
     let Some(last_line) = recent_lines.next() else {
@@ -170,4 +189,32 @@ fn codex_queued_input_header_line(line: &str) -> bool {
     let lower = trimmed.to_lowercase();
     lower.starts_with("• queued follow-up inputs")
         || lower.starts_with("• messages to be submitted after next tool call")
+}
+
+fn bottom_non_empty_lines(content: &str, max_lines: usize) -> Vec<&str> {
+    let mut lines: Vec<&str> = content
+        .lines()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(max_lines)
+        .collect();
+    lines.reverse();
+    lines
+}
+
+fn normalize_lines(lines: &[&str]) -> String {
+    lines
+        .iter()
+        .flat_map(|line| line.split_whitespace())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn transcript_control_tail(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    lower.contains("q to quit")
+        || lower.contains("esc to edit")
+        || lower.contains("esc/← to edit")
+        || lower.contains("edit message")
 }

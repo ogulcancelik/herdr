@@ -22,7 +22,9 @@ const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/preview.json";
 const HOMEBREW_FORMULA_API_URL: &str = "https://formulae.brew.sh/api/formula/herdr.json";
 const HERDR_UPDATE_COMMAND: &str = "herdr update";
 const HOMEBREW_UPDATE_COMMAND: &str = "brew update && brew upgrade herdr";
+const MISE_UPDATE_COMMAND: &str = "mise upgrade herdr";
 const NIX_UPDATE_COMMAND: &str = "update through Nix";
+const MISE_INSTALLS_DIR_ENV: &str = "MISE_INSTALLS_DIR";
 const FAKE_UPDATE_VERSION_ENV: &str = "HERDR_FAKE_UPDATE_VERSION";
 const FAKE_UPDATE_NOTES_VERSION_ENV: &str = "HERDR_FAKE_UPDATE_NOTES_VERSION";
 const DEFAULT_FAKE_UPDATE_NOTES_VERSION: &str = "0.3.0";
@@ -1624,6 +1626,8 @@ fn print_running_session_update_outcomes(
 pub(crate) fn update_install_command() -> &'static str {
     if is_homebrew_managed_install() {
         HOMEBREW_UPDATE_COMMAND
+    } else if is_mise_managed_install() {
+        MISE_UPDATE_COMMAND
     } else if is_nix_managed_install() {
         NIX_UPDATE_COMMAND
     } else {
@@ -1638,6 +1642,10 @@ pub(crate) fn update_install_instruction(install_command: &str) -> String {
         }
         HOMEBREW_UPDATE_COMMAND => {
             "detach, run `brew update && brew upgrade herdr`, then restart this Herdr session when ready".to_string()
+        }
+        MISE_UPDATE_COMMAND => {
+            "detach, run `mise upgrade herdr`, then restart this Herdr session when ready"
+                .to_string()
         }
         NIX_UPDATE_COMMAND => {
             "detach, update through Nix, then restart this Herdr session when ready".to_string()
@@ -1662,8 +1670,54 @@ fn is_nix_managed_install() -> bool {
     is_nix_store_exe_path_following_links(&current_exe)
 }
 
+fn is_mise_managed_install() -> bool {
+    let Ok(current_exe) = env::current_exe() else {
+        return false;
+    };
+
+    is_mise_managed_exe_path_following_links(&current_exe)
+}
+
+pub(crate) fn preview_channel_rejection_for_current_install() -> Option<&'static str> {
+    let Ok(current_exe) = env::current_exe() else {
+        return None;
+    };
+
+    preview_channel_rejection_for_exe_path(&current_exe)
+}
+
+pub(crate) fn package_manager_channel_update_guidance_for_current_install() -> Option<&'static str>
+{
+    if is_homebrew_managed_install() {
+        Some("Use `brew update && brew upgrade herdr` to update Homebrew installs.")
+    } else if is_mise_managed_install() {
+        Some("Use `mise upgrade herdr` to update mise installs.")
+    } else if is_nix_managed_install() {
+        Some("Update through Nix to update Nix-managed Herdr installs.")
+    } else {
+        None
+    }
+}
+
+fn preview_channel_rejection_for_exe_path(path: &Path) -> Option<&'static str> {
+    if is_homebrew_managed_exe_path_following_links(path) {
+        Some(
+            "preview channel is only available for direct Herdr installs; Homebrew installs update through `brew update && brew upgrade herdr`",
+        )
+    } else if is_mise_managed_exe_path_following_links(path) {
+        Some(
+            "preview channel is only available for direct Herdr installs; mise installs update through `mise upgrade herdr`",
+        )
+    } else if is_nix_store_exe_path_following_links(path) {
+        Some("preview channel is only available for direct Herdr installs; Nix installs update through Nix")
+    } else {
+        None
+    }
+}
+
 pub(crate) fn is_package_manager_managed_exe_path(path: &Path) -> bool {
     is_homebrew_managed_exe_path_following_links(path)
+        || is_mise_managed_exe_path_following_links(path)
         || is_nix_store_exe_path_following_links(path)
 }
 
@@ -1685,8 +1739,78 @@ fn is_nix_store_exe_path_following_links(path: &Path) -> bool {
         .is_ok_and(|path| is_nix_store_exe_path(&path))
 }
 
+fn is_mise_managed_exe_path_following_links(path: &Path) -> bool {
+    if is_mise_managed_exe_path(path) {
+        return true;
+    }
+
+    path.canonicalize()
+        .is_ok_and(|path| is_mise_managed_exe_path(&path))
+}
+
 fn is_nix_store_exe_path(path: &Path) -> bool {
     path.starts_with("/nix/store")
+}
+
+fn is_mise_managed_exe_path(path: &Path) -> bool {
+    mise_install_root(path).is_some()
+}
+
+fn mise_install_root(path: &Path) -> Option<PathBuf> {
+    if let Some(root) = mise_install_root_under_configured_installs_dir(path) {
+        return Some(root);
+    }
+
+    mise_install_root_under_named_installs_dir(path)
+}
+
+fn mise_install_root_under_configured_installs_dir(path: &Path) -> Option<PathBuf> {
+    let installs_dir = env::var_os(MISE_INSTALLS_DIR_ENV)
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())?;
+    let version_dir = mise_tool_version_dir(path)?;
+    let tool_dir = version_dir.parent()?;
+    paths_match(tool_dir.parent()?, &installs_dir).then_some(version_dir.to_path_buf())
+}
+
+fn mise_install_root_under_named_installs_dir(path: &Path) -> Option<PathBuf> {
+    let version_dir = mise_tool_version_dir(path)?;
+    let tool_dir = version_dir.parent()?;
+    let installs_dir = tool_dir.parent()?;
+    if installs_dir.file_name()? != "installs" {
+        return None;
+    }
+    Some(version_dir.to_path_buf())
+}
+
+fn mise_tool_version_dir(path: &Path) -> Option<&Path> {
+    if path.file_name()? != "herdr" {
+        return None;
+    }
+    let bin_dir = path.parent()?;
+    if bin_dir.file_name()? != "bin" {
+        return None;
+    }
+    let version_dir = bin_dir.parent()?;
+    let tool_dir = version_dir.parent()?;
+    if tool_dir.file_name()? != "herdr" {
+        return None;
+    }
+    Some(version_dir)
+}
+
+fn paths_match(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+
+    let Ok(left) = left.canonicalize() else {
+        return false;
+    };
+    let Ok(right) = right.canonicalize() else {
+        return false;
+    };
+    left == right
 }
 
 fn is_homebrew_managed_exe_path(path: &Path) -> bool {
@@ -1728,6 +1852,17 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
         }
         return Err(format!(
             "self-update is disabled for Homebrew installs; run `{HOMEBREW_UPDATE_COMMAND}`"
+        ));
+    }
+
+    if is_mise_managed_install() {
+        if channel == UpdateChannel::Preview {
+            return Err(
+                "self-update is disabled for mise installs; preview is only available for direct Herdr installs".into(),
+            );
+        }
+        return Err(format!(
+            "self-update is disabled for mise installs; run `{MISE_UPDATE_COMMAND}`"
         ));
     }
 
@@ -1842,6 +1977,11 @@ pub fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
         return;
     }
 
+    if is_mise_managed_install() && configured_channel == UpdateChannel::Preview {
+        crate::logging::update_check_failed("preview channel is not available for mise installs");
+        return;
+    }
+
     let nix_managed_install = is_nix_managed_install();
     if nix_managed_install && configured_channel == UpdateChannel::Preview {
         crate::logging::update_check_failed("preview channel is not available for Nix installs");
@@ -1874,15 +2014,9 @@ pub fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
     );
 
     // Notify the TUI — blocking_send is safe from a std::thread
-    let install_command = if nix_managed_install {
-        NIX_UPDATE_COMMAND
-    } else {
-        HERDR_UPDATE_COMMAND
-    };
-
     let _ = events.blocking_send(crate::events::AppEvent::UpdateReady {
         version: release.label().to_string(),
-        install_command: install_command.to_string(),
+        install_command: update_install_command().to_string(),
     });
 }
 
@@ -2124,6 +2258,58 @@ mod tests {
     }
 
     #[test]
+    fn mise_install_path_is_detected() {
+        let path = Path::new("/home/user/.local/share/mise/installs/herdr/0.6.6/bin/herdr");
+
+        assert!(is_mise_managed_exe_path(path));
+        assert_eq!(
+            mise_install_root(path).unwrap(),
+            PathBuf::from("/home/user/.local/share/mise/installs/herdr/0.6.6")
+        );
+    }
+
+    #[test]
+    fn mise_alias_install_path_is_detected() {
+        let path = Path::new("/home/user/.local/share/mise/installs/herdr/latest/bin/herdr");
+
+        assert!(is_mise_managed_exe_path(path));
+    }
+
+    #[test]
+    fn mise_custom_installs_dir_path_is_detected() {
+        let path = Path::new("/opt/mise-tools/installs/herdr/0.6.6/bin/herdr");
+
+        assert!(is_mise_managed_exe_path(path));
+    }
+
+    #[test]
+    fn mise_configured_installs_dir_path_is_detected() {
+        let _guard = env_lock().lock().unwrap();
+        let previous = std::env::var_os(MISE_INSTALLS_DIR_ENV);
+        std::env::set_var(MISE_INSTALLS_DIR_ENV, "/opt/mise-tools");
+        let path = Path::new("/opt/mise-tools/herdr/0.6.6/bin/herdr");
+
+        assert!(is_mise_managed_exe_path(path));
+        assert_eq!(
+            mise_install_root(path).unwrap(),
+            PathBuf::from("/opt/mise-tools/herdr/0.6.6")
+        );
+
+        if let Some(previous) = previous {
+            std::env::set_var(MISE_INSTALLS_DIR_ENV, previous);
+        } else {
+            std::env::remove_var(MISE_INSTALLS_DIR_ENV);
+        }
+    }
+
+    #[test]
+    fn non_mise_install_path_is_not_detected() {
+        let path = Path::new("/home/user/.local/bin/herdr");
+
+        assert!(!is_mise_managed_exe_path(path));
+    }
+
+    #[test]
     fn package_manager_path_detection_follows_homebrew_symlink() {
         #[cfg(unix)]
         {
@@ -2147,11 +2333,48 @@ mod tests {
     }
 
     #[test]
+    fn package_manager_path_detection_follows_mise_symlink() {
+        #[cfg(unix)]
+        {
+            let root = std::env::temp_dir()
+                .join(format!("herdr-mise-symlink-test-{}", std::process::id()));
+            let version_bin = root.join("installs/herdr/0.6.2/bin");
+            let latest_bin = root.join("installs/herdr/latest/bin");
+            fs::create_dir_all(&version_bin).unwrap();
+            fs::create_dir_all(&latest_bin).unwrap();
+            let version_binary = version_bin.join("herdr");
+            let latest_binary = latest_bin.join("herdr");
+            fs::write(&version_binary, b"").unwrap();
+            std::os::unix::fs::symlink(&version_binary, &latest_binary).unwrap();
+
+            assert!(is_package_manager_managed_exe_path(&latest_binary));
+
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
     fn nix_store_path_is_detected() {
         let path = Path::new("/nix/store/abc123-herdr-0.6.1/bin/herdr");
 
         assert!(is_nix_store_exe_path(path));
         assert!(is_package_manager_managed_exe_path(path));
+    }
+
+    #[test]
+    fn preview_channel_is_rejected_for_package_manager_paths() {
+        let homebrew = Path::new("/opt/homebrew/Cellar/herdr/0.6.6/bin/herdr");
+        let mise = Path::new("/home/user/.local/share/mise/installs/herdr/0.6.6/bin/herdr");
+        let nix = Path::new("/nix/store/abc123-herdr-0.6.6/bin/herdr");
+        let direct = Path::new("/home/user/.local/bin/herdr");
+
+        assert!(preview_channel_rejection_for_exe_path(homebrew)
+            .is_some_and(|message| message.contains("Homebrew")));
+        assert!(preview_channel_rejection_for_exe_path(mise)
+            .is_some_and(|message| message.contains("mise")));
+        assert!(preview_channel_rejection_for_exe_path(nix)
+            .is_some_and(|message| message.contains("Nix")));
+        assert!(preview_channel_rejection_for_exe_path(direct).is_none());
     }
 
     #[test]
@@ -2233,6 +2456,10 @@ mod tests {
         assert_eq!(
             update_install_instruction(HOMEBREW_UPDATE_COMMAND),
             "detach, run `brew update && brew upgrade herdr`, then restart this Herdr session when ready"
+        );
+        assert_eq!(
+            update_install_instruction(MISE_UPDATE_COMMAND),
+            "detach, run `mise upgrade herdr`, then restart this Herdr session when ready"
         );
     }
 
@@ -2984,16 +3211,16 @@ mod tests {
 
     #[test]
     fn stable_channel_installs_stable_asset_when_current_binary_is_preview() {
-        let older_stable = Version::parse("0.6.5").unwrap();
-        let preview_base = Version::parse("0.6.6").unwrap();
+        let latest_stable = Version::parse("0.6.6").unwrap();
+        let installed_base = Version::parse("0.6.6").unwrap();
         assert!(stable_channel_should_install(
-            &older_stable,
-            &preview_base,
+            &latest_stable,
+            &installed_base,
             true
         ));
         assert!(!stable_channel_should_install(
-            &older_stable,
-            &preview_base,
+            &latest_stable,
+            &installed_base,
             false
         ));
     }

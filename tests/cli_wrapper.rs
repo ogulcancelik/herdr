@@ -2117,11 +2117,15 @@ fn agent_start_command_works() {
             "/bin/sh",
             "-c",
             "printf cli-agent-start-ok; sleep 2",
+            "--session",
+            "child-session",
         ],
     );
     assert_eq!(started["result"]["type"], "agent_started");
     assert_eq!(started["result"]["agent"]["name"], "main");
     assert_eq!(started["result"]["argv"][0], "/bin/sh");
+    assert_eq!(started["result"]["argv"][3], "--session");
+    assert_eq!(started["result"]["argv"][4], "child-session");
     let terminal_id = started["result"]["agent"]["terminal_id"]
         .as_str()
         .unwrap()

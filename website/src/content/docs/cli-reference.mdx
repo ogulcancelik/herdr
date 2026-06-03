@@ -17,8 +17,11 @@ herdr --remote workbox --remote-keybindings server
 herdr --remote workbox --handoff
 herdr --no-session            # single-process escape hatch
 herdr --default-config        # print default config
-herdr update                  # download and install the latest version
+herdr update                  # download and install from the configured channel
 herdr update --handoff        # opt into live handoff for supported running servers
+herdr channel show            # print stable or preview
+herdr channel set preview     # opt into preview builds
+herdr channel set stable      # return to stable releases
 herdr --version               # print version
 ```
 
@@ -207,6 +210,7 @@ herdr integration install pi
 herdr integration install omp
 herdr integration install claude
 herdr integration install codex
+herdr integration install copilot
 herdr integration install opencode
 herdr integration install hermes
 herdr integration install qodercli
@@ -214,6 +218,7 @@ herdr integration uninstall pi
 herdr integration uninstall omp
 herdr integration uninstall claude
 herdr integration uninstall codex
+herdr integration uninstall copilot
 herdr integration uninstall opencode
 herdr integration uninstall hermes
 herdr integration uninstall qodercli

@@ -22,6 +22,9 @@ pub enum AgentState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgentDetection {
     pub state: AgentState,
+    /// True when the current screen is an agent-owned viewer that shows
+    /// transcript/history instead of the live prompt state.
+    pub skip_state_update: bool,
     /// True when the current screen visibly shows live UI chrome that needs
     /// human input. This is stronger than arbitrary prompt-like text in the
     /// scrollback and may override a non-blocked integration state.
@@ -173,12 +176,17 @@ pub fn detect_agent(agent: Option<Agent>, screen_content: &str) -> AgentDetectio
     let Some(agent) = agent else {
         return AgentDetection {
             state: AgentState::Unknown,
+            skip_state_update: false,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
         };
     };
     agents::detect(agent, screen_content)
+}
+
+pub fn should_skip_state_update(agent: Option<Agent>, screen_content: &str) -> bool {
+    agent.is_some_and(|agent| agents::should_skip_state_update(agent, screen_content))
 }
 
 // ---------------------------------------------------------------------------
@@ -940,6 +948,42 @@ mod tests {
     }
 
     #[test]
+    fn claude_detailed_transcript_skips_state_update() {
+        let screen = "● I read the root and README.md.\n\n✻ Cogitated for 14s\n\n───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n  Showing detailed transcript · ctrl+o to toggle · ctrl+e to show all                                                                                                          verbose";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert!(detection.skip_state_update);
+        assert!(!detection.visible_idle);
+        assert!(!detection.visible_working);
+        assert!(!detection.visible_blocker);
+    }
+
+    #[test]
+    fn claude_detailed_transcript_collapse_skips_state_update() {
+        let screen = "● Running tool\n\n───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n  Showing detailed transcript · ctrl+o to toggle · ctrl+e to collapse";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert!(detection.skip_state_update);
+    }
+
+    #[test]
+    fn claude_wrapped_detailed_transcript_controls_skip_state_update() {
+        let screen = "● Running tool\n\n────────────────────────\n  Showing detailed transcript · ctrl+o\n  to toggle · ctrl+e to\n  collapse";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert!(detection.skip_state_update);
+    }
+
+    #[test]
+    fn claude_transcript_text_above_prompt_does_not_skip_state_update() {
+        let screen = "Docs mention: Showing detailed transcript · ctrl+o to toggle · ctrl+e to show all\n\n───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert!(!detection.skip_state_update);
+        assert!(detection.visible_idle);
+    }
+
+    #[test]
     fn claude_waiting_do_you_want() {
         let screen = "Do you want to run this command?\n\nYes  No";
         assert_eq!(detect_claude(screen), AgentState::Blocked);
@@ -992,6 +1036,16 @@ mod tests {
     #[test]
     fn claude_question_form_selected_top_is_visible_blocker() {
         let screen = "❯ ask again\n─────────────────────────────────────────────────────────────────────────────────────────\n←  ☐ Subject  ☐ Tone  ✔ Submit  →\n\nWhat should I ask you about?\n\n❯ 1. Today\n     Your current plan or priority.\n  2. Project\n     A codebase, feature, bug, or PR.\n  3. Preference\n     How you want me to work with you.\n  4. Random\n     A casual question with no work context.\n  5. Type something.\n─────────────────────────────────────────────────────────────────────────────────────────\n  6. Chat about this\n\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Blocked);
+        assert!(detection.visible_blocker);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
+    fn claude_question_form_with_arrow_glyph_footer_is_visible_blocker() {
+        let screen = "❯ this is a test can you use question otol to ask questiosns\n\n  Thought for 16s (ctrl+o to expand)\n─────────────────────────────────────────────────────────────────────────────────────────\n ☐ Test type\n\nWhich kind of test question should I ask you next?\n\n❯ 1. Single choice\n     Ask one multiple-choice question.\n  2. Multi choice\n     Ask one question that allows several answers.\n  3. With preview\n     Ask with side-by-side previews.\n  4. Type something.\n─────────────────────────────────────────────────────────────────────────────────────────\n  5. Chat about this\n\nEnter to select · ↑/↓ to navigate · Esc to cancel";
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Blocked);
@@ -1108,6 +1162,58 @@ mod tests {
         assert!(detection.visible_working);
         assert!(!detection.visible_idle);
         assert!(!detection.visible_blocker);
+    }
+
+    #[test]
+    fn claude_waiting_for_multiple_background_agents_is_working() {
+        let screen = "● Done. I’ve delegated two investigations.\n\n✻ Waiting for 2 background agents to finish\n\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ \n─────────────────────────────────────────────────────────────────────────────────────────\n  ~/P/herdr ⎇ master ▱▱▱▱▱ 0%";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Working);
+        assert!(detection.visible_working);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
+    fn claude_completed_background_agent_wait_in_scrollback_is_idle() {
+        let screen = "❯ please create a background agent that sleeps 15 sec then say hi\n\n  Thought for 8s (ctrl+o to expand)\n\n● claude(Sleep then say hi)\n  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)\n\n● Done. I launched a background agent that will wait 15 seconds and then reply with hi.\n\n✻ Waiting for 1 background agent to finish\n\n● Agent \"Sleep then say hi\" completed · 17s\n\n● hi\n\n✻ Brewed for 28s\n\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ \n─────────────────────────────────────────────────────────────────────────────────────────\n  ~/P/herdr ⎇ master ▱▱▱▱▱ 0%";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(detection.visible_idle);
+        assert!(!detection.visible_working);
+        assert!(!detection.visible_blocker);
+    }
+
+    #[test]
+    fn claude_completed_background_agent_with_prompt_box_is_idle() {
+        let screen = "● Done. I’ve started a background agent.\n\n✻ Waiting for 1 background agent to finish\n\n⏺ Agent \"Sleep then say hi\" completed · 31s\n\n⏺ hi\n\n✻ Baked for 42s\n\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ \n─────────────────────────────────────────────────────────────────────────────────────────\n  ~/P/herdr ⎇ master ▱▱▱▱▱ 0%\n\n  ● main      ↑/↓ to select · Enter to view\n  ◯ general-purpose  Sleep then say hi  31s";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(detection.visible_idle);
+        assert!(!detection.visible_working);
+        assert!(!detection.visible_blocker);
+    }
+
+    #[test]
+    fn claude_zero_background_agent_wait_with_prompt_box_is_idle() {
+        let screen = "✻ Waiting for 0 background agents to finish\n\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ \n─────────────────────────────────────────────────────────────────────────────────────────\n  ~/P/herdr ⎇ master ▱▱▱▱▱ 0%";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(detection.visible_idle);
+        assert!(!detection.visible_working);
+    }
+
+    #[test]
+    fn claude_background_agent_wait_phrase_in_prose_is_idle() {
+        let screen = "Claude mentioned: Waiting for 1 background agent to finish\n\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ \n─────────────────────────────────────────────────────────────────────────────────────────\n  ~/P/herdr ⎇ master ▱▱▱▱▱ 0%";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(detection.visible_idle);
+        assert!(!detection.visible_working);
     }
 
     #[test]
@@ -1410,6 +1516,52 @@ mod tests {
     #[test]
     fn codex_idle() {
         assert_eq!(detect_codex("❯ "), AgentState::Idle);
+    }
+
+    #[test]
+    fn codex_transcript_viewer_skips_state_update() {
+        let screen = "/ T R A N S C R I P T / / / / / / / / / / / / / / / /\n\n› i did thats why our latest commit is also a claude fix D\n\n• Yes, then I would release.\n──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── 100% ─\n ↑/↓ to scroll   pgup/pgdn to page   home/end to jump\n q to quit   esc to edit prev";
+        let detection = detect_agent(Some(Agent::Codex), screen);
+
+        assert!(detection.skip_state_update);
+        assert!(!detection.visible_idle);
+        assert!(!detection.visible_working);
+        assert!(!detection.visible_blocker);
+    }
+
+    #[test]
+    fn codex_wrapped_transcript_controls_skip_state_update() {
+        let screen = "/ T R A N S C R I P T /\n\n› yeah go ahead\n──────────────────────────────── 100% ─\n ↑/↓ to scroll   pgup/pgdn to\n page   home/end to jump\n q to quit   esc to edit prev";
+        let detection = detect_agent(Some(Agent::Codex), screen);
+
+        assert!(detection.skip_state_update);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
+    fn codex_esc_transcript_controls_skip_state_update() {
+        let screen = "/ T R A N S C R I P T /\n\n› yeah go ahead\n──────────────────────────────── 100% ─\n ↑/↓ to scroll   pgup/pgdn to page   home/end to jump\n q to quit   esc/← to edit prev   → to edit next   enter to edit message";
+        let detection = detect_agent(Some(Agent::Codex), screen);
+
+        assert!(detection.skip_state_update);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
+    fn codex_transcript_controls_above_prompt_do_not_skip_state_update() {
+        let screen = "Old output:\n ↑/↓ to scroll   pgup/pgdn to page   home/end to jump\n q to quit   esc to edit prev\n\n› ";
+        let detection = detect_agent(Some(Agent::Codex), screen);
+
+        assert!(!detection.skip_state_update);
+        assert!(detection.visible_idle);
+    }
+
+    #[test]
+    fn codex_exit_control_without_scroll_control_does_not_skip_state_update() {
+        let screen = "Some output\n\n q to quit   esc to edit prev";
+        let detection = detect_agent(Some(Agent::Codex), screen);
+
+        assert!(!detection.skip_state_update);
     }
 
     // ---- Gemini ----

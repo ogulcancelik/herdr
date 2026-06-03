@@ -49,7 +49,9 @@ impl AppState {
             MouseEventKind::Down(_) | MouseEventKind::Up(_) | MouseEventKind::Drag(_) => {
                 self.forward_pane_mouse_button(terminal_runtimes, &info, mouse);
             }
-            MouseEventKind::Moved => {}
+            MouseEventKind::Moved => {
+                self.forward_pane_mouse_motion(terminal_runtimes, &info, mouse);
+            }
         }
     }
 
@@ -883,6 +885,12 @@ impl AppState {
                 }
             }
 
+            MouseEventKind::Moved if self.mode == Mode::Terminal && !in_sidebar => {
+                if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
+                    let _ = self.forward_pane_mouse_motion(terminal_runtimes, &info, mouse);
+                }
+            }
+
             MouseEventKind::Down(MouseButton::Right) if in_sidebar && !self.sidebar_collapsed => {
                 self.workspace_press = None;
                 self.tab_press = None;
@@ -1490,6 +1498,30 @@ impl AppState {
         true
     }
 
+    pub(super) fn forward_pane_mouse_motion(
+        &self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+        info: &PaneInfo,
+        mouse: MouseEvent,
+    ) -> bool {
+        let Some(ws_idx) = self.active else {
+            return false;
+        };
+        let Some(rt) = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)
+        else {
+            return false;
+        };
+        let column = mouse.column.saturating_sub(info.inner_rect.x);
+        let row = mouse.row.saturating_sub(info.inner_rect.y);
+        let Some(bytes) = rt.encode_mouse_motion(mouse.kind, column, row, mouse.modifiers) else {
+            return false;
+        };
+        if let Err(err) = rt.try_send_bytes(Bytes::from(bytes)) {
+            warn!(pane = info.id.raw(), err = %err, kind = ?mouse.kind, "failed to forward mouse motion event");
+        }
+        true
+    }
+
     fn forward_pane_reported_wheel(
         &self,
         terminal_runtimes: &TerminalRuntimeRegistry,
@@ -1775,6 +1807,153 @@ mod tests {
             input_rx.try_recv().expect("forwarded right mouse up"),
             Bytes::from_static(b"\x1b[<2;4;5m")
         );
+        assert!(input_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn pane_mouse_only_forwards_moved_events_for_any_motion_apps() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = pane_infos[0].clone();
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                0,
+                b"\x1b[?1003h\x1b[?1006h",
+                4,
+            );
+        ws.insert_test_runtime(pane_id, runtime);
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+
+        app.state.handle_pane_mouse_only(
+            &app.terminal_runtimes,
+            mouse(
+                MouseEventKind::Moved,
+                info.inner_rect.x + 2,
+                info.inner_rect.y + 3,
+            ),
+        );
+
+        assert_eq!(
+            input_rx.try_recv().expect("forwarded mouse motion"),
+            Bytes::from_static(b"\x1b[<35;3;4M")
+        );
+        assert!(input_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn pane_mouse_motion_uses_computed_inner_rect_offsets() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80,
+                18,
+                0,
+                b"\x1b[?1003h\x1b[?1006h",
+                4,
+            );
+        ws.insert_test_runtime(pane_id, runtime);
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let info = app.state.view.pane_infos[0].clone();
+        assert!(info.inner_rect.x > 0, "sidebar offset should be present");
+        assert!(info.inner_rect.y > 0, "tab bar offset should be present");
+
+        app.state.handle_pane_mouse_only(
+            &app.terminal_runtimes,
+            mouse(
+                MouseEventKind::Moved,
+                info.inner_rect.x + 2,
+                info.inner_rect.y + 3,
+            ),
+        );
+
+        assert_eq!(
+            input_rx.try_recv().expect("forwarded mouse motion"),
+            Bytes::from_static(b"\x1b[<35;3;4M")
+        );
+        assert!(input_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn mouse_dispatcher_downgrades_sgr_pixel_motion_to_cell_coordinates() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80,
+                18,
+                0,
+                b"\x1b[?1003h\x1b[?1006h\x1b[?1016h",
+                4,
+            );
+        ws.insert_test_runtime(pane_id, runtime);
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let info = app.state.view.pane_infos[0].clone();
+        assert!(info.inner_rect.x > 0, "sidebar offset should be present");
+        assert!(info.inner_rect.y > 0, "tab bar offset should be present");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Moved,
+            info.inner_rect.x + 2,
+            info.inner_rect.y + 3,
+        ));
+
+        assert_eq!(
+            input_rx.try_recv().expect("forwarded mouse motion"),
+            Bytes::from_static(b"\x1b[<35;3;4M")
+        );
+        assert!(input_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn mouse_dispatcher_does_not_forward_motion_behind_herdr_modes() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80,
+                18,
+                0,
+                b"\x1b[?1003h\x1b[?1006h",
+                4,
+            );
+        ws.insert_test_runtime(pane_id, runtime);
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Navigate;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let info = app.state.view.pane_infos[0].clone();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Moved,
+            info.inner_rect.x + 2,
+            info.inner_rect.y + 3,
+        ));
+
         assert!(input_rx.try_recv().is_err());
     }
 

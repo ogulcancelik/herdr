@@ -150,12 +150,15 @@ pub const MOUSE_BUTTON_WHEEL_LEFT: ffi::GhosttyMouseButton =
     ffi::GhosttyMouseButton_GHOSTTY_MOUSE_BUTTON_SIX;
 pub const MOUSE_BUTTON_WHEEL_RIGHT: ffi::GhosttyMouseButton =
     ffi::GhosttyMouseButton_GHOSTTY_MOUSE_BUTTON_SEVEN;
+pub const MOUSE_FORMAT_SGR: ffi::GhosttyMouseFormat =
+    ffi::GhosttyMouseFormat_GHOSTTY_MOUSE_FORMAT_SGR;
 
 pub const MODE_APPLICATION_CURSOR_KEYS: u16 = 1;
 pub const MODE_FOCUS_EVENT: u16 = 1004;
 pub const MODE_MOUSE_UTF8: u16 = 1005;
 pub const MODE_MOUSE_SGR: u16 = 1006;
 pub const MODE_MOUSE_ALTERNATE_SCROLL: u16 = 1007;
+pub const MODE_MOUSE_SGR_PIXELS: u16 = 1016;
 pub const MODE_BRACKETED_PASTE: u16 = 2004;
 pub const MODE_SYNCHRONIZED_OUTPUT: u16 = 2026;
 
@@ -2118,6 +2121,16 @@ impl MouseEncoder {
                 self.raw,
                 ffi::GhosttyMouseEncoderOption_GHOSTTY_MOUSE_ENCODER_OPT_SIZE,
                 (&size as *const ffi::GhosttyMouseEncoderSize).cast(),
+            )
+        }
+    }
+
+    pub fn set_format(&mut self, format: ffi::GhosttyMouseFormat) {
+        unsafe {
+            ffi::ghostty_mouse_encoder_setopt(
+                self.raw,
+                ffi::GhosttyMouseEncoderOption_GHOSTTY_MOUSE_ENCODER_OPT_FORMAT,
+                (&format as *const ffi::GhosttyMouseFormat).cast(),
             )
         }
     }

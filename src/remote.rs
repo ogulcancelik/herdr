@@ -72,6 +72,10 @@ pub(crate) fn extract_remote_args(
     let mut index = 1;
     while index < args.len() {
         let arg = &args[index];
+        if arg == "--" {
+            cleaned.extend_from_slice(&args[index..]);
+            break;
+        }
         if arg == "--handoff" {
             live_handoff = true;
             index += 1;
@@ -1841,6 +1845,27 @@ mod tests {
         let remote = remote.unwrap();
         assert_eq!(remote.target, "dev");
         assert!(remote.live_handoff);
+    }
+
+    #[test]
+    fn extract_remote_args_preserves_child_remote_options_after_separator() {
+        let args = vec![
+            "herdr".into(),
+            "agent".into(),
+            "start".into(),
+            "repro".into(),
+            "--".into(),
+            "child".into(),
+            "--remote".into(),
+            "dev".into(),
+            "--remote-keybindings=server".into(),
+            "--handoff".into(),
+        ];
+
+        let (cleaned, remote) = extract_remote_args(&args).unwrap();
+
+        assert_eq!(cleaned, args);
+        assert!(remote.is_none());
     }
 
     #[test]
