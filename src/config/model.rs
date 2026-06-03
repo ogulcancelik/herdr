@@ -39,14 +39,32 @@ impl Default for UpdateConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToastDelivery {
     #[default]
     Off,
-    Herdr,
+    Herdr {
+        position: ToastPosition,
+    },
     Terminal,
     System,
+}
+
+impl ToastDelivery {
+    /// In-Herdr delivery showing the toast in the given corner.
+    pub fn herdr(position: ToastPosition) -> Self {
+        Self::Herdr { position }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToastPosition {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    #[default]
+    BottomRight,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -597,19 +615,41 @@ impl<'de> Deserialize<'de> for ToastConfig {
     where
         D: Deserializer<'de>,
     {
+        #[derive(Deserialize, Clone, Copy, Default)]
+        #[serde(rename_all = "lowercase")]
+        enum RawToastDelivery {
+            #[default]
+            Off,
+            Herdr,
+            Terminal,
+            System,
+        }
+
+        #[derive(Deserialize, Default)]
+        #[serde(default)]
+        struct RawHerdrToastConfig {
+            position: Option<ToastPosition>,
+        }
+
         #[derive(Deserialize, Default)]
         #[serde(default)]
         struct RawToastConfig {
-            delivery: Option<ToastDelivery>,
+            delivery: Option<RawToastDelivery>,
             enabled: Option<bool>,
+            herdr: RawHerdrToastConfig,
         }
 
         let raw = RawToastConfig::deserialize(deserializer)?;
         let legacy_delivery = match raw.enabled {
-            Some(true) => ToastDelivery::Herdr,
-            Some(false) | None => ToastDelivery::Off,
+            Some(true) => RawToastDelivery::Herdr,
+            Some(false) | None => RawToastDelivery::Off,
         };
-        let delivery = raw.delivery.unwrap_or(legacy_delivery);
+        let delivery = match raw.delivery.unwrap_or(legacy_delivery) {
+            RawToastDelivery::Off => ToastDelivery::Off,
+            RawToastDelivery::Herdr => ToastDelivery::herdr(raw.herdr.position.unwrap_or_default()),
+            RawToastDelivery::Terminal => ToastDelivery::Terminal,
+            RawToastDelivery::System => ToastDelivery::System,
+        };
         Ok(Self { delivery })
     }
 }
@@ -994,7 +1034,10 @@ delivery = "system"
 enabled = true
 "#;
         let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.ui.toast.delivery, ToastDelivery::Herdr);
+        assert_eq!(
+            config.ui.toast.delivery,
+            ToastDelivery::herdr(ToastPosition::BottomRight)
+        );
     }
 
     #[test]
@@ -1016,6 +1059,69 @@ delivery = "terminal"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.ui.toast.delivery, ToastDelivery::Terminal);
+    }
+
+    #[test]
+    fn toast_config_parses_position() {
+        let toml = r#"
+[ui.toast]
+delivery = "herdr"
+herdr.position = "top-left"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.ui.toast.delivery,
+            ToastDelivery::herdr(ToastPosition::TopLeft)
+        );
+    }
+
+    #[test]
+    fn toast_config_parses_position_from_subsection() {
+        let toml = r#"
+[ui.toast]
+delivery = "herdr"
+
+[ui.toast.herdr]
+position = "top-left"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.ui.toast.delivery,
+            ToastDelivery::herdr(ToastPosition::TopLeft)
+        );
+    }
+
+    #[test]
+    fn toast_config_position_defaults_to_bottom_right() {
+        let toml = r#"
+[ui.toast]
+delivery = "herdr"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.ui.toast.delivery,
+            ToastDelivery::herdr(ToastPosition::BottomRight)
+        );
+    }
+
+    #[test]
+    fn toast_config_position_is_ignored_for_non_herdr_delivery() {
+        let toml = r#"
+[ui.toast]
+delivery = "terminal"
+herdr.position = "top-left"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.toast.delivery, ToastDelivery::Terminal);
+    }
+
+    #[test]
+    fn toast_config_rejects_unknown_position() {
+        let toml = r#"
+[ui.toast]
+herdr.position = "center"
+"#;
+        assert!(toml::from_str::<Config>(toml).is_err());
     }
 
     #[test]

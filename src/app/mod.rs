@@ -1927,7 +1927,7 @@ mod tests {
             .matches_prefix(&KeyEvent::new(KeyCode::Char('m'), KeyModifiers::empty())));
         assert_eq!(
             app.state.toast_config.delivery,
-            crate::config::ToastDelivery::Herdr
+            crate::config::ToastDelivery::herdr(crate::config::ToastPosition::default())
         );
         assert_eq!(
             app.state.agent_panel_scope,
@@ -2183,7 +2183,7 @@ mod tests {
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
 
         let mut app = test_app();
-        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        app.state.enable_herdr_toasts();
         let report = app.reload_config();
 
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
@@ -2194,7 +2194,7 @@ mod tests {
             .matches_prefix(&KeyEvent::new(KeyCode::Char('m'), KeyModifiers::empty())));
         assert_eq!(
             app.state.toast_config.delivery,
-            crate::config::ToastDelivery::Herdr
+            crate::config::ToastDelivery::herdr(crate::config::ToastPosition::default())
         );
         assert!(app
             .state

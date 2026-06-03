@@ -9,6 +9,7 @@ use ratatui::{
 use super::widgets::panel_contrast_fg;
 use crate::{
     app::state::{CopyFeedback, Palette, ToastKind, ToastNotification},
+    config::ToastPosition,
     detect::AgentState,
 };
 
@@ -28,17 +29,28 @@ pub(crate) fn copy_feedback_rect(area: Rect, feedback: &CopyFeedback, offset_row
 pub(crate) fn toast_notification_rect(
     area: Rect,
     toast: &ToastNotification,
+    position: ToastPosition,
     offset_for_warning: bool,
 ) -> Rect {
     let content_width = (toast.title.len().max(toast.context.len()) as u16) + 4;
     let width = content_width.saturating_add(2).min(area.width);
     let content_height = if toast.context.is_empty() { 1 } else { 2 };
     let height = (content_height + 2).min(area.height);
-    let x = area.x + area.width.saturating_sub(width);
-    let y = area.y
-        + area
-            .height
-            .saturating_sub(height + if offset_for_warning { 1 } else { 0 });
+    let warning_rows = if offset_for_warning { 1 } else { 0 };
+    let x = match position {
+        ToastPosition::TopLeft | ToastPosition::BottomLeft => area.x,
+        ToastPosition::TopRight | ToastPosition::BottomRight => {
+            area.x + area.width.saturating_sub(width)
+        }
+    };
+    let y = match position {
+        ToastPosition::TopLeft | ToastPosition::TopRight => {
+            area.y + warning_rows.min(area.height.saturating_sub(height))
+        }
+        ToastPosition::BottomLeft | ToastPosition::BottomRight => {
+            area.y + area.height.saturating_sub(height + warning_rows)
+        }
+    };
     Rect::new(x, y, width, height)
 }
 
@@ -46,6 +58,7 @@ pub(super) fn render_toast_notification(
     frame: &mut Frame,
     area: Rect,
     toast: &ToastNotification,
+    position: ToastPosition,
     offset_for_warning: bool,
     p: &Palette,
 ) {
@@ -54,7 +67,7 @@ pub(super) fn render_toast_notification(
         ToastKind::Finished => p.blue,
         ToastKind::UpdateInstalled => p.accent,
     };
-    let toast_area = toast_notification_rect(area, toast, offset_for_warning);
+    let toast_area = toast_notification_rect(area, toast, position, offset_for_warning);
 
     frame.render_widget(Clear, toast_area);
     let block = Block::default()

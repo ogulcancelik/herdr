@@ -113,7 +113,7 @@ pub(super) fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: R
                 "choose where background popup notifications should appear",
                 &[
                     ("off", ToastDelivery::Off),
-                    ("inside herdr", ToastDelivery::Herdr),
+                    ("inside herdr", ToastDelivery::herdr(app.toast_position())),
                     ("via terminal", ToastDelivery::Terminal),
                     ("via system", ToastDelivery::System),
                 ],

@@ -1,4 +1,6 @@
-use crate::config::{Keybinds, NewTerminalCwdConfig, SoundConfig, ToastConfig, ToastDelivery};
+use crate::config::{
+    Keybinds, NewTerminalCwdConfig, SoundConfig, ToastConfig, ToastDelivery, ToastPosition,
+};
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Direction, Rect};
 use ratatui::style::Color;
@@ -1352,6 +1354,13 @@ impl AppState {
         self.toast_config.delivery
     }
 
+    pub fn toast_position(&self) -> ToastPosition {
+        match self.toast_config.delivery {
+            ToastDelivery::Herdr { position } => position,
+            _ => ToastPosition::default(),
+        }
+    }
+
     pub fn agent_border_labels_enabled(&self) -> bool {
         self.show_agent_labels_on_pane_borders
     }
@@ -1510,6 +1519,11 @@ pub fn key_matches(
 
 #[cfg(test)]
 impl AppState {
+    /// Enable in-Herdr toast delivery with the default position.
+    pub fn enable_herdr_toasts(&mut self) {
+        self.toast_config.delivery = ToastDelivery::herdr(ToastPosition::default());
+    }
+
     /// Create an AppState for testing — no channels, no PTYs.
     pub fn test_new() -> Self {
         Self {

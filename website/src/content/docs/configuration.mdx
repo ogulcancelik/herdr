@@ -299,11 +299,14 @@ Herdr can show popup notifications when agents finish or need input.
 ```toml
 [ui.toast]
 delivery = "off"
+herdr.position = "bottom-right"
 ```
 
 `delivery = "off"` disables popup notifications. This is the default.
 
-`delivery = "herdr"` shows a top-right toast inside the Herdr UI. Click the toast, or bind `keys.open_notification_target`, to focus the target workspace, tab, and pane.
+`delivery = "herdr"` shows a toast inside the Herdr UI. Click the toast, or bind `keys.open_notification_target`, to focus the target workspace, tab, and pane.
+
+`herdr.position` places the in-Herdr toast in one of the four corners: `top-left`, `top-right`, `bottom-left`, or `bottom-right`. The default is `bottom-right`. Options under `herdr` only affect `delivery = "herdr"` — they can stay set while using another delivery and take effect again when you switch back.
 
 `delivery = "terminal"` asks the outer terminal to show a desktop notification. Herdr sends terminal notification escape sequences for Ghostty, iTerm2, Kitty, and WezTerm. This is useful over SSH because the local terminal owns the notification.
 

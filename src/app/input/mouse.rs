@@ -2147,7 +2147,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        app.state.enable_herdr_toasts();
         let target_terminal_id = app.state.workspaces[1]
             .panes
             .get(&target_pane)

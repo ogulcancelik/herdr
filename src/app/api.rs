@@ -220,7 +220,7 @@ impl App {
     ) {
         if !matches!(
             self.state.toast_config.delivery,
-            crate::config::ToastDelivery::Herdr
+            crate::config::ToastDelivery::Herdr { .. }
         ) || self.state.toast == *previous_toast
         {
             return;
@@ -650,7 +650,7 @@ mod tests {
         app.state.active = None;
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
-        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        app.state.enable_herdr_toasts();
 
         let (events, _) = tokio::sync::mpsc::channel(4);
         let runtime = crate::terminal::TerminalRuntime::spawn(

@@ -86,6 +86,7 @@ pub(crate) use self::{
 };
 use crate::app::state::ViewLayout;
 use crate::app::{AppState, Mode};
+use crate::config::ToastPosition;
 use crate::terminal::TerminalRuntimeRegistry;
 
 const COLLAPSED_WIDTH: u16 = 4; // num + space + dot + separator
@@ -254,7 +255,14 @@ fn compute_view_internal(
     let toast_hit_area = app
         .toast
         .as_ref()
-        .map(|toast| toast_notification_rect(terminal_area, toast, app.config_diagnostic.is_some()))
+        .map(|toast| {
+            toast_notification_rect(
+                terminal_area,
+                toast,
+                app.toast_position(),
+                app.config_diagnostic.is_some(),
+            )
+        })
         .unwrap_or_default();
 
     app.view = crate::app::ViewState {
@@ -426,6 +434,7 @@ fn render_notifications(app: &AppState, frame: &mut Frame, terminal_area: Rect) 
                 frame,
                 terminal_area,
                 toast,
+                app.toast_position(),
                 has_config_diagnostic,
                 &app.palette,
             );
@@ -433,8 +442,19 @@ fn render_notifications(app: &AppState, frame: &mut Frame, terminal_area: Rect) 
         copy_feedback_offset =
             copy_feedback_offset.saturating_add(if app.view.layout == ViewLayout::Mobile {
                 1
+            } else if matches!(
+                app.toast_position(),
+                ToastPosition::BottomLeft | ToastPosition::BottomRight
+            ) {
+                toast_notification_rect(
+                    terminal_area,
+                    toast,
+                    app.toast_position(),
+                    has_config_diagnostic,
+                )
+                .height
             } else {
-                toast_notification_rect(terminal_area, toast, has_config_diagnostic).height
+                0
             });
     }
     if let Some(feedback) = &app.copy_feedback {

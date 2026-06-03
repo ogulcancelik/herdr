@@ -6070,7 +6070,7 @@ next_tab = ""
             ),
         );
         server.foreground_client_id = Some(1);
-        server.app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        server.app.state.enable_herdr_toasts();
 
         let changed = server.handle_internal_event_with_forwarding(AppEvent::UpdateReady {
             version: "9.9.9".to_string(),
