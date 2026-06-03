@@ -121,6 +121,7 @@ pub struct App {
     pub(crate) overlay_panes: HashMap<crate::layout::PaneId, OverlayPaneState>,
     pub(crate) local_terminal_notifications: bool,
     pub(crate) config_reloaded_from_disk: bool,
+    prefix_input_source: Box<dyn crate::platform::PrefixInputSource>,
 }
 
 pub(crate) const APP_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -505,6 +506,9 @@ impl App {
             cjk_ime_agent_filter_configured: !config.experimental.cjk_ime_agents.is_empty(),
             cjk_ime_agents: parse_cjk_ime_agents(&config.experimental.cjk_ime_agents),
             cjk_ime_cursor_shape: config.experimental.cjk_ime_cursor_shape.to_decscusr(),
+            switch_ascii_input_source_in_prefix: config
+                .experimental
+                .switch_ascii_input_source_in_prefix,
             kitty_graphics_enabled: config.experimental.kitty_graphics,
             default_shell: config.terminal.default_shell.clone(),
             shell_mode: config.terminal.shell_mode,
@@ -598,6 +602,7 @@ impl App {
             overlay_panes: HashMap::new(),
             local_terminal_notifications: true,
             config_reloaded_from_disk: false,
+            prefix_input_source: Box::new(crate::platform::RealPrefixInputSource::default()),
         }
     }
 
@@ -673,6 +678,36 @@ impl App {
 
     fn request_full_redraw(&mut self) {
         self.full_redraw_pending = true;
+    }
+
+    pub(crate) fn sync_prefix_input_source(&mut self, previous_mode: Mode) {
+        match (
+            previous_mode == Mode::Prefix,
+            self.state.mode == Mode::Prefix,
+        ) {
+            (false, true) if self.state.switch_ascii_input_source_in_prefix => {
+                self.prefix_input_source.switch_to_ascii();
+            }
+            (true, false) => self.prefix_input_source.restore(),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn handle_internal_event_with_prefix_sync(
+        &mut self,
+        event: crate::events::AppEvent,
+    ) {
+        let previous_mode = self.state.mode;
+        self.handle_internal_event(event);
+        self.sync_prefix_input_source(previous_mode);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_prefix_input_source(
+        &mut self,
+        source: Box<dyn crate::platform::PrefixInputSource>,
+    ) {
+        self.prefix_input_source = source;
     }
 
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
@@ -851,7 +886,7 @@ impl App {
             match event {
                 LoopEvent::Timer => {}
                 LoopEvent::Internal(ev) => {
-                    self.handle_internal_event(ev);
+                    self.handle_internal_event_with_prefix_sync(ev);
                     needs_render = true;
                 }
                 LoopEvent::Api(msg) => {
@@ -1150,6 +1185,8 @@ impl App {
             self.state.cjk_ime_agents = parse_cjk_ime_agents(&config.experimental.cjk_ime_agents);
             self.state.cjk_ime_cursor_shape =
                 config.experimental.cjk_ime_cursor_shape.to_decscusr();
+            self.state.switch_ascii_input_source_in_prefix =
+                config.experimental.switch_ascii_input_source_in_prefix;
             self.persist_pane_history = config.experimental.pane_history;
             self.state.pane_history_persistence = config.experimental.pane_history;
             if !self.persist_pane_history {
@@ -1242,6 +1279,7 @@ impl App {
         apply_host_terminal_theme: bool,
     ) {
         for event in events {
+            let previous_mode = self.state.mode;
             match event {
                 crate::raw_input::RawInputEvent::Key(key) => {
                     let key_id = repeat_key_identity(&key);
@@ -1313,6 +1351,7 @@ impl App {
                 }
                 crate::raw_input::RawInputEvent::Unsupported => {}
             }
+            self.sync_prefix_input_source(previous_mode);
         }
     }
 
@@ -1402,6 +1441,8 @@ mod tests {
     use crate::terminal::TerminalRuntime;
     use crate::workspace::Workspace;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use std::cell::Cell;
+    use std::rc::Rc;
     use std::sync::Mutex;
 
     fn raw_key(
@@ -1432,6 +1473,144 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         )
+    }
+
+    #[derive(Clone, Default)]
+    struct FakePrefixInputSource {
+        switch_calls: Rc<Cell<usize>>,
+        restore_calls: Rc<Cell<usize>>,
+        switched: Rc<Cell<bool>>,
+        will_switch: bool,
+    }
+
+    impl FakePrefixInputSource {
+        fn switching() -> Self {
+            Self {
+                will_switch: true,
+                ..Self::default()
+            }
+        }
+
+        fn no_op() -> Self {
+            Self {
+                will_switch: false,
+                ..Self::default()
+            }
+        }
+    }
+
+    impl crate::platform::PrefixInputSource for FakePrefixInputSource {
+        fn switch_to_ascii(&mut self) {
+            self.switch_calls.set(self.switch_calls.get() + 1);
+            if self.will_switch {
+                self.switched.set(true);
+            }
+        }
+
+        fn restore(&mut self) {
+            if self.switched.replace(false) {
+                self.restore_calls.set(self.restore_calls.get() + 1);
+            }
+        }
+    }
+
+    #[test]
+    fn sync_prefix_input_source_switches_then_restores_when_enabled() {
+        let mut app = test_app();
+        app.state.switch_ascii_input_source_in_prefix = true;
+        let fake = FakePrefixInputSource::switching();
+        let switch_calls = fake.switch_calls.clone();
+        let restore_calls = fake.restore_calls.clone();
+        app.set_prefix_input_source(Box::new(fake));
+
+        // Terminal -> Prefix should switch to ASCII.
+        app.state.mode = Mode::Prefix;
+        app.sync_prefix_input_source(Mode::Terminal);
+        assert_eq!(switch_calls.get(), 1);
+        assert_eq!(restore_calls.get(), 0);
+
+        // Prefix -> Terminal should restore the saved source.
+        app.state.mode = Mode::Terminal;
+        app.sync_prefix_input_source(Mode::Prefix);
+        assert_eq!(switch_calls.get(), 1);
+        assert_eq!(restore_calls.get(), 1);
+    }
+
+    #[test]
+    fn sync_prefix_input_source_is_noop_when_flag_disabled() {
+        let mut app = test_app();
+        app.state.switch_ascii_input_source_in_prefix = false;
+        let fake = FakePrefixInputSource::switching();
+        let switch_calls = fake.switch_calls.clone();
+        let restore_calls = fake.restore_calls.clone();
+        app.set_prefix_input_source(Box::new(fake));
+
+        app.state.mode = Mode::Prefix;
+        app.sync_prefix_input_source(Mode::Terminal);
+        app.state.mode = Mode::Terminal;
+        app.sync_prefix_input_source(Mode::Prefix);
+
+        assert_eq!(switch_calls.get(), 0);
+        assert_eq!(restore_calls.get(), 0);
+    }
+
+    #[test]
+    fn sync_prefix_input_source_restore_is_safe_when_switch_was_noop() {
+        // Simulates the already-ASCII / failed-switch case: switch reports no
+        // change, and the later restore on leave must stay harmless.
+        let mut app = test_app();
+        app.state.switch_ascii_input_source_in_prefix = true;
+        let fake = FakePrefixInputSource::no_op();
+        let switch_calls = fake.switch_calls.clone();
+        let restore_calls = fake.restore_calls.clone();
+        app.set_prefix_input_source(Box::new(fake));
+
+        app.state.mode = Mode::Prefix;
+        app.sync_prefix_input_source(Mode::Terminal);
+        app.state.mode = Mode::Terminal;
+        app.sync_prefix_input_source(Mode::Prefix);
+
+        assert_eq!(switch_calls.get(), 1);
+        assert_eq!(restore_calls.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn raw_input_dispatch_restores_input_source_when_leaving_prefix() {
+        // Leaving prefix mode happens inside the raw-input dispatch, not in
+        // `handle_key` itself — the sync must sit at the dispatch layer so any
+        // event that exits prefix (here Esc) still restores the host source.
+        let mut app = test_app();
+        app.state.switch_ascii_input_source_in_prefix = true;
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let fake = FakePrefixInputSource::switching();
+        let switch_calls = fake.switch_calls.clone();
+        let restore_calls = fake.restore_calls.clone();
+        app.set_prefix_input_source(Box::new(fake));
+
+        // ctrl+b (the default prefix key) enters prefix mode → switch edge.
+        app.handle_raw_input_event(raw_key(
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        ))
+        .await;
+        assert_eq!(app.state.mode, Mode::Prefix);
+        assert_eq!(switch_calls.get(), 1);
+        assert_eq!(restore_calls.get(), 0);
+
+        // Esc leaves prefix mode → restore edge, even though the exit is decided
+        // below `handle_key`.
+        app.handle_raw_input_event(raw_key(
+            KeyCode::Esc,
+            KeyModifiers::empty(),
+            KeyEventKind::Press,
+        ))
+        .await;
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(restore_calls.get(), 1);
     }
 
     fn config_env_lock() -> &'static Mutex<()> {
@@ -1730,7 +1909,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[ui]\nagent_panel_scope = \"current\"\nredraw_on_focus_gained = false\nright_click_passthrough_modifier = \"ctrl\"\n[ui.toast]\ndelivery = \"herdr\"\n",
+            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[ui]\nagent_panel_scope = \"current\"\nredraw_on_focus_gained = false\nright_click_passthrough_modifier = \"ctrl\"\n[ui.toast]\ndelivery = \"herdr\"\n[experimental]\nswitch_ascii_input_source_in_prefix = true\n",
         )
         .unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
@@ -1769,6 +1948,7 @@ mod tests {
             app.state.new_terminal_cwd,
             crate::config::NewTerminalCwdConfig::Home
         );
+        assert!(app.state.switch_ascii_input_source_in_prefix);
         assert!(app.state.config_diagnostic.is_none());
         let toast = app.state.toast.as_ref().unwrap();
         assert_eq!(toast.kind, crate::app::state::ToastKind::UpdateInstalled);
@@ -3018,6 +3198,7 @@ mod tests {
     fn next_loop_deadline_includes_selection_autoscroll_deadline() {
         let mut app = test_app();
         let now = Instant::now();
+        app.next_resize_poll = now + Duration::from_millis(300);
         app.selection_autoscroll_deadline = Some(now + Duration::from_millis(5));
         app.next_animation_tick = Some(now + Duration::from_millis(100));
         app.session_save_deadline = Some(now + Duration::from_millis(200));

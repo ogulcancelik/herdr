@@ -61,9 +61,11 @@ impl App {
         &mut self,
         msg: crate::api::ApiRequestMessage,
     ) -> bool {
+        let previous_mode = self.state.mode;
         let changed = crate::api::request_changes_ui(&msg.request);
         let response = self.handle_api_request(msg.request);
         let _ = msg.respond_to.send(response);
+        self.sync_prefix_input_source(previous_mode);
         changed
     }
 
@@ -91,6 +93,7 @@ impl App {
         &mut self,
         event: crate::raw_input::RawInputEvent,
     ) -> bool {
+        let previous_mode = self.state.mode;
         let changed = match event {
             crate::raw_input::RawInputEvent::Key(key) => {
                 let key_id = repeat_key_identity(&key);
@@ -150,6 +153,7 @@ impl App {
             }
             crate::raw_input::RawInputEvent::Unsupported => false,
         };
+        self.sync_prefix_input_source(previous_mode);
         self.shutdown_detached_terminal_runtimes();
         changed
     }
@@ -552,7 +556,7 @@ impl App {
                 break;
             };
             had_event = true;
-            self.handle_internal_event(ev);
+            self.handle_internal_event_with_prefix_sync(ev);
         }
         had_event
     }

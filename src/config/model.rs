@@ -477,6 +477,12 @@ pub struct ExperimentalConfig {
     /// Cursor shape rendered for the IME anchor when
     /// `reveal_hidden_cursor_for_cjk_ime` is enabled. Default: "steady_block".
     pub cjk_ime_cursor_shape: ImeCursorShape,
+    /// While prefix mode is active, temporarily switch the macOS host input
+    /// source to an ASCII-capable keyboard layout so prefix commands are read
+    /// as ASCII even when a CJK IME is active, then restore the previous input
+    /// source when prefix mode exits. macOS only; a no-op elsewhere and a
+    /// best-effort no-op if the switch fails. Default: false.
+    pub switch_ascii_input_source_in_prefix: bool,
 }
 
 impl Default for KeysConfig {
@@ -753,6 +759,23 @@ reveal_hidden_cursor_for_cjk_ime = true
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.experimental.reveal_hidden_cursor_for_cjk_ime);
+    }
+
+    #[test]
+    fn switch_ascii_input_source_in_prefix_default_off_and_parse() {
+        let default_config = Config::default();
+        assert!(
+            !default_config
+                .experimental
+                .switch_ascii_input_source_in_prefix
+        );
+
+        let toml = r#"
+[experimental]
+switch_ascii_input_source_in_prefix = true
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.experimental.switch_ascii_input_source_in_prefix);
     }
 
     #[test]
@@ -1049,11 +1072,13 @@ kitty_graphics = true
 allow_nested = true
 kitty_graphics = true
 pane_history = true
+switch_ascii_input_source_in_prefix = true
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.experimental.allow_nested);
         assert!(config.experimental.kitty_graphics);
         assert!(config.experimental.pane_history);
+        assert!(config.experimental.switch_ascii_input_source_in_prefix);
     }
 
     #[test]

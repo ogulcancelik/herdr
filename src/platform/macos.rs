@@ -4,6 +4,7 @@ use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::ptr::NonNull;
 use std::sync::OnceLock;
 
 use super::{
@@ -13,6 +14,187 @@ use super::{
 
 const PROC_PGRP_ONLY: u32 = 2;
 const SERVER_NOFILE_LIMIT_TARGET: libc::rlim_t = 8192;
+const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+
+#[repr(C)]
+struct TisInputSource {
+    _private: [u8; 0],
+}
+
+type TisInputSourceRef = *const TisInputSource;
+type CfTypeRef = *const libc::c_void;
+type CfStringRef = *const libc::c_void;
+type OsStatus = libc::c_int;
+type Boolean = libc::c_uchar;
+type CfIndex = isize;
+
+#[link(name = "Carbon", kind = "framework")]
+extern "C" {
+    #[link_name = "kTISPropertyInputSourceID"]
+    static TIS_PROPERTY_INPUT_SOURCE_ID: CfStringRef;
+
+    #[link_name = "TISCopyCurrentKeyboardInputSource"]
+    fn tis_copy_current_keyboard_input_source() -> TisInputSourceRef;
+
+    #[link_name = "TISCopyCurrentASCIICapableKeyboardLayoutInputSource"]
+    fn tis_copy_current_ascii_capable_keyboard_layout_input_source() -> TisInputSourceRef;
+
+    #[link_name = "TISGetInputSourceProperty"]
+    fn tis_get_input_source_property(
+        input_source: TisInputSourceRef,
+        property_key: CfStringRef,
+    ) -> CfTypeRef;
+
+    #[link_name = "TISSelectInputSource"]
+    fn tis_select_input_source(input_source: TisInputSourceRef) -> OsStatus;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    #[link_name = "CFRelease"]
+    fn cf_release(value: CfTypeRef);
+
+    #[link_name = "CFEqual"]
+    fn cf_equal(left: CfTypeRef, right: CfTypeRef) -> Boolean;
+
+    #[link_name = "CFStringGetCStringPtr"]
+    fn cf_string_get_cstring_ptr(value: CfStringRef, encoding: u32) -> *const libc::c_char;
+
+    #[link_name = "CFStringGetLength"]
+    fn cf_string_get_length(value: CfStringRef) -> CfIndex;
+
+    #[link_name = "CFStringGetMaximumSizeForEncoding"]
+    fn cf_string_get_maximum_size_for_encoding(length: CfIndex, encoding: u32) -> CfIndex;
+
+    #[link_name = "CFStringGetCString"]
+    fn cf_string_get_cstring(
+        value: CfStringRef,
+        buffer: *mut libc::c_char,
+        buffer_size: CfIndex,
+        encoding: u32,
+    ) -> Boolean;
+}
+
+#[derive(Debug)]
+pub(crate) struct InputSourceRestore {
+    previous: NonNull<TisInputSource>,
+}
+
+impl Drop for InputSourceRestore {
+    fn drop(&mut self) {
+        // SAFETY: `previous` is a retained TIS input source created by
+        // `TISCopyCurrentKeyboardInputSource`; selecting it and releasing that
+        // retain follows the Carbon Input Source Services ownership contract.
+        unsafe {
+            let previous = self.previous.as_ptr();
+            let status = tis_select_input_source(previous);
+            cf_release(previous.cast());
+            if status != 0 {
+                tracing::debug!(
+                    status,
+                    "failed to restore host input source after prefix mode"
+                );
+            }
+        }
+    }
+}
+
+pub(crate) fn switch_to_ascii_input_source() -> Option<InputSourceRestore> {
+    // SAFETY: TISCopy* functions return retained references or null. Each
+    // retained reference is either transferred into `InputSourceRestore` or
+    // released before returning; TISSelectInputSource accepts live TIS refs.
+    unsafe {
+        let current =
+            NonNull::new(tis_copy_current_keyboard_input_source() as *mut TisInputSource)?;
+        let Some(ascii) = NonNull::new(
+            tis_copy_current_ascii_capable_keyboard_layout_input_source() as *mut TisInputSource,
+        ) else {
+            cf_release(current.as_ptr().cast());
+            return None;
+        };
+
+        if input_source_ids_equal(current.as_ptr(), ascii.as_ptr()) {
+            cf_release(current.as_ptr().cast());
+            cf_release(ascii.as_ptr().cast());
+            return None;
+        }
+
+        let debug_ids = tracing::enabled!(tracing::Level::DEBUG).then(|| {
+            (
+                input_source_id(current.as_ptr()),
+                input_source_id(ascii.as_ptr()),
+            )
+        });
+
+        let status = tis_select_input_source(ascii.as_ptr());
+        cf_release(ascii.as_ptr().cast());
+        if status != 0 {
+            cf_release(current.as_ptr().cast());
+            tracing::debug!(status, "failed to switch host input source for prefix mode");
+            return None;
+        }
+
+        if let Some((Some(from), Some(to))) = debug_ids {
+            tracing::debug!(from, to, "switched host input source for prefix mode");
+        }
+
+        Some(InputSourceRestore { previous: current })
+    }
+}
+
+unsafe fn input_source_ids_equal(left: TisInputSourceRef, right: TisInputSourceRef) -> bool {
+    let left_property = tis_get_input_source_property(left, TIS_PROPERTY_INPUT_SOURCE_ID);
+    let right_property = tis_get_input_source_property(right, TIS_PROPERTY_INPUT_SOURCE_ID);
+    !left_property.is_null()
+        && !right_property.is_null()
+        && cf_equal(left_property, right_property) != 0
+}
+
+unsafe fn input_source_id(input_source: TisInputSourceRef) -> Option<String> {
+    let property =
+        tis_get_input_source_property(input_source, TIS_PROPERTY_INPUT_SOURCE_ID) as CfStringRef;
+    cf_string_to_string(property)
+}
+
+unsafe fn cf_string_to_string(value: CfStringRef) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+
+    let direct = cf_string_get_cstring_ptr(value, CF_STRING_ENCODING_UTF8);
+    if !direct.is_null() {
+        return std::ffi::CStr::from_ptr(direct)
+            .to_str()
+            .ok()
+            .map(str::to_owned);
+    }
+
+    let length = cf_string_get_length(value);
+    if length < 0 {
+        return None;
+    }
+    let max_bytes = cf_string_get_maximum_size_for_encoding(length, CF_STRING_ENCODING_UTF8);
+    if max_bytes < 0 {
+        return None;
+    }
+    let buffer_len = usize::try_from(max_bytes).ok()?.checked_add(1)?;
+    let mut buffer = vec![0 as libc::c_char; buffer_len];
+    let buffer_size = CfIndex::try_from(buffer.len()).ok()?;
+    if cf_string_get_cstring(
+        value,
+        buffer.as_mut_ptr(),
+        buffer_size,
+        CF_STRING_ENCODING_UTF8,
+    ) == 0
+    {
+        return None;
+    }
+
+    std::ffi::CStr::from_ptr(buffer.as_ptr())
+        .to_str()
+        .ok()
+        .map(str::to_owned)
+}
 
 pub fn raise_server_nofile_limit() {
     match raise_nofile_limit(SERVER_NOFILE_LIMIT_TARGET) {
