@@ -124,6 +124,10 @@ pub(crate) fn cursor_dir() -> io::Result<PathBuf> {
     config_dir_from_env_or_home(CURSOR_CONFIG_DIR_ENV_VAR, &[".cursor"])
 }
 
+pub(crate) fn mastracode_dir() -> io::Result<PathBuf> {
+    Ok(home_dir()?.join(".mastracode"))
+}
+
 pub(crate) fn home_dir() -> io::Result<PathBuf> {
     if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(home));

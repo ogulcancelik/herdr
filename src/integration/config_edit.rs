@@ -110,6 +110,34 @@ pub(crate) fn ensure_command_hook(
 //   { "type": "command", "matcher": "...", "bash": "...", ... }
 // Keep the helpers separate so install/uninstall preserves unrelated hooks in
 // each agent's native format instead of normalizing user configuration.
+pub(crate) fn ensure_flat_command_hook(
+    hooks: &mut Map<String, Value>,
+    event: &str,
+    command: String,
+    timeout_ms: u64,
+) -> io::Result<()> {
+    let entries = hooks
+        .entry(event.to_string())
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| io::Error::other(format!("hook entries for {event} must be an array")))?;
+
+    if entries.iter().any(|entry| {
+        entry.get("type").and_then(Value::as_str) == Some("command")
+            && entry.get("command").and_then(Value::as_str) == Some(command.as_str())
+    }) {
+        return Ok(());
+    }
+
+    entries.push(json!({
+        "type": "command",
+        "command": command,
+        "timeout": timeout_ms,
+        "description": "Report MastraCode agent state to Herdr",
+    }));
+    Ok(())
+}
+
 pub(crate) fn ensure_direct_command_hook(
     hooks: &mut Map<String, Value>,
     event: &str,
@@ -211,6 +239,31 @@ pub(crate) fn remove_command_hook(
         hooks.remove(event);
     }
 
+    Ok(removed)
+}
+
+pub(crate) fn remove_flat_command_hook(
+    hooks: &mut Map<String, Value>,
+    event: &str,
+    command: &str,
+) -> io::Result<bool> {
+    let Some(entries_value) = hooks.get_mut(event) else {
+        return Ok(false);
+    };
+
+    let entries = entries_value
+        .as_array_mut()
+        .ok_or_else(|| io::Error::other(format!("hook entries for {event} must be an array")))?;
+
+    let before = entries.len();
+    entries.retain(|entry| {
+        !(entry.get("type").and_then(Value::as_str) == Some("command")
+            && entry.get("command").and_then(Value::as_str) == Some(command))
+    });
+    let removed = entries.len() != before;
+    if entries.is_empty() {
+        hooks.remove(event);
+    }
     Ok(removed)
 }
 
