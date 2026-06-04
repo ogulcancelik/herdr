@@ -1,11 +1,11 @@
 ---
 title: Integrations
-description: Install Herdr integrations for Pi, OMP, Claude Code, Codex, GitHub Copilot CLI, OpenCode, Hermes Agent, and Qoder CLI.
+description: Install Herdr integrations for Pi, OMP, Claude Code, Codex, GitHub Copilot CLI, Kimi Code CLI, OpenCode, Hermes Agent, and Qoder CLI.
 ---
 
 Herdr detects supported agents automatically. Official integrations can add native session identity for restore, semantic state reports, or both. Claude Code, Codex, and OpenCode state comes from screen detection even when their session identity integrations are installed.
 
-Use integrations when you want native agent session restore, direct state reports from Pi/OMP/Copilot/Hermes/Qoder-style hooks or plugins, or both.
+Use integrations when you want native agent session restore, direct state reports from Pi/OMP/Copilot/Kimi/Hermes/Qoder-style hooks or plugins, or both.
 
 ## Install integrations
 
@@ -17,6 +17,7 @@ herdr integration install omp
 herdr integration install claude
 herdr integration install codex
 herdr integration install copilot
+herdr integration install kimi
 herdr integration install opencode
 herdr integration install hermes
 herdr integration install qodercli
@@ -30,6 +31,7 @@ herdr integration uninstall omp
 herdr integration uninstall claude
 herdr integration uninstall codex
 herdr integration uninstall copilot
+herdr integration uninstall kimi
 herdr integration uninstall opencode
 herdr integration uninstall hermes
 herdr integration uninstall qodercli
@@ -45,11 +47,11 @@ Herdr combines three signals:
 | Screen heuristics | Infers visible native agent state such as `working` or `blocked`. |
 | Integration events | Reports native session identity, semantic state, or both depending on the integration. |
 
-Claude Code, Codex, and OpenCode state detection is screen-read first. Their Herdr-owned integrations do not author `idle`, `working`, or `blocked` state. Pi, GitHub Copilot CLI, and Hermes Agent report semantic state and session identity. OMP and Qoder CLI report semantic state but do not provide native session restore. Custom socket integrations can report state when they define state that is not visible in the native terminal UI.
+Claude Code, Codex, and OpenCode state detection is screen-read first. Their Herdr-owned integrations do not author `idle`, `working`, or `blocked` state. Pi, GitHub Copilot CLI, and Hermes Agent report semantic state and session identity. OMP, Kimi Code CLI, and Qoder CLI report semantic state but do not provide native session restore. Custom socket integrations can report state when they define state that is not visible in the native terminal UI.
 
 Some integrations report native agent session references. Herdr uses official session references to resume Claude Code, Codex, GitHub Copilot CLI, Pi, Hermes Agent, and OpenCode panes after a Herdr server restart unless `[session] resume_agents_on_restore = false` disables it.
 
-Native session restore requires current Herdr integrations: Pi integration version `2`, Claude Code version `5`, Codex version `5`, GitHub Copilot CLI version `1`, OpenCode version `4`, or Hermes Agent version `2`. OMP integration version `2` and Qoder CLI integration version `1` report agent state only. Check installed versions with `herdr integration status`.
+Native session restore requires current Herdr integrations: Pi integration version `2`, Claude Code version `5`, Codex version `5`, GitHub Copilot CLI version `1`, OpenCode version `4`, or Hermes Agent version `2`. OMP integration version `2`, Kimi Code CLI integration version `1`, and Qoder CLI integration version `1` report agent state only. Check installed versions with `herdr integration status`.
 
 ## Pi
 
@@ -122,6 +124,20 @@ Copilot state is reported through the same local socket API used by other integr
 Herdr uses `~/.copilot` by default, or `COPILOT_HOME` when set. The Copilot config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and updates `settings.json` with Herdr hook entries. The hook maps prompt submission, tool use, post-tool progress after approvals, `ask_user` prompts, `exit_plan_mode` plan review prompts, permission notifications, agent idle notifications, turn stops, and session exits into Herdr state. Uninstall removes Herdr entries from `settings.json` and deletes the hook script.
 
 After Copilot emits a session-bearing event, Herdr can use the reported session id to resume the pane with `copilot --resume=<id>`.
+
+## Kimi Code CLI
+
+Install the Kimi Code CLI hook:
+
+```bash
+herdr integration install kimi
+```
+
+The hook reports semantic state to Herdr when Kimi Code emits lifecycle, tool, approval, and session events. It requires Kimi Code CLI `0.8.0` or newer.
+
+Herdr uses `~/.kimi-code` by default, or `KIMI_CODE_HOME` when set. The Kimi Code config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and appends Herdr-managed `[[hooks]]` entries to `config.toml`. Uninstall removes the Herdr-managed config block and deletes the hook script.
+
+Native screen heuristics remain available when the hook is not installed.
 
 ## OpenCode
 

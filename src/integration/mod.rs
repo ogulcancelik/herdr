@@ -25,6 +25,25 @@ const CODEX_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const CODEX_HOOK_ASSET: &str = include_str!("assets/codex/herdr-agent-state.sh");
 const CODEX_INTEGRATION_VERSION: u32 = 5;
 const CODEX_HOME_ENV_VAR: &str = "CODEX_HOME";
+const KIMI_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
+const KIMI_HOOK_ASSET: &str = include_str!("assets/kimi/herdr-agent-state.sh");
+const KIMI_INTEGRATION_VERSION: u32 = 1;
+const KIMI_CODE_HOME_ENV_VAR: &str = "KIMI_CODE_HOME";
+const KIMI_CONFIG_BLOCK_BEGIN: &str = "# >>> herdr kimi integration";
+const KIMI_CONFIG_BLOCK_END: &str = "# <<< herdr kimi integration";
+const KIMI_MIN_VERSION: &str = "0.8.0";
+const KIMI_HOOK_EVENTS: [(&str, &str); 10] = [
+    ("SessionStart", "idle"),
+    ("UserPromptSubmit", "working"),
+    ("PreToolUse", "working"),
+    ("PermissionRequest", "blocked"),
+    ("PermissionResult", "working"),
+    ("PostToolUse", "working"),
+    ("PostToolUseFailure", "working"),
+    ("Stop", "idle"),
+    ("StopFailure", "idle"),
+    ("SessionEnd", "release"),
+];
 const COPILOT_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const COPILOT_HOOK_ASSET: &str = include_str!("assets/copilot/herdr-agent-state.sh");
 const COPILOT_INTEGRATION_VERSION: u32 = 1;
@@ -54,6 +73,12 @@ pub(crate) struct ClaudeInstallPaths {
 pub(crate) struct CodexInstallPaths {
     pub hook_path: PathBuf,
     pub hooks_path: PathBuf,
+    pub config_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct KimiInstallPaths {
+    pub hook_path: PathBuf,
     pub config_path: PathBuf,
 }
 
@@ -166,6 +191,14 @@ pub(crate) struct CodexUninstallResult {
 }
 
 #[derive(Debug)]
+pub(crate) struct KimiUninstallResult {
+    pub hook_path: PathBuf,
+    pub config_path: PathBuf,
+    pub removed_hook_file: bool,
+    pub updated_config: bool,
+}
+
+#[derive(Debug)]
 pub(crate) struct CopilotUninstallResult {
     pub hook_path: PathBuf,
     pub settings_path: PathBuf,
@@ -256,6 +289,17 @@ pub(crate) fn install_target(
                     "ensured copilot settings at {}",
                     installed.settings_path.display()
                 ),
+            ]
+        }
+        crate::api::schema::IntegrationTarget::Kimi => {
+            let installed = install_kimi()?;
+            vec![
+                format!(
+                    "installed kimi integration hook to {}",
+                    installed.hook_path.display()
+                ),
+                format!("ensured kimi config at {}", installed.config_path.display()),
+                format!("requires kimi code {KIMI_MIN_VERSION} or newer"),
             ]
         }
         crate::api::schema::IntegrationTarget::Opencode => {
@@ -414,6 +458,33 @@ pub(crate) fn uninstall_target(
             }
             messages
         }
+        crate::api::schema::IntegrationTarget::Kimi => {
+            let result = uninstall_kimi()?;
+            let mut messages = Vec::new();
+            if result.removed_hook_file {
+                messages.push(format!(
+                    "removed kimi hook at {}",
+                    result.hook_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no kimi hook found at {}",
+                    result.hook_path.display()
+                ));
+            }
+            if result.updated_config {
+                messages.push(format!(
+                    "removed herdr kimi hook entries from {}",
+                    result.config_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no herdr kimi hook entries found in {}",
+                    result.config_path.display()
+                ));
+            }
+            messages
+        }
         crate::api::schema::IntegrationTarget::Opencode => {
             let result = uninstall_opencode()?;
             if result.removed_plugin {
@@ -497,6 +568,7 @@ pub(crate) fn integration_target_label(
         crate::api::schema::IntegrationTarget::Claude => "claude",
         crate::api::schema::IntegrationTarget::Codex => "codex",
         crate::api::schema::IntegrationTarget::Copilot => "copilot",
+        crate::api::schema::IntegrationTarget::Kimi => "kimi",
         crate::api::schema::IntegrationTarget::Opencode => "opencode",
         crate::api::schema::IntegrationTarget::Hermes => "hermes",
         crate::api::schema::IntegrationTarget::Qodercli => "qodercli",
@@ -510,6 +582,7 @@ fn integration_target_command(target: crate::api::schema::IntegrationTarget) -> 
         crate::api::schema::IntegrationTarget::Claude => "claude",
         crate::api::schema::IntegrationTarget::Codex => "codex",
         crate::api::schema::IntegrationTarget::Copilot => "copilot",
+        crate::api::schema::IntegrationTarget::Kimi => "kimi",
         crate::api::schema::IntegrationTarget::Opencode => "opencode",
         crate::api::schema::IntegrationTarget::Hermes => "hermes",
         crate::api::schema::IntegrationTarget::Qodercli => "qodercli",
@@ -586,7 +659,7 @@ fn integration_specs() -> [(
     crate::api::schema::IntegrationTarget,
     io::Result<PathBuf>,
     u32,
-); 8] {
+); 9] {
     [
         (
             crate::api::schema::IntegrationTarget::Pi,
@@ -612,6 +685,11 @@ fn integration_specs() -> [(
             crate::api::schema::IntegrationTarget::Copilot,
             copilot_dir().map(|dir| dir.join("hooks").join(COPILOT_HOOK_INSTALL_NAME)),
             COPILOT_INTEGRATION_VERSION,
+        ),
+        (
+            crate::api::schema::IntegrationTarget::Kimi,
+            kimi_dir().map(|dir| dir.join("hooks").join(KIMI_HOOK_INSTALL_NAME)),
+            KIMI_INTEGRATION_VERSION,
         ),
         (
             crate::api::schema::IntegrationTarget::Opencode,
@@ -933,6 +1011,39 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
     })
 }
 
+pub(crate) fn install_kimi() -> io::Result<KimiInstallPaths> {
+    let dir = kimi_dir()?;
+    if !dir.is_dir() {
+        return Err(io::Error::other(format!(
+            "kimi code config directory not found at {}. install kimi code first",
+            dir.display()
+        )));
+    }
+
+    let hooks_dir = dir.join("hooks");
+    fs::create_dir_all(&hooks_dir)?;
+
+    let hook_path = hooks_dir.join(KIMI_HOOK_INSTALL_NAME);
+    fs::write(&hook_path, KIMI_HOOK_ASSET)?;
+    make_executable(&hook_path)?;
+
+    let config_path = dir.join("config.toml");
+    let existing_config = if config_path.is_file() {
+        fs::read_to_string(&config_path)?
+    } else {
+        String::new()
+    };
+    let new_config = build_kimi_config_with_hooks(&existing_config, &hook_path);
+    if new_config != existing_config {
+        fs::write(&config_path, new_config)?;
+    }
+
+    Ok(KimiInstallPaths {
+        hook_path,
+        config_path,
+    })
+}
+
 pub(crate) fn install_copilot() -> io::Result<CopilotInstallPaths> {
     let dir = copilot_dir()?;
     if !dir.is_dir() {
@@ -1217,6 +1328,31 @@ pub(crate) fn uninstall_codex() -> io::Result<CodexUninstallResult> {
         config_path,
         removed_hook_file,
         updated_hooks,
+    })
+}
+
+pub(crate) fn uninstall_kimi() -> io::Result<KimiUninstallResult> {
+    let kimi_dir = kimi_dir()?;
+    let hook_path = kimi_dir.join("hooks").join(KIMI_HOOK_INSTALL_NAME);
+    let config_path = kimi_dir.join("config.toml");
+    let mut updated_config = false;
+
+    if config_path.is_file() {
+        let existing_config = fs::read_to_string(&config_path)?;
+        let new_config = remove_kimi_config_block(&existing_config);
+        if new_config != existing_config {
+            fs::write(&config_path, new_config)?;
+            updated_config = true;
+        }
+    }
+
+    let removed_hook_file = remove_file_if_exists(&hook_path)?;
+
+    Ok(KimiUninstallResult {
+        hook_path,
+        config_path,
+        removed_hook_file,
+        updated_config,
     })
 }
 
@@ -1878,6 +2014,95 @@ fn build_codex_config_with_hooks(content: &str) -> String {
     join_toml_lines(lines, trailing_newline)
 }
 
+fn build_kimi_config_with_hooks(content: &str, hook_path: &Path) -> String {
+    let mut result = remove_kimi_config_block(content)
+        .trim_end_matches('\n')
+        .to_string();
+    if !result.is_empty() {
+        result.push('\n');
+        result.push('\n');
+    }
+
+    result.push_str(KIMI_CONFIG_BLOCK_BEGIN);
+    result.push('\n');
+    for (event, action) in KIMI_HOOK_EVENTS {
+        result.push_str(&kimi_hook_table(event, hook_path, action));
+    }
+    result.push_str(KIMI_CONFIG_BLOCK_END);
+    result.push('\n');
+    result
+}
+
+fn kimi_hook_table(event: &str, hook_path: &Path, action: &str) -> String {
+    let command = format!(
+        "bash {} {action}",
+        shell_single_quote(&hook_path.display().to_string())
+    );
+    format!(
+        "[[hooks]]\nevent = {}\ncommand = {}\ntimeout = 10\n\n",
+        toml_basic_string(event),
+        toml_basic_string(&command)
+    )
+}
+
+fn remove_kimi_config_block(content: &str) -> String {
+    let trailing_newline = content.ends_with('\n');
+    let mut lines = Vec::new();
+    let mut in_block = false;
+    let mut removed_block = false;
+
+    for line in content.lines() {
+        if line.trim() == KIMI_CONFIG_BLOCK_BEGIN {
+            in_block = true;
+            removed_block = true;
+            continue;
+        }
+        if in_block {
+            if line.trim() == KIMI_CONFIG_BLOCK_END {
+                in_block = false;
+            }
+            continue;
+        }
+        lines.push(line.to_string());
+    }
+
+    if !removed_block {
+        return content.to_string();
+    }
+
+    let mut result = join_toml_lines(lines, trailing_newline);
+    while result.ends_with("\n\n") {
+        result.pop();
+    }
+    if result == "\n" {
+        String::new()
+    } else {
+        result
+    }
+}
+
+fn toml_basic_string(value: &str) -> String {
+    let mut result = String::with_capacity(value.len() + 2);
+    result.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => result.push_str("\\\""),
+            '\\' => result.push_str("\\\\"),
+            '\u{08}' => result.push_str("\\b"),
+            '\t' => result.push_str("\\t"),
+            '\n' => result.push_str("\\n"),
+            '\u{0c}' => result.push_str("\\f"),
+            '\r' => result.push_str("\\r"),
+            ch if ch <= '\u{1f}' || ch == '\u{7f}' => {
+                result.push_str(&format!("\\u{:04X}", ch as u32));
+            }
+            ch => result.push(ch),
+        }
+    }
+    result.push('"');
+    result
+}
+
 fn join_toml_lines(lines: Vec<String>, trailing_newline: bool) -> String {
     let mut result = lines.join("\n");
     if trailing_newline || result.is_empty() {
@@ -1952,6 +2177,10 @@ fn claude_dir() -> io::Result<PathBuf> {
 
 fn codex_dir() -> io::Result<PathBuf> {
     config_dir_from_env_or_home(CODEX_HOME_ENV_VAR, &[".codex"])
+}
+
+fn kimi_dir() -> io::Result<PathBuf> {
+    config_dir_from_env_or_home(KIMI_CODE_HOME_ENV_VAR, &[".kimi-code"])
 }
 
 fn copilot_dir() -> io::Result<PathBuf> {
@@ -2032,7 +2261,37 @@ mod tests {
         std::env::remove_var(CLAUDE_CONFIG_DIR_ENV_VAR);
         std::env::remove_var(CODEX_HOME_ENV_VAR);
         std::env::remove_var(COPILOT_HOME_ENV_VAR);
+        std::env::remove_var(KIMI_CODE_HOME_ENV_VAR);
         std::env::remove_var(QODERCLI_CONFIG_DIR_ENV_VAR);
+    }
+
+    fn kimi_hook_command(hook_path: &Path, action: &str) -> String {
+        format!(
+            "bash {} {action}",
+            shell_single_quote(&hook_path.display().to_string())
+        )
+    }
+
+    fn kimi_config_hooks(config: &str) -> Vec<toml::Value> {
+        let parsed: toml::Value = toml::from_str(config).unwrap();
+        parsed
+            .get("hooks")
+            .and_then(toml::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn assert_kimi_hook(config: &str, hook_path: &Path, event: &str, action: &str) {
+        let command = kimi_hook_command(hook_path, action);
+        let hooks = kimi_config_hooks(config);
+        assert!(
+            hooks.iter().any(|hook| {
+                hook.get("event").and_then(toml::Value::as_str) == Some(event)
+                    && hook.get("command").and_then(toml::Value::as_str) == Some(command.as_str())
+                    && hook.get("timeout").and_then(toml::Value::as_integer) == Some(10)
+            }),
+            "missing kimi hook for {event} -> {action}"
+        );
     }
 
     fn unique_base() -> PathBuf {
@@ -2875,6 +3134,143 @@ mod tests {
     }
 
     #[test]
+    fn install_kimi_writes_hook_and_updates_config() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let kimi_dir = home.join(".kimi-code");
+        fs::create_dir_all(&kimi_dir).unwrap();
+        fs::write(
+            kimi_dir.join("config.toml"),
+            "default_model = \"moonshot\"\n\n[[hooks]]\nevent = \"Notification\"\nmatcher = \"task.completed\"\ncommand = \"echo keep\"\ntimeout = 3\n",
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        let installed = install_kimi().unwrap();
+        let hook_content = fs::read_to_string(&installed.hook_path).unwrap();
+        let config = fs::read_to_string(&installed.config_path).unwrap();
+        let hooks = kimi_config_hooks(&config);
+
+        assert_eq!(
+            installed.hook_path,
+            kimi_dir.join("hooks").join(KIMI_HOOK_INSTALL_NAME)
+        );
+        assert_eq!(installed.config_path, kimi_dir.join("config.toml"));
+        assert_eq!(hook_content, KIMI_HOOK_ASSET);
+        assert_eq!(hooks.len(), 11);
+        assert!(config.contains("default_model = \"moonshot\""));
+        assert!(config.contains("command = \"echo keep\""));
+        assert!(config.contains(KIMI_CONFIG_BLOCK_BEGIN));
+        assert!(config.contains(KIMI_CONFIG_BLOCK_END));
+        for (event, action) in KIMI_HOOK_EVENTS {
+            assert_kimi_hook(&config, &installed.hook_path, event, action);
+        }
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_kimi_uses_kimi_code_home_env() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let kimi_dir = base.join("custom-kimi");
+        fs::create_dir_all(&kimi_dir).unwrap();
+        std::env::set_var(KIMI_CODE_HOME_ENV_VAR, &kimi_dir);
+
+        let installed = install_kimi().unwrap();
+
+        assert_eq!(
+            installed.hook_path,
+            kimi_dir.join("hooks").join(KIMI_HOOK_INSTALL_NAME)
+        );
+        assert_eq!(installed.config_path, kimi_dir.join("config.toml"));
+
+        clear_integration_path_env();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_kimi_is_idempotent_for_config_block() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let kimi_dir = home.join(".kimi-code");
+        fs::create_dir_all(&kimi_dir).unwrap();
+        std::env::set_var("HOME", &home);
+
+        install_kimi().unwrap();
+        install_kimi().unwrap();
+
+        let config = fs::read_to_string(kimi_dir.join("config.toml")).unwrap();
+        let hooks = kimi_config_hooks(&config);
+
+        assert_eq!(config.matches(KIMI_CONFIG_BLOCK_BEGIN).count(), 1);
+        assert_eq!(config.matches(KIMI_CONFIG_BLOCK_END).count(), 1);
+        assert_eq!(hooks.len(), KIMI_HOOK_EVENTS.len());
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn uninstall_kimi_removes_hook_and_config_block_preserves_other_hooks() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let kimi_dir = home.join(".kimi-code");
+        fs::create_dir_all(&kimi_dir).unwrap();
+        std::env::set_var("HOME", &home);
+
+        let installed = install_kimi().unwrap();
+        fs::write(
+            &installed.config_path,
+            format!(
+                "default_model = \"moonshot\"\n\n[[hooks]]\nevent = \"Notification\"\ncommand = \"echo keep\"\n\n{}",
+                fs::read_to_string(&installed.config_path).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let result = uninstall_kimi().unwrap();
+        let config = fs::read_to_string(kimi_dir.join("config.toml")).unwrap();
+        let hooks = kimi_config_hooks(&config);
+
+        assert!(result.removed_hook_file);
+        assert!(result.updated_config);
+        assert!(!result.hook_path.exists());
+        assert!(config.contains("default_model = \"moonshot\""));
+        assert!(config.contains("command = \"echo keep\""));
+        assert!(!config.contains(KIMI_CONFIG_BLOCK_BEGIN));
+        assert!(!config.contains(KIMI_CONFIG_BLOCK_END));
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(
+            hooks[0].get("event").and_then(toml::Value::as_str),
+            Some("Notification")
+        );
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_kimi_errors_when_config_dir_missing() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+
+        let err = install_kimi().unwrap_err().to_string();
+
+        assert!(err.contains("kimi code config directory not found"));
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn install_copilot_writes_hook_and_updates_settings() {
         let _lock = integration_env_lock();
         let base = unique_base();
@@ -3243,6 +3639,10 @@ mod tests {
         assert!(CODEX_HOOK_ASSET.contains("pane.report_agent_session"));
         assert!(!CODEX_HOOK_ASSET.contains("\"state\": action"));
         assert!(!CODEX_HOOK_ASSET.contains("pane.release_agent"));
+        assert!(KIMI_HOOK_ASSET.contains("source = \"herdr:kimi\""));
+        assert!(KIMI_HOOK_ASSET.contains("pane.report_agent"));
+        assert!(KIMI_HOOK_ASSET.contains("pane.release_agent"));
+        assert!(!KIMI_HOOK_ASSET.contains("agent_session_id"));
         assert!(COPILOT_HOOK_ASSET.contains("agent_session_id"));
         assert!(COPILOT_HOOK_ASSET.contains("notification_type"));
         assert!(COPILOT_HOOK_ASSET.contains("ask_user"));
