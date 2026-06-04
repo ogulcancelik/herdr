@@ -79,6 +79,7 @@ fn has_visible_blocker(agent: Agent, content: &str, state: AgentState) -> bool {
         // is known to be structural and live.
         Agent::Claude => claude_code::has_visible_blocker(content),
         Agent::Codex => codex::has_visible_blocker(content),
+        Agent::Kimi => kimi::has_visible_blocker(content),
         _ => false,
     }
 }
@@ -91,6 +92,7 @@ fn has_visible_idle(agent: Agent, content: &str, state: AgentState) -> bool {
     match agent {
         Agent::Claude => claude_code::has_prompt_box(content),
         Agent::Codex => codex::has_prompt(content),
+        Agent::Kimi => kimi::has_prompt_box(content),
         _ => false,
     }
 }
@@ -103,6 +105,7 @@ fn has_visible_working(agent: Agent, content: &str, state: AgentState) -> bool {
     match agent {
         Agent::Claude => claude_code::has_working_chrome(content),
         Agent::Codex => codex::has_visible_working(content),
+        Agent::Kimi => kimi::has_visible_working(content),
         _ => false,
     }
 }
