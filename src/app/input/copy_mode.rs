@@ -280,23 +280,53 @@ impl AppState {
         direction: i16,
         half_page: bool,
     ) {
-        let Some(copy_mode) = self.copy_mode else {
+        let Some(mut copy_mode) = self.copy_mode else {
             return;
         };
-        let Some(info) = self.pane_info_by_id(copy_mode.pane_id) else {
+        let Some(info) = self.pane_info_by_id(copy_mode.pane_id).cloned() else {
             self.exit_copy_mode(terminal_runtimes, false);
             return;
         };
-        let lines = if half_page {
-            (info.inner_rect.height / 2).max(1)
-        } else {
-            info.inner_rect.height.max(1)
-        } as usize;
-        if direction < 0 {
+        let lines = copy_mode_page_lines(info.inner_rect.height, half_page);
+        if let Some(metrics) = self.pane_scroll_metrics(terminal_runtimes, copy_mode.pane_id) {
+            if direction < 0 {
+                let next_offset = metrics.offset_from_bottom.saturating_add(lines);
+                if next_offset > metrics.max_offset_from_bottom {
+                    let scrolled_lines = metrics
+                        .max_offset_from_bottom
+                        .saturating_sub(metrics.offset_from_bottom);
+                    let cursor_lines = lines.saturating_sub(scrolled_lines);
+                    self.set_pane_scroll_offset(
+                        terminal_runtimes,
+                        copy_mode.pane_id,
+                        metrics.max_offset_from_bottom,
+                    );
+                    copy_mode.cursor_row = copy_mode
+                        .cursor_row
+                        .saturating_sub(cursor_lines.min(u16::MAX as usize) as u16);
+                } else {
+                    self.set_pane_scroll_offset(terminal_runtimes, copy_mode.pane_id, next_offset);
+                }
+            } else if metrics.offset_from_bottom < lines {
+                let cursor_lines = lines.saturating_sub(metrics.offset_from_bottom);
+                self.set_pane_scroll_offset(terminal_runtimes, copy_mode.pane_id, 0);
+                copy_mode.cursor_row = copy_mode
+                    .cursor_row
+                    .saturating_add(cursor_lines.min(u16::MAX as usize) as u16)
+                    .min(info.inner_rect.height.saturating_sub(1));
+            } else {
+                self.set_pane_scroll_offset(
+                    terminal_runtimes,
+                    copy_mode.pane_id,
+                    metrics.offset_from_bottom - lines,
+                );
+            }
+        } else if direction < 0 {
             self.scroll_pane_up(terminal_runtimes, copy_mode.pane_id, lines);
         } else {
             self.scroll_pane_down(terminal_runtimes, copy_mode.pane_id, lines);
         }
+        self.copy_mode = Some(copy_mode);
         self.sync_copy_mode_selection(terminal_runtimes);
     }
 
@@ -581,6 +611,16 @@ fn char_cell_width(ch: char) -> u16 {
     UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16
 }
 
+fn copy_mode_page_lines(height: u16, half_page: bool) -> usize {
+    if height <= 2 {
+        1
+    } else if half_page {
+        usize::from(height / 2)
+    } else {
+        usize::from(height - 2)
+    }
+}
+
 fn copy_mode_command_char(key: TerminalKey) -> Option<char> {
     if !key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
         return None;
@@ -698,6 +738,16 @@ mod tests {
             .and_then(crate::terminal::TerminalRuntime::scroll_metrics)
             .expect("copy mode scroll metrics")
             .offset_from_bottom
+    }
+
+    fn copy_mode_scroll_metrics(
+        app: &App,
+        pane_id: crate::layout::PaneId,
+    ) -> crate::pane::ScrollMetrics {
+        app.state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .and_then(crate::terminal::TerminalRuntime::scroll_metrics)
+            .expect("copy mode scroll metrics")
     }
 
     #[tokio::test]
@@ -849,6 +899,72 @@ mod tests {
             .join("\n");
         assert_eq!(copy_mode_clipboard_text(&mut app), expected);
         assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), 0);
+    }
+
+    #[tokio::test]
+    async fn copy_mode_page_up_uses_tmux_page_size() {
+        let bytes = numbered_lines_bytes(64);
+        let (mut app, pane_id) = app_with_copy_scrollback(&bytes);
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        let height = app.state.copy_mode.expect("copy mode").cursor_row + 1;
+        let expected_lines = copy_mode_page_lines(height, false);
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()));
+
+        assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), expected_lines);
+    }
+
+    #[tokio::test]
+    async fn copy_mode_ctrl_u_moves_cursor_when_history_top_clamps() {
+        let bytes = numbered_lines_bytes(64);
+        let (mut app, pane_id) = app_with_copy_scrollback(&bytes);
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        let bottom = app.state.copy_mode.expect("copy mode").cursor_row;
+        let lines = copy_mode_page_lines(bottom + 1, true);
+        let metrics = copy_mode_scroll_metrics(&app, pane_id);
+        assert!(metrics.max_offset_from_bottom >= lines);
+        app.state.set_pane_scroll_offset(
+            &app.terminal_runtimes,
+            pane_id,
+            metrics.max_offset_from_bottom - lines + 1,
+        );
+        if let Some(copy_mode) = app.state.copy_mode.as_mut() {
+            copy_mode.cursor_row = bottom;
+        }
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+
+        let copy_mode = app.state.copy_mode.expect("copy mode");
+        let expected_cursor_delta = 1;
+        assert_eq!(
+            copy_mode_offset_from_bottom(&app, pane_id),
+            metrics.max_offset_from_bottom
+        );
+        assert_eq!(
+            copy_mode.cursor_row,
+            bottom.saturating_sub(expected_cursor_delta as u16)
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_mode_ctrl_d_moves_cursor_when_live_bottom_clamps() {
+        let bytes = numbered_lines_bytes(64);
+        let (mut app, pane_id) = app_with_copy_scrollback(&bytes);
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        let bottom = app.state.copy_mode.expect("copy mode").cursor_row;
+        let lines = copy_mode_page_lines(bottom + 1, true);
+        assert!(lines > 1);
+        app.state
+            .set_pane_scroll_offset(&app.terminal_runtimes, pane_id, lines - 1);
+        if let Some(copy_mode) = app.state.copy_mode.as_mut() {
+            copy_mode.cursor_row = 0;
+        }
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+
+        let copy_mode = app.state.copy_mode.expect("copy mode");
+        assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), 0);
+        assert_eq!(copy_mode.cursor_row, 1);
     }
 
     #[tokio::test]
