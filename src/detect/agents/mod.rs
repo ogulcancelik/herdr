@@ -9,6 +9,7 @@ pub(super) mod gemini;
 pub(super) mod github_copilot;
 pub(super) mod grok;
 pub(super) mod hermes;
+pub(super) mod jcode;
 pub(super) mod kilo;
 pub(super) mod kimi;
 pub(super) mod kiro;
@@ -37,6 +38,7 @@ pub(super) fn detect(agent: Agent, screen_content: &str) -> AgentDetection {
         Agent::Hermes => hermes::detect(screen_content),
         Agent::Kilo => kilo::detect(screen_content),
         Agent::Qodercli => qodercli::detect(screen_content),
+        Agent::Jcode => jcode::detect(screen_content),
     };
 
     let skip_state_update = should_skip_state_update(agent, screen_content);
