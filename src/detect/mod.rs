@@ -2124,6 +2124,26 @@ mod tests {
     }
 
     #[test]
+    fn kimi_current_approval_panel_is_visible_blocker() {
+        let screen = "────────────────────────────────────────────────────\n  ▶ Run this command?\n\n  $ git status --short\n\n  ▶ 1. Approve once\n    2. Approve for this session\n    3. Reject\n    4. Reject with feedback\n\n  ↑/↓ select · 1/2/3/4 choose · ↵ confirm\n────────────────────────────────────────────────────";
+        let detection = detect_agent(Some(Agent::Kimi), screen);
+
+        assert_eq!(detection.state, AgentState::Blocked);
+        assert!(detection.visible_blocker);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
+    fn kimi_question_panel_is_visible_blocker() {
+        let screen = "────────────────────────────────────────────────────\n question\n\n (○) Destination   Submit\n\n ? Which destination should I use?\n\n  → [1] Local checkout\n    [2] Remote branch\n    [3] Other\n\n  ↑↓ select  1-3 / ↵ choose  ←/→/tab switch  esc cancel\n────────────────────────────────────────────────────";
+        let detection = detect_agent(Some(Agent::Kimi), screen);
+
+        assert_eq!(detection.state, AgentState::Blocked);
+        assert!(detection.visible_blocker);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
     fn kimi_approval_words_without_prompt_stay_idle() {
         assert_eq!(detect_kimi("approve?"), AgentState::Idle);
         assert_eq!(detect_kimi("continue? [y/n]"), AgentState::Idle);
@@ -2143,6 +2163,15 @@ mod tests {
             detect_kimi("⠹ Using Shell (git log -20 --name-status)"),
             AgentState::Working
         );
+    }
+
+    #[test]
+    fn kimi_working_braille_working_status_is_visible_working() {
+        let detection = detect_agent(Some(Agent::Kimi), "⠋ working...");
+
+        assert_eq!(detection.state, AgentState::Working);
+        assert!(detection.visible_working);
+        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -2173,6 +2202,17 @@ mod tests {
     fn kimi_idle() {
         let screen = "Welcome to Kimi Code CLI!\n── input ─\n────────────────\nagent (Kimi-k2.6 ●)  ~/Projects/herdr";
         assert_eq!(detect_kimi(screen), AgentState::Idle);
+    }
+
+    #[test]
+    fn kimi_current_editor_box_is_visible_idle() {
+        let screen = "╭──────────────────────────────────────────────────╮\n│  >                                               │\n╰──────────────────────────────────────────────────╯\nk2  ~/Projects/herdr                    /help: show commands\n                                      context: 0.0%";
+        let detection = detect_agent(Some(Agent::Kimi), screen);
+
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(detection.visible_idle);
+        assert!(!detection.visible_working);
+        assert!(!detection.visible_blocker);
     }
 
     // ---- Kiro ----
