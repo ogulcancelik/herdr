@@ -188,72 +188,166 @@ fn compute_prof_blit_stats(
 ///
 /// Returns a string like `38;5;123` (indexed) or `38;2;255;128;64` (RGB)
 /// or `39` (reset), without the leading `\x1b[` or trailing `m`.
-fn color_to_sgr_fg(val: u32) -> String {
+fn write_color_sgr_fg(writer: &mut impl Write, val: u32) {
     match val >> 24 {
         0x00 => match val & 0xFF {
-            0x00 => "39".to_owned(), // Reset
-            0x01 => "30".to_owned(), // Black
-            0x02 => "31".to_owned(), // Red
-            0x03 => "32".to_owned(), // Green
-            0x04 => "33".to_owned(), // Yellow
-            0x05 => "34".to_owned(), // Blue
-            0x06 => "35".to_owned(), // Magenta
-            0x07 => "36".to_owned(), // Cyan
-            0x08 => "37".to_owned(), // Gray (light gray)
-            0x09 => "90".to_owned(), // DarkGray
-            0x0A => "91".to_owned(), // LightRed
-            0x0B => "92".to_owned(), // LightGreen
-            0x0C => "93".to_owned(), // LightYellow
-            0x0D => "94".to_owned(), // LightBlue
-            0x0E => "95".to_owned(), // LightMagenta
-            0x0F => "96".to_owned(), // LightCyan
-            0x10 => "97".to_owned(), // White
-            _ => "39".to_owned(),    // Unknown → Reset
+            0x00 => {
+                let _ = writer.write_all(b"39");
+            } // Reset
+            0x01 => {
+                let _ = writer.write_all(b"30");
+            } // Black
+            0x02 => {
+                let _ = writer.write_all(b"31");
+            } // Red
+            0x03 => {
+                let _ = writer.write_all(b"32");
+            } // Green
+            0x04 => {
+                let _ = writer.write_all(b"33");
+            } // Yellow
+            0x05 => {
+                let _ = writer.write_all(b"34");
+            } // Blue
+            0x06 => {
+                let _ = writer.write_all(b"35");
+            } // Magenta
+            0x07 => {
+                let _ = writer.write_all(b"36");
+            } // Cyan
+            0x08 => {
+                let _ = writer.write_all(b"37");
+            } // Gray (light gray)
+            0x09 => {
+                let _ = writer.write_all(b"90");
+            } // DarkGray
+            0x0A => {
+                let _ = writer.write_all(b"91");
+            } // LightRed
+            0x0B => {
+                let _ = writer.write_all(b"92");
+            } // LightGreen
+            0x0C => {
+                let _ = writer.write_all(b"93");
+            } // LightYellow
+            0x0D => {
+                let _ = writer.write_all(b"94");
+            } // LightBlue
+            0x0E => {
+                let _ = writer.write_all(b"95");
+            } // LightMagenta
+            0x0F => {
+                let _ = writer.write_all(b"96");
+            } // LightCyan
+            0x10 => {
+                let _ = writer.write_all(b"97");
+            } // White
+            _ => {
+                let _ = writer.write_all(b"39");
+            } // Unknown → Reset
         },
-        0x01 => format!("38;5;{}", val & 0xFF), // Indexed
+        0x01 => {
+            let _ = write!(writer, "38;5;{}", val & 0xFF);
+        } // Indexed
         0x02 => {
             // RGB
             let r = (val >> 16) & 0xFF;
             let g = (val >> 8) & 0xFF;
             let b = val & 0xFF;
-            format!("38;2;{r};{g};{b}")
+            let _ = write!(writer, "38;2;{r};{g};{b}");
         }
-        _ => "39".to_owned(), // Unknown → Reset
+        _ => {
+            let _ = writer.write_all(b"39");
+        } // Unknown → Reset
     }
 }
 
+#[cfg(test)]
+fn color_to_sgr_fg(val: u32) -> String {
+    let mut out = Vec::new();
+    write_color_sgr_fg(&mut out, val);
+    String::from_utf8(out).unwrap()
+}
+
 /// Converts a packed u32 color to a background SGR fragment.
-fn color_to_sgr_bg(val: u32) -> String {
+fn write_color_sgr_bg(writer: &mut impl Write, val: u32) {
     match val >> 24 {
         0x00 => match val & 0xFF {
-            0x00 => "49".to_owned(),  // Reset
-            0x01 => "40".to_owned(),  // Black
-            0x02 => "41".to_owned(),  // Red
-            0x03 => "42".to_owned(),  // Green
-            0x04 => "43".to_owned(),  // Yellow
-            0x05 => "44".to_owned(),  // Blue
-            0x06 => "45".to_owned(),  // Magenta
-            0x07 => "46".to_owned(),  // Cyan
-            0x08 => "47".to_owned(),  // Gray (light gray)
-            0x09 => "100".to_owned(), // DarkGray
-            0x0A => "101".to_owned(), // LightRed
-            0x0B => "102".to_owned(), // LightGreen
-            0x0C => "103".to_owned(), // LightYellow
-            0x0D => "104".to_owned(), // LightBlue
-            0x0E => "105".to_owned(), // LightMagenta
-            0x0F => "106".to_owned(), // LightCyan
-            0x10 => "107".to_owned(), // White
-            _ => "49".to_owned(),     // Unknown → Reset
+            0x00 => {
+                let _ = writer.write_all(b"49");
+            } // Reset
+            0x01 => {
+                let _ = writer.write_all(b"40");
+            } // Black
+            0x02 => {
+                let _ = writer.write_all(b"41");
+            } // Red
+            0x03 => {
+                let _ = writer.write_all(b"42");
+            } // Green
+            0x04 => {
+                let _ = writer.write_all(b"43");
+            } // Yellow
+            0x05 => {
+                let _ = writer.write_all(b"44");
+            } // Blue
+            0x06 => {
+                let _ = writer.write_all(b"45");
+            } // Magenta
+            0x07 => {
+                let _ = writer.write_all(b"46");
+            } // Cyan
+            0x08 => {
+                let _ = writer.write_all(b"47");
+            } // Gray (light gray)
+            0x09 => {
+                let _ = writer.write_all(b"100");
+            } // DarkGray
+            0x0A => {
+                let _ = writer.write_all(b"101");
+            } // LightRed
+            0x0B => {
+                let _ = writer.write_all(b"102");
+            } // LightGreen
+            0x0C => {
+                let _ = writer.write_all(b"103");
+            } // LightYellow
+            0x0D => {
+                let _ = writer.write_all(b"104");
+            } // LightBlue
+            0x0E => {
+                let _ = writer.write_all(b"105");
+            } // LightMagenta
+            0x0F => {
+                let _ = writer.write_all(b"106");
+            } // LightCyan
+            0x10 => {
+                let _ = writer.write_all(b"107");
+            } // White
+            _ => {
+                let _ = writer.write_all(b"49");
+            } // Unknown → Reset
         },
-        0x01 => format!("48;5;{}", val & 0xFF), // Indexed
+        0x01 => {
+            let _ = write!(writer, "48;5;{}", val & 0xFF);
+        } // Indexed
         0x02 => {
             let r = (val >> 16) & 0xFF;
             let g = (val >> 8) & 0xFF;
             let b = val & 0xFF;
-            format!("48;2;{r};{g};{b}")
+            let _ = write!(writer, "48;2;{r};{g};{b}");
         }
-        _ => "49".to_owned(),
+        _ => {
+            let _ = writer.write_all(b"49");
+        }
     }
+}
+
+#[cfg(test)]
+fn color_to_sgr_bg(val: u32) -> String {
+    let mut out = Vec::new();
+    write_color_sgr_bg(&mut out, val);
+    String::from_utf8(out).unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +357,7 @@ fn color_to_sgr_bg(val: u32) -> String {
 /// Converts a u16 modifier bitmask to SGR escape sequence fragments.
 ///
 /// Returns a Vec of SGR parameter strings (e.g., "1" for bold, "3" for italic).
+#[cfg(test)]
 fn modifier_to_sgr_parts(val: u16) -> Vec<&'static str> {
     let mut parts = Vec::new();
 
@@ -308,7 +403,64 @@ fn modifier_to_sgr_parts(val: u16) -> Vec<&'static str> {
     parts
 }
 
+fn write_modifier_sgr_parts(writer: &mut impl Write, val: u16) {
+    const BOLD: u16 = 1 << 0;
+    const DIM: u16 = 1 << 1;
+    const ITALIC: u16 = 1 << 2;
+    const UNDERLINED: u16 = 1 << 3;
+    const SLOW_BLINK: u16 = 1 << 4;
+    const RAPID_BLINK: u16 = 1 << 5;
+    const REVERSED: u16 = 1 << 6;
+    const HIDDEN: u16 = 1 << 7;
+    const CROSSED_OUT: u16 = 1 << 8;
+
+    for (bit, part) in [
+        (BOLD, b"1" as &[u8]),
+        (DIM, b"2"),
+        (ITALIC, b"3"),
+        (UNDERLINED, b"4"),
+        (SLOW_BLINK, b"5"),
+        (RAPID_BLINK, b"6"),
+        (REVERSED, b"7"),
+        (HIDDEN, b"8"),
+        (CROSSED_OUT, b"9"),
+    ] {
+        if val & bit != 0 {
+            let _ = writer.write_all(b";");
+            let _ = writer.write_all(part);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CellStyle {
+    fg: u32,
+    bg: u32,
+    modifier: u16,
+}
+
+impl From<&CellData> for CellStyle {
+    fn from(cell: &CellData) -> Self {
+        Self {
+            fg: cell.fg,
+            bg: cell.bg,
+            modifier: cell.modifier,
+        }
+    }
+}
+
+fn write_sgr(writer: &mut impl Write, style: CellStyle) {
+    let _ = writer.write_all(b"\x1b[0");
+    write_modifier_sgr_parts(writer, style.modifier);
+    let _ = writer.write_all(b";");
+    write_color_sgr_fg(writer, style.fg);
+    let _ = writer.write_all(b";");
+    write_color_sgr_bg(writer, style.bg);
+    let _ = writer.write_all(b"m");
+}
+
 /// Builds a complete SGR escape sequence for a cell's style.
+#[cfg(test)]
 fn build_sgr(fg: u32, bg: u32, modifier: u16) -> String {
     let mut parts = vec!["0".to_owned()];
     parts.extend(
@@ -386,7 +538,9 @@ fn blit_frame_to_with_cursor_memory(
     } else {
         // Diff-based update: only write changed cells.
         let prev = prev.unwrap();
-        write_changed_cells(&mut writer, frame, prev);
+        if !write_scrolled_frame_delta(&mut writer, frame, prev) {
+            write_changed_cells(&mut writer, frame, prev);
+        }
     }
 
     // Position the cursor while it is still hidden, then restore visibility.
@@ -413,6 +567,9 @@ fn blit_frame_to_with_cursor_memory(
 
 /// Writes all cells in the frame (full redraw).
 fn cell_width(cell: &CellData) -> usize {
+    if cell.symbol.len() == 1 && cell.symbol.as_bytes()[0].is_ascii() {
+        return 1;
+    }
     cell.symbol.width()
 }
 
@@ -509,6 +666,7 @@ fn write_ime_anchor_cursor_state(writer: &mut impl Write, cursor: HostCursorStat
 
 fn write_all_cells(writer: &mut impl Write, frame: &FrameData) {
     let mut active_hyperlink = None;
+    let mut last_style = None;
     for row in 0..frame.height {
         let mut to_skip = 0usize;
         for col in 0..frame.width {
@@ -527,9 +685,11 @@ fn write_all_cells(writer: &mut impl Write, frame: &FrameData) {
             // Move cursor to position (1-based).
             let _ = write!(writer, "\x1b[{};{}H", row + 1, col + 1);
 
-            // Set style.
-            let sgr = build_sgr(cell.fg, cell.bg, cell.modifier);
-            let _ = writer.write_all(sgr.as_bytes());
+            let style = CellStyle::from(cell);
+            if last_style != Some(style) {
+                write_sgr(writer, style);
+                last_style = Some(style);
+            }
 
             write_hyperlink_if_changed(
                 writer,
@@ -603,12 +763,10 @@ fn close_hyperlink(writer: &mut impl Write, active: &mut Option<String>) {
     }
 }
 
-fn write_cell(
+fn write_cell_at_cursor(
     writer: &mut impl Write,
-    row: u16,
-    col: u16,
     cell: &CellData,
-    last_sgr: &mut String,
+    last_style: &mut Option<CellStyle>,
     active_hyperlink: &mut Option<String>,
     frame: &FrameData,
 ) {
@@ -616,12 +774,10 @@ fn write_cell(
         return;
     }
 
-    let _ = write!(writer, "\x1b[{};{}H", row + 1, col + 1);
-
-    let sgr = build_sgr(cell.fg, cell.bg, cell.modifier);
-    if sgr != *last_sgr {
-        let _ = writer.write_all(sgr.as_bytes());
-        *last_sgr = sgr;
+    let style = CellStyle::from(cell);
+    if *last_style != Some(style) {
+        write_sgr(writer, style);
+        *last_style = Some(style);
     }
 
     write_hyperlink_if_changed(writer, active_hyperlink, cell_hyperlink_uri(frame, cell));
@@ -644,8 +800,154 @@ fn cells_visually_equal(
     // Skip flag is only for ratatui internal use, not visual.
 }
 
+fn rows_visually_equal(
+    sanitized_hyperlinks: &[Option<String>],
+    frame: &FrameData,
+    row: u16,
+    prev_sanitized_hyperlinks: &[Option<String>],
+    prev: &FrameData,
+    prev_row: u16,
+) -> bool {
+    let width = frame.width as usize;
+    let start = row as usize * width;
+    let prev_start = prev_row as usize * width;
+    frame.cells[start..start + width]
+        .iter()
+        .zip(&prev.cells[prev_start..prev_start + width])
+        .all(|(cell, prev_cell)| {
+            cells_visually_equal(
+                sanitized_hyperlinks,
+                cell,
+                prev_sanitized_hyperlinks,
+                prev_cell,
+            )
+        })
+}
+
+fn detect_vertical_scroll_delta(
+    frame: &FrameData,
+    prev: &FrameData,
+    sanitized_hyperlinks: &[Option<String>],
+    prev_sanitized_hyperlinks: &[Option<String>],
+) -> Option<i16> {
+    if frame.width == 0 || frame.height < 2 || frame.cells.len() != prev.cells.len() {
+        return None;
+    }
+
+    let max_shift = frame.height.saturating_sub(1);
+    for shift in 1..=max_shift {
+        if (0..frame.height - shift).all(|row| {
+            rows_visually_equal(
+                sanitized_hyperlinks,
+                frame,
+                row,
+                prev_sanitized_hyperlinks,
+                prev,
+                row + shift,
+            )
+        }) {
+            return Some(shift as i16);
+        }
+
+        if (shift..frame.height).all(|row| {
+            rows_visually_equal(
+                sanitized_hyperlinks,
+                frame,
+                row,
+                prev_sanitized_hyperlinks,
+                prev,
+                row - shift,
+            )
+        }) {
+            return Some(-(shift as i16));
+        }
+    }
+
+    None
+}
+
+fn write_row_cells(
+    writer: &mut impl Write,
+    frame: &FrameData,
+    row: u16,
+    last_style: &mut Option<CellStyle>,
+    active_hyperlink: &mut Option<String>,
+) {
+    let mut to_skip = 0usize;
+    let mut run_next_col = None;
+    for col in 0..frame.width {
+        if to_skip > 0 {
+            to_skip -= 1;
+            continue;
+        }
+
+        let idx = (row as usize) * (frame.width as usize) + (col as usize);
+        let cell = &frame.cells[idx];
+        if cell.skip {
+            run_next_col = None;
+            continue;
+        }
+
+        if run_next_col != Some(col) {
+            write_cursor_position(writer, (col, row));
+        }
+        write_cell_at_cursor(writer, cell, last_style, active_hyperlink, frame);
+        let width = cell_width(cell) as u16;
+        run_next_col = width.checked_sub(1).and_then(|_| col.checked_add(width));
+        to_skip = (width as usize).saturating_sub(1);
+    }
+}
+
+fn write_scrolled_frame_delta(
+    writer: &mut impl Write,
+    frame: &FrameData,
+    prev: &FrameData,
+) -> bool {
+    if prev.width != frame.width || prev.height != frame.height {
+        return false;
+    }
+
+    let sanitized_hyperlinks = sanitized_frame_hyperlinks(frame);
+    let prev_sanitized_hyperlinks = sanitized_frame_hyperlinks(prev);
+    let Some(delta) = detect_vertical_scroll_delta(
+        frame,
+        prev,
+        &sanitized_hyperlinks,
+        &prev_sanitized_hyperlinks,
+    ) else {
+        return false;
+    };
+
+    let amount = delta.unsigned_abs();
+    let _ = write!(writer, "\x1b[1;{}r", frame.height);
+    if delta > 0 {
+        let _ = write!(writer, "\x1b[{amount}S");
+    } else {
+        let _ = write!(writer, "\x1b[{amount}T");
+    }
+    let _ = writer.write_all(b"\x1b[r");
+
+    let mut last_style = None;
+    let mut active_hyperlink = None;
+    if delta > 0 {
+        for row in frame.height - amount..frame.height {
+            write_row_cells(writer, frame, row, &mut last_style, &mut active_hyperlink);
+        }
+    } else {
+        for row in 0..amount {
+            write_row_cells(writer, frame, row, &mut last_style, &mut active_hyperlink);
+        }
+    }
+
+    close_hyperlink(writer, &mut active_hyperlink);
+    if last_style.is_some() {
+        let _ = writer.write_all(b"\x1b[0m");
+    }
+    true
+}
+
 fn write_changed_cells(writer: &mut impl Write, frame: &FrameData, prev: &FrameData) {
-    let mut last_sgr = String::new(); // Track last SGR to avoid redundant style changes.
+    let mut last_style = None; // Track last SGR to avoid redundant style changes.
     let mut active_hyperlink = None;
     let sanitized_hyperlinks = sanitized_frame_hyperlinks(frame);
     let prev_sanitized_hyperlinks = sanitized_frame_hyperlinks(prev);
@@ -653,6 +955,8 @@ fn write_changed_cells(writer: &mut impl Write, frame: &FrameData, prev: &FrameD
     for row in 0..frame.height {
         let mut invalidated = 0usize;
         let mut to_skip = 0usize;
+
+        let mut run_next_col = None;
 
         for col in 0..frame.width {
             let idx = (row as usize) * (frame.width as usize) + (col as usize);
@@ -668,15 +972,14 @@ fn write_changed_cells(writer: &mut impl Write, frame: &FrameData, prev: &FrameD
                 ) || invalidated > 0)
                 && to_skip == 0
             {
-                write_cell(
-                    writer,
-                    row,
-                    col,
-                    cell,
-                    &mut last_sgr,
-                    &mut active_hyperlink,
-                    frame,
-                );
+                if run_next_col != Some(col) {
+                    write_cursor_position(writer, (col, row));
+                }
+                write_cell_at_cursor(writer, cell, &mut last_style, &mut active_hyperlink, frame);
+                let width = cell_width(cell) as u16;
+                run_next_col = width.checked_sub(1).and_then(|_| col.checked_add(width));
+            } else if to_skip == 0 {
+                run_next_col = None;
             }
 
             to_skip = cell_width(cell).saturating_sub(1);
@@ -688,7 +991,7 @@ fn write_changed_cells(writer: &mut impl Write, frame: &FrameData, prev: &FrameD
     close_hyperlink(writer, &mut active_hyperlink);
 
     // Reset style if we wrote anything.
-    if !last_sgr.is_empty() {
+    if last_style.is_some() {
         let _ = writer.write_all(b"\x1b[0m");
     }
 }
@@ -726,10 +1029,93 @@ mod tests {
         }
     }
 
+    fn count_cup_sequences(output: &str) -> usize {
+        let bytes = output.as_bytes();
+        let mut count = 0;
+        let mut i = 0;
+
+        while i + 2 < bytes.len() {
+            if bytes[i] == 0x1b && bytes[i + 1] == b'[' {
+                let mut j = i + 2;
+                while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b';') {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'H' {
+                    count += 1;
+                    i = j + 1;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+
+        count
+    }
+
+    fn shifted_scrollback_frames(width: u16, height: u16, shift: u16) -> (FrameData, FrameData) {
+        fn frame_for_offset(width: u16, height: u16, offset: u16) -> FrameData {
+            let cells = (0..height)
+                .flat_map(|row| {
+                    (0..width).map(move |col| {
+                        let ch = char::from(b'a' + ((row + offset + col) % 26) as u8);
+                        make_cell(&ch.to_string(), 0, 0, 0)
+                    })
+                })
+                .collect();
+
+            make_frame(width, height, cells)
+        }
+
+        (
+            frame_for_offset(width, height, 0),
+            frame_for_offset(width, height, shift),
+        )
+    }
+
+    fn encode_diff_output(curr: &FrameData, prev: &FrameData) -> String {
+        let mut output = Vec::new();
+        blit_frame_to(&mut output, curr, Some(prev));
+        String::from_utf8(output).unwrap()
+    }
+
     fn linked_cell(symbol: &str, index: u32) -> CellData {
         let mut cell = make_cell(symbol, 0, 0, 0);
         cell.hyperlink = Some(index);
         cell
+    }
+
+    #[test]
+    #[ignore]
+    fn scrollback_shift_diff_metrics() {
+        use std::time::Instant;
+
+        let (prev, curr) = shifted_scrollback_frames(120, 40, 1);
+        let changed_cells = prev
+            .cells
+            .iter()
+            .zip(&curr.cells)
+            .filter(|(prev, curr)| !cells_equal(prev, curr))
+            .count();
+        let output = encode_diff_output(&curr, &prev);
+        let cup_count = count_cup_sequences(&output);
+
+        let iterations = 500;
+        let started = Instant::now();
+        for _ in 0..iterations {
+            let _ = encode_diff_output(&curr, &prev);
+        }
+        let elapsed = started.elapsed();
+
+        eprintln!(
+            "scrollback_shift_diff_metrics width={} height={} shift=1 changed_cells={} bytes={} cup_count={} iterations={} elapsed_ms={:.3}",
+            curr.width,
+            curr.height,
+            changed_cells,
+            output.len(),
+            cup_count,
+            iterations,
+            elapsed.as_secs_f64() * 1000.0
+        );
     }
 
     #[test]
@@ -1124,6 +1510,113 @@ mod tests {
     }
 
     #[test]
+    fn diff_redraw_batches_scrollback_shift_by_changed_runs() {
+        let (prev, curr) = shifted_scrollback_frames(120, 40, 1);
+        let changed_cells = prev
+            .cells
+            .iter()
+            .zip(&curr.cells)
+            .filter(|(prev, curr)| !cells_equal(prev, curr))
+            .count();
+
+        let output = encode_diff_output(&curr, &prev);
+        let cup_count = count_cup_sequences(&output);
+
+        assert_eq!(changed_cells, 120 * 40);
+        assert!(
+            cup_count <= curr.height as usize + 2,
+            "expected one paint CUP per changed row plus final cursor anchors, got {cup_count} CUPs"
+        );
+        assert!(
+            cup_count * 20 < changed_cells,
+            "batched output should use far fewer CUPs than changed cells"
+        );
+        assert!(
+            output.len() * 5 < changed_cells * 10,
+            "batched output should stay close to payload size instead of per-cell CUP overhead"
+        );
+    }
+
+    #[test]
+    fn diff_redraw_batches_contiguous_cells_with_style_changes() {
+        let prev = make_frame(4, 1, vec![make_cell("A", 0, 0, 0); 4]);
+        let curr = make_frame(
+            4,
+            1,
+            vec![
+                make_cell("B", 0x00_00_00_02, 0, 0),
+                make_cell("C", 0x00_00_00_03, 0, 1),
+                make_cell("D", 0x00_00_00_04, 0, 0),
+                make_cell("E", 0x00_00_00_05, 0, 1),
+            ],
+        );
+
+        let output = encode_diff_output(&curr, &prev);
+
+        assert_eq!(count_cup_sequences(&output), 3);
+        assert!(output.contains('B'));
+        assert!(output.contains('C'));
+        assert!(output.contains('D'));
+        assert!(output.contains('E'));
+        assert!(output.contains("\x1b[0;31;49m"));
+        assert!(output.contains("\x1b[0;1;32;49m"));
+    }
+
+    #[test]
+    fn diff_redraw_batches_wide_grapheme_runs_without_tail_cup() {
+        let prev = make_frame(
+            4,
+            1,
+            vec![
+                make_cell("A", 0, 0, 0),
+                make_cell("B", 0, 0, 0),
+                make_cell("C", 0, 0, 0),
+                make_cell("D", 0, 0, 0),
+            ],
+        );
+        let curr = make_frame(
+            4,
+            1,
+            vec![
+                make_cell(WIDE_GRAPHEME, 0, 0, 0),
+                make_cell(" ", 0, 0, 0),
+                make_cell("Z", 0, 0, 0),
+                make_cell("D", 0, 0, 0),
+            ],
+        );
+
+        let output = encode_diff_output(&curr, &prev);
+
+        assert_eq!(count_cup_sequences(&output), 3);
+        assert!(output.contains(WIDE_GRAPHEME));
+        assert!(output.contains('Z'));
+        assert!(!output.contains("\x1b[1;2H"));
+        assert!(!output.contains("\x1b[1;3H"));
+    }
+
+    #[test]
+    fn diff_redraw_batches_contiguous_cells_with_hyperlink_changes() {
+        let prev = make_frame(3, 1, vec![make_cell("A", 0, 0, 0); 3]);
+        let mut curr = make_frame(
+            3,
+            1,
+            vec![
+                linked_cell("L", 0),
+                linked_cell("i", 0),
+                make_cell("!", 0, 0, 0),
+            ],
+        );
+        curr.hyperlinks.push("https://example.com".to_owned());
+
+        let output = encode_diff_output(&curr, &prev);
+
+        assert_eq!(count_cup_sequences(&output), 3);
+        assert!(output.contains("\x1b]8;;https://example.com\x1b\\L"));
+        assert!(output.contains('i'));
+        assert!(output.contains("\x1b]8;;\x1b\\!"));
+    }
+
+    #[test]
     fn blit_frame_size_change_triggers_full_redraw() {
         let prev = make_frame(2, 2, vec![make_cell("A", 0, 0, 0); 4]);
 
@@ -1476,7 +1969,7 @@ mod tests {
 
         assert!(output_str.contains("\x1b[1;1H"));
         assert!(
-            output_str.contains("\x1b[1;2H"),
+            output_str.contains("A "),
             "cells hidden by a previous wide grapheme must be redrawn when they become visible"
         );
     }
