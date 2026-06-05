@@ -216,6 +216,8 @@ impl App {
                     SettingsAction::SaveAgentBorderLabels(enabled) => {
                         self.save_agent_border_labels(enabled)
                     }
+                    SettingsAction::SaveSidebarRowGap(gap) => self.save_sidebar_row_gap(gap),
+                    SettingsAction::SaveSidebarPaneGap(gap) => self.save_sidebar_pane_gap(gap),
                     SettingsAction::SavePaneHistory(enabled) => {
                         self.save_pane_history_persistence(enabled)
                     }

@@ -12,7 +12,7 @@ use super::widgets::{
 };
 use crate::{
     app::{
-        state::{ExperimentSetting, Palette},
+        state::{ExperimentSetting, Palette, SidebarGapSetting},
         AppState,
     },
     config::ToastDelivery,
@@ -133,6 +133,9 @@ pub(super) fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: R
                 app.agent_border_labels_enabled(),
                 app.settings.list.selected,
             );
+        }
+        SettingsSection::Sidebar => {
+            render_settings_sidebar(app, frame, content_area);
         }
         SettingsSection::Experiments => {
             render_settings_experiments(app, frame, content_area);
@@ -382,6 +385,45 @@ fn render_settings_toggle(
     );
 }
 
+fn render_settings_sidebar(app: &AppState, frame: &mut Frame, area: Rect) {
+    let p = &app.palette;
+    let [desc_area, _, list_area] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Min(1),
+    ])
+    .areas::<3>(area);
+
+    super::widgets::render_modal_description(
+        frame,
+        desc_area,
+        "sidebar spacing — enter or click cycles a value, changes apply immediately",
+        Style::default().fg(p.overlay1),
+    );
+
+    for (idx, setting) in SidebarGapSetting::ALL.iter().copied().enumerate() {
+        let style = if app.settings.list.selected == idx {
+            Style::default()
+                .bg(p.surface0)
+                .fg(p.text)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.subtext0)
+        };
+        let row = Rect::new(list_area.x, list_area.y + idx as u16, list_area.width, 1);
+        frame.render_widget(
+            Paragraph::new(format!(
+                " {} [{}/{}]",
+                setting.label(),
+                setting.value(app),
+                setting.max()
+            ))
+            .style(style),
+            row,
+        );
+    }
+}
+
 fn render_settings_experiments(app: &AppState, frame: &mut Frame, area: Rect) {
     let p = &app.palette;
     let [desc_area, _, list_area] = Layout::vertical([
@@ -421,6 +463,33 @@ mod tests {
     use super::*;
     use crate::app::{state::SettingsSection, Mode};
     use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn sidebar_section_renders_gap_steppers_with_current_values() {
+        let mut app = AppState::test_new();
+        app.sidebar_row_gap = 1;
+        app.sidebar_pane_gap = 2;
+        app.settings.section = SettingsSection::Sidebar;
+        app.settings.list.selected = 0;
+        app.mode = Mode::Settings;
+
+        let mut terminal =
+            Terminal::new(TestBackend::new(80, 24)).expect("test terminal should initialize");
+        terminal
+            .draw(|frame| render_settings_overlay(&app, frame, Rect::new(0, 0, 80, 24)))
+            .expect("settings overlay should render");
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("blank rows between sidebar entries [1/3]"));
+        assert!(rendered.contains("blank columns around the pane divider [2/4]"));
+    }
 
     #[test]
     fn experiments_pane_history_uses_settings_checkmark_marker() {

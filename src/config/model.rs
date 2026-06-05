@@ -5,8 +5,8 @@ use serde::{de, Deserialize, Deserializer, Serialize};
 
 use super::{
     BindingConfig, CommandKeybindConfig, SoundConfig, ThemeConfig, DEFAULT_MOBILE_WIDTH_THRESHOLD,
-    DEFAULT_MOUSE_SCROLL_LINES, DEFAULT_SCROLLBACK_LIMIT_BYTES, DEFAULT_SIDEBAR_ROW_GAP,
-    MAX_SIDEBAR_ROW_GAP,
+    DEFAULT_MOUSE_SCROLL_LINES, DEFAULT_SCROLLBACK_LIMIT_BYTES, DEFAULT_SIDEBAR_PANE_GAP,
+    DEFAULT_SIDEBAR_ROW_GAP, MAX_SIDEBAR_PANE_GAP, MAX_SIDEBAR_ROW_GAP,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -217,6 +217,11 @@ pub fn validated_sidebar_row_gap(gap: u16) -> u16 {
     gap.min(MAX_SIDEBAR_ROW_GAP)
 }
 
+/// Clamp `[ui] sidebar_pane_gap` to its supported range (0..=MAX_SIDEBAR_PANE_GAP).
+pub fn validated_sidebar_pane_gap(gap: u16) -> u16 {
+    gap.min(MAX_SIDEBAR_PANE_GAP)
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -377,6 +382,8 @@ pub struct UiConfig {
     pub mobile_width_threshold: u16,
     /// Blank rows between sidebar list entries (workspaces and agents). Default: 1, max: 3.
     pub sidebar_row_gap: u16,
+    /// Blank columns on each side of the sidebar/pane divider. Default: 0, max: 4.
+    pub sidebar_pane_gap: u16,
     /// Capture mouse input for Herdr's mouse UI. Default: true.
     pub mouse_capture: bool,
     /// Modifier that lets right-click gestures pass through to pane apps. Empty disables it.
@@ -566,6 +573,7 @@ impl Default for UiConfig {
             sidebar_max_width: 36,
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
             sidebar_row_gap: DEFAULT_SIDEBAR_ROW_GAP,
+            sidebar_pane_gap: DEFAULT_SIDEBAR_PANE_GAP,
             mouse_capture: true,
             right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),
             redraw_on_focus_gained: true,
@@ -842,6 +850,26 @@ mobile_width_threshold = 96
         assert_eq!(config.ui.sidebar_min_width, 12);
         assert_eq!(config.ui.sidebar_max_width, 80);
         assert_eq!(config.ui.mobile_width_threshold, 96);
+    }
+
+    #[test]
+    fn sidebar_pane_gap_default_parse_and_clamp() {
+        let default_config = Config::default();
+        assert_eq!(default_config.ui.sidebar_pane_gap, DEFAULT_SIDEBAR_PANE_GAP);
+
+        let toml = r#"
+[ui]
+sidebar_pane_gap = 2
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.sidebar_pane_gap, 2);
+
+        assert_eq!(validated_sidebar_pane_gap(0), 0);
+        assert_eq!(
+            validated_sidebar_pane_gap(MAX_SIDEBAR_PANE_GAP),
+            MAX_SIDEBAR_PANE_GAP
+        );
+        assert_eq!(validated_sidebar_pane_gap(u16::MAX), MAX_SIDEBAR_PANE_GAP);
     }
 
     #[test]

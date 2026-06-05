@@ -489,6 +489,7 @@ impl App {
             sidebar_max_width,
             mobile_width_threshold: config.ui.mobile_width_threshold,
             sidebar_row_gap: crate::config::validated_sidebar_row_gap(config.ui.sidebar_row_gap),
+            sidebar_pane_gap: crate::config::validated_sidebar_pane_gap(config.ui.sidebar_pane_gap),
             sidebar_width_source,
             sidebar_width_auto: false,
             sidebar_collapsed: false,
@@ -1144,6 +1145,8 @@ impl App {
                 self.state.mobile_width_threshold = config.ui.mobile_width_threshold;
                 self.state.sidebar_row_gap =
                     crate::config::validated_sidebar_row_gap(config.ui.sidebar_row_gap);
+                self.state.sidebar_pane_gap =
+                    crate::config::validated_sidebar_pane_gap(config.ui.sidebar_pane_gap);
                 // Re-clamp the live width to the new bounds. No source guard — bounds
                 // always apply, including to widths owned by Persisted or Manual.
                 self.state.sidebar_width = self
@@ -2065,6 +2068,51 @@ mod tests {
 
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
         assert_eq!(app.state.mobile_width_threshold, 96);
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_config_updates_sidebar_pane_gap() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-sidebar-pane-gap");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        assert_eq!(
+            app.state.sidebar_pane_gap,
+            crate::config::DEFAULT_SIDEBAR_PANE_GAP
+        );
+
+        std::fs::write(
+            &path,
+            "[ui]
+sidebar_pane_gap = 2
+",
+        )
+        .unwrap();
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.state.sidebar_pane_gap, 2);
+
+        // Out-of-range values clamp instead of producing absurd layouts.
+        std::fs::write(
+            &path,
+            "[ui]
+sidebar_pane_gap = 99
+",
+        )
+        .unwrap();
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(
+            app.state.sidebar_pane_gap,
+            crate::config::MAX_SIDEBAR_PANE_GAP
+        );
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

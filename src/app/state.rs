@@ -870,6 +870,7 @@ pub enum SettingsSection {
     Sound,
     Toast,
     PaneLabels,
+    Sidebar,
     Experiments,
     Integrations,
 }
@@ -880,6 +881,7 @@ impl SettingsSection {
         Self::Sound,
         Self::Toast,
         Self::PaneLabels,
+        Self::Sidebar,
         Self::Integrations,
         Self::Experiments,
     ];
@@ -890,6 +892,7 @@ impl SettingsSection {
             Self::Sound => "sound",
             Self::Toast => "toasts",
             Self::PaneLabels => "pane labels",
+            Self::Sidebar => "sidebar",
             Self::Experiments => "experiments",
             Self::Integrations => "integrations",
         }
@@ -920,6 +923,47 @@ impl ExperimentSetting {
             Self::SwitchAsciiInputSourceInPrefix => {
                 state.switch_ascii_input_source_in_prefix_enabled()
             }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidebarGapSetting {
+    RowGap,
+    PaneGap,
+}
+
+impl SidebarGapSetting {
+    pub(crate) const ALL: [Self; 2] = [Self::RowGap, Self::PaneGap];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::RowGap => "blank rows between sidebar entries",
+            Self::PaneGap => "blank columns around the pane divider",
+        }
+    }
+
+    pub(crate) fn value(self, state: &AppState) -> u16 {
+        match self {
+            Self::RowGap => state.sidebar_row_gap,
+            Self::PaneGap => state.sidebar_pane_gap,
+        }
+    }
+
+    pub(crate) fn max(self) -> u16 {
+        match self {
+            Self::RowGap => crate::config::MAX_SIDEBAR_ROW_GAP,
+            Self::PaneGap => crate::config::MAX_SIDEBAR_PANE_GAP,
+        }
+    }
+
+    /// Next value in the enter/click cycle, wrapping back to 0 past the max.
+    pub(crate) fn next_value(self, state: &AppState) -> u16 {
+        let current = self.value(state);
+        if current >= self.max() {
+            0
+        } else {
+            current + 1
         }
     }
 }
@@ -1301,6 +1345,8 @@ pub struct AppState {
     pub mobile_width_threshold: u16,
     /// Blank rows between sidebar list entries (workspaces and agents).
     pub sidebar_row_gap: u16,
+    /// Blank columns on each side of the sidebar/pane divider.
+    pub sidebar_pane_gap: u16,
     pub sidebar_width_source: SidebarWidthSource,
     pub sidebar_width_auto: bool,
     pub sidebar_collapsed: bool,
@@ -1626,6 +1672,7 @@ impl AppState {
             sidebar_max_width: 36,
             mobile_width_threshold: crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD,
             sidebar_row_gap: crate::config::DEFAULT_SIDEBAR_ROW_GAP,
+            sidebar_pane_gap: crate::config::DEFAULT_SIDEBAR_PANE_GAP,
             sidebar_width_source: SidebarWidthSource::ConfigDefault,
             sidebar_width_auto: false,
             sidebar_collapsed: false,

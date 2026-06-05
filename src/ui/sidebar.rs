@@ -46,8 +46,17 @@ fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
     (ws_h, detail_h)
 }
 
-pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, Rect) {
-    let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
+pub(crate) fn expanded_sidebar_sections(
+    area: Rect,
+    split_ratio: f32,
+    pane_gap: u16,
+) -> (Rect, Rect) {
+    let content = Rect::new(
+        area.x,
+        area.y,
+        area.width.saturating_sub(1 + pane_gap),
+        area.height,
+    );
     if content.width == 0 || content.height == 0 {
         return (Rect::default(), Rect::default());
     }
@@ -58,8 +67,13 @@ pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, 
     (ws_area, detail_area)
 }
 
-pub(crate) fn sidebar_section_divider_rect(area: Rect, split_ratio: f32) -> Rect {
-    let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
+pub(crate) fn sidebar_section_divider_rect(area: Rect, split_ratio: f32, pane_gap: u16) -> Rect {
+    let content = Rect::new(
+        area.x,
+        area.y,
+        area.width.saturating_sub(1 + pane_gap),
+        area.height,
+    );
     if content.width == 0 || content.height < 6 {
         return Rect::default();
     }
@@ -330,7 +344,7 @@ fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], idx: usize) 
 }
 
 pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested: usize) -> usize {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+    let ws_area = workspace_list_rect(area, app.sidebar_section_split, app.sidebar_pane_gap);
     let body = workspace_list_body_rect(ws_area, false);
     if body.height == 0 {
         return requested;
@@ -444,8 +458,8 @@ pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> 
     entries
 }
 
-pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32) -> Rect {
-    let (ws_area, _) = expanded_sidebar_sections(area, split_ratio);
+pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32, pane_gap: u16) -> Rect {
+    let (ws_area, _) = expanded_sidebar_sections(area, split_ratio, pane_gap);
     ws_area
 }
 
@@ -588,7 +602,7 @@ pub(crate) fn compute_workspace_list_areas(
     app: &AppState,
     area: Rect,
 ) -> (Vec<crate::app::state::WorkspaceCardArea>, Vec<()>) {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+    let ws_area = workspace_list_rect(area, app.sidebar_section_split, app.sidebar_pane_gap);
     if ws_area == Rect::default() {
         return (Vec::new(), Vec::new());
     }
@@ -646,8 +660,13 @@ pub(crate) fn compute_workspace_card_areas(
 }
 
 /// Auto-scale sidebar width based on workspace identity + agent summary.
-pub(crate) fn collapsed_sidebar_sections(area: Rect) -> (Rect, Option<u16>, Rect) {
-    let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
+pub(crate) fn collapsed_sidebar_sections(area: Rect, pane_gap: u16) -> (Rect, Option<u16>, Rect) {
+    let content = Rect::new(
+        area.x,
+        area.y,
+        area.width.saturating_sub(1 + pane_gap),
+        area.height,
+    );
     if content.width == 0 || content.height == 0 {
         return (Rect::default(), None, Rect::default());
     }
@@ -686,7 +705,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-    let (ws_area, divider_y, detail_area) = collapsed_sidebar_sections(area);
+    let (ws_area, divider_y, detail_area) = collapsed_sidebar_sections(area, app.sidebar_pane_gap);
     if ws_area == Rect::default() {
         render_sidebar_toggle(app, frame, area, true, p);
         return;
@@ -834,7 +853,8 @@ pub(super) fn render_sidebar(
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-    let (ws_area, detail_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+    let (ws_area, detail_area) =
+        expanded_sidebar_sections(area, app.sidebar_section_split, app.sidebar_pane_gap);
 
     render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
     render_agent_detail(app, terminal_runtimes, frame, detail_area);
@@ -1410,7 +1430,7 @@ mod tests {
 
     #[test]
     fn expanded_sidebar_sections_handle_tiny_heights() {
-        let (ws_area, detail_area) = expanded_sidebar_sections(Rect::new(0, 0, 20, 5), 0.9);
+        let (ws_area, detail_area) = expanded_sidebar_sections(Rect::new(0, 0, 20, 5), 0.9, 0);
 
         assert_eq!(ws_area, Rect::new(0, 0, 19, 3));
         assert_eq!(detail_area, Rect::new(0, 3, 19, 2));
@@ -1418,7 +1438,7 @@ mod tests {
 
     #[test]
     fn sidebar_section_divider_is_hidden_for_tiny_heights() {
-        let divider = sidebar_section_divider_rect(Rect::new(0, 0, 20, 5), 0.5);
+        let divider = sidebar_section_divider_rect(Rect::new(0, 0, 20, 5), 0.5, 0);
 
         assert_eq!(divider, Rect::default());
     }
@@ -1485,6 +1505,28 @@ mod tests {
         assert_eq!(cards[1].ws_idx, 1);
         assert!(cards[1].indented);
         assert_eq!(cards[1].rect.y, cards[0].rect.y + cards[0].rect.height + 1);
+    }
+
+    #[test]
+    fn sidebar_pane_gap_shrinks_content_symmetrically() {
+        let area = Rect::new(0, 0, 26, 20);
+
+        // gap 0: content is everything except the divider column (legacy behavior).
+        let (ws_area, detail_area) = expanded_sidebar_sections(area, 0.5, 0);
+        assert_eq!(ws_area.width, 25);
+        assert_eq!(detail_area.width, 25);
+
+        // gap 2: content also leaves two blank columns before the divider.
+        let (ws_area, detail_area) = expanded_sidebar_sections(area, 0.5, 2);
+        assert_eq!(ws_area.width, 23);
+        assert_eq!(detail_area.width, 23);
+
+        let divider = sidebar_section_divider_rect(area, 0.5, 2);
+        assert_eq!(divider.width, 23);
+
+        let (ws_area, _, detail_area) = collapsed_sidebar_sections(Rect::new(0, 0, 6, 20), 2);
+        assert_eq!(ws_area.width, 3);
+        assert_eq!(detail_area.width, 3);
     }
 
     #[test]

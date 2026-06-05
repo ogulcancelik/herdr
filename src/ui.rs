@@ -184,8 +184,16 @@ fn compute_view_internal(
             .clamp(app.sidebar_min_width, app.sidebar_max_width)
     };
 
-    let [sidebar_area, main_area] =
-        Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Min(1)]).areas(area);
+    // Symmetric breathing room around the sidebar/pane divider: the divider stays
+    // the last column of `sidebar_area`, with `pane_gap` blank columns inside it
+    // (between content and divider) and another `pane_gap` columns before the panes.
+    let pane_gap = app.sidebar_pane_gap;
+    let [sidebar_area, _divider_gap, main_area] = Layout::horizontal([
+        Constraint::Length(sidebar_w + pane_gap),
+        Constraint::Length(pane_gap),
+        Constraint::Min(1),
+    ])
+    .areas(area);
 
     let has_tabs = app.active.and_then(|i| app.workspaces.get(i)).is_some();
     let (tab_bar_rect, terminal_area) = if has_tabs && main_area.height > 1 {
@@ -198,7 +206,8 @@ fn compute_view_internal(
 
     if !app.sidebar_collapsed {
         app.workspace_scroll = normalized_workspace_scroll(app, sidebar_area, app.workspace_scroll);
-        let (_, detail_area) = expanded_sidebar_sections(sidebar_area, app.sidebar_section_split);
+        let (_, detail_area) =
+            expanded_sidebar_sections(sidebar_area, app.sidebar_section_split, pane_gap);
         let max_agent_scroll = agent_panel_scroll_metrics(app, detail_area).max_offset_from_bottom;
         app.agent_panel_scroll = app.agent_panel_scroll.min(max_agent_scroll);
     } else {
@@ -646,7 +655,8 @@ mod tests {
         terminal.draw(|frame| render(&app, frame)).unwrap();
         let buffer = terminal.backend().buffer();
 
-        let (ws_area, _, _) = collapsed_sidebar_sections(app.view.sidebar_rect);
+        let (ws_area, _, _) =
+            collapsed_sidebar_sections(app.view.sidebar_rect, app.sidebar_pane_gap);
         let active_row = ws_area.y + 1;
         let active_style = buffer[(ws_area.x, active_row)].style();
 

@@ -86,6 +86,22 @@ impl App {
         }
     }
 
+    pub(super) fn save_sidebar_row_gap(&mut self, gap: u16) {
+        if self.update_config_file("sidebar row gap", |content| {
+            crate::config::upsert_section_value(content, "ui", "sidebar_row_gap", &gap.to_string())
+        }) {
+            self.apply_config_from_disk(false);
+        }
+    }
+
+    pub(super) fn save_sidebar_pane_gap(&mut self, gap: u16) {
+        if self.update_config_file("sidebar pane gap", |content| {
+            crate::config::upsert_section_value(content, "ui", "sidebar_pane_gap", &gap.to_string())
+        }) {
+            self.apply_config_from_disk(false);
+        }
+    }
+
     pub(super) fn save_pane_history_persistence(&mut self, enabled: bool) {
         if self.update_config_file("pane screen history", |content| {
             crate::config::upsert_section_bool(content, "experimental", "pane_history", enabled)
