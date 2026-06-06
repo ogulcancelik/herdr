@@ -1515,6 +1515,18 @@ impl AppState {
 
     pub(crate) fn remove_alias_shadowed_by_new_pane(&mut self, pane_id: PaneId) {
         self.pane_id_aliases.remove(&pane_id.raw());
+        // Lazy GC: drop aliases whose target pane no longer exists. Runs on
+        // pane creation, so the map stays bounded by live panes plus their
+        // historical env ids.
+        let live: std::collections::HashSet<u32> = self
+            .workspaces
+            .iter()
+            .flat_map(|ws| ws.tabs.iter())
+            .flat_map(|tab| tab.layout.pane_ids())
+            .map(|pane| pane.raw())
+            .collect();
+        self.pane_id_aliases
+            .retain(|_, target| live.contains(&target.raw()));
     }
 
     pub fn sound_enabled(&self) -> bool {
