@@ -443,6 +443,13 @@ impl HeadlessServer {
                 crate::render_prof::event("full_render_cause.deferred_worktree_dialog");
             }
 
+            if let Some(ws_idx) = self.app.state.request_branch_session.take() {
+                self.app.open_branch_session_dialog(ws_idx);
+                needs_render = true;
+                needs_full_render = true;
+                crate::render_prof::event("full_render_cause.deferred_worktree_dialog");
+            }
+
             if let Some(ws_idx) = self.app.state.request_open_existing_worktree.take() {
                 self.app.open_existing_worktree_dialog(ws_idx);
                 needs_render = true;

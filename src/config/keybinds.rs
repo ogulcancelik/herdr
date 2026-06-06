@@ -1774,4 +1774,19 @@ description = "say hello"
             Some("say hello".to_string())
         );
     }
+    #[test]
+    fn branch_session_parses_from_keys_table() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+branch_session = "prefix+y"
+
+[worktrees]
+directory = "/tmp/x"
+"#,
+        )
+        .unwrap();
+        let kb = config.keybinds();
+        assert_eq!(kb.branch_session.label().as_deref(), Some("prefix+y"));
+    }
 }

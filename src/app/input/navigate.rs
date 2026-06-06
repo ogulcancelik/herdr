@@ -1125,6 +1125,42 @@ mod tests {
     }
 
     #[test]
+    fn prefix_branch_session_key_dispatches_from_parsed_config() {
+        let config: crate::config::Config =
+            toml::from_str("[keys]\nbranch_session = \"prefix+y\"\n").unwrap();
+        let mut app = super::super::app_for_mouse_test();
+        app.state.keybinds = config.keybinds();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("main")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Prefix;
+
+        app.handle_prefix_key(crate::input::TerminalKey::new(
+            KeyCode::Char('y'),
+            KeyModifiers::empty(),
+        ));
+
+        assert_eq!(app.state.request_branch_session, Some(0));
+    }
+
+    #[test]
+    fn prefix_branch_session_key_requests_active_workspace() {
+        let mut app = super::super::app_for_mouse_test();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("main")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Prefix;
+        app.state.keybinds.branch_session = crate::config::ActionKeybinds::prefix("y");
+
+        app.handle_prefix_key(crate::input::TerminalKey::new(
+            KeyCode::Char('y'),
+            KeyModifiers::empty(),
+        ));
+
+        assert_eq!(app.state.request_branch_session, Some(0));
+    }
+
+    #[test]
     fn custom_branch_session_key_requests_selected_workspace() {
         let mut state = state_with_workspaces(&["main", "scratch"]);
         state.workspaces[1].identity_cwd = unique_temp_path("navigate-branch-session-selected");
