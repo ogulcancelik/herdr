@@ -481,6 +481,8 @@ pub(crate) enum NavigateAction {
     KillWorktree,
     FocusAttention,
     FocusAttentionPrevious,
+    FocusAttentionWorkspace,
+    FocusAttentionWorkspacePrevious,
     OpenWorktree,
     RemoveWorktree,
     RenameWorkspace,
@@ -599,6 +601,14 @@ fn action_for_key(
         (
             &kb.focus_attention_previous,
             NavigateAction::FocusAttentionPrevious,
+        ),
+        (
+            &kb.focus_attention_workspace,
+            NavigateAction::FocusAttentionWorkspace,
+        ),
+        (
+            &kb.focus_attention_workspace_previous,
+            NavigateAction::FocusAttentionWorkspacePrevious,
         ),
         (&kb.new_tab, NavigateAction::NewTab),
         (&kb.rename_tab, NavigateAction::RenameTab),
@@ -772,6 +782,14 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::FocusAttentionPrevious => {
             state.focus_attention_agent_previous();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::FocusAttentionWorkspace => {
+            state.focus_attention_workspace();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::FocusAttentionWorkspacePrevious => {
+            state.focus_attention_workspace_previous();
             leave_navigate_mode(state);
         }
         NavigateAction::NewTab => {
