@@ -1078,17 +1078,32 @@ impl AppState {
     /// chimes once (all clear) and falls back to cycling the remaining
     /// agents like next_agent.
     pub(crate) fn focus_attention_agent(&mut self) {
-        self.focus_attention_agent_in_direction(true)
+        self.focus_attention_agent_in_direction(true, false)
     }
 
     pub(crate) fn focus_attention_agent_previous(&mut self) {
-        self.focus_attention_agent_in_direction(false)
+        self.focus_attention_agent_in_direction(false, false)
     }
 
-    fn focus_attention_agent_in_direction(&mut self, forward: bool) {
+    /// Workspace-scoped attention: same priority queue, restricted to the
+    /// active workspace's panes; the empty-queue fallback cycles that
+    /// workspace's agent panes. Never chimes — a scoped all-clear says
+    /// nothing about the other workspaces.
+    pub(crate) fn focus_attention_workspace(&mut self) {
+        self.focus_attention_agent_in_direction(true, true)
+    }
+
+    pub(crate) fn focus_attention_workspace_previous(&mut self) {
+        self.focus_attention_agent_in_direction(false, true)
+    }
+
+    fn focus_attention_agent_in_direction(&mut self, forward: bool, workspace_only: bool) {
         let mut attention: Vec<(usize, crate::layout::PaneId, u8, Option<std::time::Instant>)> =
             Vec::new();
         for (ws_idx, ws) in self.workspaces.iter().enumerate() {
+            if workspace_only && Some(ws_idx) != self.active {
+                continue;
+            }
             for detail in ws.pane_details(&self.terminals) {
                 let group = match (detail.state, detail.seen) {
                     (AgentState::Blocked, _) => Some(0u8),
@@ -1113,14 +1128,20 @@ impl AppState {
         });
 
         if attention.is_empty() {
-            if !self.attention_all_clear_chimed {
-                self.attention_all_clear_chimed = true;
-                self.pending_attention_chime = true;
+            if workspace_only {
+                self.cycle_pane_in_active_workspace(forward);
+            } else {
+                if !self.attention_all_clear_chimed {
+                    self.attention_all_clear_chimed = true;
+                    self.pending_attention_chime = true;
+                }
+                self.cycle_agent_entry(forward);
             }
-            self.cycle_agent_entry(forward);
             return;
         }
-        self.attention_all_clear_chimed = false;
+        if !workspace_only {
+            self.attention_all_clear_chimed = false;
+        }
 
         let focused = self
             .active
@@ -1164,6 +1185,31 @@ impl AppState {
             return true;
         }
         false
+    }
+
+    /// Cycle through the active workspace's panes in pane-detail order.
+    fn cycle_pane_in_active_workspace(&mut self, forward: bool) {
+        let Some(ws_idx) = self.active else {
+            return;
+        };
+        let Some(ws) = self.workspaces.get(ws_idx) else {
+            return;
+        };
+        let panes: Vec<crate::layout::PaneId> = ws
+            .pane_details(&self.terminals)
+            .into_iter()
+            .map(|detail| detail.pane_id)
+            .collect();
+        if panes.is_empty() {
+            return;
+        }
+        let focused = ws.focused_pane_id();
+        let target = match focused.and_then(|pane| panes.iter().position(|p| *p == pane)) {
+            Some(idx) if forward => panes[(idx + 1) % panes.len()],
+            Some(idx) => panes[(idx + panes.len() - 1) % panes.len()],
+            None => panes[0],
+        };
+        self.focus_pane_in_workspace(ws_idx, target);
     }
 
     fn cycle_agent_entry(&mut self, forward: bool) {
@@ -2749,6 +2795,33 @@ mod tests {
         state.focus_attention_agent();
         assert_eq!(state.active, Some(1));
         state.focus_attention_agent_previous();
+        assert_eq!(state.active, Some(0));
+    }
+
+    #[test]
+    fn focus_attention_workspace_ignores_other_workspaces_and_never_chimes() {
+        let mut state = app_with_workspaces(&["a", "b"]);
+        state.ensure_test_terminals();
+        state.active = Some(1);
+
+        // Workspace a has a blocked agent; b (active) has nothing urgent.
+        let pane_a = state.workspaces[0].tabs[0].root_pane;
+        let tid = state.workspaces[0].terminal_id(pane_a).cloned().unwrap();
+        state
+            .terminals
+            .get_mut(&tid)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Blocked);
+
+        state.focus_attention_workspace();
+
+        // Scoped: stays in b (cycles within it), ignores a's blocked agent,
+        // and stays silent — a scoped all-clear says nothing globally.
+        assert_eq!(state.active, Some(1));
+        assert!(!state.pending_attention_chime);
+
+        // Global variant still jumps to a.
+        state.focus_attention_agent();
         assert_eq!(state.active, Some(0));
     }
 

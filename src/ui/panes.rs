@@ -1081,10 +1081,7 @@ mod tests {
         assert_eq!(content, pane_inner);
 
         // Latched: context row + prompt rows reserved, content shifts down.
-        app.terminals
-            .get_mut(&terminal_id)
-            .unwrap()
-            .header_reserved = true;
+        app.terminals.get_mut(&terminal_id).unwrap().header_reserved = true;
         let (header, content) = carve_pane_header(&app, Some(&terminal_id), pane_inner);
         let header = header.expect("header should be reserved");
         assert_eq!(header.height, 4);
