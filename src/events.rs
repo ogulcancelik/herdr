@@ -56,6 +56,11 @@ pub enum AppEvent {
         process_exited: bool,
         observed_at: Instant,
     },
+    /// A user prompt submitted to an agent pane (integration hook report).
+    HookPromptReported {
+        pane_id: PaneId,
+        prompt: String,
+    },
     /// Hook-authoritative agent state was reported for a pane.
     HookStateReported {
         pane_id: PaneId,

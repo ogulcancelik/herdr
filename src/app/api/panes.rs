@@ -11,7 +11,7 @@ use crate::app::{App, Mode};
 
 use super::super::api_helpers::{
     detect_state_from_api, encode_api_keys, encode_api_text, normalize_custom_status,
-    normalize_reported_agent_label,
+    normalize_reported_agent_label, sanitize_reported_prompt,
 };
 use super::responses::{encode_error, encode_success};
 
@@ -198,6 +198,25 @@ impl App {
             seq: params.seq,
         });
 
+        encode_success(id, ResponseResult::Ok {})
+    }
+
+    pub(super) fn handle_pane_report_prompt(
+        &mut self,
+        id: String,
+        params: crate::api::schema::PaneReportPromptParams,
+    ) -> String {
+        let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        if normalize_reported_agent_label(&params.agent).is_none() {
+            return invalid_agent(id);
+        }
+        let prompt = sanitize_reported_prompt(&params.prompt);
+        if prompt.is_empty() {
+            return encode_success(id, ResponseResult::Ok {});
+        }
+        self.handle_internal_event(crate::events::AppEvent::HookPromptReported { pane_id, prompt });
         encode_success(id, ResponseResult::Ok {})
     }
 
@@ -572,5 +591,47 @@ mod tests {
         assert_eq!(success.id, "req");
         assert_eq!(app.state.request_remove_linked_worktree, None);
         assert!(app.state.workspaces.is_empty());
+    }
+    #[test]
+    fn report_prompt_stores_sanitized_last_prompt() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("main")];
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(pane_id)
+            .expect("pane state")
+            .attached_terminal_id
+            .clone();
+        app.state.terminals.insert(
+            terminal_id.clone(),
+            crate::terminal::TerminalState::new(terminal_id.clone(), "/tmp".into()),
+        );
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+
+        let response = app.handle_pane_report_prompt(
+            "req-1".into(),
+            crate::api::schema::PaneReportPromptParams {
+                pane_id: public_pane_id,
+                source: "herdr:claude".into(),
+                agent: "claude".into(),
+                prompt: "  fix the \u{1b}[31mparser\u{1b}[0m bug  ".into(),
+                seq: Some(1),
+            },
+        );
+        assert!(response.contains("\"ok\""));
+        assert_eq!(
+            app.state
+                .terminals
+                .get(&terminal_id)
+                .and_then(|terminal| terminal.last_prompt.as_deref()),
+            Some("fix the parser bug")
+        );
     }
 }

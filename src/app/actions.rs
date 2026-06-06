@@ -2095,6 +2095,13 @@ impl AppState {
                 })
                 .into_iter()
                 .collect(),
+            AppEvent::HookPromptReported { pane_id, prompt } => self
+                .update_terminal_state(pane_id, |terminal| {
+                    terminal.last_prompt = Some(prompt.clone());
+                    None
+                })
+                .into_iter()
+                .collect(),
             AppEvent::HookStateReported {
                 pane_id,
                 source,

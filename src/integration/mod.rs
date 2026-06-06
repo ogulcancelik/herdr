@@ -19,7 +19,7 @@ const OMP_INTEGRATION_VERSION: u32 = 2;
 const PI_CODING_AGENT_DIR_ENV_VAR: &str = "PI_CODING_AGENT_DIR";
 const CLAUDE_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const CLAUDE_HOOK_ASSET: &str = include_str!("assets/claude/herdr-agent-state.sh");
-const CLAUDE_INTEGRATION_VERSION: u32 = 5;
+const CLAUDE_INTEGRATION_VERSION: u32 = 6;
 const CLAUDE_CONFIG_DIR_ENV_VAR: &str = "CLAUDE_CONFIG_DIR";
 const CODEX_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const CODEX_HOOK_ASSET: &str = include_str!("assets/codex/herdr-agent-state.sh");
@@ -924,6 +924,13 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
         10,
         Some("*"),
     )?;
+    ensure_command_hook(
+        hooks,
+        "UserPromptSubmit",
+        format!("bash {quoted_hook_path} prompt"),
+        10,
+        None,
+    )?;
 
     fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
 
@@ -1211,6 +1218,11 @@ pub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {
                 hooks,
                 "SessionStart",
                 &format!("bash {quoted_hook_path} session"),
+            )?;
+            updated_settings |= remove_command_hook(
+                hooks,
+                "UserPromptSubmit",
+                &format!("bash {quoted_hook_path} prompt"),
             )?;
             updated_settings |= remove_command_hook(
                 hooks,
@@ -2662,7 +2674,19 @@ mod tests {
             .as_str()
             .unwrap()
             .contains(" session"));
-        assert!(settings["hooks"].get("UserPromptSubmit").is_none());
+        assert_eq!(
+            settings["hooks"]["UserPromptSubmit"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .ends_with(" prompt")
+        );
         assert!(settings["hooks"].get("PreToolUse").is_none());
         assert!(settings["hooks"].get("PermissionRequest").is_none());
         assert!(settings["hooks"].get("PostToolUse").is_none());
@@ -2714,7 +2738,19 @@ mod tests {
             settings["hooks"]["SessionStart"].as_array().unwrap().len(),
             1
         );
-        assert!(settings["hooks"].get("UserPromptSubmit").is_none());
+        assert_eq!(
+            settings["hooks"]["UserPromptSubmit"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .ends_with(" prompt")
+        );
         assert!(settings["hooks"].get("PreToolUse").is_none());
         assert!(settings["hooks"].get("PermissionRequest").is_none());
         assert!(settings["hooks"].get("PostToolUse").is_none());
@@ -2770,7 +2806,19 @@ mod tests {
             settings["hooks"]["SessionEnd"][0]["hooks"][0]["command"],
             "echo keep-session-end"
         );
-        assert!(settings["hooks"].get("UserPromptSubmit").is_none());
+        assert_eq!(
+            settings["hooks"]["UserPromptSubmit"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .ends_with(" prompt")
+        );
         assert!(settings["hooks"].get("PreToolUse").is_none());
         assert!(settings["hooks"].get("Stop").is_none());
 
@@ -2801,7 +2849,7 @@ mod tests {
 
         assert_eq!(claude.path, hook_path);
         assert_eq!(claude.installed_version, Some(1));
-        assert_eq!(claude.expected_version, 5);
+        assert_eq!(claude.expected_version, 6);
         assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
         std::env::remove_var("HOME");
@@ -2831,7 +2879,7 @@ mod tests {
 
         assert_eq!(claude.path, hook_path);
         assert_eq!(claude.installed_version, Some(2));
-        assert_eq!(claude.expected_version, 5);
+        assert_eq!(claude.expected_version, 6);
         assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
         std::env::remove_var("HOME");

@@ -315,8 +315,165 @@ pub(super) fn render_panes(
                 app.host_terminal_theme,
             );
             render_copy_mode_cursor(app, frame, info);
+            render_prompt_float(app, ws, frame, info);
         }
     }
+}
+
+/// Float the pane's last submitted prompt over the top rows of the pane,
+/// middle-collapsed to at most `prompt_float_lines` rows. Only agent panes
+/// with a reported prompt get the float; it never covers more than half the
+/// pane.
+fn render_prompt_float(
+    app: &AppState,
+    ws: &crate::workspace::Workspace,
+    frame: &mut Frame,
+    info: &PaneInfo,
+) {
+    let max_lines = app.prompt_float_lines;
+    if max_lines == 0 {
+        return;
+    }
+    let Some(terminal) = ws
+        .pane_state(info.id)
+        .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
+    else {
+        return;
+    };
+    let Some(prompt) = terminal.last_prompt.as_deref() else {
+        return;
+    };
+    let inner = info.inner_rect;
+    if inner.width < 8 || inner.height < 4 {
+        return;
+    }
+    // Never cover more than the top half of the pane.
+    let budget = max_lines.min(inner.height / 2).max(1) as usize;
+
+    let width = inner.width.saturating_sub(2) as usize; // 1 col padding each side
+    let lines = collapse_prompt_lines(prompt, budget, width);
+    if lines.is_empty() {
+        return;
+    }
+
+    let p = &app.palette;
+    let bar_style = Style::default().bg(p.surface_dim).fg(p.subtext0);
+    let marker_style = Style::default()
+        .bg(p.surface_dim)
+        .fg(p.overlay0)
+        .add_modifier(Modifier::DIM);
+    let buf = frame.buffer_mut();
+    for (row, line) in lines.iter().enumerate() {
+        let y = inner.y + row as u16;
+        // Paint the full bar row, then the text on top.
+        for x in inner.x..inner.x + inner.width {
+            buf[(x, y)].set_symbol(" ");
+            buf[(x, y)].set_style(bar_style);
+        }
+        let style = if line.is_marker {
+            marker_style
+        } else {
+            bar_style
+        };
+        let prefix = if row == 0 { "\u{276f} " } else { "  " };
+        let text = format!("{prefix}{}", line.text);
+        buf.set_stringn(
+            inner.x + 1,
+            y,
+            text,
+            inner.width.saturating_sub(1) as usize,
+            style,
+        );
+    }
+}
+
+struct PromptFloatLine {
+    text: String,
+    is_marker: bool,
+}
+
+/// Middle-truncate a single line to `width` display columns, keeping the
+/// start and end ("abcdef", 5 -> "ab\u{2026}ef").
+fn middle_truncate(line: &str, width: usize) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    if chars.len() <= width {
+        return line.to_string();
+    }
+    if width <= 1 {
+        return "\u{2026}".to_string();
+    }
+    let keep = width - 1;
+    let head = keep.div_ceil(2);
+    let tail = keep - head;
+    let mut out: String = chars[..head].iter().collect();
+    out.push('\u{2026}');
+    out.extend(chars[chars.len() - tail..].iter());
+    out
+}
+
+/// Collapse a prompt to at most `max_lines` rows of `width` columns: when the
+/// prompt has more logical lines than fit, the MIDDLE is elided symmetrically
+/// (head lines, a "+N lines" marker, tail lines) — the start and the end of
+/// the prompt both survive. Overlong individual lines are middle-truncated.
+fn collapse_prompt_lines(prompt: &str, max_lines: usize, width: usize) -> Vec<PromptFloatLine> {
+    if max_lines == 0 || width == 0 {
+        return Vec::new();
+    }
+    // The first rendered row carries a 2-col prompt marker prefix.
+    let text_width = width.saturating_sub(2).max(1);
+    let logical: Vec<&str> = prompt
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .skip_while(|line| line.is_empty())
+        .collect();
+    let logical: Vec<&str> = {
+        let mut lines = logical;
+        while lines.last().is_some_and(|line| line.is_empty()) {
+            lines.pop();
+        }
+        lines
+    };
+    if logical.is_empty() {
+        return Vec::new();
+    }
+
+    let truncated = |line: &str| PromptFloatLine {
+        text: middle_truncate(line, text_width),
+        is_marker: false,
+    };
+
+    if logical.len() <= max_lines {
+        return logical.iter().map(|line| truncated(line)).collect();
+    }
+    if max_lines == 1 {
+        // No room for a marker: fuse start and end of the whole prompt.
+        let joined = format!(
+            "{} \u{2026} {}",
+            logical.first().unwrap_or(&""),
+            logical.last().unwrap_or(&"")
+        );
+        return vec![truncated(&joined)];
+    }
+
+    let budget = max_lines - 1; // one row for the elision marker
+    let head = budget.div_ceil(2);
+    let tail = budget - head;
+    let elided = logical.len() - head - tail;
+
+    let mut out: Vec<PromptFloatLine> = Vec::with_capacity(max_lines);
+    out.extend(logical[..head].iter().map(|line| truncated(line)));
+    out.push(PromptFloatLine {
+        text: format!("\u{22ef} +{elided} lines \u{22ef}"),
+        is_marker: true,
+    });
+    out.extend(
+        logical[logical.len() - tail..]
+            .iter()
+            .map(|line| truncated(line)),
+    );
+    out
 }
 
 fn render_copy_mode_cursor(app: &AppState, frame: &mut Frame, info: &PaneInfo) {
@@ -754,5 +911,62 @@ mod tests {
             panic!("selection background should resolve to rgb");
         };
         assert!(relative_luminance((r, g, b)) > relative_luminance((12, 14, 16)));
+    }
+    #[test]
+    fn collapse_keeps_short_prompts_verbatim() {
+        let lines = collapse_prompt_lines("fix the parser bug", 3, 40);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "fix the parser bug");
+        assert!(!lines[0].is_marker);
+    }
+
+    #[test]
+    fn collapse_elides_the_middle_not_the_end() {
+        let prompt = "line one\nline two\nline three\nline four\nline five";
+        let lines = collapse_prompt_lines(prompt, 3, 40);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].text, "line one");
+        assert!(lines[1].is_marker);
+        assert!(lines[1].text.contains("+3 lines"));
+        assert_eq!(lines[2].text, "line five");
+    }
+
+    #[test]
+    fn collapse_distributes_head_heavy_for_even_budgets() {
+        let prompt = (1..=10)
+            .map(|i| format!("l{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lines = collapse_prompt_lines(&prompt, 4, 40);
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0].text, "l1");
+        assert_eq!(lines[1].text, "l2");
+        assert!(lines[2].is_marker);
+        assert_eq!(lines[3].text, "l10");
+    }
+
+    #[test]
+    fn collapse_single_row_fuses_start_and_end() {
+        let prompt = "first ask\nmiddle\nfinal ask";
+        let lines = collapse_prompt_lines(prompt, 1, 60);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].text.starts_with("first ask"));
+        assert!(lines[0].text.ends_with("final ask"));
+    }
+
+    #[test]
+    fn middle_truncate_keeps_both_ends_of_long_lines() {
+        let out = middle_truncate("abcdefghijklmnopqrstuvwxyz", 11);
+        assert_eq!(out.chars().count(), 11);
+        assert!(out.starts_with("abcde"));
+        assert!(out.ends_with("vwxyz"));
+        assert!(out.contains('\u{2026}'));
+    }
+
+    #[test]
+    fn collapse_trims_blank_padding_lines() {
+        let lines = collapse_prompt_lines("\n\n  do the thing  \n\n", 3, 40);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "  do the thing");
     }
 }

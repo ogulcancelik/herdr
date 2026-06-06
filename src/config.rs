@@ -18,9 +18,10 @@ pub use self::{
         IndexedKeybind, Keybinds, LiveKeybindConfig,
     },
     model::{
-        validated_sidebar_bounds, validated_sidebar_pane_gap, validated_sidebar_row_gap,
-        AgentPanelScopeConfig, Config, ConfigReloadReport, ConfigReloadStatus, KeysConfig,
-        NewTerminalCwdConfig, ShellModeConfig, ToastConfig, ToastDelivery, UpdateChannelConfig,
+        validated_prompt_float_lines, validated_sidebar_bounds, validated_sidebar_pane_gap,
+        validated_sidebar_row_gap, AgentPanelScopeConfig, Config, ConfigReloadReport,
+        ConfigReloadStatus, KeysConfig, NewTerminalCwdConfig, ShellModeConfig, ToastConfig,
+        ToastDelivery, UpdateChannelConfig,
     },
     sound::SoundConfig,
     theme::{parse_color, CustomThemeColors, ThemeConfig},
@@ -36,6 +37,8 @@ pub const DEFAULT_SIDEBAR_ROW_GAP: u16 = 1;
 pub const MAX_SIDEBAR_ROW_GAP: u16 = 3;
 pub const DEFAULT_SIDEBAR_PANE_GAP: u16 = 0;
 pub const MAX_SIDEBAR_PANE_GAP: u16 = 4;
+pub const DEFAULT_PROMPT_FLOAT_LINES: u16 = 3;
+pub const MAX_PROMPT_FLOAT_LINES: u16 = 10;
 
 #[cfg(test)]
 pub(crate) fn app_dir_name() -> &'static str {

@@ -1424,6 +1424,8 @@ pub struct AppState {
     pub sidebar_row_gap: u16,
     /// Blank columns on each side of the sidebar/pane divider.
     pub sidebar_pane_gap: u16,
+    /// Max height of the prompt float over agent panes. 0 disables.
+    pub prompt_float_lines: u16,
     pub sidebar_width_source: SidebarWidthSource,
     pub sidebar_width_auto: bool,
     pub sidebar_collapsed: bool,
@@ -1764,6 +1766,7 @@ impl AppState {
             mobile_width_threshold: crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD,
             sidebar_row_gap: crate::config::DEFAULT_SIDEBAR_ROW_GAP,
             sidebar_pane_gap: crate::config::DEFAULT_SIDEBAR_PANE_GAP,
+            prompt_float_lines: crate::config::DEFAULT_PROMPT_FLOAT_LINES,
             sidebar_width_source: SidebarWidthSource::ConfigDefault,
             sidebar_width_auto: false,
             sidebar_collapsed: false,

@@ -1145,6 +1145,9 @@ mod tests {
         let mut app = super::super::app_for_mouse_test();
         app.state.keybinds = config.keybinds();
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("main")];
+        // Pin a non-git identity cwd: the test process may itself run inside a
+        // linked worktree checkout, where worktree actions are refused.
+        app.state.workspaces[0].identity_cwd = unique_temp_path("navigate-branch-session-prefix");
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Prefix;
@@ -1161,6 +1164,9 @@ mod tests {
     fn prefix_branch_session_key_requests_active_workspace() {
         let mut app = super::super::app_for_mouse_test();
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("main")];
+        // Pin a non-git identity cwd: the test process may itself run inside a
+        // linked worktree checkout, where worktree actions are refused.
+        app.state.workspaces[0].identity_cwd = unique_temp_path("navigate-branch-session-prefix");
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Prefix;

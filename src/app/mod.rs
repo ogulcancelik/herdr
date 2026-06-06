@@ -495,6 +495,9 @@ impl App {
             mobile_width_threshold: config.ui.mobile_width_threshold,
             sidebar_row_gap: crate::config::validated_sidebar_row_gap(config.ui.sidebar_row_gap),
             sidebar_pane_gap: crate::config::validated_sidebar_pane_gap(config.ui.sidebar_pane_gap),
+            prompt_float_lines: crate::config::validated_prompt_float_lines(
+                config.ui.prompt_float_lines,
+            ),
             sidebar_width_source,
             sidebar_width_auto: false,
             sidebar_collapsed: false,
@@ -1169,6 +1172,8 @@ impl App {
                     crate::config::validated_sidebar_row_gap(config.ui.sidebar_row_gap);
                 self.state.sidebar_pane_gap =
                     crate::config::validated_sidebar_pane_gap(config.ui.sidebar_pane_gap);
+                self.state.prompt_float_lines =
+                    crate::config::validated_prompt_float_lines(config.ui.prompt_float_lines);
                 self.state.agent_aliases = config.ui.agent_aliases.clone();
                 // Re-clamp the live width to the new bounds. No source guard — bounds
                 // always apply, including to widths owned by Persisted or Manual.

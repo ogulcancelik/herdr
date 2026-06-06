@@ -61,6 +61,9 @@ pub struct TerminalState {
     fallback_visible_idle: bool,
     fallback_visible_working: bool,
     fallback_observed_at: Option<Instant>,
+    /// The last user prompt submitted to this pane's agent, reported by the
+    /// integration hook (Claude's UserPromptSubmit). Drives the prompt float.
+    pub last_prompt: Option<String>,
     /// When the effective agent state last transitioned. Drives the
     /// oldest-first ordering of the attention queue.
     pub state_changed_at: Option<Instant>,
@@ -94,6 +97,7 @@ impl TerminalState {
             fallback_visible_idle: false,
             fallback_visible_working: false,
             fallback_observed_at: None,
+            last_prompt: None,
             state_changed_at: None,
             live_activity: None,
             stale_hook_idle_since: None,

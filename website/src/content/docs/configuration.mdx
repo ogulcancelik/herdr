@@ -309,6 +309,8 @@ The agent panel shows rows as `<agent> · <status>` using built-in short codes (
 
 `sidebar_row_gap` controls the blank rows between sidebar list entries (workspaces and agents). The default is 1; set 0 for a packed list. The maximum is 3.
 
+`prompt_float_lines` controls the prompt float: agent panes pin the **last submitted prompt** to their top rows so you can glance at what the agent was asked without scrolling back through long output. Prompts taller than the limit are collapsed in the **middle** — the start and the end survive, with a `⋯ +N lines ⋯` marker between them; overlong single lines are middle-truncated the same way. The default is 3 rows, the float never covers more than the top half of a pane, and `0` disables it. The prompt is reported by the Claude Code integration's `UserPromptSubmit` hook (reinstall the integration from the settings panel if it shows "update available"); other agents will gain support as their hooks expose the prompt.
+
 `sidebar_pane_gap` adds symmetric breathing room around the sidebar/pane divider: the configured number of blank columns appears on each side of the vertical divider line. The default is 0 (content and panes touch the divider); the maximum is 4.
 
 Both gaps can also be cycled live from the `sidebar` tab in the settings panel (`prefix+s`); changes are written back to `config.toml`.

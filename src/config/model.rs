@@ -5,8 +5,9 @@ use serde::{de, Deserialize, Deserializer, Serialize};
 
 use super::{
     BindingConfig, CommandKeybindConfig, SoundConfig, ThemeConfig, DEFAULT_MOBILE_WIDTH_THRESHOLD,
-    DEFAULT_MOUSE_SCROLL_LINES, DEFAULT_SCROLLBACK_LIMIT_BYTES, DEFAULT_SIDEBAR_PANE_GAP,
-    DEFAULT_SIDEBAR_ROW_GAP, MAX_SIDEBAR_PANE_GAP, MAX_SIDEBAR_ROW_GAP,
+    DEFAULT_MOUSE_SCROLL_LINES, DEFAULT_PROMPT_FLOAT_LINES, DEFAULT_SCROLLBACK_LIMIT_BYTES,
+    DEFAULT_SIDEBAR_PANE_GAP, DEFAULT_SIDEBAR_ROW_GAP, MAX_PROMPT_FLOAT_LINES,
+    MAX_SIDEBAR_PANE_GAP, MAX_SIDEBAR_ROW_GAP,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -222,6 +223,11 @@ pub fn validated_sidebar_pane_gap(gap: u16) -> u16 {
     gap.min(MAX_SIDEBAR_PANE_GAP)
 }
 
+/// Clamp `[ui] prompt_float_lines` to its supported range (0 disables).
+pub fn validated_prompt_float_lines(lines: u16) -> u16 {
+    lines.min(MAX_PROMPT_FLOAT_LINES)
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -393,6 +399,9 @@ pub struct UiConfig {
     pub sidebar_row_gap: u16,
     /// Blank columns on each side of the sidebar/pane divider. Default: 0, max: 4.
     pub sidebar_pane_gap: u16,
+    /// Max height of the prompt float pinned to the top of agent panes
+    /// (the last submitted prompt, middle-collapsed). 0 disables. Default: 3.
+    pub prompt_float_lines: u16,
     /// Capture mouse input for Herdr's mouse UI. Default: true.
     pub mouse_capture: bool,
     /// Modifier that lets right-click gestures pass through to pane apps. Empty disables it.
@@ -590,6 +599,7 @@ impl Default for UiConfig {
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
             sidebar_row_gap: DEFAULT_SIDEBAR_ROW_GAP,
             sidebar_pane_gap: DEFAULT_SIDEBAR_PANE_GAP,
+            prompt_float_lines: DEFAULT_PROMPT_FLOAT_LINES,
             mouse_capture: true,
             right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),
             redraw_on_focus_gained: true,

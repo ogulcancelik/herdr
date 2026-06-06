@@ -86,6 +86,8 @@ pub enum Method {
     PaneReportAgent(PaneReportAgentParams),
     #[serde(rename = "pane.report_agent_session")]
     PaneReportAgentSession(PaneReportAgentSessionParams),
+    #[serde(rename = "pane.report_prompt")]
+    PaneReportPrompt(PaneReportPromptParams),
     #[serde(rename = "pane.report_metadata")]
     PaneReportMetadata(PaneReportMetadataParams),
     #[serde(rename = "pane.clear_agent_authority")]
@@ -353,6 +355,17 @@ pub struct PaneReportAgentParams {
     pub agent_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneReportPromptParams {
+    pub pane_id: String,
+    pub source: String,
+    pub agent: String,
+    /// The user prompt as submitted to the agent.
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

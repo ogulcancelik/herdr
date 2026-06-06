@@ -3,7 +3,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=claude
-# HERDR_INTEGRATION_VERSION=5
+# HERDR_INTEGRATION_VERSION=6
 
 set -eu
 
@@ -13,7 +13,7 @@ trap 'rm -f "$hook_input_file"' EXIT HUP INT TERM
 cat >"$hook_input_file" 2>/dev/null || true
 
 case "$action" in
-  session) ;;
+  session|prompt) ;;
   *) exit 0 ;;
 esac
 
@@ -57,22 +57,39 @@ if hook_event_name == "SubagentStop":
     raise SystemExit(0)
 request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
 report_seq = time.time_ns()
-session_id = hook_input.get("session_id")
-agent_session_id = session_id if isinstance(session_id, str) and session_id else None
-if agent_session_id:
+if action == "prompt":
+    prompt = hook_input.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise SystemExit(0)
+    # Server re-sanitizes; this cap just bounds the wire payload.
     request = {
         "id": request_id,
-        "method": "pane.report_agent_session",
+        "method": "pane.report_prompt",
         "params": {
             "pane_id": pane_id,
             "source": source,
             "agent": "claude",
             "seq": report_seq,
-            "agent_session_id": agent_session_id,
+            "prompt": prompt[:16384],
         },
     }
 else:
-    raise SystemExit(0)
+    session_id = hook_input.get("session_id")
+    agent_session_id = session_id if isinstance(session_id, str) and session_id else None
+    if agent_session_id:
+        request = {
+            "id": request_id,
+            "method": "pane.report_agent_session",
+            "params": {
+                "pane_id": pane_id,
+                "source": source,
+                "agent": "claude",
+                "seq": report_seq,
+                "agent_session_id": agent_session_id,
+            },
+        }
+    else:
+        raise SystemExit(0)
 
 try:
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
