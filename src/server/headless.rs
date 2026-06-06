@@ -481,6 +481,16 @@ impl HeadlessServer {
                 crate::render_prof::event("full_render_cause.deferred_worktree_dialog");
             }
 
+            if self.app.state.pending_attention_chime {
+                self.app.state.pending_attention_chime = false;
+                if self.app.state.sound_enabled() {
+                    self.send_to_foreground_client(ServerMessage::Notify {
+                        kind: protocol::NotifyKind::Sound,
+                        message: "attention clear".to_owned(),
+                    });
+                }
+            }
+
             if self.app.state.request_submit_worktree_create {
                 self.app.state.request_submit_worktree_create = false;
                 self.app.start_worktree_add();
@@ -1367,6 +1377,7 @@ impl HeadlessServer {
                         let msg = match sound {
                             crate::sound::Sound::Done => "agent done",
                             crate::sound::Sound::Request => "agent attention",
+                            crate::sound::Sound::AllClear => "attention clear",
                         };
                         self.send_to_foreground_client(ServerMessage::Notify {
                             kind: protocol::NotifyKind::Sound,
@@ -1452,6 +1463,7 @@ impl HeadlessServer {
                         let msg = match sound {
                             crate::sound::Sound::Done => "agent done",
                             crate::sound::Sound::Request => "agent attention",
+                            crate::sound::Sound::AllClear => "attention clear",
                         };
                         self.send_to_foreground_client(ServerMessage::Notify {
                             kind: protocol::NotifyKind::Sound,
@@ -2341,6 +2353,7 @@ impl HeadlessServer {
                     let msg_text = match sound {
                         crate::sound::Sound::Done => "agent done",
                         crate::sound::Sound::Request => "agent attention",
+                        crate::sound::Sound::AllClear => "attention clear",
                     };
                     debug!(sound = ?sound, "forwarding sound notification from API request");
                     self.send_to_foreground_client(ServerMessage::Notify {

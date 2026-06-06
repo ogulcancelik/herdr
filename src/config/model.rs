@@ -270,6 +270,9 @@ pub struct KeysConfig {
     /// gate (PR merged / branch merged into the default branch) passes.
     /// Unset by default.
     pub kill_worktree: BindingConfig,
+    /// Focus the agent most in need of attention (blocked oldest-first, then
+    /// unseen-done). Unset by default.
+    pub focus_attention: BindingConfig,
     /// Open an existing Git worktree from the selected workspace. Unset by default.
     pub open_worktree: BindingConfig,
     /// Delete the selected managed worktree checkout after confirmation. Unset by default.
@@ -415,6 +418,10 @@ pub struct UiConfig {
     pub show_agent_labels_on_pane_borders: bool,
     /// Agent sidebar scope. Saved values are "current" or "all". Default: "all".
     pub agent_panel_scope: AgentPanelScopeConfig,
+    /// Display alias overrides for agent labels in the sidebar, e.g.
+    /// `agent_aliases = { claude = "CC" }`. Built-in short codes apply
+    /// when no override is set (claude -> cc, codex -> cd, ...).
+    pub agent_aliases: std::collections::HashMap<String, String>,
     /// Accent color for highlights, borders, and navigation UI.
     /// Accepts hex (#89b4fa), named colors (cyan, blue), or RGB (rgb(137,180,250)).
     pub accent: String,
@@ -525,6 +532,7 @@ impl Default for KeysConfig {
             new_worktree: BindingConfig::one("prefix+shift+g"),
             branch_session: BindingConfig::empty(),
             kill_worktree: BindingConfig::empty(),
+            focus_attention: BindingConfig::empty(),
             open_worktree: BindingConfig::empty(),
             remove_worktree: BindingConfig::empty(),
             rename_workspace: BindingConfig::one("prefix+shift+w"),
@@ -600,6 +608,7 @@ impl Default for UiConfig {
             prompt_new_tab_name: true,
             show_agent_labels_on_pane_borders: false,
             agent_panel_scope: AgentPanelScopeConfig::All,
+            agent_aliases: std::collections::HashMap::new(),
             accent: "cyan".into(),
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),

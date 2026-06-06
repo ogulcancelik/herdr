@@ -479,6 +479,7 @@ pub(crate) enum NavigateAction {
     NewWorktree,
     BranchSession,
     KillWorktree,
+    FocusAttention,
     OpenWorktree,
     RemoveWorktree,
     RenameWorkspace,
@@ -593,6 +594,7 @@ fn action_for_key(
         (&kb.next_workspace, NavigateAction::NextWorkspace),
         (&kb.previous_agent, NavigateAction::PreviousAgent),
         (&kb.next_agent, NavigateAction::NextAgent),
+        (&kb.focus_attention, NavigateAction::FocusAttention),
         (&kb.new_tab, NavigateAction::NewTab),
         (&kb.rename_tab, NavigateAction::RenameTab),
         (&kb.previous_tab, NavigateAction::PreviousTab),
@@ -757,6 +759,10 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::NextAgent => {
             state.next_agent();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::FocusAttention => {
+            state.focus_attention_agent();
             leave_navigate_mode(state);
         }
         NavigateAction::NewTab => {

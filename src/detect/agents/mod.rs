@@ -43,6 +43,7 @@ pub(super) fn detect(agent: Agent, screen_content: &str) -> AgentDetection {
     if skip_state_update {
         return AgentDetection {
             state,
+            activity: None,
             skip_state_update: true,
             visible_blocker: false,
             visible_idle: false,
@@ -50,8 +51,15 @@ pub(super) fn detect(agent: Agent, screen_content: &str) -> AgentDetection {
         };
     }
 
+    let activity = if agent == Agent::Claude && state == AgentState::Working {
+        claude_code::live_activity_text(screen_content)
+    } else {
+        None
+    };
+
     AgentDetection {
         state,
+        activity,
         skip_state_update: false,
         visible_blocker: has_visible_blocker(agent, screen_content, state),
         visible_idle: has_visible_idle(agent, screen_content, state),

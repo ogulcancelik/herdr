@@ -19,6 +19,9 @@ pub struct SoundConfig {
     /// Optional mp3 file path for "request" notifications.
     /// Relative paths are resolved from the config file's directory.
     pub request_path: Option<PathBuf>,
+    /// Optional mp3 file path for the attention all-clear chime.
+    /// Relative paths are resolved from the config file's directory.
+    pub all_clear_path: Option<PathBuf>,
     pub agents: AgentSoundOverrides,
 }
 
@@ -66,6 +69,7 @@ impl SoundConfig {
         let path = match sound {
             crate::sound::Sound::Done => self.done_path.as_ref().or(self.path.as_ref()),
             crate::sound::Sound::Request => self.request_path.as_ref().or(self.path.as_ref()),
+            crate::sound::Sound::AllClear => self.all_clear_path.as_ref().or(self.path.as_ref()),
         }?;
 
         Some(resolve_config_relative_path(path))
@@ -146,6 +150,7 @@ impl Default for SoundConfig {
             path: None,
             done_path: None,
             request_path: None,
+            all_clear_path: None,
             agents: AgentSoundOverrides::default(),
         }
     }

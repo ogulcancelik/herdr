@@ -27,6 +27,7 @@ pub(crate) struct AgentPanelEntry {
     pub seen: bool,
     pub custom_status: Option<String>,
     pub state_labels: std::collections::HashMap<String, String>,
+    pub live_activity: Option<String>,
 }
 
 fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
@@ -169,6 +170,7 @@ fn agent_panel_entries_with_runtimes(
                     seen: detail.seen,
                     custom_status: detail.custom_status,
                     state_labels: detail.state_labels,
+                    live_activity: detail.live_activity,
                 })
                 .collect()
         }
@@ -192,6 +194,7 @@ fn agent_panel_entries_with_runtimes(
                         seen: detail.seen,
                         custom_status: detail.custom_status,
                         state_labels: detail.state_labels,
+                        live_activity: detail.live_activity,
                     })
             })
             .collect(),
@@ -1168,13 +1171,21 @@ fn render_agent_detail(
         );
         row_y += 1;
 
-        let mut status_spans = vec![
-            Span::styled("   ", Style::default()),
-            Span::styled(label, status_style),
-        ];
+        // '<agent> · <activity-or-status>': the short agent code leads so the
+        // (potentially long) live activity text gets the remaining width.
+        let mut status_spans = vec![Span::styled("   ", Style::default())];
         if let Some(agent_label) = &detail.agent_label {
+            status_spans.push(Span::styled(
+                app.agent_alias(agent_label).to_string(),
+                agent_style,
+            ));
             status_spans.push(Span::styled(" · ", agent_style));
-            status_spans.push(Span::styled(agent_label, agent_style));
+        }
+        match &detail.live_activity {
+            Some(activity) => {
+                status_spans.push(Span::styled(format!("{activity}…"), status_style));
+            }
+            None => status_spans.push(Span::styled(label, status_style)),
         }
         if let Some(custom_status) = &detail.custom_status {
             status_spans.push(Span::styled(" · ", agent_style));
@@ -1420,6 +1431,7 @@ mod tests {
             state: AgentState::Idle,
             seen: true,
             custom_status: None,
+            live_activity: None,
             state_labels: std::collections::HashMap::new(),
         };
 

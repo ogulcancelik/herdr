@@ -1072,6 +1072,66 @@ impl AppState {
         self.cycle_agent_entry(true);
     }
 
+    /// Jump to the agent most in need of attention: blocked agents first
+    /// (oldest transition first), then unseen-done agents (oldest first),
+    /// cycling through the queue on repeated presses. With an empty queue it
+    /// chimes once (all clear) and falls back to cycling the remaining
+    /// agents like next_agent.
+    pub(crate) fn focus_attention_agent(&mut self) {
+        let mut attention: Vec<(usize, crate::layout::PaneId, u8, Option<std::time::Instant>)> =
+            Vec::new();
+        for (ws_idx, ws) in self.workspaces.iter().enumerate() {
+            for detail in ws.pane_details(&self.terminals) {
+                let group = match (detail.state, detail.seen) {
+                    (AgentState::Blocked, _) => Some(0u8),
+                    (AgentState::Idle, false) => Some(1u8),
+                    _ => None,
+                };
+                if let Some(group) = group {
+                    attention.push((ws_idx, detail.pane_id, group, detail.state_changed_at));
+                }
+            }
+        }
+        attention.sort_by(|a, b| {
+            a.2.cmp(&b.2)
+                .then_with(|| match (a.3, b.3) {
+                    // No timestamp means the state predates tracking: oldest.
+                    (None, None) => std::cmp::Ordering::Equal,
+                    (None, Some(_)) => std::cmp::Ordering::Less,
+                    (Some(_), None) => std::cmp::Ordering::Greater,
+                    (Some(x), Some(y)) => x.cmp(&y),
+                })
+                .then_with(|| a.0.cmp(&b.0))
+        });
+
+        if attention.is_empty() {
+            if !self.attention_all_clear_chimed {
+                self.attention_all_clear_chimed = true;
+                self.pending_attention_chime = true;
+            }
+            self.cycle_agent_entry(true);
+            return;
+        }
+        self.attention_all_clear_chimed = false;
+
+        let focused = self
+            .active
+            .and_then(|idx| self.workspaces.get(idx))
+            .and_then(crate::workspace::Workspace::focused_pane_id);
+        let target = match focused
+            .and_then(|pane_id| attention.iter().position(|entry| entry.1 == pane_id))
+        {
+            Some(idx) => attention[(idx + 1) % attention.len()],
+            None => attention[0],
+        };
+        if self.focus_pane_in_workspace(target.0, target.1) {
+            let entries = crate::ui::agent_panel_entries(self);
+            if let Some(idx) = entries.iter().position(|entry| entry.pane_id == target.1) {
+                self.ensure_agent_panel_entry_visible(idx);
+            }
+        }
+    }
+
     pub fn previous_agent(&mut self) {
         self.cycle_agent_entry(false);
     }
@@ -2014,6 +2074,7 @@ impl AppState {
                 pane_id,
                 agent,
                 state,
+                activity,
                 visible_blocker,
                 visible_idle,
                 visible_working,
@@ -2021,6 +2082,7 @@ impl AppState {
                 observed_at,
             } => self
                 .update_terminal_state(pane_id, |terminal| {
+                    terminal.live_activity = activity.clone();
                     Some(terminal.set_detected_state_with_screen_signals_at(
                         agent,
                         state,
@@ -2558,6 +2620,64 @@ mod tests {
         ] {
             assert_selects_nothing(row, click);
         }
+    }
+
+    #[test]
+    fn focus_attention_prefers_oldest_blocked_then_unseen_done() {
+        let mut state = app_with_workspaces(&["a", "b", "c"]);
+        state.ensure_test_terminals();
+        state.active = Some(2);
+
+        let now = std::time::Instant::now();
+        let set = |state: &mut AppState, ws: usize, agent_state, changed_at| {
+            let pane = state.workspaces[ws].tabs[0].root_pane;
+            let tid = state.workspaces[ws].terminal_id(pane).cloned().unwrap();
+            let terminal = state.terminals.get_mut(&tid).unwrap();
+            terminal.set_detected_state(Some(Agent::Claude), agent_state);
+            terminal.state_changed_at = changed_at;
+        };
+        // b blocked older than a; c is an unseen-done workspace.
+        set(&mut state, 0, AgentState::Blocked, Some(now));
+        set(
+            &mut state,
+            1,
+            AgentState::Blocked,
+            Some(now - std::time::Duration::from_secs(60)),
+        );
+        set(&mut state, 2, AgentState::Idle, Some(now));
+        // mark c's pane unseen (done while away)
+        let pane_c = state.workspaces[2].tabs[0].root_pane;
+        state.workspaces[2].panes.get_mut(&pane_c).unwrap().seen = false;
+
+        state.focus_attention_agent();
+        assert_eq!(state.active, Some(1), "oldest blocked first");
+
+        state.focus_attention_agent();
+        assert_eq!(state.active, Some(0), "next blocked");
+
+        state.focus_attention_agent();
+        assert_eq!(state.active, Some(2), "then unseen done");
+        assert!(!state.pending_attention_chime);
+    }
+
+    #[test]
+    fn focus_attention_chimes_once_when_queue_is_empty() {
+        let mut state = app_with_workspaces(&["a"]);
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        // Mark the only pane seen and idle: nothing needs attention.
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        state.workspaces[0].panes.get_mut(&pane).unwrap().seen = true;
+
+        state.focus_attention_agent();
+        assert!(state.pending_attention_chime, "first empty press chimes");
+        state.pending_attention_chime = false;
+
+        state.focus_attention_agent();
+        assert!(
+            !state.pending_attention_chime,
+            "repeat presses stay silent until the queue refills"
+        );
     }
 
     #[test]
@@ -3413,6 +3533,7 @@ mod tests {
             pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Working,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3451,6 +3572,7 @@ mod tests {
             pane_id: bg_pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Idle,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3481,6 +3603,7 @@ mod tests {
             pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Idle,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3504,6 +3627,7 @@ mod tests {
             pane_id: bg_pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Idle,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3550,6 +3674,7 @@ mod tests {
             pane_id: bg_pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3604,6 +3729,7 @@ mod tests {
             pane_id: bg_pane_id,
             agent: Some(Agent::Codex),
             state: AgentState::Idle,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3624,6 +3750,7 @@ mod tests {
             pane_id: bg_pane_id,
             agent: Some(Agent::Codex),
             state: AgentState::Blocked,
+            activity: None,
             visible_blocker: true,
             visible_idle: false,
             visible_working: false,
@@ -3655,6 +3782,7 @@ mod tests {
             pane_id,
             agent: Some(Agent::Claude),
             state: AgentState::Working,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3680,6 +3808,7 @@ mod tests {
             pane_id,
             agent: Some(Agent::Claude),
             state: AgentState::Idle,
+            activity: None,
             visible_blocker: false,
             visible_idle: true,
             visible_working: false,
@@ -3707,6 +3836,7 @@ mod tests {
             pane_id,
             agent: Some(Agent::Claude),
             state: AgentState::Working,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: true,
@@ -3777,6 +3907,7 @@ mod tests {
             pane_id: bg_pane_id,
             agent: Some(Agent::Droid),
             state: AgentState::Idle,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3807,6 +3938,7 @@ mod tests {
             pane_id: bg_pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3834,6 +3966,7 @@ mod tests {
             pane_id: bg_pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3858,6 +3991,7 @@ mod tests {
             pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3880,6 +4014,7 @@ mod tests {
             pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,

@@ -947,6 +947,7 @@ mod tests {
             state: AgentState::Idle,
             seen: true,
             custom_status: None,
+            live_activity: None,
             state_labels: std::collections::HashMap::new(),
         }
     }

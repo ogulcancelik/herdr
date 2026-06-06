@@ -414,6 +414,9 @@ impl App {
             request_new_linked_worktree: None,
             request_branch_session: None,
             request_kill_worktree: None,
+            attention_all_clear_chimed: false,
+            pending_attention_chime: false,
+            agent_aliases: config.ui.agent_aliases.clone(),
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
             request_remove_linked_worktree: None,
@@ -799,6 +802,13 @@ impl App {
                 needs_render = true;
             }
 
+            if self.state.pending_attention_chime {
+                self.state.pending_attention_chime = false;
+                if self.state.sound_enabled() {
+                    crate::sound::play(crate::sound::Sound::AllClear, &self.state.sound);
+                }
+            }
+
             if self.state.request_submit_worktree_create {
                 self.state.request_submit_worktree_create = false;
                 self.start_worktree_add();
@@ -1164,6 +1174,7 @@ impl App {
                     crate::config::validated_sidebar_pane_gap(config.ui.sidebar_pane_gap);
                 self.state.prompt_float_lines =
                     crate::config::validated_prompt_float_lines(config.ui.prompt_float_lines);
+                self.state.agent_aliases = config.ui.agent_aliases.clone();
                 // Re-clamp the live width to the new bounds. No source guard — bounds
                 // always apply, including to widths owned by Persisted or Manual.
                 self.state.sidebar_width = self
@@ -3362,6 +3373,7 @@ sidebar_pane_gap = 99
             pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Working,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3387,6 +3399,7 @@ sidebar_pane_gap = 99
             pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Idle,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
