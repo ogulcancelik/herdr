@@ -2012,6 +2012,63 @@ fn is_trailing_token_wrapper(ch: char) -> bool {
 // ---------------------------------------------------------------------------
 
 impl AppState {
+    /// Infer worktree membership for workspaces sitting in linked git
+    /// worktrees that Herdr didn't create (agent-made, manual, other tools):
+    /// they get the managed worktree actions and group under their parent
+    /// repo workspace when it is open. Pure inference from cached git
+    /// metadata — no directory registry.
+    pub(crate) fn adopt_external_worktrees(&mut self) -> bool {
+        if !self.adopt_external_worktrees {
+            return false;
+        }
+        let mut changed = false;
+        for idx in 0..self.workspaces.len() {
+            if self.workspaces[idx].worktree_space().is_some() {
+                continue;
+            }
+            let Some(space) = self.workspaces[idx].git_space().cloned() else {
+                continue;
+            };
+            if !space.is_linked_worktree {
+                continue;
+            }
+            let main_root =
+                crate::worktree::main_root_from_common_dir(std::path::Path::new(&space.key));
+            self.workspaces[idx].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+                key: space.key.clone(),
+                label: space.label.clone(),
+                repo_root: main_root.clone(),
+                checkout_path: space.repo_root.clone(),
+                is_linked_worktree: true,
+            });
+            changed = true;
+            // Give the open parent checkout its parent-side membership so the
+            // sidebar renders the group.
+            for parent_idx in 0..self.workspaces.len() {
+                if parent_idx == idx || self.workspaces[parent_idx].worktree_space().is_some() {
+                    continue;
+                }
+                let is_parent = self.workspaces[parent_idx]
+                    .git_space()
+                    .is_some_and(|parent| !parent.is_linked_worktree && parent.key == space.key);
+                if is_parent {
+                    self.workspaces[parent_idx].worktree_space =
+                        Some(crate::workspace::WorktreeSpaceMembership {
+                            key: space.key.clone(),
+                            label: space.label.clone(),
+                            repo_root: main_root.clone(),
+                            checkout_path: main_root.clone(),
+                            is_linked_worktree: false,
+                        });
+                }
+            }
+        }
+        if changed {
+            self.mark_session_dirty();
+        }
+        changed
+    }
+
     pub fn apply_workspace_git_statuses(
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,

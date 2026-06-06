@@ -100,6 +100,8 @@ Worktree actions are available from Git workspace rows. `New worktree` creates a
 
 Grouped worktrees still behave like normal Herdr workspaces: they can be focused, renamed, closed, and contain their own tabs and panes. The parent row is the original workspace. Closing the parent row closes the whole Herdr group, but it does not delete checkout folders or branches.
 
+External worktrees are adopted automatically: when a workspace sits in a linked checkout that Herdr didn't create (an agent ran `git worktree add`, you made one by hand, another tool did), it gains the managed worktree actions and groups under its parent repo workspace when that is open — membership is inferred from git, not from where the checkout lives. Set `adopt_external = false` under `[worktrees]` to keep the old explicit-adoption-only behavior.
+
 Deleting a worktree checkout is explicit. Use `Delete worktree checkout...` on a grouped child workspace to run `git worktree remove`. Herdr first asks Git to remove safely. If Git refuses because the checkout has modified or untracked files, Herdr asks again before running the forced remove. Branches are not deleted.
 
 ## Remote attach

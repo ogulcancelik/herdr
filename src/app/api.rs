@@ -44,9 +44,11 @@ impl App {
             } else {
                 self.last_git_remote_status_refresh = Instant::now();
             }
+            let adopted = self.state.adopt_external_worktrees();
             if self
                 .state
                 .apply_workspace_git_statuses(&self.terminal_runtimes, results)
+                || adopted
             {
                 self.render_dirty.store(true, Ordering::Release);
                 self.render_notify.notify_one();

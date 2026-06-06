@@ -1725,4 +1725,81 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&repo);
     }
+    #[test]
+    fn adopt_external_worktrees_links_child_and_parent() {
+        let repo = create_committed_repo("adopt-external-repo");
+        let checkout = unique_temp_path("adopt-external-checkout");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "feature/agent-made",
+                checkout.to_str().unwrap(),
+            ],
+        );
+
+        let mut app = app_for_worktree_tests();
+        let mut parent = crate::workspace::Workspace::test_new("repo");
+        parent.identity_cwd = repo.clone();
+        parent.cached_git_space = crate::workspace::git_space_metadata(&repo);
+        let mut child = crate::workspace::Workspace::test_new("external");
+        child.identity_cwd = checkout.clone();
+        child.cached_git_space = crate::workspace::git_space_metadata(&checkout);
+        app.state.workspaces = vec![parent, child];
+
+        assert!(app.state.adopt_external_worktrees());
+
+        let child_space = app.state.workspaces[1]
+            .worktree_space()
+            .expect("child adopted");
+        assert!(child_space.is_linked_worktree);
+        assert_eq!(
+            std::fs::canonicalize(&child_space.checkout_path).unwrap(),
+            std::fs::canonicalize(&checkout).unwrap()
+        );
+        let parent_space = app.state.workspaces[0]
+            .worktree_space()
+            .expect("parent linked for grouping");
+        assert!(!parent_space.is_linked_worktree);
+        assert_eq!(parent_space.key, child_space.key);
+
+        // Second pass is a no-op.
+        assert!(!app.state.adopt_external_worktrees());
+
+        let _ = std::fs::remove_dir_all(&checkout);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn adopt_external_worktrees_respects_config_flag() {
+        let repo = create_committed_repo("adopt-flag-repo");
+        let checkout = unique_temp_path("adopt-flag-checkout");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "feature/x",
+                checkout.to_str().unwrap(),
+            ],
+        );
+
+        let mut app = app_for_worktree_tests();
+        let mut child = crate::workspace::Workspace::test_new("external");
+        child.identity_cwd = checkout.clone();
+        child.cached_git_space = crate::workspace::git_space_metadata(&checkout);
+        app.state.workspaces = vec![child];
+        app.state.adopt_external_worktrees = false;
+
+        assert!(!app.state.adopt_external_worktrees());
+        assert!(app.state.workspaces[0].worktree_space().is_none());
+
+        let _ = std::fs::remove_dir_all(&checkout);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
 }

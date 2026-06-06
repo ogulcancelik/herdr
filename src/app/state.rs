@@ -1366,6 +1366,8 @@ pub struct AppState {
     pub action_notice: Option<String>,
     /// Sidebar display aliases for agent labels ([ui] agent_aliases).
     pub agent_aliases: std::collections::HashMap<String, String>,
+    /// Auto-adopt external linked worktrees into managed groups.
+    pub adopt_external_worktrees: bool,
     pub request_open_existing_worktree: Option<usize>,
     pub request_new_workspace_cwd: Option<std::path::PathBuf>,
     pub request_remove_linked_worktree: Option<usize>,
@@ -1711,6 +1713,7 @@ impl AppState {
             pending_attention_chime: false,
             action_notice: None,
             agent_aliases: std::collections::HashMap::new(),
+            adopt_external_worktrees: true,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
             request_remove_linked_worktree: None,

@@ -420,6 +420,7 @@ impl App {
             pending_attention_chime: false,
             action_notice: None,
             agent_aliases: config.ui.agent_aliases.clone(),
+            adopt_external_worktrees: config.worktrees.adopt_external,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
             request_remove_linked_worktree: None,
@@ -1185,6 +1186,7 @@ impl App {
                 self.state.pane_header = config.ui.pane_header;
                 self.state.status_line = config.ui.status_line;
                 self.state.agent_aliases = config.ui.agent_aliases.clone();
+                self.state.adopt_external_worktrees = config.worktrees.adopt_external;
                 // Re-clamp the live width to the new bounds. No source guard — bounds
                 // always apply, including to widths owned by Persisted or Manual.
                 self.state.sidebar_width = self

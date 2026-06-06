@@ -385,6 +385,10 @@ pub struct IndexedKeysConfig {
 pub struct WorktreesConfig {
     /// Root directory under which Herdr creates <repo>/<branch-slug> checkouts.
     pub directory: String,
+    /// Adopt workspaces that sit in linked git worktrees Herdr didn't create:
+    /// they group under their open parent repo workspace and get the managed
+    /// worktree actions. Default: true.
+    pub adopt_external: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -595,6 +599,7 @@ impl Default for WorktreesConfig {
     fn default() -> Self {
         Self {
             directory: "~/.herdr/worktrees".into(),
+            adopt_external: true,
         }
     }
 }
