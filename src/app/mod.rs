@@ -256,6 +256,7 @@ impl App {
         let (prefix_code, prefix_mods) = config.prefix_key();
         crate::kitty_graphics::set_enabled(config.experimental.kitty_graphics);
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(APP_EVENT_CHANNEL_CAPACITY);
+        crate::system_stats::spawn_sampler(event_tx.clone());
         let render_notify = Arc::new(Notify::new());
         let render_dirty = Arc::new(AtomicBool::new(false));
 
@@ -461,6 +462,7 @@ impl App {
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
+                status_line_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),
                 tab_scroll_right_hit_area: Rect::default(),
@@ -498,6 +500,9 @@ impl App {
             prompt_float_lines: crate::config::validated_prompt_float_lines(
                 config.ui.prompt_float_lines,
             ),
+            pane_header: config.ui.pane_header,
+            status_line: config.ui.status_line,
+            system_stats: None,
             sidebar_width_source,
             sidebar_width_auto: false,
             sidebar_collapsed: false,
@@ -1174,6 +1179,8 @@ impl App {
                     crate::config::validated_sidebar_pane_gap(config.ui.sidebar_pane_gap);
                 self.state.prompt_float_lines =
                     crate::config::validated_prompt_float_lines(config.ui.prompt_float_lines);
+                self.state.pane_header = config.ui.pane_header;
+                self.state.status_line = config.ui.status_line;
                 self.state.agent_aliases = config.ui.agent_aliases.clone();
                 // Re-clamp the live width to the new bounds. No source guard — bounds
                 // always apply, including to widths owned by Persisted or Manual.

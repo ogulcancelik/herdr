@@ -51,7 +51,7 @@ pub(crate) use self::scrollbar::{
 use self::settings::render_settings_overlay;
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
 use self::status::{
-    render_config_diagnostic, render_copy_feedback, render_toast_notification,
+    render_config_diagnostic, render_copy_feedback, render_status_line, render_toast_notification,
     toast_notification_rect,
 };
 use self::tabs::render_tab_bar;
@@ -195,13 +195,18 @@ fn compute_view_internal(
     ])
     .areas(area);
 
+    let status_rows = u16::from(app.status_line && main_area.height > 4);
     let has_tabs = app.active.and_then(|i| app.workspaces.get(i)).is_some();
-    let (tab_bar_rect, terminal_area) = if has_tabs && main_area.height > 1 {
-        let [tab_bar_rect, terminal_area] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(main_area);
-        (tab_bar_rect, terminal_area)
+    let (status_line_rect, tab_bar_rect, terminal_area) = if has_tabs && main_area.height > 1 {
+        let [status_line_rect, tab_bar_rect, terminal_area] = Layout::vertical([
+            Constraint::Length(status_rows),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .areas(main_area);
+        (status_line_rect, tab_bar_rect, terminal_area)
     } else {
-        (Rect::default(), main_area)
+        (Rect::default(), Rect::default(), main_area)
     };
 
     if !app.sidebar_collapsed {
@@ -271,6 +276,7 @@ fn compute_view_internal(
         sidebar_rect: sidebar_area,
         workspace_card_areas,
         tab_bar_rect,
+        status_line_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
         tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
         tab_scroll_right_hit_area: tab_bar_view.scroll_right_hit_area,
@@ -340,6 +346,7 @@ fn compute_mobile_view(
         sidebar_rect: Rect::default(),
         workspace_card_areas: Vec::new(),
         tab_bar_rect: Rect::default(),
+        status_line_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
         tab_scroll_left_hit_area: Rect::default(),
         tab_scroll_right_hit_area: Rect::default(),
@@ -378,6 +385,7 @@ pub fn render_with_runtime_registry(
     }
     if app.view.layout != ViewLayout::Mobile {
         render_tab_bar(app, frame, tab_bar_area);
+        render_status_line(app, frame, app.view.status_line_rect);
     }
     render_panes(app, terminal_runtimes, frame, terminal_area);
 
@@ -864,6 +872,7 @@ mod tests {
             rect: Rect::new(0, 0, 12, 8),
             inner_rect: Rect::new(1, 1, 9, 6),
             scrollbar_rect: Some(Rect::new(10, 1, 1, 6)),
+            header_rect: None,
             is_focused: true,
         };
 

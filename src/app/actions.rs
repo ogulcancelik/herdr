@@ -2104,6 +2104,10 @@ impl AppState {
                 })
                 .into_iter()
                 .collect(),
+            AppEvent::SystemStatsUpdated(stats) => {
+                self.system_stats = Some(stats);
+                Vec::new()
+            }
             AppEvent::HookPromptReported { pane_id, prompt } => self
                 .update_terminal_state(pane_id, |terminal| {
                     terminal.last_prompt = Some(prompt.clone());

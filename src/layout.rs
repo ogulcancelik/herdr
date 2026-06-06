@@ -35,6 +35,8 @@ pub struct PaneInfo {
     /// Visible scrollbar lane, when scrollback is present. `inner_rect` may still
     /// exclude a stable hidden gutter when this is `None`.
     pub scrollbar_rect: Option<Rect>,
+    /// Reserved header strip above `inner_rect` (context + last prompt).
+    pub header_rect: Option<Rect>,
     pub is_focused: bool,
 }
 
@@ -305,6 +307,7 @@ fn collect_panes(node: &Node, area: Rect, focus: PaneId, result: &mut Vec<PaneIn
                 // inner_rect is set during render when we know if borders are shown
                 inner_rect: area,
                 scrollbar_rect: None,
+                header_rect: None,
                 is_focused: *id == focus,
             });
         }

@@ -62,8 +62,11 @@ pub struct TerminalState {
     fallback_visible_working: bool,
     fallback_observed_at: Option<Instant>,
     /// The last user prompt submitted to this pane's agent, reported by the
-    /// integration hook (Claude's UserPromptSubmit). Drives the prompt float.
+    /// integration hook (Claude's UserPromptSubmit). Shown in the pane header.
     pub last_prompt: Option<String>,
+    /// Latched once an agent is ever seen in this pane: keeps the pane header
+    /// reservation stable so the PTY doesn't resize on detection flaps.
+    pub header_reserved: bool,
     /// When the effective agent state last transitioned. Drives the
     /// oldest-first ordering of the attention queue.
     pub state_changed_at: Option<Instant>,
@@ -98,6 +101,7 @@ impl TerminalState {
             fallback_visible_working: false,
             fallback_observed_at: None,
             last_prompt: None,
+            header_reserved: false,
             state_changed_at: None,
             live_activity: None,
             stale_hook_idle_since: None,
@@ -197,6 +201,9 @@ impl TerminalState {
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let previous_detected_agent = self.detected_agent;
         let previous_session = self.current_session_identity_for_persistence();
+        if agent.is_some() {
+            self.header_reserved = true;
+        }
         self.detected_agent = agent;
         self.fallback_state = fallback_state;
         self.fallback_visible_blocker = visible_blocker && fallback_state == AgentState::Blocked;
@@ -328,6 +335,7 @@ impl TerminalState {
             return None;
         }
         self.persisted_agent_session = None;
+        self.header_reserved = true;
         self.hook_authority = Some(HookAuthority {
             source,
             agent_label,
@@ -448,6 +456,7 @@ impl TerminalState {
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
         seq: Option<u64>,
     ) -> Option<TerminalStateMutation> {
+        self.header_reserved = true;
         let session_ref = session_ref?;
         if !self.accept_hook_report(&source, seq) {
             return None;

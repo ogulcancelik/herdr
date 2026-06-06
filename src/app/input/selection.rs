@@ -189,6 +189,7 @@ mod autoscroll_tests {
             rect: Rect::new(0, 0, 80, 24),
             inner_rect: Rect::new(0, 0, 80, 24),
             scrollbar_rect: None,
+            header_rect: None,
             is_focused: true,
         });
         (state, pane_id)
@@ -207,6 +208,7 @@ mod autoscroll_tests {
             rect: Rect::new(0, 5, 80, 24),
             inner_rect: Rect::new(0, 5, 80, 24),
             scrollbar_rect: None,
+            header_rect: None,
             is_focused: true,
         });
         // Anchor at (5, 10), drag to different cell above pane

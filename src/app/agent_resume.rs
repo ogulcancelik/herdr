@@ -596,6 +596,7 @@ mod tests {
             rect: ratatui::layout::Rect::new(0, 0, 100, 30),
             inner_rect: ratatui::layout::Rect::new(1, 1, 98, 28),
             scrollbar_rect: None,
+            header_rect: None,
             is_focused: true,
         }];
         app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 30);
@@ -710,6 +711,7 @@ mod tests {
             rect: ratatui::layout::Rect::new(0, 0, 100, 30),
             inner_rect: ratatui::layout::Rect::new(1, 1, 98, 28),
             scrollbar_rect: None,
+            header_rect: None,
             is_focused: true,
         }];
         app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 30);

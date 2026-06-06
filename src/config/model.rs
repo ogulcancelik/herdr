@@ -401,9 +401,15 @@ pub struct UiConfig {
     pub sidebar_row_gap: u16,
     /// Blank columns on each side of the sidebar/pane divider. Default: 0, max: 4.
     pub sidebar_pane_gap: u16,
-    /// Max height of the prompt float pinned to the top of agent panes
-    /// (the last submitted prompt, middle-collapsed). 0 disables. Default: 3.
+    /// Max height of the prompt section in the pane header (the last
+    /// submitted prompt, middle-collapsed). 0 = context-only header. Default: 3.
     pub prompt_float_lines: u16,
+    /// Reserve a header strip (project · worktree · branch + last prompt) at
+    /// the top of agent panes. The pane PTY shrinks accordingly. Default: true.
+    pub pane_header: bool,
+    /// Show the global machine status line (cpu/mem/disk/battery/net/gpu)
+    /// above the tab bar. Default: true.
+    pub status_line: bool,
     /// Capture mouse input for Herdr's mouse UI. Default: true.
     pub mouse_capture: bool,
     /// Modifier that lets right-click gestures pass through to pane apps. Empty disables it.
@@ -603,6 +609,8 @@ impl Default for UiConfig {
             sidebar_row_gap: DEFAULT_SIDEBAR_ROW_GAP,
             sidebar_pane_gap: DEFAULT_SIDEBAR_PANE_GAP,
             prompt_float_lines: DEFAULT_PROMPT_FLOAT_LINES,
+            pane_header: true,
+            status_line: true,
             mouse_capture: true,
             right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),
             redraw_on_focus_gained: true,

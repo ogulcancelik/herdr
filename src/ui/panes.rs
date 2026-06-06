@@ -98,6 +98,51 @@ fn stable_scrollbar_gutter(rt: &TerminalRuntime, pane_inner: Rect) -> (Rect, Opt
 }
 
 /// Resize every visible runtime in a tab to the geometry it would receive if the tab were selected.
+/// Rows reserved for the pane header (context line + prompt section) of this
+/// terminal, or 0 when the header is disabled / the pane never hosted an
+/// agent / the pane is too small to give up rows.
+fn pane_header_rows(
+    app: &AppState,
+    terminal_id: Option<&crate::terminal::TerminalId>,
+    pane_inner: Rect,
+) -> u16 {
+    if !app.pane_header {
+        return 0;
+    }
+    let Some(terminal) = terminal_id.and_then(|id| app.terminals.get(id)) else {
+        return 0;
+    };
+    if !terminal.header_reserved {
+        return 0;
+    }
+    let rows = 1 + app.prompt_float_lines;
+    // Keep a usable PTY: the header never claims more than it leaves behind.
+    if pane_inner.height < rows.saturating_mul(2).saturating_add(4) {
+        return 0;
+    }
+    rows
+}
+
+/// Split `pane_inner` into (header strip, remaining content area).
+fn carve_pane_header(
+    app: &AppState,
+    terminal_id: Option<&crate::terminal::TerminalId>,
+    pane_inner: Rect,
+) -> (Option<Rect>, Rect) {
+    let rows = pane_header_rows(app, terminal_id, pane_inner);
+    if rows == 0 {
+        return (None, pane_inner);
+    }
+    let header = Rect::new(pane_inner.x, pane_inner.y, pane_inner.width, rows);
+    let content = Rect::new(
+        pane_inner.x,
+        pane_inner.y + rows,
+        pane_inner.width,
+        pane_inner.height - rows,
+    );
+    (Some(header), content)
+}
+
 pub(super) fn resize_tab_panes(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -111,6 +156,7 @@ pub(super) fn resize_tab_panes(
         let focused_id = tab.layout.focused();
         if let Some((terminal_id, rt)) = runtime_for_tab_pane(terminal_runtimes, tab, focused_id) {
             let pane_inner = pane_inner_rect(area, multi_pane);
+            let (_, pane_inner) = carve_pane_header(app, Some(terminal_id), pane_inner);
             let inner_rect = stable_terminal_inner_rect(pane_inner);
             if !app.direct_attach_resize_locks.contains(terminal_id) {
                 rt.resize(
@@ -132,6 +178,7 @@ pub(super) fn resize_tab_panes(
         };
 
         if let Some((terminal_id, rt)) = runtime_for_tab_pane(terminal_runtimes, tab, info.id) {
+            let (_, pane_inner) = carve_pane_header(app, Some(terminal_id), pane_inner);
             let inner_rect = stable_terminal_inner_rect(pane_inner);
             if !app.direct_attach_resize_locks.contains(terminal_id) {
                 rt.resize(
@@ -166,6 +213,8 @@ pub(super) fn compute_pane_infos(
     if ws.zoomed {
         let focused_id = ws.layout.focused();
         let pane_inner = pane_inner_rect(area, multi_pane);
+        let (header_rect, pane_inner) =
+            carve_pane_header(app, ws.terminal_id(focused_id), pane_inner);
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, focused_id) {
@@ -188,6 +237,7 @@ pub(super) fn compute_pane_infos(
             rect: area,
             inner_rect,
             scrollbar_rect,
+            header_rect,
             is_focused: true,
         }];
     }
@@ -209,6 +259,7 @@ pub(super) fn compute_pane_infos(
             area
         };
 
+        let (header_rect, pane_inner) = carve_pane_header(app, ws.terminal_id(info.id), pane_inner);
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
@@ -229,6 +280,7 @@ pub(super) fn compute_pane_infos(
 
         info.inner_rect = inner_rect;
         info.scrollbar_rect = scrollbar_rect;
+        info.header_rect = header_rect;
     }
 
     pane_infos
@@ -315,73 +367,115 @@ pub(super) fn render_panes(
                 app.host_terminal_theme,
             );
             render_copy_mode_cursor(app, frame, info);
-            render_prompt_float(app, ws, frame, info);
+            render_pane_header(app, ws, frame, info);
         }
     }
 }
 
-/// Float the pane's last submitted prompt over the top rows of the pane,
-/// middle-collapsed to at most `prompt_float_lines` rows. Only agent panes
-/// with a reported prompt get the float; it never covers more than half the
-/// pane.
-fn render_prompt_float(
+/// Render the reserved pane header: a context line (project · worktree ·
+/// branch) and the last submitted prompt, middle-collapsed into the
+/// remaining header rows.
+fn render_pane_header(
     app: &AppState,
     ws: &crate::workspace::Workspace,
     frame: &mut Frame,
     info: &PaneInfo,
 ) {
-    let max_lines = app.prompt_float_lines;
-    if max_lines == 0 {
+    let Some(header) = info.header_rect else {
         return;
-    }
-    let Some(terminal) = ws
+    };
+    let terminal = ws
         .pane_state(info.id)
-        .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
-    else {
-        return;
-    };
-    let Some(prompt) = terminal.last_prompt.as_deref() else {
-        return;
-    };
-    let inner = info.inner_rect;
-    if inner.width < 8 || inner.height < 4 {
-        return;
-    }
-    // Never cover more than the top half of the pane.
-    let budget = max_lines.min(inner.height / 2).max(1) as usize;
-
-    let width = inner.width.saturating_sub(2) as usize; // 1 col padding each side
-    let lines = collapse_prompt_lines(prompt, budget, width);
-    if lines.is_empty() {
-        return;
-    }
+        .and_then(|pane| app.terminals.get(&pane.attached_terminal_id));
 
     let p = &app.palette;
-    let bar_style = Style::default().bg(p.surface_dim).fg(p.subtext0);
+    let bar_bg = Style::default().bg(p.surface_dim);
+    let buf = frame.buffer_mut();
+    for y in header.y..header.y + header.height {
+        for x in header.x..header.x + header.width {
+            buf[(x, y)].set_symbol(" ");
+            buf[(x, y)].set_style(bar_bg);
+        }
+    }
+
+    // Context line: project · worktree · branch.
+    let mut spans: Vec<Span> = vec![Span::styled(" ", bar_bg)];
+    let project = ws
+        .worktree_space()
+        .map(|space| space.label.clone())
+        .unwrap_or_else(|| ws.display_name());
+    spans.push(Span::styled(
+        project,
+        Style::default()
+            .bg(p.surface_dim)
+            .fg(p.text)
+            .add_modifier(Modifier::BOLD),
+    ));
+    if let Some(worktree_dir) = ws
+        .worktree_space()
+        .filter(|space| space.is_linked_worktree)
+        .and_then(|space| space.checkout_path.file_name())
+        .map(|name| name.to_string_lossy().to_string())
+    {
+        spans.push(Span::styled(
+            " \u{b7} ",
+            Style::default().bg(p.surface_dim).fg(p.overlay0),
+        ));
+        spans.push(Span::styled(
+            worktree_dir,
+            Style::default().bg(p.surface_dim).fg(p.mauve),
+        ));
+    }
+    if let Some(branch) = ws.branch() {
+        spans.push(Span::styled(
+            " \u{b7} ",
+            Style::default().bg(p.surface_dim).fg(p.overlay0),
+        ));
+        spans.push(Span::styled(
+            format!("\u{e0a0} {branch}"),
+            Style::default().bg(p.surface_dim).fg(p.green),
+        ));
+    }
+    buf.set_line(header.x, header.y, &Line::from(spans), header.width);
+
+    // Prompt section.
+    let prompt_rows = header.height.saturating_sub(1) as usize;
+    if prompt_rows == 0 {
+        return;
+    }
+    let width = header.width.saturating_sub(2) as usize;
+    let prompt = terminal.and_then(|t| t.last_prompt.as_deref());
+    let lines = match prompt {
+        Some(prompt) => collapse_prompt_lines(prompt, prompt_rows, width),
+        None => Vec::new(),
+    };
+    let prompt_style = Style::default().bg(p.surface_dim).fg(p.subtext0);
     let marker_style = Style::default()
         .bg(p.surface_dim)
         .fg(p.overlay0)
         .add_modifier(Modifier::DIM);
-    let buf = frame.buffer_mut();
+    if lines.is_empty() {
+        buf.set_stringn(
+            header.x + 1,
+            header.y + 1,
+            "\u{276f} \u{2014}",
+            width.max(3),
+            marker_style,
+        );
+        return;
+    }
     for (row, line) in lines.iter().enumerate() {
-        let y = inner.y + row as u16;
-        // Paint the full bar row, then the text on top.
-        for x in inner.x..inner.x + inner.width {
-            buf[(x, y)].set_symbol(" ");
-            buf[(x, y)].set_style(bar_style);
-        }
         let style = if line.is_marker {
             marker_style
         } else {
-            bar_style
+            prompt_style
         };
         let prefix = if row == 0 { "\u{276f} " } else { "  " };
-        let text = format!("{prefix}{}", line.text);
         buf.set_stringn(
-            inner.x + 1,
-            y,
-            text,
-            inner.width.saturating_sub(1) as usize,
+            header.x + 1,
+            header.y + 1 + row as u16,
+            format!("{prefix}{}", line.text),
+            header.width.saturating_sub(1) as usize,
             style,
         );
     }
@@ -968,5 +1062,58 @@ mod tests {
         let lines = collapse_prompt_lines("\n\n  do the thing  \n\n", 3, 40);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text, "  do the thing");
+    }
+    #[test]
+    fn header_carve_reserves_rows_only_for_latched_agent_panes() {
+        let mut app = AppState::test_new();
+        app.pane_header = true;
+        app.prompt_float_lines = 3;
+        let ws = crate::workspace::Workspace::test_new("main");
+        let pane_id = ws.focused_pane_id().unwrap();
+        let terminal_id = ws.pane_state(pane_id).unwrap().attached_terminal_id.clone();
+        let terminal = crate::terminal::TerminalState::new(terminal_id.clone(), "/tmp".into());
+        let pane_inner = Rect::new(0, 0, 80, 30);
+
+        // Not latched: no reservation.
+        app.terminals.insert(terminal_id.clone(), terminal);
+        let (header, content) = carve_pane_header(&app, Some(&terminal_id), pane_inner);
+        assert!(header.is_none());
+        assert_eq!(content, pane_inner);
+
+        // Latched: context row + prompt rows reserved, content shifts down.
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .header_reserved = true;
+        let (header, content) = carve_pane_header(&app, Some(&terminal_id), pane_inner);
+        let header = header.expect("header should be reserved");
+        assert_eq!(header.height, 4);
+        assert_eq!(content.y, pane_inner.y + 4);
+        assert_eq!(content.height, pane_inner.height - 4);
+
+        // Disabled config: nothing reserved.
+        app.pane_header = false;
+        let (header, content) = carve_pane_header(&app, Some(&terminal_id), pane_inner);
+        assert!(header.is_none());
+        assert_eq!(content, pane_inner);
+    }
+
+    #[test]
+    fn header_carve_skips_tiny_panes() {
+        let mut app = AppState::test_new();
+        app.pane_header = true;
+        app.prompt_float_lines = 3;
+        let ws = crate::workspace::Workspace::test_new("main");
+        let pane_id = ws.focused_pane_id().unwrap();
+        let terminal_id = ws.pane_state(pane_id).unwrap().attached_terminal_id.clone();
+        let mut terminal = crate::terminal::TerminalState::new(terminal_id.clone(), "/tmp".into());
+        terminal.header_reserved = true;
+        app.terminals.insert(terminal_id.clone(), terminal);
+
+        // 10 rows < 2*4+4: the pane keeps everything.
+        let tiny = Rect::new(0, 0, 80, 10);
+        let (header, content) = carve_pane_header(&app, Some(&terminal_id), tiny);
+        assert!(header.is_none());
+        assert_eq!(content, tiny);
     }
 }

@@ -310,7 +310,11 @@ The agent panel shows rows as `<agent> · <status>` using built-in short codes (
 
 `sidebar_row_gap` controls the blank rows between sidebar list entries (workspaces and agents). The default is 1; set 0 for a packed list. The maximum is 3.
 
-`prompt_float_lines` controls the prompt float: agent panes pin the **last submitted prompt** to their top rows so you can glance at what the agent was asked without scrolling back through long output. Prompts taller than the limit are collapsed in the **middle** — the start and the end survive, with a `⋯ +N lines ⋯` marker between them; overlong single lines are middle-truncated the same way. The default is 3 rows, the float never covers more than the top half of a pane, and `0` disables it. The prompt is reported by the Claude Code integration's `UserPromptSubmit` hook (reinstall the integration from the settings panel if it shows "update available"); other agents will gain support as their hooks expose the prompt.
+`pane_header` (default `true`) reserves a header strip at the top of agent panes — the pane's terminal shrinks so nothing is ever covered. Row 1 shows context (`project · worktree ·  branch`), the remaining rows show the **last submitted prompt**. The reservation latches the first time an agent is seen in a pane and stays stable from then on. Panes too small to give up rows skip the header.
+
+`status_line` (default `true`) shows a one-line machine HUD above the tab bar: cpu, memory, disk space, battery, network throughput, and best-effort GPU utilization (omitted where unreadable). Utilization colors shift to yellow at 60% and red at 85%.
+
+`prompt_float_lines` controls the prompt section of the pane header: prompts taller than the limit are collapsed in the **middle** — the start and the end survive, with a `⋯ +N lines ⋯` marker between them; overlong single lines are middle-truncated the same way. The default is 3 rows, the float never covers more than the top half of a pane, and `0` disables it. The prompt is reported by the Claude Code integration's `UserPromptSubmit` hook (reinstall the integration from the settings panel if it shows "update available"); other agents will gain support as their hooks expose the prompt.
 
 `sidebar_pane_gap` adds symmetric breathing room around the sidebar/pane divider: the configured number of blank columns appears on each side of the vertical divider line. The default is 0 (content and panes touch the divider); the maximum is 4.
 

@@ -50,6 +50,7 @@ mod selection;
 mod server;
 mod session;
 mod sound;
+mod system_stats;
 mod terminal;
 mod terminal_notify;
 mod terminal_theme;

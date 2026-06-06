@@ -1,5 +1,5 @@
 use ratatui::{
-    layout::{Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
@@ -197,4 +197,116 @@ pub(super) fn state_label_color(state: AgentState, seen: bool, p: &Palette) -> C
         (AgentState::Idle, true) => p.green,
         (AgentState::Unknown, _) => p.overlay0,
     }
+}
+
+/// One-line machine HUD: cpu · mem · disk · battery · net · gpu. Metrics the
+/// sampler could not read are omitted. Utilization colors shift at 60/85%.
+pub(super) fn render_status_line(app: &crate::app::AppState, frame: &mut Frame, area: Rect) {
+    if area.height == 0 || area.width < 10 {
+        return;
+    }
+    let p = &app.palette;
+    let dim = Style::default().fg(p.overlay0);
+    let mut spans: Vec<Span> = Vec::new();
+    let sep = " \u{b7} ";
+
+    let utilization_style = |percent: f32| {
+        if percent >= 85.0 {
+            Style::default().fg(p.red)
+        } else if percent >= 60.0 {
+            Style::default().fg(p.yellow)
+        } else {
+            Style::default().fg(p.green)
+        }
+    };
+    let push_metric = |spans: &mut Vec<Span>, label: &str, value: String, style: Style| {
+        if !spans.is_empty() {
+            spans.push(Span::styled(sep.to_string(), dim));
+        }
+        spans.push(Span::styled(format!("{label} "), dim));
+        spans.push(Span::styled(value, style));
+    };
+
+    let Some(stats) = app.system_stats.as_ref() else {
+        frame.render_widget(
+            Paragraph::new(Span::styled(" gathering system stats\u{2026}", dim)),
+            area,
+        );
+        return;
+    };
+
+    if let Some(cpu) = stats.cpu_percent {
+        push_metric(
+            &mut spans,
+            "cpu",
+            format!("{cpu:.0}%"),
+            utilization_style(cpu),
+        );
+    }
+    if let (Some(used), Some(total)) = (stats.mem_used, stats.mem_total) {
+        let percent = if total > 0 {
+            used as f32 / total as f32 * 100.0
+        } else {
+            0.0
+        };
+        push_metric(
+            &mut spans,
+            "mem",
+            format!(
+                "{}/{}",
+                crate::system_stats::human_bytes(used),
+                crate::system_stats::human_bytes(total)
+            ),
+            utilization_style(percent),
+        );
+    }
+    if let Some(free) = stats.disk_free {
+        push_metric(
+            &mut spans,
+            "disk",
+            format!("{} free", crate::system_stats::human_bytes(free)),
+            Style::default().fg(p.text),
+        );
+    }
+    if let Some(percent) = stats.battery_percent {
+        let icon = match stats.battery_charging {
+            Some(true) => "\u{26a1}",
+            _ => "\u{1f50b}",
+        };
+        let style = if percent <= 15 {
+            Style::default().fg(p.red)
+        } else {
+            Style::default().fg(p.text)
+        };
+        push_metric(&mut spans, icon, format!("{percent}%"), style);
+    }
+    if let (Some(rx), Some(tx)) = (stats.net_rx_per_sec, stats.net_tx_per_sec) {
+        push_metric(
+            &mut spans,
+            "net",
+            format!(
+                "\u{25bc}{} \u{25b2}{}",
+                crate::system_stats::human_bytes(rx),
+                crate::system_stats::human_bytes(tx)
+            ),
+            Style::default().fg(p.teal),
+        );
+    }
+    if let Some(gpu) = stats.gpu_percent {
+        push_metric(
+            &mut spans,
+            "gpu",
+            format!("{gpu}%"),
+            utilization_style(gpu as f32),
+        );
+    }
+
+    if spans.is_empty() {
+        return;
+    }
+    spans.insert(0, Span::styled(" ".to_string(), dim));
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).alignment(Alignment::Right),
+        area,
+    );
 }

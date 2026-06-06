@@ -643,6 +643,7 @@ mod tests {
             rect: ratatui::layout::Rect::new(0, 0, 80, 24),
             inner_rect: ratatui::layout::Rect::new(0, 0, 80, 24),
             scrollbar_rect: None,
+            header_rect: None,
             is_focused: true,
         });
         (app, pane_id)
@@ -879,6 +880,7 @@ mod tests {
             rect: ratatui::layout::Rect::new(0, 0, cols, rows),
             inner_rect: ratatui::layout::Rect::new(0, 0, cols, rows),
             scrollbar_rect: None,
+            header_rect: None,
             is_focused: true,
         });
         (app, pane_id)

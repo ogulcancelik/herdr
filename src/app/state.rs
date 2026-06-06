@@ -812,6 +812,7 @@ pub struct ViewState {
     pub sidebar_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub tab_bar_rect: Rect,
+    pub status_line_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
     pub tab_scroll_left_hit_area: Rect,
     pub tab_scroll_right_hit_area: Rect,
@@ -1424,8 +1425,14 @@ pub struct AppState {
     pub sidebar_row_gap: u16,
     /// Blank columns on each side of the sidebar/pane divider.
     pub sidebar_pane_gap: u16,
-    /// Max height of the prompt float over agent panes. 0 disables.
+    /// Max height of the prompt section in the pane header. 0 = context only.
     pub prompt_float_lines: u16,
+    /// Reserve the agent pane header strip.
+    pub pane_header: bool,
+    /// Show the global machine status line.
+    pub status_line: bool,
+    /// Latest sampler snapshot for the status line.
+    pub system_stats: Option<crate::system_stats::SystemStats>,
     pub sidebar_width_source: SidebarWidthSource,
     pub sidebar_width_auto: bool,
     pub sidebar_collapsed: bool,
@@ -1732,6 +1739,7 @@ impl AppState {
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
+                status_line_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),
                 tab_scroll_right_hit_area: Rect::default(),
@@ -1767,6 +1775,9 @@ impl AppState {
             sidebar_row_gap: crate::config::DEFAULT_SIDEBAR_ROW_GAP,
             sidebar_pane_gap: crate::config::DEFAULT_SIDEBAR_PANE_GAP,
             prompt_float_lines: crate::config::DEFAULT_PROMPT_FLOAT_LINES,
+            pane_header: true,
+            status_line: true,
+            system_stats: None,
             sidebar_width_source: SidebarWidthSource::ConfigDefault,
             sidebar_width_auto: false,
             sidebar_collapsed: false,

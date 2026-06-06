@@ -56,6 +56,8 @@ pub enum AppEvent {
         process_exited: bool,
         observed_at: Instant,
     },
+    /// Periodic machine metrics snapshot for the global status line.
+    SystemStatsUpdated(crate::system_stats::SystemStats),
     /// A user prompt submitted to an agent pane (integration hook report).
     HookPromptReported {
         pane_id: PaneId,
