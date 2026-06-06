@@ -490,6 +490,9 @@ fn render_pane_header(
         );
         return;
     }
+    let expanded = app.expanded_prompt_pane == Some(info.id);
+    let collapsed_content = lines.iter().any(|line| line.is_marker)
+        || lines.iter().any(|line| line.text.contains('\u{2026}'));
     for (row, line) in lines.iter().enumerate() {
         let style = if line.is_marker {
             marker_style
@@ -497,13 +500,56 @@ fn render_pane_header(
             prompt_style
         };
         let prefix = if row == 0 { "\u{276f} " } else { "  " };
+        let mut text = format!("{prefix}{}", line.text);
+        if row == 0 && (collapsed_content || expanded) {
+            text = format!(
+                "{} {}",
+                text,
+                if expanded { "\u{25b4}" } else { "\u{25be}" }
+            );
+        }
         buf.set_stringn(
             header.x + 1,
             header.y + 1 + row as u16,
-            format!("{prefix}{}", line.text),
+            text,
             header.width.saturating_sub(1) as usize,
             style,
         );
+    }
+
+    // Click-expanded: the full prompt floats below the header, over content.
+    if expanded {
+        if let Some(prompt) = prompt {
+            let inner = info.inner_rect;
+            let full: Vec<String> = prompt
+                .lines()
+                .map(|line| line.trim_end().to_string())
+                .collect();
+            let rows = (full.len() as u16).min(inner.height.saturating_sub(1));
+            for offset in 0..rows {
+                let y = inner.y + offset;
+                for x in inner.x..inner.x + inner.width {
+                    buf[(x, y)].set_symbol(" ");
+                    buf[(x, y)].set_style(prompt_style);
+                }
+                buf.set_stringn(
+                    inner.x + 1,
+                    y,
+                    full[offset as usize].clone(),
+                    inner.width.saturating_sub(2) as usize,
+                    prompt_style,
+                );
+            }
+            if (full.len() as u16) > rows && rows > 0 {
+                buf.set_stringn(
+                    inner.x + 1,
+                    inner.y + rows - 1,
+                    format!("\u{22ef} +{} more lines \u{22ef}", full.len() as u16 - rows),
+                    inner.width.saturating_sub(2) as usize,
+                    marker_style,
+                );
+            }
+        }
     }
 }
 

@@ -520,6 +520,7 @@ impl App {
             pane_header: config.ui.pane_header,
             status_line: config.ui.status_line,
             system_stats: None,
+            expanded_prompt_pane: None,
             sidebar_width_source,
             sidebar_width_auto: false,
             sidebar_collapsed: false,

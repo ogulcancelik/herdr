@@ -1441,6 +1441,8 @@ pub struct AppState {
     pub status_line: bool,
     /// Latest sampler snapshot for the status line.
     pub system_stats: Option<crate::system_stats::SystemStats>,
+    /// Pane whose header prompt is click-expanded to the full text.
+    pub expanded_prompt_pane: Option<PaneId>,
     pub sidebar_width_source: SidebarWidthSource,
     pub sidebar_width_auto: bool,
     pub sidebar_collapsed: bool,
@@ -1788,6 +1790,7 @@ impl AppState {
             pane_header: true,
             status_line: true,
             system_stats: None,
+            expanded_prompt_pane: None,
             sidebar_width_source: SidebarWidthSource::ConfigDefault,
             sidebar_width_auto: false,
             sidebar_collapsed: false,

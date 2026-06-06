@@ -591,6 +591,22 @@ impl AppState {
                         self.pane_scroll_metrics(terminal_runtimes, info.id),
                     ));
                 } else if let Some(info) = self.view.pane_infos.iter().find(|p| {
+                    p.header_rect.is_some_and(|h| {
+                        mouse.column >= h.x
+                            && mouse.column < h.x + h.width
+                            && mouse.row > h.y
+                            && mouse.row < h.y + h.height
+                    })
+                }) {
+                    // Click on the header prompt rows toggles the full-prompt view.
+                    let id = info.id;
+                    self.expanded_prompt_pane = if self.expanded_prompt_pane == Some(id) {
+                        None
+                    } else {
+                        Some(id)
+                    };
+                    self.focus_pane(id);
+                } else if let Some(info) = self.view.pane_infos.iter().find(|p| {
                     mouse.column >= p.rect.x
                         && mouse.column < p.rect.x + p.rect.width
                         && mouse.row >= p.rect.y
