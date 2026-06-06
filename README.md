@@ -19,6 +19,25 @@ workspaces, tabs, panes. mouse-native: click, drag, split. every agent at a glan
 
 ---
 
+## Installing this fork (Nix)
+
+This fork ships via its Nix flake — no separate releases.
+
+```nix
+# newest CI-green build (recommended)
+herdr.url = "github:gerchowl/herdr/latest";
+
+# bleeding edge (integration branch, may be mid-flight)
+herdr.url = "github:gerchowl/herdr/feat/sidebar-row-gap";
+
+# immutable pin
+herdr.url = "github:gerchowl/herdr/<rev>";
+```
+
+Or try it directly: `nix run github:gerchowl/herdr/latest`.
+`nix flake update herdr` pulls the newest green build whenever you choose.
+The `latest` branch only advances after the flake package builds in CI.
+
 ## install
 
 ```bash
