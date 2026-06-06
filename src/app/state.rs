@@ -1351,6 +1351,14 @@ pub struct AppState {
     pub request_new_linked_worktree: Option<usize>,
     pub request_branch_session: Option<usize>,
     pub request_kill_worktree: Option<usize>,
+    /// One-shot guard so the attention all-clear chime fires once per
+    /// empty-queue episode instead of on every keypress.
+    pub attention_all_clear_chimed: bool,
+    /// Chime due: consumed by the App/headless loops (the headless server
+    /// forwards it to the foreground client, which owns audio).
+    pub pending_attention_chime: bool,
+    /// Sidebar display aliases for agent labels ([ui] agent_aliases).
+    pub agent_aliases: std::collections::HashMap<String, String>,
     pub request_open_existing_worktree: Option<usize>,
     pub request_new_workspace_cwd: Option<std::path::PathBuf>,
     pub request_remove_linked_worktree: Option<usize>,
@@ -1492,6 +1500,15 @@ impl AppState {
 
     pub fn sound_enabled(&self) -> bool {
         self.sound.enabled
+    }
+
+    /// Sidebar display alias for an agent label: config override first,
+    /// then the built-in short code, then the label unchanged.
+    pub(crate) fn agent_alias<'a>(&'a self, label: &'a str) -> &'a str {
+        self.agent_aliases
+            .get(label)
+            .map(String::as_str)
+            .unwrap_or_else(|| crate::detect::short_agent_label(label))
     }
 
     pub fn toast_delivery(&self) -> ToastDelivery {
@@ -1675,6 +1692,9 @@ impl AppState {
             request_new_linked_worktree: None,
             request_branch_session: None,
             request_kill_worktree: None,
+            attention_all_clear_chimed: false,
+            pending_attention_chime: false,
+            agent_aliases: std::collections::HashMap::new(),
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
             request_remove_linked_worktree: None,

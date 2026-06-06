@@ -48,6 +48,8 @@ pub enum AppEvent {
         pane_id: PaneId,
         agent: Option<Agent>,
         state: AgentState,
+        /// Free-text activity from the agent's status line while Working.
+        activity: Option<String>,
         visible_blocker: bool,
         visible_idle: bool,
         visible_working: bool,

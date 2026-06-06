@@ -1050,6 +1050,7 @@ fn sound_from_notify_message(message: &str) -> Option<crate::sound::Sound> {
     match message {
         "agent done" => Some(crate::sound::Sound::Done),
         "agent attention" => Some(crate::sound::Sound::Request),
+        "attention clear" => Some(crate::sound::Sound::AllClear),
         _ => None,
     }
 }

@@ -61,6 +61,13 @@ pub struct TerminalState {
     fallback_visible_idle: bool,
     fallback_visible_working: bool,
     fallback_observed_at: Option<Instant>,
+    /// When the effective agent state last transitioned. Drives the
+    /// oldest-first ordering of the attention queue.
+    pub state_changed_at: Option<Instant>,
+    /// Free-text activity from the agent's own status line while Working
+    /// (e.g. Claude's "Implementing the parser"). Cleared by the detector
+    /// when the agent stops working.
+    pub live_activity: Option<String>,
     stale_hook_idle_since: Option<Instant>,
     pub hook_authority: Option<HookAuthority>,
     pub agent_metadata: HashMap<String, AgentMetadata>,
@@ -87,6 +94,8 @@ impl TerminalState {
             fallback_visible_idle: false,
             fallback_visible_working: false,
             fallback_observed_at: None,
+            state_changed_at: None,
+            live_activity: None,
             stale_hook_idle_since: None,
             hook_authority: None,
             agent_metadata: HashMap::new(),
@@ -764,6 +773,9 @@ impl TerminalState {
             return None;
         }
 
+        if previous_state != state {
+            self.state_changed_at = Some(now);
+        }
         self.state = state;
         Some(EffectiveStateChange {
             previous_agent_label,
@@ -887,6 +899,7 @@ mod tests {
             AgentState::Working,
             AgentDetection {
                 state: AgentState::Idle,
+                activity: None,
                 skip_state_update: false,
                 visible_blocker: false,
                 visible_idle: false,
@@ -910,6 +923,7 @@ mod tests {
             AgentState::Working,
             AgentDetection {
                 state: AgentState::Idle,
+                activity: None,
                 skip_state_update: false,
                 visible_blocker: false,
                 visible_idle: true,

@@ -182,8 +182,11 @@ open_worktree = "prefix+shift+o"
 remove_worktree = "prefix+alt+d"
 branch_session = "prefix+shift+b"
 kill_worktree = "prefix+alt+k"
+focus_attention = "prefix+a"
 next_tab = ["prefix+n", "ctrl+alt+]"]
 ```
+
+`focus_attention` jumps to the agent most in need of attention: blocked agents first (oldest state change first), then agents that finished while you were elsewhere (oldest first). Repeated presses walk the queue; focusing a done agent marks it seen and drains it. When nothing needs attention the press chimes once (the all-clear sound, customizable via `[ui.sound] all_clear_path`) and falls back to cycling agents like `next_agent`.
 
 `kill_worktree` deletes a linked worktree checkout **and its local branch** — but the branch only when a merge gate passes: Herdr asks `gh pr view <branch>` for a merged PR, falling back to `git branch --merged <default-branch>`. The confirm dialog shows the evidence ("PR #12 merged" / "merged into master") or, when there is none, downgrades to a checkout-only delete with the branch kept. This is the one deliberate exception to Herdr's "branches are never deleted" rule, and it never fires without positive evidence. Also available as `Kill worktree & branch...` in the workspace context menu.
 
@@ -301,6 +304,8 @@ Set `redraw_on_focus_gained = false` to avoid the visible full-screen refresh wh
 Set `mouse_scroll_lines` to change how many pane scrollback lines each mouse wheel notch scrolls. The default is 3. Pane apps that request mouse reporting still receive wheel events directly.
 
 Set `show_agent_labels_on_pane_borders = true` if you want detected agent labels in split pane borders when no manual pane label is set.
+
+The agent panel shows rows as `<agent> · <status>` using built-in short codes (`claude` → `cc`, `codex` → `cd`, `gemini` → `gm`, …). Override or extend them with `agent_aliases = { claude = "CC" }` under `[ui]`. While a Claude Code pane is working, the status text is replaced by the live activity from its own status line (e.g. `cc · Implementing the parser…`), scraped from the terminal in real time.
 
 `sidebar_row_gap` controls the blank rows between sidebar list entries (workspaces and agents). The default is 1; set 0 for a packed list. The maximum is 3.
 

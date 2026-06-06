@@ -209,6 +209,12 @@ fn has_claude_yes_no_choice(content: &str) -> bool {
 /// on the spinner glyph + trailing ellipsis rather than specific wording.
 /// Include Claude's narrow-pane middle-dot frame too.
 pub(in crate::detect) fn has_spinner_activity(content: &str) -> bool {
+    spinner_activity_text(content).is_some()
+}
+
+/// The free-text activity label from Claude's spinner line, e.g.
+/// "✶ Implementing the parser… (esc to interrupt)" -> "Implementing the parser".
+pub(in crate::detect) fn spinner_activity_text(content: &str) -> Option<String> {
     const SPINNER_CHARS: &str = "·✱✲✳✴✵✶✷✸✹✺✻✼✽✾✿❀❁❂❃❇❈❉❊❋✢✣✤✥✦✧✨⊛⊕⊙◉◎◍⁂⁕※⍟☼★☆";
     for line in content.lines() {
         let trimmed = line.trim();
@@ -216,16 +222,27 @@ pub(in crate::detect) fn has_spinner_activity(content: &str) -> bool {
         if let Some(first) = chars.next() {
             if SPINNER_CHARS.contains(first) {
                 let rest: String = chars.collect();
-                if rest.starts_with(' ')
-                    && rest.contains('\u{2026}')
-                    && rest.chars().any(|c| c.is_alphanumeric())
-                {
-                    return true;
+                if rest.starts_with(' ') && rest.contains('\u{2026}') {
+                    let text = rest
+                        .split('\u{2026}')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if text.chars().any(|c| c.is_alphanumeric()) {
+                        return Some(text);
+                    }
                 }
             }
         }
     }
-    false
+    None
+}
+
+/// Public seam for detect::detect_agent: activity text relative to the live
+/// prompt area (ignores transcript scrollback above the prompt box).
+pub(in crate::detect) fn live_activity_text(content: &str) -> Option<String> {
+    spinner_activity_text(content_above_prompt_box(content))
 }
 
 /// Extract content above Claude's prompt box.

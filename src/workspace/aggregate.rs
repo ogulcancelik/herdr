@@ -19,6 +19,10 @@ pub struct PaneDetail {
     pub seen: bool,
     pub custom_status: Option<String>,
     pub state_labels: HashMap<String, String>,
+    /// Live status-line activity while Working (e.g. "Implementing the parser").
+    pub live_activity: Option<String>,
+    /// When the effective agent state last transitioned.
+    pub state_changed_at: Option<std::time::Instant>,
 }
 
 impl Tab {
@@ -57,6 +61,10 @@ impl Tab {
                     seen: pane.seen,
                     custom_status: presentation.custom_status,
                     state_labels: presentation.state_labels,
+                    live_activity: (terminal.state == AgentState::Working)
+                        .then(|| terminal.live_activity.clone())
+                        .flatten(),
+                    state_changed_at: terminal.state_changed_at,
                 })
             })
             .collect()

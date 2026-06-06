@@ -19,9 +19,12 @@ pub enum AgentState {
 }
 
 /// Screen-derived agent state plus confidence metadata used for source arbitration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentDetection {
     pub state: AgentState,
+    /// Free-text activity from the agent's own status line (Claude's spinner
+    /// verb, e.g. "Implementing the parser"). Only set while Working.
+    pub activity: Option<String>,
     /// True when the current screen is an agent-owned viewer that shows
     /// transcript/history instead of the live prompt state.
     pub skip_state_update: bool,
@@ -80,6 +83,29 @@ pub fn agent_label(agent: Agent) -> &'static str {
         Agent::Hermes => "hermes",
         Agent::Kilo => "kilo",
         Agent::Qodercli => "qodercli",
+    }
+}
+
+/// Compact two/three-char display code for a canonical agent label. Unknown
+/// labels (including user renames) pass through unchanged.
+pub fn short_agent_label(label: &str) -> &str {
+    match label {
+        "claude" => "cc",
+        "codex" => "cd",
+        "copilot" => "cp",
+        "gemini" => "gm",
+        "cursor" => "cu",
+        "agy" => "ag",
+        "cline" => "cl",
+        "opencode" => "oc",
+        "kimi" => "km",
+        "kiro" => "kr",
+        "droid" => "dr",
+        "grok" => "gk",
+        "hermes" => "hm",
+        "kilo" => "kl",
+        "qodercli" => "qd",
+        other => other,
     }
 }
 
@@ -176,6 +202,7 @@ pub fn detect_agent(agent: Option<Agent>, screen_content: &str) -> AgentDetectio
     let Some(agent) = agent else {
         return AgentDetection {
             state: AgentState::Unknown,
+            activity: None,
             skip_state_update: false,
             visible_blocker: false,
             visible_idle: false,
@@ -2799,5 +2826,34 @@ Which framework should we use?\n\
     fn visible_claude_prompt_box_is_idle() {
         let screen = "Task complete.\n─────────────\n❯ \n─────────────";
         assert_eq!(detect_claude(screen), AgentState::Idle);
+    }
+    #[test]
+    fn spinner_activity_text_extracts_claude_verb() {
+        assert_eq!(
+            agents::claude_code::spinner_activity_text(
+                "✶ Implementing the parser… (esc to interrupt)"
+            )
+            .as_deref(),
+            Some("Implementing the parser")
+        );
+        assert_eq!(
+            agents::claude_code::spinner_activity_text("· Thinking…").as_deref(),
+            Some("Thinking")
+        );
+        assert_eq!(
+            agents::claude_code::spinner_activity_text("plain text"),
+            None
+        );
+        // ellipsis without any words is not an activity
+        assert_eq!(agents::claude_code::spinner_activity_text("✶ …"), None);
+    }
+
+    #[test]
+    fn short_agent_labels_cover_common_agents() {
+        assert_eq!(short_agent_label("claude"), "cc");
+        assert_eq!(short_agent_label("codex"), "cd");
+        assert_eq!(short_agent_label("gemini"), "gm");
+        assert_eq!(short_agent_label("pi"), "pi");
+        assert_eq!(short_agent_label("my-custom-name"), "my-custom-name");
     }
 }

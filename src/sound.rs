@@ -23,6 +23,8 @@ pub enum Sound {
     Done,
     /// Agent needs input (transitioned to Blocked).
     Request,
+    /// Attention queue is empty (focus_attention found nothing left).
+    AllClear,
 }
 
 /// Play a notification sound in a background thread.
@@ -44,7 +46,7 @@ pub fn play(sound: Sound, config: &crate::config::SoundConfig) {
         }
 
         let data = match sound {
-            Sound::Done => SOUND_DONE,
+            Sound::Done | Sound::AllClear => SOUND_DONE,
             Sound::Request => SOUND_REQUEST,
         };
 
