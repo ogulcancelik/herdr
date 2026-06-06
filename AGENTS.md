@@ -30,6 +30,27 @@ Commit on the task branch in that worktree.
 
 When the change is ready, fast-forward the shared checkout at `../herdr` to the task branch commit, then push `origin/master` from `../herdr`. Do not treat the task branch as the final landing branch.
 
+### Fork fleet flow (gerchowl/herdr, feat/sidebar-row-gap)
+
+On this fork, `feat/sidebar-row-gap` is the integration branch the dotfiles
+flake pins. Multiple agent sessions develop it concurrently, so direct pushes
+cause pin races and skip review. Instead, EVERY change lands through a PR:
+
+1. Isolate in a worktree (herdr's `branch_session` keybind, `herdr worktree`
+   CLI, or `git worktree add`). External worktrees are auto-adopted.
+2. Commit on the task branch; push; `gh pr create --base feat/sidebar-row-gap`
+   with test/probe evidence in the description.
+3. Merge via the PR (merge commit, matching PRs #1-#5), then
+   `git pull --rebase` in the shared checkout.
+4. Deploying: bump the dotfiles flake (`nix flake update herdr`), VERIFY the
+   pinned rev in flake.lock (pin races happen), `home-manager switch`, then
+   `herdr server live-handoff`. Commit the dotfiles pin.
+5. Clean up with the merge-gated kill (`kill_worktree` keybind,
+   `herdr worktree kill`, or the `/clean-ws` skill) — never delete branches
+   by hand.
+
+Doc-only changes still take a PR, but skip step 4.
+
 If the current session is already inside an isolated task worktree, keep using it. Do not create nested worktrees.
 
 Before committing, propose the commit message and get alignment.
