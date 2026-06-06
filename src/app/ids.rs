@@ -73,7 +73,7 @@ impl App {
     /// resolving the API caller by process ancestry: peer pid -> parents ->
     /// a pane's direct child pid.
     pub(super) fn parse_pane_id_or_peer(
-        &self,
+        &mut self,
         id: &str,
         peer_pid: Option<u32>,
     ) -> Option<(usize, crate::layout::PaneId)> {
@@ -90,6 +90,17 @@ impl App {
                 resolved = pane_id.raw(),
                 "resolved stale pane id via process ancestry"
             );
+            // Memoize: the next report from this environment takes the alias
+            // fast path instead of re-walking the process tree. The alias map
+            // already handles shadowing, persistence, and handoff chaining.
+            if let Some(stale_raw) = id
+                .strip_prefix("p_")
+                .and_then(|rest| rest.parse::<u32>().ok())
+            {
+                if stale_raw != pane_id.raw() {
+                    self.state.pane_id_aliases.insert(stale_raw, pane_id);
+                }
+            }
         }
         resolved
     }
@@ -161,5 +172,51 @@ impl App {
             .iter()
             .find_map(|(pane_id, number)| (*number == pane_number).then_some(*pane_id))?;
         Some((ws_idx, pane_id))
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::super::App;
+
+    fn test_app() -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        )
+    }
+
+    #[test]
+    fn alias_gc_drops_entries_for_dead_target_panes() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("main")];
+        let live = app.state.workspaces[0].tabs[0].root_pane;
+        let dead = crate::layout::PaneId::from_raw(9_999);
+
+        app.state.pane_id_aliases.insert(1_000, live);
+        app.state.pane_id_aliases.insert(1_001, dead);
+
+        app.state
+            .remove_alias_shadowed_by_new_pane(crate::layout::PaneId::from_raw(7_777));
+
+        assert_eq!(app.state.pane_id_aliases.get(&1_000), Some(&live));
+        assert_eq!(app.state.pane_id_aliases.get(&1_001), None);
+    }
+
+    #[test]
+    fn memoized_alias_takes_the_fast_path_after_ancestry_resolution() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("main")];
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+
+        // Simulate the memoization a successful ancestry walk performs.
+        app.state.pane_id_aliases.insert(123_456, pane);
+
+        // The stale id now resolves through parse_pane_id without any peer.
+        let resolved = app.parse_pane_id_or_peer("p_123456", None);
+        assert_eq!(resolved.map(|(_, id)| id), Some(pane));
     }
 }
