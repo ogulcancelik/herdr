@@ -2211,6 +2211,8 @@ impl AppState {
                 self.system_stats = Some(stats);
                 Vec::new()
             }
+            // Handled in the shared api.rs preprocessing before reaching here.
+            AppEvent::PrStatePollDue | AppEvent::PrStatesUpdated(_) => Vec::new(),
             AppEvent::HookPromptReported { pane_id, prompt } => self
                 .update_terminal_state(pane_id, |terminal| {
                     terminal.last_prompt = Some(prompt.clone());

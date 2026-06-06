@@ -93,6 +93,8 @@ pub struct Workspace {
     pub(crate) cached_git_branch: Option<String>,
     /// Cached ahead/behind counts for the workspace repo's current branch upstream.
     pub(crate) cached_git_ahead_behind: Option<(usize, usize)>,
+    /// GitHub PR state for the current branch (background gh poller).
+    pub(crate) pr_state: Option<crate::worktree::PrStateInfo>,
     /// Cached derived Git repo metadata for worktree actions and status display.
     pub(crate) cached_git_space: Option<GitSpaceMetadata>,
     /// Explicit Herdr-managed worktree grouping provenance.
@@ -223,6 +225,7 @@ impl Workspace {
                 identity_cwd: initial_cwd.clone(),
                 cached_git_branch: git_branch(&initial_cwd),
                 cached_git_ahead_behind: None,
+                pr_state: None,
                 cached_git_space: None,
                 worktree_space: None,
                 public_pane_numbers,
@@ -615,6 +618,14 @@ impl Workspace {
         self.cached_git_branch.clone()
     }
 
+    pub fn ahead_behind(&self) -> Option<(usize, usize)> {
+        self.cached_git_ahead_behind
+    }
+
+    pub fn pr_state(&self) -> Option<crate::worktree::PrStateInfo> {
+        self.pr_state
+    }
+
     pub fn git_ahead_behind(&self) -> Option<(usize, usize)> {
         self.cached_git_ahead_behind
     }
@@ -751,6 +762,7 @@ impl Workspace {
             identity_cwd: identity_cwd.clone(),
             cached_git_branch: git_branch(&identity_cwd),
             cached_git_ahead_behind: None,
+            pr_state: None,
             cached_git_space: None,
             worktree_space: None,
             public_pane_numbers,

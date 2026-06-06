@@ -28,6 +28,11 @@ pub struct SessionSnapshot {
     pub sidebar_section_split: Option<f32>,
     #[serde(default)]
     pub collapsed_space_keys: std::collections::HashSet<String>,
+    /// Raw pane-id aliases (ancient env id -> current raw id) carried across
+    /// live handoffs so HERDR_PANE_ID baked into long-lived pane environments
+    /// keeps resolving no matter how many handoffs happened since spawn.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub pane_id_aliases: std::collections::HashMap<u32, u32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -93,6 +98,10 @@ pub struct PaneSnapshot {
     pub cwd: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub header_reserved: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -174,6 +183,8 @@ struct RawSessionSnapshot {
     sidebar_section_split: Option<f32>,
     #[serde(default)]
     collapsed_space_keys: std::collections::HashSet<String>,
+    #[serde(default)]
+    pane_id_aliases: std::collections::HashMap<u32, u32>,
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
@@ -189,6 +200,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         agent_panel_scope: raw.agent_panel_scope,
         sidebar_width: raw.sidebar_width,
         sidebar_section_split: raw.sidebar_section_split,
+        pane_id_aliases: raw.pane_id_aliases,
         collapsed_space_keys: raw.collapsed_space_keys,
     })
 }
@@ -253,6 +265,7 @@ pub fn capture(
     sidebar_width: u16,
     sidebar_section_split: f32,
     collapsed_space_keys: std::collections::HashSet<String>,
+    pane_id_aliases: std::collections::HashMap<u32, u32>,
 ) -> SessionSnapshot {
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
@@ -266,6 +279,7 @@ pub fn capture(
         sidebar_width: Some(sidebar_width),
         sidebar_section_split: Some(sidebar_section_split),
         collapsed_space_keys,
+        pane_id_aliases,
     }
 }
 
@@ -345,11 +359,19 @@ fn capture_tab(
                         }
                     })
                 });
+        let (last_prompt, header_reserved) = tab
+            .panes
+            .get(id)
+            .and_then(|pane| terminals.get(&pane.attached_terminal_id))
+            .map(|terminal| (terminal.last_prompt.clone(), terminal.header_reserved))
+            .unwrap_or((None, false));
         panes.insert(
             id.raw(),
             PaneSnapshot {
                 cwd,
                 label,
+                last_prompt,
+                header_reserved,
                 agent_name,
                 agent_session,
                 launch_argv,
@@ -519,6 +541,7 @@ mod tests {
             state.sidebar_width,
             state.sidebar_section_split,
             state.collapsed_space_keys.clone(),
+            std::collections::HashMap::new(),
         )
     }
 
@@ -547,6 +570,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            pane_id_aliases: std::collections::HashMap::new(),
         };
         let json = serde_json::to_string(&snap).unwrap();
         let restored = parse_snapshot(&json).unwrap();
@@ -586,6 +610,8 @@ mod tests {
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/herdr"),
                 label: None,
+                last_prompt: None,
+                header_reserved: false,
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
@@ -596,6 +622,8 @@ mod tests {
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/website"),
                 label: Some("website".into()),
+                last_prompt: None,
+                header_reserved: false,
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
@@ -630,6 +658,7 @@ mod tests {
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
             version: SNAPSHOT_VERSION,
+            pane_id_aliases: std::collections::HashMap::new(),
         };
 
         let json = serde_json::to_string_pretty(&snap).unwrap();
@@ -1117,6 +1146,8 @@ mod tests {
             PaneSnapshot {
                 cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test"),
                 label: None,
+                last_prompt: None,
+                header_reserved: false,
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
@@ -1129,6 +1160,8 @@ mod tests {
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| PathBuf::from("/tmp")),
                 label: None,
+                last_prompt: None,
+                header_reserved: false,
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
@@ -1163,6 +1196,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            pane_id_aliases: std::collections::HashMap::new(),
         };
 
         let json = serde_json::to_string(&snap).unwrap();

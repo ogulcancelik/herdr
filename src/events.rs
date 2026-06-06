@@ -58,6 +58,10 @@ pub enum AppEvent {
     },
     /// Periodic machine metrics snapshot for the global status line.
     SystemStatsUpdated(crate::system_stats::SystemStats),
+    /// The slow PR-state poll interval elapsed; collect targets and query gh.
+    PrStatePollDue,
+    /// Background gh results: per-workspace PR state for worktree branches.
+    PrStatesUpdated(Vec<(String, Option<crate::worktree::PrStateInfo>)>),
     /// A user prompt submitted to an agent pane (integration hook report).
     HookPromptReported {
         pane_id: PaneId,

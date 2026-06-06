@@ -241,6 +241,63 @@ pub(crate) fn detect_default_branch(repo_root: &std::path::Path) -> Option<Strin
     None
 }
 
+/// GitHub PR state for a worktree branch, shown in the pane header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrState {
+    Open,
+    Draft,
+    Merged,
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrStateInfo {
+    pub state: PrState,
+    pub number: u64,
+}
+
+pub(crate) fn parse_pr_state_json(json: &str) -> Option<PrStateInfo> {
+    let value = serde_json::from_str::<serde_json::Value>(json).ok()?;
+    let number = value.get("number")?.as_u64()?;
+    let state = match value.get("state")?.as_str()? {
+        "OPEN" if value.get("isDraft").and_then(|v| v.as_bool()) == Some(true) => PrState::Draft,
+        "OPEN" => PrState::Open,
+        "MERGED" => PrState::Merged,
+        "CLOSED" => PrState::Closed,
+        _ => return None,
+    };
+    Some(PrStateInfo { state, number })
+}
+
+/// Query the PR for `branch` on the checkout's origin repo. Slow (network):
+/// only called from the background PR poller.
+pub(crate) fn query_pr_state(
+    repo_root: &std::path::Path,
+    checkout: &std::path::Path,
+    branch: &str,
+) -> Option<PrStateInfo> {
+    let root = repo_root.to_string_lossy().to_string();
+    let repo = run_command_capture("git", &["-C", &root, "remote", "get-url", "origin"], None)
+        .ok()
+        .as_deref()
+        .and_then(github_repo_from_remote_url)?;
+    let json = run_command_capture(
+        "gh",
+        &[
+            "pr",
+            "view",
+            branch,
+            "--repo",
+            &repo,
+            "--json",
+            "state,number,isDraft",
+        ],
+        Some(checkout),
+    )
+    .ok()?;
+    parse_pr_state_json(&json)
+}
+
 /// Parse "owner/repo" out of a github remote URL (ssh or https).
 fn github_repo_from_remote_url(url: &str) -> Option<String> {
     let rest = url
@@ -890,5 +947,38 @@ prunable stale
             main_root_from_common_dir(std::path::Path::new("/repo/bare.git")),
             std::path::PathBuf::from("/repo/bare.git")
         );
+    }
+    #[test]
+    fn pr_state_json_parses_all_states() {
+        assert_eq!(
+            parse_pr_state_json(r#"{"state":"OPEN","number":7,"isDraft":false}"#),
+            Some(PrStateInfo {
+                state: PrState::Open,
+                number: 7
+            })
+        );
+        assert_eq!(
+            parse_pr_state_json(r#"{"state":"OPEN","number":7,"isDraft":true}"#),
+            Some(PrStateInfo {
+                state: PrState::Draft,
+                number: 7
+            })
+        );
+        assert_eq!(
+            parse_pr_state_json(r#"{"state":"MERGED","number":5,"isDraft":false}"#),
+            Some(PrStateInfo {
+                state: PrState::Merged,
+                number: 5
+            })
+        );
+        assert_eq!(
+            parse_pr_state_json(r#"{"state":"CLOSED","number":2,"isDraft":false}"#),
+            Some(PrStateInfo {
+                state: PrState::Closed,
+                number: 2
+            })
+        );
+        assert_eq!(parse_pr_state_json("not json"), None);
+        assert_eq!(parse_pr_state_json(r#"{"state":"WEIRD","number":1}"#), None);
     }
 }

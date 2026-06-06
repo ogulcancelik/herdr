@@ -258,6 +258,20 @@ impl App {
         crate::kitty_graphics::set_enabled(config.experimental.kitty_graphics);
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(APP_EVENT_CHANNEL_CAPACITY);
         crate::system_stats::spawn_sampler(event_tx.clone());
+        {
+            // Slow PR-state poll tick: the shared event handler collects the
+            // worktree branches and spawns the actual gh worker.
+            let pr_tick_tx = event_tx.clone();
+            std::thread::Builder::new()
+                .name("pr-state-tick".into())
+                .spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(120));
+                    if pr_tick_tx.blocking_send(AppEvent::PrStatePollDue).is_err() {
+                        return;
+                    }
+                })
+                .expect("pr-state tick thread should spawn");
+        }
         let render_notify = Arc::new(Notify::new());
         let render_dirty = Arc::new(AtomicBool::new(false));
 
@@ -506,6 +520,7 @@ impl App {
             pane_header: config.ui.pane_header,
             status_line: config.ui.status_line,
             system_stats: None,
+            expanded_prompt_pane: None,
             sidebar_width_source,
             sidebar_width_auto: false,
             sidebar_collapsed: false,

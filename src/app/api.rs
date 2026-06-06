@@ -66,6 +66,62 @@ impl App {
             return;
         }
 
+        if let AppEvent::PrStatePollDue = ev {
+            let targets: Vec<_> = self
+                .state
+                .workspaces
+                .iter()
+                .filter_map(|ws| {
+                    let space = ws.worktree_space().filter(|s| s.is_linked_worktree)?;
+                    let branch = ws.branch()?;
+                    Some((
+                        ws.id.clone(),
+                        space.repo_root.clone(),
+                        space.checkout_path.clone(),
+                        branch,
+                    ))
+                })
+                .collect();
+            if !targets.is_empty() {
+                let event_tx = self.event_tx.clone();
+                std::thread::spawn(move || {
+                    let results: Vec<_> = targets
+                        .into_iter()
+                        .map(|(id, root, checkout, branch)| {
+                            (
+                                id,
+                                crate::worktree::query_pr_state(&root, &checkout, &branch),
+                            )
+                        })
+                        .collect();
+                    let _ = event_tx.blocking_send(AppEvent::PrStatesUpdated(results));
+                });
+            }
+            return;
+        }
+
+        if let AppEvent::PrStatesUpdated(results) = ev {
+            let mut changed = false;
+            for (workspace_id, pr_state) in results {
+                if let Some(ws) = self
+                    .state
+                    .workspaces
+                    .iter_mut()
+                    .find(|ws| ws.id == workspace_id)
+                {
+                    if ws.pr_state != pr_state {
+                        ws.pr_state = pr_state;
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                self.render_dirty.store(true, Ordering::Release);
+                self.render_notify.notify_one();
+            }
+            return;
+        }
+
         if let AppEvent::WorktreeKillGateFinished(result) = ev {
             self.handle_worktree_kill_gate_finished(result);
             return;
@@ -832,6 +888,35 @@ mod tests {
         assert_eq!(
             app.state.toast.as_ref().map(|toast| toast.context.as_str()),
             Some("__herdr_original__ · 1")
+        );
+    }
+    #[tokio::test]
+    async fn pr_states_updated_applies_to_matching_workspace() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("wt")];
+        let id = app.state.workspaces[0].id.clone();
+
+        app.handle_internal_event(crate::events::AppEvent::PrStatesUpdated(vec![(
+            id,
+            Some(crate::worktree::PrStateInfo {
+                state: crate::worktree::PrState::Merged,
+                number: 6,
+            }),
+        )]));
+
+        assert_eq!(
+            app.state.workspaces[0].pr_state(),
+            Some(crate::worktree::PrStateInfo {
+                state: crate::worktree::PrState::Merged,
+                number: 6,
+            })
         );
     }
 }

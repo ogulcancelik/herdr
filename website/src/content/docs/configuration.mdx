@@ -312,7 +312,7 @@ The agent panel shows rows as `<agent> · <status>` using built-in short codes (
 
 `sidebar_row_gap` controls the blank rows between sidebar list entries (workspaces and agents). The default is 1; set 0 for a packed list. The maximum is 3.
 
-`pane_header` (default `true`) reserves a header strip at the top of agent panes — the pane's terminal shrinks so nothing is ever covered. Row 1 shows context (`project · worktree ·  branch`), the remaining rows show the **last submitted prompt**. The reservation latches the first time an agent is seen in a pane and stays stable from then on. Panes too small to give up rows skip the header.
+`pane_header` (default `true`) reserves a header strip at the top of agent panes — the pane's terminal shrinks so nothing is ever covered. Row 1 shows context: `project · worktree ·  branch`, unpushed/unpulled counts (`↑n`/`↓n`), and the branch's GitHub PR state (`#N ⊙` open, `◐` draft, `✓` merged, `✗` closed — polled via `gh` every two minutes, omitted when `gh` or a PR is absent). The remaining rows show the **last submitted prompt**; when it is collapsed or truncated a `▾` marker appears — **click the prompt rows** to expand the full text over the pane (click again to collapse). The prompt and header survive live-handoffs and restarts. The reservation latches the first time an agent is seen in a pane and stays stable from then on. Panes too small to give up rows skip the header.
 
 `status_line` (default `true`) shows a one-line machine HUD above the tab bar: cpu, memory, disk space, battery, network throughput, and best-effort GPU utilization (omitted where unreadable). Utilization colors shift to yellow at 60% and red at 85%.
 
