@@ -245,10 +245,21 @@ fn github_repo_from_remote_url(url: &str) -> Option<String> {
     Some(format!("{owner}/{name}"))
 }
 
-fn gh_pr_merged_evidence(args: &[&str], cwd: &std::path::Path) -> Option<String> {
+/// gh matches PRs by branch NAME; commits added locally after the merge
+/// would not be covered by that evidence. Only accept it when the PR's head
+/// equals the local tip — otherwise fall through to the tip-exact checks.
+fn gh_pr_merged_evidence(
+    args: &[&str],
+    cwd: &std::path::Path,
+    local_tip: Option<&str>,
+) -> Option<String> {
     let json = run_command_capture("gh", args, Some(cwd)).ok()?;
     let value = serde_json::from_str::<serde_json::Value>(&json).ok()?;
     if value.get("state").and_then(|v| v.as_str()) != Some("MERGED") {
+        return None;
+    }
+    let head_oid = value.get("headRefOid").and_then(|v| v.as_str())?;
+    if local_tip != Some(head_oid) {
         return None;
     }
     Some(match value.get("number").and_then(|v| v.as_u64()) {
@@ -270,12 +281,15 @@ pub(crate) fn branch_merge_gate(
     checkout: &std::path::Path,
     branch: &str,
 ) -> WorktreeMergeGate {
-    if let Some(evidence) =
-        gh_pr_merged_evidence(&["pr", "view", branch, "--json", "state,number"], checkout)
-    {
+    let root = repo_root.to_string_lossy().to_string();
+    let local_tip = run_command_capture("git", &["-C", &root, "rev-parse", branch], None).ok();
+    if let Some(evidence) = gh_pr_merged_evidence(
+        &["pr", "view", branch, "--json", "state,number,headRefOid"],
+        checkout,
+        local_tip.as_deref(),
+    ) {
         return WorktreeMergeGate::Merged { evidence };
     }
-    let root = repo_root.to_string_lossy().to_string();
     if let Some(repo) =
         run_command_capture("git", &["-C", &root, "remote", "get-url", "origin"], None)
             .ok()
@@ -290,9 +304,10 @@ pub(crate) fn branch_merge_gate(
                 "--repo",
                 &repo,
                 "--json",
-                "state,number",
+                "state,number,headRefOid",
             ],
             checkout,
+            local_tip.as_deref(),
         ) {
             return WorktreeMergeGate::Merged { evidence };
         }
