@@ -14,6 +14,7 @@ const DISABLE_SOUND_ENV: &str = "HERDR_DISABLE_SOUND";
 
 static SOUND_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 static SOUND_DONE: &[u8] = include_bytes!("../assets/sounds/done.mp3");
+static SOUND_ALL_CLEAR: &[u8] = include_bytes!("../assets/sounds/all-clear.mp3");
 static SOUND_REQUEST: &[u8] = include_bytes!("../assets/sounds/request.mp3");
 
 /// Which notification sound to play.
@@ -46,8 +47,9 @@ pub fn play(sound: Sound, config: &crate::config::SoundConfig) {
         }
 
         let data = match sound {
-            Sound::Done | Sound::AllClear => SOUND_DONE,
+            Sound::Done => SOUND_DONE,
             Sound::Request => SOUND_REQUEST,
+            Sound::AllClear => SOUND_ALL_CLEAR,
         };
 
         if let Err(err) = play_bytes(data) {
