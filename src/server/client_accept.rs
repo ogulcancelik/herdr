@@ -1,22 +1,23 @@
 use std::io;
-use std::os::unix::net::UnixListener;
 use std::sync::{atomic::AtomicBool, Arc};
 
+use interprocess::local_socket::traits::{Listener as _, Stream as _};
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
+use crate::ipc::LocalListener;
 use crate::server::client_transport::{self, ServerEvent};
 
 /// Accepts pending thin-client connections and starts their handshake readers.
 pub(crate) fn accept_pending_client_connections(
-    listener: &UnixListener,
+    listener: &LocalListener,
     next_client_id: &mut u64,
     should_quit: &Arc<AtomicBool>,
     server_event_tx: &mpsc::Sender<ServerEvent>,
 ) -> io::Result<()> {
     loop {
         match listener.accept() {
-            Ok((stream, _addr)) => {
+            Ok(stream) => {
                 let client_id = *next_client_id;
                 *next_client_id = next_client_id.saturating_add(1);
 
@@ -53,10 +54,10 @@ pub(crate) fn accept_pending_client_connections(
 ///
 /// During live handoff the old server must not let clients sit in the Unix
 /// listener backlog waiting for a welcome frame that will never be sent.
-pub(crate) fn reject_pending_client_connections(listener: &UnixListener) -> io::Result<()> {
+pub(crate) fn reject_pending_client_connections(listener: &LocalListener) -> io::Result<()> {
     loop {
         match listener.accept() {
-            Ok((_stream, _addr)) => {}
+            Ok(_stream) => {}
             Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => break,
             Err(err) => {
                 error!(err = %err, "client listener reject failed");

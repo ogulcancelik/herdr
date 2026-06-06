@@ -1364,6 +1364,22 @@ impl AppState {
         self.switch_ascii_input_source_in_prefix
     }
 
+    pub(crate) fn pane_exposes_host_cursor(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+    ) -> bool {
+        let has_effective_agent_label = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.terminal_id(pane_id))
+            .and_then(|terminal_id| self.terminals.get(terminal_id))
+            .and_then(crate::terminal::TerminalState::effective_agent_label)
+            .is_some();
+
+        pane_exposes_host_cursor_for_target(has_effective_agent_label, cfg!(windows))
+    }
+
     pub(crate) fn integration_updates_available(&self) -> bool {
         self.integration_recommendations
             .iter()
@@ -1678,10 +1694,29 @@ impl AppState {
     }
 }
 
+fn pane_exposes_host_cursor_for_target(
+    has_effective_agent_label: bool,
+    target_is_windows: bool,
+) -> bool {
+    !target_is_windows || !has_effective_agent_label
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    #[test]
+    fn windows_agent_panes_do_not_expose_host_cursor() {
+        assert!(!pane_exposes_host_cursor_for_target(true, true));
+        assert!(pane_exposes_host_cursor_for_target(false, true));
+    }
+
+    #[test]
+    fn non_windows_agent_panes_keep_existing_host_cursor_behavior() {
+        assert!(pane_exposes_host_cursor_for_target(true, false));
+        assert!(pane_exposes_host_cursor_for_target(false, false));
+    }
 
     #[test]
     fn built_in_theme_names_resolve() {

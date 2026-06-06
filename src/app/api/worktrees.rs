@@ -898,8 +898,19 @@ mod tests {
         App::new(&Config::default(), true, None, api_rx, event_hub)
     }
 
+    #[cfg(windows)]
+    fn test_shell() -> &'static str {
+        "C:\\Windows\\System32\\whoami.exe"
+    }
+
+    #[cfg(not(windows))]
+    fn test_shell() -> &'static str {
+        "/usr/bin/true"
+    }
+
     fn app_with_parent(repo: &Path) -> App {
         let mut app = test_app();
+        app.state.default_shell = test_shell().into();
         let mut parent = Workspace::test_new("main");
         parent.identity_cwd = repo.to_path_buf();
         app.state.workspaces = vec![parent];
@@ -954,6 +965,9 @@ mod tests {
         );
         assert!(workspace.worktree.unwrap().is_linked_worktree);
 
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
         let remove =
             crate::worktree::build_worktree_remove_command(&repo, Path::new(&worktree.path), false);
         crate::worktree::run_worktree_command(&remove).unwrap();
@@ -968,6 +982,7 @@ mod tests {
         let event_hub = crate::api::EventHub::default();
         let mut app = test_app_with_event_hub(event_hub.clone());
         app.state.worktree_directory = worktree_root.clone();
+        app.state.default_shell = test_shell().into();
 
         let response = app.handle_api_request(Request {
             id: "req".into(),
@@ -1000,6 +1015,9 @@ mod tests {
             "auto-created parent workspace event should include parent worktree membership"
         );
 
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
         let remove =
             crate::worktree::build_worktree_remove_command(&repo, Path::new(&worktree.path), false);
         crate::worktree::run_worktree_command(&remove).unwrap();
@@ -1230,7 +1248,7 @@ mod tests {
         let repo = create_committed_repo("api-worktree-open-source-repo");
         let event_hub = crate::api::EventHub::default();
         let mut app = test_app_with_event_hub(event_hub.clone());
-        app.state.default_shell = "/usr/bin/true".into();
+        app.state.default_shell = test_shell().into();
 
         let response = app.handle_api_request(Request {
             id: "req".into(),

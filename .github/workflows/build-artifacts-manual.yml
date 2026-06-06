@@ -11,6 +11,7 @@ on:
         options:
           - linux
           - macos
+          - windows
           - all
       libghostty_optimize:
         description: libghostty-vt optimize mode for this build
@@ -177,5 +178,57 @@ jobs:
           name: ${{ matrix.name }}-${{ inputs.libghostty_optimize }}-simd-${{ inputs.libghostty_simd }}
           path: |
             ${{ matrix.name }}
+            BUILD_INFO.txt
+          retention-days: 7
+
+  build-windows:
+    if: ${{ inputs.build_group == 'windows' || inputs.build_group == 'all' }}
+    runs-on: windows-latest
+    env:
+      LIBGHOSTTY_VT_OPTIMIZE: ${{ inputs.libghostty_optimize }}
+      LIBGHOSTTY_VT_SIMD: ${{ inputs.libghostty_simd }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+
+      - name: Remove Zig caches
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force .zig-cache -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force vendor/libghostty-vt/.zig-cache -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force vendor/libghostty-vt/zig-out -ErrorAction SilentlyContinue
+
+      - name: Build
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+
+      - name: Package artifact
+        shell: pwsh
+        run: |
+          Copy-Item target\x86_64-pc-windows-msvc\release\herdr.exe herdr-windows-x86_64.exe
+          "commit=$env:GITHUB_SHA" | Out-File -Encoding utf8 BUILD_INFO.txt
+          "target=x86_64-pc-windows-msvc" | Out-File -Encoding utf8 -Append BUILD_INFO.txt
+          "libghostty_vt_optimize=$env:LIBGHOSTTY_VT_OPTIMIZE" | Out-File -Encoding utf8 -Append BUILD_INFO.txt
+          "libghostty_vt_simd=$env:LIBGHOSTTY_VT_SIMD" | Out-File -Encoding utf8 -Append BUILD_INFO.txt
+          $hash = (Get-FileHash -Algorithm SHA256 herdr-windows-x86_64.exe).Hash.ToLowerInvariant()
+          "sha256=$hash  herdr-windows-x86_64.exe" | Out-File -Encoding utf8 -Append BUILD_INFO.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: herdr-windows-x86_64-${{ inputs.libghostty_optimize }}-simd-${{ inputs.libghostty_simd }}
+          path: |
+            herdr-windows-x86_64.exe
             BUILD_INFO.txt
           retention-days: 7

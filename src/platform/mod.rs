@@ -25,6 +25,22 @@ pub enum Signal {
     Kill,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlatformCapabilities {
+    pub(crate) live_handoff: bool,
+    pub(crate) remote_attach: bool,
+    pub(crate) direct_terminal_attach: bool,
+}
+
+pub(crate) const fn capabilities() -> PlatformCapabilities {
+    PlatformCapabilities {
+        live_handoff: cfg!(unix),
+        remote_attach: cfg!(unix),
+        direct_terminal_attach: cfg!(unix),
+    }
+}
+
+#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClipboardCommand {
     pub program: &'static str,
@@ -32,11 +48,14 @@ pub struct ClipboardCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+// Windows does not wire clipboard-image bridging into semantic input yet.
+#[cfg_attr(windows, allow(dead_code))]
 pub struct ClipboardImage {
     pub bytes: Vec<u8>,
     pub extension: &'static str,
 }
 
+#[cfg(unix)]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum LimitedRead {
     Empty,
@@ -44,6 +63,7 @@ pub(crate) enum LimitedRead {
     Oversized,
 }
 
+#[cfg(unix)]
 pub(crate) fn read_limited_reader(
     mut reader: impl std::io::Read,
     max_bytes: usize,
@@ -91,9 +111,14 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::*;
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+pub use windows::*;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 mod fallback;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub use fallback::*;
 
 #[cfg(not(target_os = "macos"))]
@@ -139,7 +164,7 @@ impl PrefixInputSource for RealPrefixInputSource {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

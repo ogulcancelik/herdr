@@ -375,15 +375,94 @@ fn normalized_process_name(process: &crate::platform::ForegroundProcess) -> Stri
 
 fn wrapped_agent_name_from_runtime_argv(runtime: &str, argv: Option<&[String]>) -> Option<String> {
     let argv = argv?;
-    let runtime = path_basename(runtime).to_lowercase();
+    let runtime = normalized_agent_lookup_name(path_basename(runtime));
 
     match runtime.as_str() {
         "node" | "bun" => script_arg_agent_name(argv, &["-e", "--eval", "-p", "--print"], &[]),
         "python" | "python3" => script_arg_agent_name(argv, &["-c"], &["-m"]),
         "sh" | "bash" | "zsh" | "fish" => script_arg_agent_name(argv, &["-c"], &[]),
+        "cmd" => windows_cmd_arg_agent_name(argv),
+        "powershell" | "pwsh" => powershell_arg_agent_name(argv),
         "tmux" => None,
         _ => None,
     }
+}
+
+fn windows_cmd_arg_agent_name(argv: &[String]) -> Option<String> {
+    let mut args = argv.iter().skip(1);
+    while let Some(arg) = args.next() {
+        let flag = arg.trim_matches('"').to_lowercase();
+        match flag.as_str() {
+            "/c" | "/k" => {
+                return args
+                    .next()
+                    .and_then(|command| command_text_agent_name(command))
+            }
+            "/d" | "/s" | "/q" | "/a" | "/u" | "/e:on" | "/e:off" | "/f:on" | "/f:off"
+            | "/v:on" | "/v:off" => continue,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn powershell_arg_agent_name(argv: &[String]) -> Option<String> {
+    let mut args = argv.iter().skip(1);
+    while let Some(arg) = args.next() {
+        let flag = arg.trim_matches('"').to_lowercase();
+        match flag.as_str() {
+            "-file" | "-f" | "/file" => {
+                return args
+                    .next()
+                    .and_then(|path| agent_name_from_path_token(path));
+            }
+            "-command" | "-c" | "/command" | "/c" => {
+                return args
+                    .next()
+                    .and_then(|command| command_text_agent_name(command));
+            }
+            "-encodedcommand" | "-enc" | "/encodedcommand" | "/enc" => return None,
+            "-configurationname" | "-executionpolicy" | "-outputformat" | "-psconsolefile"
+            | "-version" | "-windowstyle" | "-workingdirectory" => {
+                let _ = args.next();
+            }
+            _ if flag.starts_with('-') || flag.starts_with('/') => {}
+            _ => return agent_name_from_path_token(arg),
+        }
+    }
+    None
+}
+
+fn command_text_agent_name(command: &str) -> Option<String> {
+    let mut rest = command;
+    while let Some((token, next)) = command_text_token(rest) {
+        let token = token.trim();
+        if token.eq_ignore_ascii_case("&")
+            || token.eq_ignore_ascii_case(".")
+            || token.eq_ignore_ascii_case("call")
+        {
+            rest = next;
+            continue;
+        }
+        return agent_name_from_path_token(token);
+    }
+    None
+}
+
+fn command_text_token(input: &str) -> Option<(&str, &str)> {
+    let input = input.trim_start();
+    let first = input.chars().next()?;
+    if first == '"' || first == '\'' {
+        let start = first.len_utf8();
+        if let Some(end) = input[start..].find(first) {
+            let end = start + end;
+            return Some((&input[start..end], &input[end + first.len_utf8()..]));
+        }
+        return Some((&input[start..], ""));
+    }
+
+    let end = input.find(char::is_whitespace).unwrap_or(input.len());
+    Some((&input[..end], &input[end..]))
 }
 
 fn script_arg_agent_name(
@@ -488,16 +567,18 @@ fn agent_name_from_basename(basename: &str) -> Option<String> {
 
 fn normalized_agent_lookup_name(name: &str) -> String {
     let mut name = name.trim().to_lowercase();
-    if name.ends_with(".exe") {
-        name.truncate(name.len() - ".exe".len());
+    for suffix in [".exe", ".cmd", ".bat", ".ps1", ".js"] {
+        if name.ends_with(suffix) {
+            name.truncate(name.len() - suffix.len());
+            break;
+        }
     }
     name
 }
 
 fn path_basename(path: &str) -> &str {
-    std::path::Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
+    path.rsplit(['/', '\\'])
+        .find(|component| !component.is_empty())
         .unwrap_or(path)
 }
 
@@ -513,9 +594,20 @@ fn process_priority(process: &crate::platform::ForegroundProcess, normalized_nam
 }
 
 fn is_generic_runtime_or_shell(name: &str) -> bool {
+    let name = normalized_agent_lookup_name(path_basename(name));
     matches!(
-        name,
-        "sh" | "bash" | "zsh" | "fish" | "tmux" | "node" | "bun" | "python" | "python3"
+        name.as_str(),
+        "sh" | "bash"
+            | "zsh"
+            | "fish"
+            | "tmux"
+            | "node"
+            | "bun"
+            | "python"
+            | "python3"
+            | "cmd"
+            | "powershell"
+            | "pwsh"
     )
 }
 
@@ -541,6 +633,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn temp_detection_path(name: &str) -> std::path::PathBuf {
         let unique = format!(
             "herdr-detect-tests-{}-{}-{}",
@@ -783,6 +876,51 @@ mod tests {
         assert_eq!(
             identify_agent_in_job(&job),
             Some((Agent::Pi, "pi".to_string()))
+        );
+    }
+
+    #[test]
+    fn identify_agent_in_job_detects_windows_cmd_wrapped_codex() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 123,
+            processes: vec![foreground_process(
+                1,
+                "cmd.exe",
+                &[
+                    "cmd.exe",
+                    "/D",
+                    "/S",
+                    "/C",
+                    "C:\\Users\\herdr\\AppData\\Roaming\\npm\\codex.cmd --model gpt-5",
+                ],
+            )],
+        };
+
+        assert_eq!(
+            identify_agent_in_job(&job),
+            Some((Agent::Codex, "codex".to_string()))
+        );
+    }
+
+    #[test]
+    fn identify_agent_in_job_detects_powershell_file_wrapped_claude() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 123,
+            processes: vec![foreground_process(
+                1,
+                "powershell.exe",
+                &[
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-File",
+                    "C:\\Users\\herdr\\Documents\\PowerShell\\Scripts\\claude.ps1",
+                ],
+            )],
+        };
+
+        assert_eq!(
+            identify_agent_in_job(&job),
+            Some((Agent::Claude, "claude".to_string()))
         );
     }
 

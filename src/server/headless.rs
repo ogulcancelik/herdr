@@ -16,13 +16,17 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyModifiers, MouseEventKind};
+use interprocess::local_socket::traits::Listener as _;
+#[cfg(windows)]
+use interprocess::local_socket::traits::Stream as _;
+#[cfg(unix)]
+use interprocess::local_socket::ListenerNonblockingMode;
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -34,11 +38,15 @@ use crate::api;
 use crate::app;
 use crate::config;
 use crate::events::AppEvent;
-use crate::ipc::{remove_socket_file_if_owned, socket_file_identity, SocketFileIdentity};
+use crate::ipc::{
+    bind_local_listener, remove_socket_file_if_owned, socket_file_identity, LocalListener,
+    SocketFileIdentity,
+};
 use crate::protocol::{
     self, AttachScrollDirection, AttachScrollSource, FrameData, ServerMessage, MAX_FRAME_SIZE,
     MAX_GRAPHICS_FRAME_SIZE,
 };
+#[cfg(unix)]
 use crate::server::client_accept::{
     accept_pending_client_connections, reject_pending_client_connections,
 };
@@ -146,7 +154,7 @@ const MIN_ROWS: u16 = 24;
 #[allow(dead_code)]
 const SHUTDOWN_API_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How often the idle headless loop wakes to poll the std UnixListener for new
+/// How often the idle headless loop wakes to poll the local listener for new
 /// client connections.
 ///
 /// The listener is non-blocking and not integrated into `tokio::select!`, so
@@ -162,12 +170,16 @@ const CLIENT_ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// The headless server — runs the herdr event loop without a real terminal.
 pub struct HeadlessServer {
     app: app::App,
+    #[cfg(unix)]
     api_tx: Option<api::ApiRequestSender>,
+    #[cfg(unix)]
     api_server: Option<api::ServerHandle>,
-    client_listener: UnixListener,
+    #[cfg(unix)]
+    client_listener: LocalListener,
     client_socket_path: PathBuf,
     client_socket_identity: SocketFileIdentity,
     clients: HashMap<u64, ClientConnection>,
+    #[cfg(unix)]
     next_client_id: u64,
     /// The client currently driving the shared pane runtime size, theme, and input keybindings.
     foreground_client_id: Option<u64>,
@@ -189,6 +201,7 @@ pub struct HeadlessServer {
     /// Flag set while exporting live PTYs to a replacement server.
     handoff_in_progress: bool,
     /// Imported panes get one app-safe resize nudge after the first client attaches.
+    #[cfg(unix)]
     pending_handoff_repaint_nudge: bool,
     /// Flag set by Ctrl+C or `server stop` signal.
     should_quit: Arc<AtomicBool>,
@@ -271,6 +284,51 @@ fn apply_terminal_attach_input(
         .map_err(|err| format!("terminal attach input failed: {err}"))
 }
 
+#[cfg(windows)]
+fn spawn_windows_client_accept_thread(
+    listener: LocalListener,
+    should_quit: Arc<AtomicBool>,
+    server_event_tx: mpsc::Sender<ServerEvent>,
+) {
+    std::thread::spawn(move || {
+        let mut next_client_id = 1_u64;
+        while !should_quit.load(Ordering::Acquire) {
+            let stream = match listener.accept() {
+                Ok(stream) => stream,
+                Err(err) => {
+                    if should_quit.load(Ordering::Acquire) {
+                        break;
+                    }
+                    error!(err = %err, "client listener accept failed");
+                    std::thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+            };
+
+            let client_id = next_client_id;
+            next_client_id = next_client_id.saturating_add(1);
+
+            if let Err(err) = stream.set_nonblocking(true) {
+                warn!(err = %err, "failed to set client stream nonblocking");
+                continue;
+            }
+
+            let should_quit = should_quit.clone();
+            let server_event_tx = server_event_tx.clone();
+            std::thread::spawn(move || {
+                if let Err(err) = crate::server::client_transport::handle_client_handshake(
+                    stream,
+                    client_id,
+                    &server_event_tx,
+                    &should_quit,
+                ) {
+                    debug!(client_id, err = %err, "client handshake failed");
+                }
+            });
+        }
+    });
+}
+
 impl HeadlessServer {
     /// Creates and starts the headless server.
     ///
@@ -287,30 +345,40 @@ impl HeadlessServer {
         let client_path = client_socket_path();
         prepare_socket_path(&client_path)?;
 
-        let listener = UnixListener::bind(&client_path)?;
+        let listener = bind_local_listener(&client_path)?;
         restrict_socket_permissions(&client_path)?;
         let client_socket_identity = socket_file_identity(&client_path)?;
         info!(path = %client_path.display(), "client protocol socket listening");
 
-        // Set non-blocking on the listener so we can poll it from the event loop.
-        listener.set_nonblocking(true)?;
+        // Set non-blocking on Unix so we can poll it from the event loop.
+        #[cfg(unix)]
+        listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
 
         let should_quit = Arc::new(AtomicBool::new(false));
 
         // Channel for server events from client threads.
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
+        #[cfg(windows)]
+        spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone());
+
         let server_keybindings = app_keybindings(&app);
         let (server_config_diagnostic, server_config_diagnostic_without_keybindings) =
             server_config_diagnostic_summaries(config_diagnostics);
+        #[cfg(not(unix))]
+        let _ = (&api_tx, &api_server);
 
         Ok(Self {
             app,
+            #[cfg(unix)]
             api_tx,
+            #[cfg(unix)]
             api_server,
+            #[cfg(unix)]
             client_listener: listener,
             client_socket_path: client_path,
             client_socket_identity,
             clients: HashMap::new(),
+            #[cfg(unix)]
             next_client_id: 1,
             foreground_client_id: None,
             server_keybindings,
@@ -321,6 +389,7 @@ impl HeadlessServer {
             effective_size: (MIN_COLS, MIN_ROWS),
             shutting_down: false,
             handoff_in_progress: false,
+            #[cfg(unix)]
             pending_handoff_repaint_nudge: false,
             should_quit,
             server_event_rx,
@@ -864,7 +933,7 @@ impl HeadlessServer {
         } else {
             let _ = std::fs::remove_file(crate::api::socket_path());
         }
-        let _ = remove_socket_file_if_owned(&self.client_socket_path, self.client_socket_identity);
+        let _ = remove_socket_file_if_owned(&self.client_socket_path, &self.client_socket_identity);
         if let Err(err) = crate::server::handoff::wait_ready(&mut stream) {
             crate::server::handoff::cleanup_failed_import_child(&mut import_child);
             match self.wait_then_restore_public_sockets_after_failed_handoff() {
@@ -945,10 +1014,10 @@ impl HeadlessServer {
 
         let client_path = client_socket_path();
         prepare_socket_path(&client_path)?;
-        let listener = UnixListener::bind(&client_path)?;
+        let listener = bind_local_listener(&client_path)?;
         restrict_socket_permissions(&client_path)?;
         let client_socket_identity = socket_file_identity(&client_path)?;
-        listener.set_nonblocking(true)?;
+        listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
 
         self.api_server = Some(api_server);
         self.client_listener = listener;
@@ -1161,6 +1230,7 @@ impl HeadlessServer {
     }
 
     /// Accepts pending client connections from the non-blocking listener.
+    #[cfg(unix)]
     fn accept_client_connections(&mut self) -> io::Result<()> {
         if self.handoff_in_progress {
             return reject_pending_client_connections(&self.client_listener);
@@ -1171,6 +1241,13 @@ impl HeadlessServer {
             &self.should_quit,
             &self.server_event_tx,
         )
+    }
+
+    /// Windows named-pipe clients can block in connect unless the server has a
+    /// pending blocking accept. The dedicated accept thread handles that path.
+    #[cfg(windows)]
+    fn accept_client_connections(&mut self) -> io::Result<()> {
+        Ok(())
     }
 
     /// Drains server events from the dedicated channel.
@@ -1701,6 +1778,7 @@ impl HeadlessServer {
         }
     }
 
+    #[cfg(unix)]
     fn disconnect_all_clients_for_handoff(&mut self) {
         let client_ids = self.clients.keys().copied().collect::<Vec<_>>();
         for client_id in client_ids {
@@ -1799,6 +1877,67 @@ impl HeadlessServer {
     }
 
     /// Handles a server event. Returns true if the event requires a re-render.
+    fn handle_client_input_events(
+        &mut self,
+        client_id: u64,
+        events: Vec<crate::raw_input::RawInputEvent>,
+    ) -> bool {
+        let host_surface_redraw = crate::raw_input::events_require_host_surface_redraw(
+            &events,
+            self.app.state.redraw_on_focus_gained,
+        );
+        if let Some(client) = self.clients.get_mut(&client_id) {
+            if host_surface_redraw {
+                client.request_full_redraw();
+            } else {
+                // Ensure semantic clients receive one post-input frame even if the
+                // semantic buffer compares equal. Terminal-ANSI clients must keep their
+                // server-side blit baseline; resetting it here forces a full redraw on
+                // every keypress and makes remote sessions feel extremely slow.
+                client.request_semantic_redraw_after_input();
+            }
+        }
+        self.update_client_outer_focus_from_events(client_id, &events);
+        let interaction = events_include_interaction(&events);
+        let foreground_changed = if interaction {
+            self.promote_client_to_foreground(client_id)
+        } else {
+            false
+        };
+        if foreground_changed {
+            self.resize_shared_runtime_to_effective_size_before_input();
+        }
+        let theme_changed = self.update_client_host_theme_from_events(client_id, &events);
+        self.app
+            .route_client_events(events, self.foreground_client_id == Some(client_id));
+        if self.app.take_config_reloaded_from_disk() {
+            self.reload_server_config(false);
+        } else {
+            self.sync_foreground_client_state();
+        }
+
+        if self.app.state.detach_requested {
+            self.app.state.detach_requested = false;
+            info!(client_id, "client detach requested via keybind");
+
+            self.send_client_graphics_cleanup(client_id);
+            self.send_to_client(
+                client_id,
+                ServerMessage::ServerShutdown {
+                    reason: Some("detached".to_owned()),
+                },
+            );
+
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                client.writer = None;
+            }
+
+            false
+        } else {
+            foreground_changed || theme_changed || interaction
+        }
+    }
+
     fn handle_server_event(&mut self, ev: ServerEvent) -> bool {
         if self.handoff_in_progress && Self::ignore_client_event_during_handoff(&ev) {
             return false;
@@ -1917,77 +2056,27 @@ impl HeadlessServer {
                 } else {
                     Vec::new()
                 };
-                let host_surface_redraw = crate::raw_input::events_require_host_surface_redraw(
-                    &events,
-                    self.app.state.redraw_on_focus_gained,
-                );
-                if let Some(client) = self.clients.get_mut(&client_id) {
-                    if host_surface_redraw {
-                        client.request_full_redraw();
-                    } else {
-                        // Ensure semantic clients receive one post-input frame even if the
-                        // semantic buffer compares equal. Terminal-ANSI clients must keep their
-                        // server-side blit baseline; resetting it here forces a full redraw on
-                        // every keypress and makes remote sessions feel extremely slow.
-                        client.request_semantic_redraw_after_input();
-                    }
-                }
-                self.update_client_outer_focus_from_events(client_id, &events);
-                let interaction = events_include_interaction(&events);
-                let foreground_changed = if interaction {
-                    self.promote_client_to_foreground(client_id)
-                } else {
-                    false
-                };
-                if foreground_changed {
-                    self.resize_shared_runtime_to_effective_size_before_input();
-                }
-                let theme_changed = self.update_client_host_theme_from_events(client_id, &events);
-                self.app
-                    .route_client_events(events, self.foreground_client_id == Some(client_id));
-                if self.app.take_config_reloaded_from_disk() {
-                    self.reload_server_config(false);
-                } else {
-                    self.sync_foreground_client_state();
-                }
-
-                // Check if the detach keybind was triggered during input processing.
-                if self.app.state.detach_requested {
-                    self.app.state.detach_requested = false;
-                    info!(client_id, "client detach requested via keybind");
-
-                    // Clear client-local host graphics before sending ServerShutdown
-                    // so the outer terminal does not retain stale images.
-                    self.send_client_graphics_cleanup(client_id);
-
-                    // Send a ServerShutdown with "detached" reason to this client
-                    // so it exits cleanly (not with a connection-lost error).
-                    // The client will close its connection after receiving this,
-                    // which triggers a ClientDisconnected event that removes it.
-                    self.send_to_client(
+                self.handle_client_input_events(client_id, events)
+            }
+            ServerEvent::ClientInputEvents { client_id, events } => {
+                if self.handoff_in_progress {
+                    debug!(
                         client_id,
-                        ServerMessage::ServerShutdown {
-                            reason: Some("detached".to_owned()),
-                        },
+                        len = events.len(),
+                        "ignored client input events during handoff"
                     );
-
-                    // Don't remove the client here — let the client disconnect
-                    // naturally after receiving the ServerShutdown. The client's
-                    // read loop will see EOF and the server will get a
-                    // ClientDisconnected event which handles cleanup.
-                    //
-                    // However, we do need to stop sending frames to this client
-                    // since it's detaching. Drop the writer channel so no more
-                    // frames are queued for this client.
-                    if let Some(client) = self.clients.get_mut(&client_id) {
-                        client.writer = None;
-                    }
-
-                    // No re-render needed for remaining clients.
-                    false
-                } else {
-                    foreground_changed || theme_changed || interaction
+                    return false;
                 }
+                debug!(
+                    client_id,
+                    len = events.len(),
+                    "client input events received"
+                );
+                let events = events
+                    .iter()
+                    .map(crate::protocol::ClientInputEvent::to_raw_input_event)
+                    .collect();
+                self.handle_client_input_events(client_id, events)
             }
             ServerEvent::ClientClipboardImage {
                 client_id,
@@ -3049,7 +3138,7 @@ impl HeadlessServer {
     /// Removes socket files created by the server.
     fn cleanup_sockets(&self) -> io::Result<()> {
         if let Err(err) =
-            remove_socket_file_if_owned(&self.client_socket_path, self.client_socket_identity)
+            remove_socket_file_if_owned(&self.client_socket_path, &self.client_socket_identity)
         {
             if err.kind() != io::ErrorKind::NotFound {
                 warn!(
@@ -3165,6 +3254,7 @@ pub fn run_server() -> io::Result<()> {
             api_rx,
             event_hub,
         );
+        seed_startup_workspace_if_empty(&mut app);
 
         // The server runs headless — disable local notification side effects.
         // Sound and terminal notifications are forwarded to connected clients
@@ -3201,6 +3291,36 @@ pub fn run_server() -> io::Result<()> {
     rt.shutdown_timeout(Duration::from_millis(100));
     crate::logging::shutdown("server");
     result
+}
+
+fn seed_startup_workspace_if_empty(app: &mut app::App) {
+    let Some(cwd) = take_startup_cwd() else {
+        return;
+    };
+
+    if !app.state.workspaces.is_empty() {
+        info!(
+            cwd = %cwd.display(),
+            "restored session already has workspaces; ignoring startup cwd"
+        );
+        return;
+    }
+
+    match app.create_workspace_with_options(cwd.clone(), true) {
+        Ok(_) => {
+            info!(cwd = %cwd.display(), "created startup workspace");
+        }
+        Err(err) => {
+            warn!(cwd = %cwd.display(), err = %err, "failed to create startup workspace");
+            app.state.mode = app::Mode::Navigate;
+        }
+    }
+}
+
+fn take_startup_cwd() -> Option<PathBuf> {
+    let cwd = std::env::var_os(crate::server::autodetect::STARTUP_CWD_ENV_VAR)?;
+    std::env::remove_var(crate::server::autodetect::STARTUP_CWD_ENV_VAR);
+    (!cwd.is_empty()).then(|| PathBuf::from(cwd))
 }
 
 #[cfg(unix)]
@@ -3275,14 +3395,13 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
 
 #[cfg(unix)]
 fn wait_for_old_public_sockets_to_close(timeout: Duration) -> io::Result<()> {
-    use std::os::unix::net::UnixStream;
-
     let deadline = Instant::now() + timeout;
     let api_socket = api::socket_path();
     let client_socket = client_socket_path();
     while Instant::now() < deadline {
-        let api_open = api_socket.exists() && UnixStream::connect(&api_socket).is_ok();
-        let client_open = client_socket.exists() && UnixStream::connect(&client_socket).is_ok();
+        let api_open = api_socket.exists() && crate::ipc::connect_local_stream(&api_socket).is_ok();
+        let client_open =
+            client_socket.exists() && crate::ipc::connect_local_stream(&client_socket).is_ok();
         if !api_open && !client_open {
             return Ok(());
         }
@@ -3346,23 +3465,32 @@ mod tests {
         let _ = fs::create_dir_all(&dir);
         let socket_path = dir.join("client.sock");
         let _ = fs::remove_file(&socket_path);
-        let listener = UnixListener::bind(&socket_path).expect("bind test listener");
+        let listener = bind_local_listener(&socket_path).expect("bind test listener");
         let client_socket_identity =
             socket_file_identity(&socket_path).expect("test listener socket identity");
+        #[cfg(unix)]
         listener
-            .set_nonblocking(true)
+            .set_nonblocking(ListenerNonblockingMode::Accept)
             .expect("set listener nonblocking");
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
+        #[cfg(windows)]
+        let should_quit = Arc::new(AtomicBool::new(false));
+        #[cfg(windows)]
+        spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone());
         let server_keybindings = app_keybindings(&app);
 
         HeadlessServer {
             app,
+            #[cfg(unix)]
             api_tx: None,
+            #[cfg(unix)]
             api_server: None,
+            #[cfg(unix)]
             client_listener: listener,
             client_socket_path: socket_path,
             client_socket_identity,
             clients: HashMap::new(),
+            #[cfg(unix)]
             next_client_id: 1,
             foreground_client_id: None,
             server_keybindings,
@@ -3373,8 +3501,12 @@ mod tests {
             effective_size: (MIN_COLS, MIN_ROWS),
             shutting_down: false,
             handoff_in_progress: false,
+            #[cfg(unix)]
             pending_handoff_repaint_nudge: false,
+            #[cfg(unix)]
             should_quit: Arc::new(AtomicBool::new(false)),
+            #[cfg(windows)]
+            should_quit,
             server_event_rx,
             server_event_tx,
         }
@@ -4960,6 +5092,107 @@ next_tab = ""
         }));
 
         assert_eq!(server.app.state.mode, crate::app::Mode::Terminal);
+    }
+
+    #[test]
+    fn semantic_client_input_events_route_through_app_input() {
+        let mut server = test_headless_server();
+        server.app.state.mode = crate::app::Mode::Onboarding;
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(true),
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 1,
+            events: vec![crate::protocol::ClientInputEvent::Key {
+                code: crate::protocol::ClientKeyCode::Enter,
+                modifiers: 0,
+                kind: crate::protocol::ClientKeyKind::Press,
+            }],
+        }));
+
+        assert_eq!(server.app.state.mode, crate::app::Mode::Settings);
+        assert_eq!(
+            server.app.state.settings.section,
+            crate::app::state::SettingsSection::Integrations
+        );
+    }
+
+    #[test]
+    fn semantic_client_escape_closes_keybind_help() {
+        let mut server = test_headless_server();
+        server.app.state.mode = crate::app::Mode::KeybindHelp;
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (100, 30),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(true),
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.resize_shared_runtime_to_effective_size();
+
+        assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 1,
+            events: vec![crate::protocol::ClientInputEvent::Key {
+                code: crate::protocol::ClientKeyCode::Esc,
+                modifiers: 0,
+                kind: crate::protocol::ClientKeyKind::Press,
+            }],
+        }));
+
+        assert_eq!(server.app.state.mode, crate::app::Mode::Navigate);
+    }
+
+    #[test]
+    fn semantic_client_down_scrolls_keybind_help() {
+        let mut server = test_headless_server();
+        server.app.state.mode = crate::app::Mode::KeybindHelp;
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (100, 30),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(true),
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.resize_shared_runtime_to_effective_size();
+
+        assert!(server.app.state.keybind_help_max_scroll() > 0);
+        assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 1,
+            events: vec![crate::protocol::ClientInputEvent::Key {
+                code: crate::protocol::ClientKeyCode::Down,
+                modifiers: 0,
+                kind: crate::protocol::ClientKeyKind::Press,
+            }],
+        }));
+
+        assert_eq!(server.app.state.mode, crate::app::Mode::KeybindHelp);
+        assert_eq!(server.app.state.keybind_help.scroll, 1);
     }
 
     #[tokio::test]

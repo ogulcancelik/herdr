@@ -961,12 +961,15 @@ fn shell_quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::time::Duration;
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Direction;
 
-    use super::super::{state_with_workspaces, unique_temp_path, wait_for_file};
+    #[cfg(unix)]
+    use super::super::wait_for_file;
+    use super::super::{state_with_workspaces, unique_temp_path};
     use super::*;
     use crate::{
         app::App, config::Config, input::TerminalKey, terminal::TerminalState, workspace::Workspace,
@@ -1856,6 +1859,7 @@ last_pane = "prefix+tab"
         assert_eq!(state.workspaces.len(), 2);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn custom_command_runs_from_prefix_key_in_navigate_mode() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1905,6 +1909,7 @@ last_pane = "prefix+tab"
         let _ = std::fs::remove_file(output_path);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn pane_overlay_command_opens_and_closes_after_exit() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1992,6 +1997,7 @@ last_pane = "prefix+tab"
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn edit_scrollback_key_opens_focused_runtime_scrollback_in_editor_pane() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();

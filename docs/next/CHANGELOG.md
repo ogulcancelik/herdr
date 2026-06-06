@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Added native Windows beta documentation and platform capability tracking for ConPTY panes, semantic client input, Windows agent discovery, known partial cwd behavior, and unsupported Unix-only features such as live handoff, direct terminal attach, and `herdr --remote` from the Windows binary.
+
 ## [0.6.8] - 2026-06-04
 
 This is a hotfix release for v0.6.7, prioritizing a server-crash fix for panes that print complex Unicode or emoji output.

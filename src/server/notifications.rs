@@ -64,10 +64,14 @@ fn toast_event_text(kind: app::state::ToastKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use crate::detect::Agent;
+    #[cfg(unix)]
     use crate::terminal::TerminalState;
 
+    #[cfg(unix)]
     fn init_repo(path: &std::path::Path) {
         let status = std::process::Command::new("git")
             .args(["init", "-q"])
@@ -77,6 +81,7 @@ mod tests {
         assert!(status.success(), "git init failed for {}", path.display());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn toast_message_uses_live_root_runtime_cwd_label() {
         let mut state = AppState::test_new();

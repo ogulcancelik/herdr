@@ -1,8 +1,11 @@
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+use interprocess::local_socket::traits::Stream as _;
+
+use crate::ipc::LocalStream;
 
 pub const SESSION_ENV_VAR: &str = "HERDR_SESSION";
 pub const DEFAULT_SESSION_NAME: &str = "default";
@@ -238,7 +241,7 @@ fn stop_session_with_timeout(name: Option<&str>, timeout: Duration) -> Result<Se
         "method": "server.stop",
         "params": {}
     });
-    let stream = UnixStream::connect(&socket_path).map_err(|err| {
+    let stream = crate::ipc::connect_local_stream(&socket_path).map_err(|err| {
         format!(
             "session {} is not running or cannot be reached at {}: {err}",
             name.unwrap_or(DEFAULT_SESSION_NAME),
@@ -283,14 +286,14 @@ pub fn delete_session(name: &str) -> Result<SessionInfo, String> {
 }
 
 fn send_stop_request(
-    mut stream: UnixStream,
+    mut stream: LocalStream,
     request: &serde_json::Value,
     deadline: Instant,
 ) -> Result<Option<serde_json::Value>, String> {
     let Some(write_timeout) = socket_timeout_until(deadline) else {
         return Ok(None);
     };
-    if let Err(err) = stream.set_write_timeout(Some(write_timeout)) {
+    if let Err(err) = stream.set_send_timeout(Some(write_timeout)) {
         if err.kind() != std::io::ErrorKind::InvalidInput {
             return Err(err.to_string());
         }
@@ -308,7 +311,7 @@ fn send_stop_request(
 }
 
 fn send_stop_request_inner(
-    stream: &mut UnixStream,
+    stream: &mut LocalStream,
     request: &serde_json::Value,
     deadline: Instant,
 ) -> std::io::Result<Option<String>> {
@@ -319,7 +322,7 @@ fn send_stop_request_inner(
     let Some(read_timeout) = socket_timeout_until(deadline) else {
         return Ok(None);
     };
-    if let Err(err) = stream.set_read_timeout(Some(read_timeout)) {
+    if let Err(err) = stream.set_recv_timeout(Some(read_timeout)) {
         if err.kind() == std::io::ErrorKind::InvalidInput {
             return Ok(None);
         }
@@ -347,7 +350,7 @@ fn stop_request_error_allows_wait(err: &std::io::Error) -> bool {
 }
 
 fn is_running_at(socket_path: &Path) -> bool {
-    socket_path.exists() && UnixStream::connect(socket_path).is_ok()
+    socket_path.exists() && crate::ipc::connect_local_stream(socket_path).is_ok()
 }
 
 fn wait_until_stopped_until(socket_path: &Path, deadline: Instant) -> bool {
@@ -420,11 +423,31 @@ fn normalize_name(name: &str) -> Result<Option<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use interprocess::local_socket::traits::Listener as _;
     use std::sync::{Mutex, OnceLock};
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[cfg(unix)]
+    fn unique_test_path(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}", std::process::id()))
+    }
+
+    #[cfg(unix)]
+    fn local_stream_pair(name: &str) -> (LocalStream, LocalStream, std::path::PathBuf) {
+        let path = unique_test_path(name);
+        let listener = crate::ipc::bind_local_listener(&path).unwrap();
+        let client = crate::ipc::connect_local_stream(&path).unwrap();
+        let server = listener.accept().unwrap();
+        (client, server, path)
     }
 
     #[test]
@@ -455,9 +478,10 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn stop_request_empty_response_waits_for_socket_state() {
-        let (client, server) = UnixStream::pair().unwrap();
+        let (client, server, _path) = local_stream_pair("stop-empty-response");
         let handle = std::thread::spawn(move || {
             let mut request = String::new();
             let _ = BufReader::new(server).read_line(&mut request);
@@ -481,6 +505,7 @@ mod tests {
         assert!(handle.join().unwrap().contains("server.stop"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn stop_session_times_out_when_socket_stays_open_without_response() {
         let _guard = env_lock().lock().unwrap();
@@ -874,6 +899,7 @@ mod tests {
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
     }
 
+    #[cfg(unix)]
     #[test]
     fn stop_session_fails_when_socket_remains_reachable_after_timeout() {
         let _guard = env_lock().lock().unwrap();

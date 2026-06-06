@@ -197,9 +197,9 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
     use ratatui::layout::Rect;
 
-    use super::super::{
-        app_for_mouse_test, mouse, numbered_lines_bytes, unique_temp_path, wait_for_file,
-    };
+    use super::super::{app_for_mouse_test, mouse, numbered_lines_bytes};
+    #[cfg(unix)]
+    use super::super::{unique_temp_path, wait_for_file};
     use super::*;
     use crate::{config::Config, events::AppEvent, workspace::Workspace};
 
@@ -740,6 +740,7 @@ mod tests {
         assert_eq!(app.state.mode, Mode::Terminal);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn terminal_direct_edit_scrollback_opens_editor_pane() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -793,6 +794,7 @@ mod tests {
         let _ = std::fs::remove_file(output_path);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn direct_custom_command_runs_before_forwarding_to_pane() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -829,6 +831,7 @@ mod tests {
         let _ = std::fs::remove_file(output_path);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn direct_custom_pane_command_opens_overlay_pane() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();

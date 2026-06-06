@@ -15,8 +15,6 @@ pub(crate) fn stage(
     extension: &str,
     data: &[u8],
 ) -> io::Result<StagedClipboardImage> {
-    use std::os::unix::fs::OpenOptionsExt;
-
     let extension = sanitize_extension(extension);
     let dir = ensure_staging_dir()?;
     cleanup_stale(&dir);
@@ -30,12 +28,10 @@ pub(crate) fn stage(
         let path = dir.join(format!(
             "client-{client_id}-clipboard-{unique}-{attempt}.{extension}"
         ));
-        let mut file = match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-        {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        restrict_file_options(&mut options);
+        let mut file = match options.open(&path) {
             Ok(file) => file,
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(err) => return Err(err),
@@ -76,13 +72,14 @@ fn sanitize_extension(extension: &str) -> &'static str {
 }
 
 fn staging_dir() -> PathBuf {
+    #[cfg(unix)]
     let user_id = unsafe { libc::geteuid() };
+    #[cfg(windows)]
+    let user_id = std::process::id();
     std::env::temp_dir().join(format!("herdr-clipboard-images-{user_id}"))
 }
 
 fn ensure_staging_dir() -> io::Result<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-
     let dir = staging_dir();
     fs::create_dir_all(&dir)?;
     let metadata = fs::metadata(&dir)?;
@@ -92,8 +89,30 @@ fn ensure_staging_dir() -> io::Result<PathBuf> {
             dir.display()
         )));
     }
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+    restrict_dir_permissions(&dir)?;
     Ok(dir)
+}
+
+#[cfg(unix)]
+fn restrict_file_options(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.mode(0o600);
+}
+
+#[cfg(windows)]
+fn restrict_file_options(_options: &mut fs::OpenOptions) {}
+
+#[cfg(unix)]
+fn restrict_dir_permissions(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(windows)]
+fn restrict_dir_permissions(_dir: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 fn cleanup_stale(dir: &Path) {

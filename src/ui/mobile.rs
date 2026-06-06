@@ -965,6 +965,7 @@ mod tests {
         assert_eq!(mobile_agent_detail(&entry), "  idle · pi");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn mobile_header_uses_live_root_runtime_cwd_for_workspace_label() {
         let unique = format!(

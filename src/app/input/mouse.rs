@@ -2421,6 +2421,7 @@ mod tests {
         assert_eq!(app.state.workspaces[0].display_name(), "a");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn keyboard_context_menu_split_keeps_new_runtime() {
         let mut app = app_for_mouse_test();

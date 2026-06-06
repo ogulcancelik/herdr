@@ -1,4 +1,5 @@
 pub mod autodetect;
+#[cfg(unix)]
 pub(crate) mod client_accept;
 pub(crate) mod client_transport;
 pub(crate) mod clients;

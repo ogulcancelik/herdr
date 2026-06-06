@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::path::PathBuf;
 
 use tracing::info;
 
@@ -359,6 +360,145 @@ impl Osc52Forwarder {
     }
 }
 
+/// Reconstructs cwd-reporting OSC sequences from child output. Shell
+/// integrations commonly use OSC 7 (`file://...`), while Windows Terminal
+/// documents OSC 9;9 for the same practical purpose.
+#[derive(Debug, Default)]
+pub(super) struct CwdOscTracker {
+    state: Osc52ForwarderState,
+    body: Vec<u8>,
+    pending: Vec<PathBuf>,
+}
+
+impl CwdOscTracker {
+    pub(super) fn observe(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            match self.state {
+                Osc52ForwarderState::Ground => {
+                    if byte == 0x1b {
+                        self.state = Osc52ForwarderState::Escape;
+                    }
+                }
+                Osc52ForwarderState::Escape => {
+                    if byte == b']' {
+                        self.body.clear();
+                        self.state = Osc52ForwarderState::OscBody;
+                    } else if byte == 0x1b {
+                        self.state = Osc52ForwarderState::Escape;
+                    } else {
+                        self.state = Osc52ForwarderState::Ground;
+                    }
+                }
+                Osc52ForwarderState::OscBody => match byte {
+                    0x07 => {
+                        self.finalize();
+                        self.state = Osc52ForwarderState::Ground;
+                    }
+                    0x1b => self.state = Osc52ForwarderState::OscEscape,
+                    _ => self.body.push(byte),
+                },
+                Osc52ForwarderState::OscEscape => {
+                    if byte == b'\\' {
+                        self.finalize();
+                        self.state = Osc52ForwarderState::Ground;
+                    } else {
+                        self.body.push(0x1b);
+                        self.body.push(byte);
+                        self.state = Osc52ForwarderState::OscBody;
+                    }
+                }
+            }
+
+            if self.body.len() > 4096 {
+                self.body.clear();
+                self.state = Osc52ForwarderState::Ground;
+            }
+        }
+    }
+
+    fn finalize(&mut self) {
+        if let Some(cwd) = parse_cwd_osc(&self.body) {
+            self.pending.push(cwd);
+        }
+        self.body.clear();
+    }
+
+    pub(super) fn drain_latest(&mut self) -> Option<PathBuf> {
+        self.pending.drain(..).next_back()
+    }
+}
+
+fn parse_cwd_osc(body: &[u8]) -> Option<PathBuf> {
+    let body = std::str::from_utf8(body).ok()?;
+    if let Some(uri) = body.strip_prefix("7;") {
+        return parse_file_uri_cwd(uri);
+    }
+    if let Some(path) = body.strip_prefix("9;9;") {
+        let path = path.trim().trim_matches('"');
+        return (!path.is_empty()).then(|| PathBuf::from(path));
+    }
+    None
+}
+
+fn parse_file_uri_cwd(uri: &str) -> Option<PathBuf> {
+    let rest = uri.strip_prefix("file://")?;
+    let path = if rest.starts_with('/') {
+        rest
+    } else if let Some(slash) = rest.find('/') {
+        let host = &rest[..slash];
+        if !(host.is_empty() || host.eq_ignore_ascii_case("localhost")) {
+            return None;
+        }
+        &rest[slash..]
+    } else {
+        rest
+    };
+    let path = percent_decode_utf8(path)?;
+
+    #[cfg(windows)]
+    {
+        let mut path = path;
+        if path.len() >= 3
+            && path.as_bytes()[0] == b'/'
+            && path.as_bytes()[2] == b':'
+            && path.as_bytes()[1].is_ascii_alphabetic()
+        {
+            path.remove(0);
+        }
+        return Some(PathBuf::from(path.replace('/', "\\")));
+    }
+
+    #[cfg(not(windows))]
+    Some(PathBuf::from(path))
+}
+
+fn percent_decode_utf8(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if bytes[idx] == b'%' {
+            let hi = *bytes.get(idx + 1)?;
+            let lo = *bytes.get(idx + 2)?;
+            output.push(hex_value(hi)? * 16 + hex_value(lo)?);
+            idx += 3;
+        } else {
+            output.push(bytes[idx]);
+            idx += 1;
+        }
+    }
+    String::from_utf8(output).ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// Accepts `52;c;<base64>` and `52;;<base64>`.
 /// Queries (`?`) are rejected because herdr has no reply path.
 /// The payload must decode as base64 before it is forwarded.
@@ -598,6 +738,32 @@ mod tests {
 
         assert!(!tracker.observe(b"\x1b]10;?\x1b\\"));
         assert!(!tracker.observe(b"\x1b]11;?\x07"));
+    }
+
+    #[test]
+    fn cwd_osc_tracker_detects_split_osc7_sequence() {
+        let mut tracker = CwdOscTracker::default();
+
+        tracker.observe(b"\x1b]7;file:///tmp/herdr%20repo");
+        assert_eq!(tracker.drain_latest(), None);
+        tracker.observe(b"\x07");
+
+        assert_eq!(
+            tracker.drain_latest(),
+            Some(std::path::PathBuf::from("/tmp/herdr repo"))
+        );
+    }
+
+    #[test]
+    fn cwd_osc_tracker_detects_windows_terminal_cwd_sequence() {
+        let mut tracker = CwdOscTracker::default();
+
+        tracker.observe(b"\x1b]9;9;C:\\Users\\herdr\\src\\herdr\x1b\\");
+
+        assert_eq!(
+            tracker.drain_latest(),
+            Some(std::path::PathBuf::from("C:\\Users\\herdr\\src\\herdr"))
+        );
     }
 
     #[test]

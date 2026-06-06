@@ -488,6 +488,14 @@ mod tests {
         }
     }
 
+    fn test_session_path(name: &str) -> String {
+        std::env::current_dir()
+            .unwrap()
+            .join(name)
+            .display()
+            .to_string()
+    }
+
     fn state_with_workspaces(names: &[&str]) -> AppState {
         let mut state = AppState::test_new();
         state.workspaces = names.iter().map(|name| Workspace::test_new(name)).collect();
@@ -1022,6 +1030,7 @@ mod tests {
     #[test]
     fn capture_contract_tracks_hook_authority_agent_session() {
         let mut state = state_with_workspaces(&["one"]);
+        let session_path = test_session_path("pi-session.jsonl");
         let root = state.workspaces[0].tabs[0].root_pane;
         state.ensure_test_terminals();
         let terminal_id = state.workspaces[0].tabs[0].panes[&root]
@@ -1037,7 +1046,7 @@ mod tests {
                 crate::detect::AgentState::Working,
                 None,
                 None,
-                crate::agent_resume::AgentSessionRef::path("/tmp/pi-session.jsonl"),
+                crate::agent_resume::AgentSessionRef::path(session_path.clone()),
                 Some(20),
             );
 
@@ -1053,7 +1062,7 @@ mod tests {
             agent_session.kind,
             crate::agent_resume::AgentSessionRefKind::Path
         );
-        assert_eq!(agent_session.value, "/tmp/pi-session.jsonl");
+        assert_eq!(agent_session.value, session_path);
     }
 
     #[test]

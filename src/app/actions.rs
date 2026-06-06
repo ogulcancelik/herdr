@@ -2141,6 +2141,25 @@ impl AppState {
             // Intercepted in App::handle_internal_event before reaching this
             // dispatch; never touches AppState.
             AppEvent::ClipboardWrite { .. } => Vec::new(),
+            AppEvent::TerminalCwdReported { pane_id, cwd } => {
+                if !cwd.is_absolute() || !cwd.is_dir() {
+                    return Vec::new();
+                }
+                let Some(terminal_id) = self.workspaces.iter().find_map(|ws| {
+                    ws.pane_state(pane_id)
+                        .map(|pane| pane.attached_terminal_id.clone())
+                }) else {
+                    return Vec::new();
+                };
+                let Some(terminal) = self.terminals.get_mut(&terminal_id) else {
+                    return Vec::new();
+                };
+                if terminal.cwd != cwd {
+                    terminal.cwd = cwd;
+                    self.mark_session_dirty();
+                }
+                Vec::new()
+            }
             AppEvent::GitStatusRefreshed {
                 results,
                 cache_updates,
@@ -3720,6 +3739,9 @@ mod tests {
     fn hidden_session_ref_only_update_marks_session_dirty_without_visible_update() {
         let mut state = app_with_workspaces(&["active"]);
         let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let test_dir = std::env::current_dir().unwrap();
+        let first_session = test_dir.join("one.jsonl").display().to_string();
+        let second_session = test_dir.join("two.jsonl").display().to_string();
 
         let first_updates = state.handle_app_event(AppEvent::HookStateReported {
             pane_id,
@@ -3729,7 +3751,7 @@ mod tests {
             message: None,
             custom_status: None,
             seq: Some(20),
-            session_ref: crate::agent_resume::AgentSessionRef::path("/tmp/one.jsonl"),
+            session_ref: crate::agent_resume::AgentSessionRef::path(first_session),
         });
         assert_eq!(first_updates.len(), 1);
         state.session_dirty = false;
@@ -3742,11 +3764,36 @@ mod tests {
             message: None,
             custom_status: None,
             seq: Some(21),
-            session_ref: crate::agent_resume::AgentSessionRef::path("/tmp/two.jsonl"),
+            session_ref: crate::agent_resume::AgentSessionRef::path(second_session),
         });
 
         assert!(second_updates.is_empty());
         assert!(state.session_dirty);
+    }
+
+    #[test]
+    fn terminal_cwd_report_updates_terminal_cwd_and_marks_session_dirty() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0]
+            .pane_state(pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        let cwd =
+            std::env::temp_dir().join(format!("herdr-cwd-report-test-{}", std::process::id()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        state.session_dirty = false;
+
+        let updates = state.handle_app_event(AppEvent::TerminalCwdReported {
+            pane_id,
+            cwd: cwd.clone(),
+        });
+
+        assert!(updates.is_empty());
+        assert_eq!(state.terminals.get(&terminal_id).unwrap().cwd, cwd);
+        assert!(state.session_dirty);
+        let _ = std::fs::remove_dir_all(cwd);
     }
 
     #[test]

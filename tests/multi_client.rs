@@ -566,7 +566,7 @@ fn client_handshake(
 
 fn connect_raw_client(client_socket: &Path, cols: u16, rows: u16) -> UnixStream {
     let mut stream = UnixStream::connect(client_socket).expect("should connect to client socket");
-    client_handshake(&mut stream, 12, cols, rows).expect("handshake should succeed");
+    client_handshake(&mut stream, 13, cols, rows).expect("handshake should succeed");
     stream
 }
 

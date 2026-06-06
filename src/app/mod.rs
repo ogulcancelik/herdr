@@ -1475,6 +1475,16 @@ mod tests {
         )
     }
 
+    #[cfg(windows)]
+    fn exiting_test_command() -> &'static str {
+        "C:\\Windows\\System32\\whoami.exe"
+    }
+
+    #[cfg(not(windows))]
+    fn exiting_test_command() -> &'static str {
+        "/usr/bin/true"
+    }
+
     #[derive(Clone, Default)]
     struct FakePrefixInputSource {
         switch_calls: Rc<Cell<usize>>,
@@ -2856,7 +2866,7 @@ mod tests {
     async fn pane_split_request_targets_pane_in_background_tab() {
         let _guard = config_env_lock().lock().unwrap();
         let original_shell = std::env::var_os("SHELL");
-        std::env::set_var("SHELL", "/usr/bin/true");
+        std::env::set_var("SHELL", exiting_test_command());
 
         let mut app = test_app();
         let mut workspace = Workspace::test_new("api-pane-split-background-tab");
@@ -2952,7 +2962,7 @@ mod tests {
     async fn pane_split_request_focuses_new_pane_when_requested() {
         let _guard = config_env_lock().lock().unwrap();
         let original_shell = std::env::var_os("SHELL");
-        std::env::set_var("SHELL", "/usr/bin/true");
+        std::env::set_var("SHELL", exiting_test_command());
 
         let mut app = test_app();
         let mut workspace = Workspace::test_new("api-pane-split-focus-background-tab");
@@ -3014,7 +3024,7 @@ mod tests {
                 tab_id: None,
                 split: Some(crate::api::schema::SplitDirection::Right),
                 focus: true,
-                argv: vec!["/usr/bin/true".into()],
+                argv: vec![exiting_test_command().into()],
             }),
         });
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();

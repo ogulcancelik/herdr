@@ -455,32 +455,58 @@ fn restore_tab(
             continue;
         }
 
-        let runtime_result = if let Some(imported) = imported_runtime {
-            TerminalRuntime::from_handoff_fd(
-                crate::handoff_runtime::ImportedHandoffRuntime {
-                    master_fd: imported.master_fd,
-                    state: imported.state.with_pane_id(*id),
-                },
-                runtime_context.scrollback_limit_bytes,
-                crate::terminal_theme::TerminalTheme::default(),
-                runtime_context.events.clone(),
-                runtime_context.render_notify.clone(),
-                runtime_context.render_dirty.clone(),
-            )
-        } else {
-            TerminalRuntime::spawn_with_initial_history(
-                *id,
-                rows,
-                cols,
-                cwd.clone(),
-                runtime_context.scrollback_limit_bytes,
-                crate::terminal_theme::TerminalTheme::default(),
-                runtime_context.shell_config,
-                startup.initial_history_ansi,
-                runtime_context.events.clone(),
-                runtime_context.render_notify.clone(),
-                runtime_context.render_dirty.clone(),
-            )
+        #[cfg(not(unix))]
+        if imported_runtime.is_some() {
+            failed_imports += 1;
+            continue;
+        }
+
+        let runtime_result = {
+            #[cfg(unix)]
+            if let Some(imported) = imported_runtime {
+                TerminalRuntime::from_handoff_fd(
+                    crate::handoff_runtime::ImportedHandoffRuntime {
+                        master_fd: imported.master_fd,
+                        state: imported.state.with_pane_id(*id),
+                    },
+                    runtime_context.scrollback_limit_bytes,
+                    crate::terminal_theme::TerminalTheme::default(),
+                    runtime_context.events.clone(),
+                    runtime_context.render_notify.clone(),
+                    runtime_context.render_dirty.clone(),
+                )
+            } else {
+                TerminalRuntime::spawn_with_initial_history(
+                    *id,
+                    rows,
+                    cols,
+                    cwd.clone(),
+                    runtime_context.scrollback_limit_bytes,
+                    crate::terminal_theme::TerminalTheme::default(),
+                    runtime_context.shell_config,
+                    startup.initial_history_ansi,
+                    runtime_context.events.clone(),
+                    runtime_context.render_notify.clone(),
+                    runtime_context.render_dirty.clone(),
+                )
+            }
+
+            #[cfg(not(unix))]
+            {
+                TerminalRuntime::spawn_with_initial_history(
+                    *id,
+                    rows,
+                    cols,
+                    cwd.clone(),
+                    runtime_context.scrollback_limit_bytes,
+                    crate::terminal_theme::TerminalTheme::default(),
+                    runtime_context.shell_config,
+                    startup.initial_history_ansi,
+                    runtime_context.events.clone(),
+                    runtime_context.render_notify.clone(),
+                    runtime_context.render_dirty.clone(),
+                )
+            }
         };
 
         match runtime_result {
@@ -771,6 +797,24 @@ fn collect_ids_inner(node: &Node, ids: &mut Vec<PaneId>) {
 mod tests {
     use super::*;
 
+    fn test_session_path(name: &str) -> String {
+        std::env::current_dir()
+            .unwrap()
+            .join(name)
+            .display()
+            .to_string()
+    }
+
+    #[cfg(windows)]
+    fn test_restore_shell() -> &'static str {
+        "C:\\Windows\\System32\\whoami.exe"
+    }
+
+    #[cfg(not(windows))]
+    fn test_restore_shell() -> &'static str {
+        "/bin/sh"
+    }
+
     #[test]
     fn capture_and_restore_node_round_trip() {
         let node = Node::Split {
@@ -847,35 +891,37 @@ mod tests {
 
     #[test]
     fn restore_plan_respects_opt_in_and_allowlist() {
+        let pi_session_path = test_session_path("pi-session.jsonl");
         let session = super::super::snapshot::PaneAgentSessionSnapshot {
             source: "herdr:pi".into(),
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
-            value: "/tmp/pi-session.jsonl".into(),
+            value: pi_session_path.clone(),
         };
 
         assert!(restore_plan_for_snapshot(&session, false).is_none());
         assert_eq!(
             restore_plan_for_snapshot(&session, true).unwrap().argv,
-            vec!["pi", "--session", "/tmp/pi-session.jsonl"]
+            vec!["pi", "--session", pi_session_path.as_str()]
         );
 
         let unsupported_path = super::super::snapshot::PaneAgentSessionSnapshot {
             source: "herdr:claude".into(),
             agent: "claude".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
-            value: "/tmp/claude-session".into(),
+            value: test_session_path("claude-session"),
         };
         assert!(restore_plan_for_snapshot(&unsupported_path, true).is_none());
     }
 
     #[test]
     fn restore_plan_selection_suppresses_duplicates() {
+        let pi_session_path = test_session_path("pi-session.jsonl");
         let session = super::super::snapshot::PaneAgentSessionSnapshot {
             source: "herdr:pi".into(),
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
-            value: "/tmp/pi-session.jsonl".into(),
+            value: pi_session_path.clone(),
         };
         let mut resumed = HashSet::new();
 
@@ -884,7 +930,10 @@ mod tests {
 
         let first = take_restore_plan_for_snapshot(&session, true, &mut resumed)
             .expect("first restore should get a plan");
-        assert_eq!(first.argv, vec!["pi", "--session", "/tmp/pi-session.jsonl"]);
+        assert_eq!(
+            first.argv,
+            vec!["pi", "--session", pi_session_path.as_str()]
+        );
         assert!(take_restore_plan_for_snapshot(&session, true, &mut resumed).is_none());
     }
 
@@ -894,7 +943,7 @@ mod tests {
             source: "herdr:pi".into(),
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
-            value: "/tmp/pi-session.jsonl".into(),
+            value: test_session_path("pi-session.jsonl"),
         };
         let history = super::super::snapshot::PaneHistorySnapshot {
             ansi: "RESTORED_HISTORY\r\n".into(),
@@ -919,7 +968,7 @@ mod tests {
             source: "herdr:pi".into(),
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
-            value: "/tmp/pi-session.jsonl".into(),
+            value: test_session_path("pi-session.jsonl"),
         };
         let history = super::super::snapshot::PaneHistorySnapshot {
             ansi: "RESTORED_HISTORY\r\n".into(),
@@ -947,7 +996,7 @@ mod tests {
             source: "herdr:pi".into(),
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
-            value: "/tmp/pi-session.jsonl".into(),
+            value: test_session_path("pi-session.jsonl"),
         };
         let history = super::super::snapshot::PaneHistorySnapshot {
             ansi: "RESTORED_HISTORY\r\n".into(),
@@ -989,7 +1038,7 @@ mod tests {
             source: "herdr:pi".into(),
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
-            value: "/tmp/pi-session.jsonl".into(),
+            value: test_session_path("pi-session.jsonl"),
         };
         let mut resumed = HashSet::new();
         assert!(take_restore_plan_for_snapshot(&session, true, &mut resumed).is_some());
@@ -1047,7 +1096,7 @@ mod tests {
             24,
             80,
             0,
-            "/usr/bin/true",
+            test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
             false,
             events,
@@ -1122,7 +1171,7 @@ mod tests {
             24,
             80,
             0,
-            "/bin/sh",
+            test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
             true,
             events,
@@ -1150,7 +1199,7 @@ mod tests {
         let (_handoff_workspaces, handoff_terminals, handoff_runtimes) = restore_handoff(
             &snapshot,
             0,
-            "/bin/sh",
+            test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
             &mut imports,
             mpsc::channel(4).0,
@@ -1185,7 +1234,7 @@ mod tests {
             5,
             40,
             4096,
-            "/bin/sh",
+            test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
             false,
             events,
@@ -1224,7 +1273,7 @@ mod tests {
             5,
             40,
             4096,
-            "/bin/sh",
+            test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
             false,
             events,

@@ -96,6 +96,12 @@ pub enum AppEvent {
     /// A pane child emitted a valid OSC 52 clipboard write. The main loop
     /// re-emits it through herdr's own clipboard writer.
     ClipboardWrite { content: Vec<u8> },
+    /// A pane child reported its shell current directory through terminal
+    /// metadata such as OSC 7.
+    TerminalCwdReported {
+        pane_id: PaneId,
+        cwd: std::path::PathBuf,
+    },
     /// Background git status refresh completed for workspaces.
     GitStatusRefreshed {
         results: Vec<WorkspaceGitStatus>,

@@ -9,14 +9,14 @@
 //! (escape hatch for users who want the traditional single-process behavior).
 
 use std::io;
-use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use tracing::{info, warn};
+use tracing::info;
 
 use super::socket_paths::client_socket_path;
 
@@ -30,6 +30,10 @@ const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Timeout for checking the stable JSON API before attaching to the binary protocol socket.
 const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Private daemon-start hint used to seed a fresh headless server from the
+/// directory where the user ran `herdr`.
+pub(crate) const STARTUP_CWD_ENV_VAR: &str = "HERDR_STARTUP_CWD";
+
 // ---------------------------------------------------------------------------
 // Server detection
 // ---------------------------------------------------------------------------
@@ -39,7 +43,7 @@ const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 /// This works by attempting to connect to the client socket. If the connection
 /// succeeds, a server is running. If the socket file doesn't exist or the
 /// connection is refused, no server is running. Stale sockets (from a crashed
-/// server) are detected because `UnixStream::connect` returns `ConnectionRefused`
+/// server) are detected because connect returns `ConnectionRefused`
 /// when nobody is listening.
 #[allow(dead_code)] // Public API for external use and testing
 pub fn is_server_listening() -> bool {
@@ -48,40 +52,101 @@ pub fn is_server_listening() -> bool {
 
 /// Checks whether a herdr server is listening at a specific socket path.
 fn is_server_listening_at(socket_path: &Path) -> bool {
-    if !socket_path.exists() {
-        return false;
+    #[cfg(windows)]
+    {
+        let _ = socket_path;
+        return read_server_status().ok().flatten().is_some();
     }
 
-    match UnixStream::connect(socket_path) {
-        Ok(_) => {
-            // Server is listening. Close the test connection immediately.
-            // The server's handshake handler will time out on this connection
-            // since we don't send Hello, which is fine.
-            true
+    #[cfg(not(windows))]
+    {
+        if !socket_path.exists() {
+            return false;
         }
-        Err(err)
-            if matches!(
-                err.kind(),
-                io::ErrorKind::ConnectionRefused | io::ErrorKind::TimedOut
-            ) =>
-        {
-            // Socket file exists but nobody is listening — stale socket.
-            false
-        }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            // Socket file disappeared between exists() and connect().
-            false
-        }
-        Err(err) => {
-            // Other errors (permission denied, etc.) — assume not listening.
-            warn!(err = %err, "unexpected error checking server socket");
-            false
+
+        match crate::ipc::connect_local_stream(socket_path) {
+            Ok(_) => {
+                // Server is listening. Close the test connection immediately.
+                // The server's handshake handler will time out on this connection
+                // since we don't send Hello, which is fine.
+                true
+            }
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::ConnectionRefused | io::ErrorKind::TimedOut
+                ) =>
+            {
+                // Socket file exists but nobody is listening — stale socket.
+                false
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                // Socket file disappeared between exists() and connect().
+                false
+            }
+            Err(err) => {
+                // Other errors (permission denied, etc.) — assume not listening.
+                tracing::warn!(err = %err, "unexpected error checking server socket");
+                false
+            }
         }
     }
 }
 
 fn read_server_status() -> io::Result<Option<crate::api::RuntimeStatus>> {
     crate::api::read_runtime_status_at(&crate::api::socket_path(), STATUS_REQUEST_TIMEOUT)
+}
+
+#[cfg(windows)]
+fn client_protocol_accepts_hello(socket_path: &Path) -> io::Result<bool> {
+    if !socket_path.exists() {
+        return Ok(false);
+    }
+
+    let mut stream = match crate::ipc::connect_local_stream(socket_path) {
+        Ok(stream) => stream,
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::ConnectionRefused
+                    | io::ErrorKind::NotFound
+                    | io::ErrorKind::TimedOut
+                    | io::ErrorKind::WouldBlock
+            ) =>
+        {
+            return Ok(false);
+        }
+        Err(err) => return Err(err),
+    };
+
+    let hello = crate::protocol::ClientMessage::Hello {
+        version: crate::protocol::PROTOCOL_VERSION,
+        cols: 80,
+        rows: 24,
+        cell_width_px: 0,
+        cell_height_px: 0,
+        requested_encoding: crate::protocol::RenderEncoding::SemanticFrame,
+        keybindings: crate::protocol::ClientKeybindings::Server,
+        launch_mode: crate::protocol::ClientLaunchMode::App,
+    };
+
+    match crate::protocol::write_message(&mut stream, &hello) {
+        Ok(()) => Ok(true),
+        Err(crate::protocol::FramingError::Io(err))
+            if matches!(
+                err.kind(),
+                io::ErrorKind::ConnectionRefused
+                    | io::ErrorKind::NotFound
+                    | io::ErrorKind::TimedOut
+                    | io::ErrorKind::WouldBlock
+                    | io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::ConnectionReset
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(err) => Err(io::Error::other(err.to_string())),
+    }
 }
 
 fn validate_running_server_compatibility() -> io::Result<()> {
@@ -149,13 +214,25 @@ fn build_server_daemon_command(exe: PathBuf) -> Command {
     let mut command = Command::new(&exe);
     command
         .arg("server")
-        // Create a new process group so the server survives the parent's exit
-        // and doesn't receive SIGHUP when the client's terminal closes.
-        .process_group(0)
         // Redirect stdio to /dev/null
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        // Create a new process group so the server survives the parent's exit
+        // and doesn't receive SIGHUP when the client's terminal closes.
+        command.process_group(0);
+    }
+
+    match std::env::current_dir() {
+        Ok(cwd) => {
+            command.env(STARTUP_CWD_ENV_VAR, cwd);
+        }
+        Err(_) => {
+            command.env_remove(STARTUP_CWD_ENV_VAR);
+        }
+    }
 
     if crate::session::explicit_session_requested() {
         command
@@ -179,6 +256,13 @@ pub fn wait_for_server_socket(socket_path: &Path, timeout: Duration) -> io::Resu
     let deadline = std::time::Instant::now() + timeout;
 
     while std::time::Instant::now() < deadline {
+        #[cfg(windows)]
+        if client_protocol_accepts_hello(socket_path)? {
+            info!(path = %socket_path.display(), "server client protocol ready");
+            return Ok(());
+        }
+
+        #[cfg(not(windows))]
         if is_server_listening_at(socket_path) {
             info!(path = %socket_path.display(), "server socket ready");
             return Ok(());
@@ -232,7 +316,7 @@ pub fn auto_detect_launch() -> io::Result<()> {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::ffi::OsStr;
@@ -287,6 +371,17 @@ mod tests {
         std::env::remove_var("HERDR_CLIENT_SOCKET_PATH");
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
         crate::session::clear_explicit_session_for_test();
+    }
+
+    #[test]
+    fn server_daemon_command_passes_current_dir_as_startup_cwd() {
+        let expected = std::env::current_dir().unwrap();
+        let command = build_server_daemon_command(PathBuf::from("/tmp/herdr-test"));
+        let envs: Vec<_> = command.get_envs().collect();
+
+        assert!(envs.iter().any(|(key, value)| {
+            *key == OsStr::new(STARTUP_CWD_ENV_VAR) && value == &Some(expected.as_os_str())
+        }));
     }
 
     #[test]

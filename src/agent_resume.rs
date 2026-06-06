@@ -177,8 +177,17 @@ fn valid_session_path(value: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn absolute_test_path(name: &str) -> String {
+        std::env::current_dir()
+            .unwrap()
+            .join(name)
+            .display()
+            .to_string()
+    }
+
     #[test]
     fn planner_allows_supported_agents() {
+        let pi_session = absolute_test_path("pi-session.jsonl");
         assert_eq!(
             plan(
                 "herdr:claude",
@@ -213,11 +222,11 @@ mod tests {
             plan(
                 "herdr:pi",
                 "pi",
-                &AgentSessionRef::path("/tmp/pi-session.jsonl").unwrap()
+                &AgentSessionRef::path(&pi_session).unwrap()
             )
             .unwrap()
             .argv,
-            vec!["pi", "--session", "/tmp/pi-session.jsonl"]
+            vec!["pi", "--session", pi_session.as_str()]
         );
         assert_eq!(
             plan(
@@ -243,6 +252,7 @@ mod tests {
 
     #[test]
     fn planner_rejects_custom_and_unsupported_path_refs() {
+        let claude_session = absolute_test_path("claude-session");
         assert!(plan(
             "custom:claude",
             "claude",
@@ -252,22 +262,25 @@ mod tests {
         assert!(plan(
             "herdr:claude",
             "claude",
-            &AgentSessionRef::path("/tmp/claude-session").unwrap()
+            &AgentSessionRef::path(&claude_session).unwrap()
         )
         .is_none());
     }
 
     #[test]
     fn report_ref_prefers_pi_path_and_validates_values() {
+        let pi_session = absolute_test_path("pi-session.jsonl");
+        let claude_session = absolute_test_path("claude-session");
+        let copilot_session = absolute_test_path("copilot-session");
         let session_ref = session_ref_from_report(
             "herdr:pi",
             "pi",
             Some("pi-id".into()),
-            Some("/tmp/pi-session.jsonl".into()),
+            Some(pi_session.clone()),
         )
         .unwrap();
         assert_eq!(session_ref.kind, AgentSessionRefKind::Path);
-        assert_eq!(session_ref.value, "/tmp/pi-session.jsonl");
+        assert_eq!(session_ref.value, pi_session);
 
         assert!(session_ref_from_report("herdr:pi", "pi", Some("bad\nid".into()), None).is_none());
         assert!(
@@ -275,26 +288,19 @@ mod tests {
                 .is_none()
         );
         assert!(session_ref_from_report("custom:pi", "pi", Some("pi-id".into()), None).is_none());
-        assert!(session_ref_from_report(
-            "herdr:claude",
-            "claude",
-            None,
-            Some("/tmp/claude-session".into())
-        )
-        .is_none());
+        assert!(
+            session_ref_from_report("herdr:claude", "claude", None, Some(claude_session)).is_none()
+        );
 
         let session_ref =
             session_ref_from_report("herdr:copilot", "copilot", Some("copilot-id".into()), None)
                 .unwrap();
         assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
         assert_eq!(session_ref.value, "copilot-id");
-        assert!(session_ref_from_report(
-            "herdr:copilot",
-            "copilot",
-            None,
-            Some("/tmp/copilot-session".into())
-        )
-        .is_none());
+        assert!(
+            session_ref_from_report("herdr:copilot", "copilot", None, Some(copilot_session))
+                .is_none()
+        );
     }
 
     #[test]
@@ -314,22 +320,25 @@ mod tests {
 
     #[test]
     fn planner_rejects_path_refs_for_id_only_agents() {
+        let hermes_session = absolute_test_path("hermes-session");
+        let opencode_session = absolute_test_path("opencode-session");
+        let copilot_session = absolute_test_path("copilot-session");
         assert!(plan(
             "herdr:hermes",
             "hermes",
-            &AgentSessionRef::path("/tmp/hermes-session").unwrap()
+            &AgentSessionRef::path(&hermes_session).unwrap()
         )
         .is_none());
         assert!(plan(
             "herdr:opencode",
             "opencode",
-            &AgentSessionRef::path("/tmp/opencode-session").unwrap()
+            &AgentSessionRef::path(&opencode_session).unwrap()
         )
         .is_none());
         assert!(plan(
             "herdr:copilot",
             "copilot",
-            &AgentSessionRef::path("/tmp/copilot-session").unwrap()
+            &AgentSessionRef::path(&copilot_session).unwrap()
         )
         .is_none());
         assert!(session_ref_from_snapshot(

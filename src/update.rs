@@ -10,11 +10,11 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, BufReader, IsTerminal, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use interprocess::local_socket::traits::Stream as _;
 use serde::{Deserialize, Deserializer};
 
 const STABLE_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
@@ -216,7 +216,7 @@ struct HomebrewFormulaVersions {
 }
 
 impl UpdateManifest {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn download_url_for(&self, os: &str, arch: &str) -> Option<String> {
         self.assets
             .get(&format!("{os}-{arch}"))
@@ -626,7 +626,7 @@ fn client_protocol_server_is_running_at(socket_path: &Path) -> bool {
         return false;
     }
 
-    UnixStream::connect(socket_path).is_ok()
+    crate::ipc::connect_local_stream(socket_path).is_ok()
 }
 
 fn client_protocol_server_is_running() -> bool {
@@ -1309,13 +1309,13 @@ fn send_server_update_method_at(
         method,
     };
 
-    let mut stream = UnixStream::connect(socket_path)
+    let mut stream = crate::ipc::connect_local_stream(socket_path)
         .map_err(|e| format!("failed to connect to running server: {e}"))?;
     stream
-        .set_write_timeout(Some(timeout))
+        .set_send_timeout(Some(timeout))
         .map_err(|e| format!("failed to set {error_prefix} write timeout: {e}"))?;
     stream
-        .set_read_timeout(Some(timeout))
+        .set_recv_timeout(Some(timeout))
         .map_err(|e| format!("failed to set {error_prefix} read timeout: {e}"))?;
     stream
         .write_all(
@@ -1348,7 +1348,7 @@ fn send_server_update_method_at(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn live_handoff_server_via_api_at(socket_path: &Path, timeout: Duration) -> Result<(), String> {
     use crate::api::schema::{Method, ServerLiveHandoffParams};
 
@@ -1404,7 +1404,7 @@ fn server_shutdown_confirmed_at(socket_path: &Path) -> Result<bool, String> {
         return Ok(true);
     }
 
-    match UnixStream::connect(socket_path) {
+    match crate::ipc::connect_local_stream(socket_path) {
         Ok(_) => Ok(false),
         Err(err)
             if matches!(
@@ -1715,6 +1715,7 @@ fn preview_channel_rejection_for_exe_path(path: &Path) -> Option<&'static str> {
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn is_package_manager_managed_exe_path(path: &Path) -> bool {
     is_homebrew_managed_exe_path_following_links(path)
         || is_mise_managed_exe_path_following_links(path)
@@ -2095,7 +2096,7 @@ fn platform_target() -> (&'static str, &'static str) {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;

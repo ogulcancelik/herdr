@@ -1,15 +1,16 @@
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use interprocess::local_socket::traits::Stream as _;
 use serde::de::DeserializeOwned;
 
 use crate::api::schema::{
     ErrorResponse, EventsSubscribeParams, Method, PingParams, Request, ResponseResult,
     SubscriptionEventEnvelope, SuccessResponse,
 };
+use crate::ipc::LocalStream;
 
 /// API connection target resolved by clients at the process edge.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,8 +67,8 @@ impl ApiClient {
         timeout: Duration,
     ) -> Result<serde_json::Value, ApiClientError> {
         let mut stream = self.connect()?;
-        stream.set_write_timeout(Some(timeout))?;
-        stream.set_read_timeout(Some(timeout))?;
+        set_timeout_best_effort(&stream, TimeoutKind::Send, timeout)?;
+        set_timeout_best_effort(&stream, TimeoutKind::Recv, timeout)?;
         write_request(&mut stream, request)?;
 
         let mut reader = BufReader::new(stream);
@@ -97,7 +98,7 @@ impl ApiClient {
         let mut stream = self.connect()?;
         write_request(&mut stream, request)?;
         if let Some(timeout) = read_timeout {
-            stream.set_read_timeout(Some(timeout))?;
+            set_timeout_best_effort(&stream, TimeoutKind::Recv, timeout)?;
         }
 
         let mut reader = BufReader::new(stream);
@@ -124,13 +125,35 @@ impl ApiClient {
         }
     }
 
-    fn connect(&self) -> io::Result<UnixStream> {
-        UnixStream::connect(self.socket_path())
+    fn connect(&self) -> io::Result<LocalStream> {
+        crate::ipc::connect_local_stream(&self.socket_path())
+    }
+}
+
+enum TimeoutKind {
+    Send,
+    Recv,
+}
+
+fn set_timeout_best_effort(
+    stream: &LocalStream,
+    kind: TimeoutKind,
+    timeout: Duration,
+) -> io::Result<()> {
+    let result = match kind {
+        TimeoutKind::Send => stream.set_send_timeout(Some(timeout)),
+        TimeoutKind::Recv => stream.set_recv_timeout(Some(timeout)),
+    };
+    match result {
+        Ok(()) => Ok(()),
+        #[cfg(windows)]
+        Err(err) if err.kind() == io::ErrorKind::Unsupported => Ok(()),
+        Err(err) => Err(err),
     }
 }
 
 pub struct EventStream {
-    reader: BufReader<UnixStream>,
+    reader: BufReader<LocalStream>,
 }
 
 impl EventStream {
@@ -181,7 +204,7 @@ impl From<serde_json::Error> for ApiClientError {
     }
 }
 
-fn write_request(stream: &mut UnixStream, request: &Request) -> Result<(), ApiClientError> {
+fn write_request(stream: &mut LocalStream, request: &Request) -> Result<(), ApiClientError> {
     stream.write_all(serde_json::to_string(request)?.as_bytes())?;
     stream.write_all(b"\n")?;
     stream.flush()?;
@@ -189,7 +212,7 @@ fn write_request(stream: &mut UnixStream, request: &Request) -> Result<(), ApiCl
 }
 
 fn read_json_line<T: DeserializeOwned>(
-    reader: &mut BufReader<UnixStream>,
+    reader: &mut BufReader<LocalStream>,
 ) -> Result<T, ApiClientError> {
     let mut line = String::new();
     let read = reader.read_line(&mut line)?;
@@ -200,7 +223,7 @@ fn read_json_line<T: DeserializeOwned>(
 }
 
 fn read_optional_json_line<T: DeserializeOwned>(
-    reader: &mut BufReader<UnixStream>,
+    reader: &mut BufReader<LocalStream>,
 ) -> Result<Option<T>, ApiClientError> {
     let mut line = String::new();
     let read = reader.read_line(&mut line)?;

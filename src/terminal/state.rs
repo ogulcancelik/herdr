@@ -838,6 +838,14 @@ mod tests {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
     }
 
+    fn test_session_path(name: &str) -> String {
+        std::env::current_dir()
+            .unwrap()
+            .join(name)
+            .display()
+            .to_string()
+    }
+
     #[test]
     fn claude_working_is_sticky_for_short_gap() {
         let now = std::time::Instant::now();
@@ -1728,6 +1736,7 @@ mod tests {
     #[test]
     fn accepted_hook_report_stores_session_ref() {
         let mut terminal = test_terminal();
+        let session_path = test_session_path("pi.jsonl");
         let mutation = terminal
             .set_hook_authority_with_session_ref(
                 "herdr:pi".into(),
@@ -1735,7 +1744,7 @@ mod tests {
                 AgentState::Working,
                 None,
                 None,
-                crate::agent_resume::AgentSessionRef::path("/tmp/pi.jsonl"),
+                crate::agent_resume::AgentSessionRef::path(session_path.clone()),
                 Some(20),
             )
             .expect("accepted report");
@@ -1749,7 +1758,7 @@ mod tests {
                 .map(|session_ref| (&session_ref.kind, session_ref.value.as_str())),
             Some((
                 &crate::agent_resume::AgentSessionRefKind::Path,
-                "/tmp/pi.jsonl"
+                session_path.as_str()
             ))
         );
     }
@@ -1757,13 +1766,15 @@ mod tests {
     #[test]
     fn stale_hook_report_cannot_overwrite_session_ref() {
         let mut terminal = test_terminal();
+        let session_path = test_session_path("pi.jsonl");
+        let new_session_path = test_session_path("new.jsonl");
         terminal.set_hook_authority_with_session_ref(
             "herdr:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
             None,
-            crate::agent_resume::AgentSessionRef::path("/tmp/pi.jsonl"),
+            crate::agent_resume::AgentSessionRef::path(session_path.clone()),
             Some(20),
         );
 
@@ -1773,7 +1784,7 @@ mod tests {
             AgentState::Working,
             None,
             None,
-            crate::agent_resume::AgentSessionRef::path("/tmp/new.jsonl"),
+            crate::agent_resume::AgentSessionRef::path(new_session_path),
             Some(19),
         );
 
@@ -1784,20 +1795,21 @@ mod tests {
                 .as_ref()
                 .and_then(|authority| authority.session_ref.as_ref())
                 .map(|session_ref| session_ref.value.as_str()),
-            Some("/tmp/pi.jsonl")
+            Some(session_path.as_str())
         );
     }
 
     #[test]
     fn accepted_hook_report_without_session_ref_clears_previous_ref() {
         let mut terminal = test_terminal();
+        let session_path = test_session_path("pi.jsonl");
         terminal.set_hook_authority_with_session_ref(
             "herdr:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
             None,
-            crate::agent_resume::AgentSessionRef::path("/tmp/pi.jsonl"),
+            crate::agent_resume::AgentSessionRef::path(session_path),
             Some(20),
         );
 
@@ -1850,13 +1862,14 @@ mod tests {
     #[test]
     fn clearing_hook_authority_clears_session_ref() {
         let mut terminal = test_terminal();
+        let session_path = test_session_path("pi.jsonl");
         terminal.set_hook_authority_with_session_ref(
             "herdr:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
             None,
-            crate::agent_resume::AgentSessionRef::path("/tmp/pi.jsonl"),
+            crate::agent_resume::AgentSessionRef::path(session_path),
             Some(20),
         );
 
@@ -1871,13 +1884,14 @@ mod tests {
     #[test]
     fn release_agent_clears_session_ref() {
         let mut terminal = test_terminal();
+        let session_path = test_session_path("pi.jsonl");
         terminal.set_hook_authority_with_session_ref(
             "herdr:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
             None,
-            crate::agent_resume::AgentSessionRef::path("/tmp/pi.jsonl"),
+            crate::agent_resume::AgentSessionRef::path(session_path),
             Some(20),
         );
 

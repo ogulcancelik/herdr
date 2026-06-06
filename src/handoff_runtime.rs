@@ -28,9 +28,10 @@ impl HandoffRuntimeState {
     }
 }
 
-#[cfg(unix)]
 #[derive(Debug)]
 pub(crate) struct ImportedHandoffRuntime {
+    #[cfg(unix)]
     pub master_fd: std::os::fd::RawFd,
+    #[cfg(unix)]
     pub state: HandoffRuntimeState,
 }

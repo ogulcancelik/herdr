@@ -76,3 +76,79 @@ jobs:
 
       - name: Run checks
         run: just ci '${{ matrix.nextest_filter }}'
+
+  check-windows:
+    name: check (windows)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install Rust tools
+        uses: taiki-e/install-action@b550161ef8a7bc4f2a671c0b03a18ac9ccedea1e # v2
+        with:
+          tool: cargo-nextest
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          key: windows-x86_64-pc-windows-msvc
+
+      - name: Run Windows checks
+        shell: pwsh
+        run: |
+          cargo fmt --check
+          cargo clippy --bin herdr --locked --target x86_64-pc-windows-msvc -- -D warnings
+          cargo nextest run --locked --target x86_64-pc-windows-msvc -E "binary(herdr)" --status-level fail --final-status-level slow --failure-output final --success-output never
+          cargo build --locked --target x86_64-pc-windows-msvc
+
+      - name: Smoke ConPTY pane
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:HERDR_SESSION = "ci-windows-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $exe = Join-Path $PWD "target\x86_64-pc-windows-msvc\debug\herdr.exe"
+
+          & $exe --version
+          & $exe --default-config | Out-Null
+
+          $server = Start-Process -FilePath $exe -ArgumentList "server" -PassThru -WindowStyle Hidden
+          try {
+            $deadline = (Get-Date).AddSeconds(10)
+            do {
+              Start-Sleep -Milliseconds 250
+              $status = & $exe status server 2>&1
+              if ($LASTEXITCODE -eq 0 -and (($status -join "`n") -match "status: running")) {
+                break
+              }
+            } while ((Get-Date) -lt $deadline)
+
+            if ((Get-Date) -ge $deadline) {
+              throw "server did not become ready"
+            }
+
+            & $exe agent start smoke -- "$env:ComSpec" /K dir
+            Start-Sleep -Seconds 2
+            $read = & $exe agent read smoke --source recent --lines 40 --format text
+            $text = $read -join "`n"
+            if ($text -notmatch "Directory of") {
+              throw "pane read did not include cmd.exe directory output: $text"
+            }
+          } finally {
+            & $exe server stop 2>$null
+            Wait-Process -Id $server.Id -Timeout 10 -ErrorAction SilentlyContinue
+          }

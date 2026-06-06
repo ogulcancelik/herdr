@@ -504,27 +504,82 @@ pub(crate) fn integration_target_label(
 }
 
 fn integration_target_command(target: crate::api::schema::IntegrationTarget) -> &'static str {
+    integration_target_command_names(target)[0]
+}
+
+fn integration_target_command_names(
+    target: crate::api::schema::IntegrationTarget,
+) -> &'static [&'static str] {
     match target {
-        crate::api::schema::IntegrationTarget::Pi => "pi",
-        crate::api::schema::IntegrationTarget::Omp => "omp",
-        crate::api::schema::IntegrationTarget::Claude => "claude",
-        crate::api::schema::IntegrationTarget::Codex => "codex",
-        crate::api::schema::IntegrationTarget::Copilot => "copilot",
-        crate::api::schema::IntegrationTarget::Opencode => "opencode",
-        crate::api::schema::IntegrationTarget::Hermes => "hermes",
-        crate::api::schema::IntegrationTarget::Qodercli => "qodercli",
+        crate::api::schema::IntegrationTarget::Pi => &["pi"],
+        crate::api::schema::IntegrationTarget::Omp => &["omp"],
+        crate::api::schema::IntegrationTarget::Claude => &["claude"],
+        crate::api::schema::IntegrationTarget::Codex => &["codex"],
+        crate::api::schema::IntegrationTarget::Copilot => &["copilot"],
+        crate::api::schema::IntegrationTarget::Opencode => &["opencode"],
+        crate::api::schema::IntegrationTarget::Hermes => &["hermes"],
+        crate::api::schema::IntegrationTarget::Qodercli => qodercli_command_names(),
     }
 }
 
 fn integration_target_available(target: crate::api::schema::IntegrationTarget) -> bool {
-    command_available(integration_target_command(target))
+    integration_target_command_names(target)
+        .iter()
+        .any(|command| command_available(command))
+        || integration_target_install_layout_available(target)
+}
+
+#[cfg(windows)]
+fn qodercli_command_names() -> &'static [&'static str] {
+    &["qodercli", "qoder", "qoderclicn", "qodercn"]
+}
+
+#[cfg(not(windows))]
+fn qodercli_command_names() -> &'static [&'static str] {
+    &["qodercli"]
+}
+
+fn integration_target_install_layout_available(
+    target: crate::api::schema::IntegrationTarget,
+) -> bool {
+    match target {
+        crate::api::schema::IntegrationTarget::Codex => codex_standalone_binary_available(),
+        crate::api::schema::IntegrationTarget::Hermes => hermes_install_layout_available(),
+        _ => false,
+    }
 }
 
 fn command_available(command: &str) -> bool {
     let Some(paths) = std::env::var_os("PATH") else {
         return false;
     };
-    std::env::split_paths(&paths).any(|dir| executable_file_exists(&dir.join(command)))
+    std::env::split_paths(&paths).any(|dir| {
+        command_path_candidates(&dir, command)
+            .into_iter()
+            .any(|path| executable_file_exists(&path))
+    })
+}
+
+fn command_path_candidates(dir: &Path, command: &str) -> Vec<PathBuf> {
+    let base = dir.join(command);
+
+    #[cfg(not(windows))]
+    {
+        vec![base]
+    }
+
+    #[cfg(windows)]
+    {
+        if Path::new(command).extension().is_some() {
+            return vec![base];
+        }
+
+        let mut candidates = vec![base];
+        for extension in [".exe", ".cmd", ".bat", ".ps1"] {
+            candidates.push(dir.join(format!("{command}{extension}")));
+        }
+        candidates
+    }
 }
 
 fn executable_file_exists(path: &Path) -> bool {
@@ -544,6 +599,53 @@ fn executable_file_exists(path: &Path) -> bool {
     #[cfg(not(unix))]
     {
         true
+    }
+}
+
+fn codex_standalone_binary_available() -> bool {
+    let Ok(releases_dir) =
+        codex_dir().map(|dir| dir.join("packages").join("standalone").join("releases"))
+    else {
+        return false;
+    };
+    let Ok(entries) = fs::read_dir(releases_dir) else {
+        return false;
+    };
+
+    entries.filter_map(Result::ok).any(|entry| {
+        executable_file_exists(&entry.path().join("bin").join(codex_executable_name()))
+    })
+}
+
+fn codex_executable_name() -> &'static str {
+    if cfg!(windows) {
+        "codex.exe"
+    } else {
+        "codex"
+    }
+}
+
+fn hermes_install_layout_available() -> bool {
+    #[cfg(windows)]
+    {
+        let Some(local_app_data) =
+            std::env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty())
+        else {
+            return false;
+        };
+        let dir = PathBuf::from(local_app_data).join("hermes");
+        [
+            dir.join("hermes.exe"),
+            dir.join("bin").join("hermes.exe"),
+            dir.join("Scripts").join("hermes.exe"),
+        ]
+        .into_iter()
+        .any(|path| executable_file_exists(&path))
+    }
+
+    #[cfg(not(windows))]
+    {
+        false
     }
 }
 
@@ -732,6 +834,17 @@ pub(crate) fn install_pi() -> io::Result<PathBuf> {
 
 pub(crate) fn install_omp() -> io::Result<OmpInstallPaths> {
     let dir = omp_extension_dir()?;
+    if !dir.is_dir() {
+        if dir.parent().is_some_and(|parent| parent.is_dir()) {
+            fs::create_dir_all(&dir)?;
+        } else {
+            return Err(io::Error::other(format!(
+                "omp extension directory not found at {}. install omp and create the extensions directory first",
+                dir.display()
+            )));
+        }
+    }
+
     if !dir.is_dir() {
         return Err(io::Error::other(format!(
             "omp extension directory not found at {}. install omp and create the extensions directory first",
@@ -1919,14 +2032,14 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-fn make_executable(path: &Path) -> io::Result<()> {
+fn make_executable(_path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        let mut perms = fs::metadata(path)?.permissions();
+        let mut perms = fs::metadata(_path)?.permissions();
         perms.set_mode(0o755);
-        fs::set_permissions(path, perms)?;
+        fs::set_permissions(_path, perms)?;
     }
 
     Ok(())
@@ -2012,9 +2125,28 @@ fn qodercli_dir() -> io::Result<PathBuf> {
 }
 
 fn home_dir() -> io::Result<PathBuf> {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .map_err(|_| io::Error::other("HOME is not set; cannot locate home directory"))
+    if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(home));
+    }
+
+    #[cfg(windows)]
+    {
+        if let Some(profile) = std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()) {
+            return Ok(PathBuf::from(profile));
+        }
+        if let (Some(drive), Some(path)) = (
+            std::env::var_os("HOMEDRIVE").filter(|value| !value.is_empty()),
+            std::env::var_os("HOMEPATH").filter(|value| !value.is_empty()),
+        ) {
+            let mut home = PathBuf::from(drive);
+            home.push(path);
+            return Ok(home);
+        }
+    }
+
+    Err(io::Error::other(
+        "home directory is not set; cannot locate home directory",
+    ))
 }
 
 #[cfg(test)]
@@ -2047,6 +2179,28 @@ mod tests {
         ))
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn home_dir_uses_userprofile_when_home_is_missing() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let previous_home = std::env::var_os("HOME");
+        let previous_userprofile = std::env::var_os("USERPROFILE");
+        std::env::remove_var("HOME");
+        std::env::set_var("USERPROFILE", &base);
+
+        assert_eq!(home_dir().unwrap(), base);
+
+        if let Some(home) = previous_home {
+            std::env::set_var("HOME", home);
+        }
+        if let Some(userprofile) = previous_userprofile {
+            std::env::set_var("USERPROFILE", userprofile);
+        } else {
+            std::env::remove_var("USERPROFILE");
+        }
+    }
+
     #[test]
     #[cfg(unix)]
     fn command_available_requires_executable_file_on_path() {
@@ -2067,6 +2221,162 @@ mod tests {
         fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(command_available("claude"));
 
+        if let Some(path) = original_path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn command_available_finds_windows_command_shims_on_path() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let bin = base.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let original_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", &bin);
+
+        fs::write(bin.join("claude.cmd"), "@echo off\r\n").unwrap();
+        assert!(command_available("claude"));
+
+        fs::write(bin.join("codex.exe"), "").unwrap();
+        assert!(command_available("codex"));
+
+        assert!(!command_available("missing-agent"));
+
+        if let Some(path) = original_path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn qodercli_availability_checks_windows_aliases() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let bin = base.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let original_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", &bin);
+
+        fs::write(bin.join("qoder.cmd"), "@echo off\r\n").unwrap();
+
+        assert!(integration_target_available(
+            crate::api::schema::IntegrationTarget::Qodercli
+        ));
+
+        if let Some(path) = original_path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn hermes_availability_checks_windows_install_layout() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let local_app_data = base.join("local-app-data");
+        let hermes_bin = local_app_data.join("hermes").join("bin");
+        fs::create_dir_all(&hermes_bin).unwrap();
+        fs::write(hermes_bin.join("hermes.exe"), "").unwrap();
+        let original_local_app_data = std::env::var_os("LOCALAPPDATA");
+        let original_path = std::env::var_os("PATH");
+        std::env::set_var("LOCALAPPDATA", &local_app_data);
+        std::env::set_var("PATH", "");
+
+        assert!(integration_target_available(
+            crate::api::schema::IntegrationTarget::Hermes
+        ));
+
+        if let Some(local_app_data) = original_local_app_data {
+            std::env::set_var("LOCALAPPDATA", local_app_data);
+        } else {
+            std::env::remove_var("LOCALAPPDATA");
+        }
+        if let Some(path) = original_path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn codex_availability_finds_standalone_binary_under_codex_home() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let bin = home
+            .join(".codex/packages/standalone/releases/0.137.0-test")
+            .join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let binary = bin.join(codex_executable_name());
+        fs::write(&binary, "").unwrap();
+        make_executable(&binary).unwrap();
+        let original_home = std::env::var_os("HOME");
+        let original_path = std::env::var_os("PATH");
+        std::env::set_var("HOME", &home);
+        std::env::set_var("PATH", "");
+
+        assert!(integration_target_available(
+            crate::api::schema::IntegrationTarget::Codex
+        ));
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(path) = original_path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn integration_recommendations_mark_standalone_codex_available() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let bin = home
+            .join(".codex/packages/standalone/releases/0.137.0-test")
+            .join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let binary = bin.join(codex_executable_name());
+        fs::write(&binary, "").unwrap();
+        make_executable(&binary).unwrap();
+        let original_home = std::env::var_os("HOME");
+        let original_path = std::env::var_os("PATH");
+        std::env::set_var("HOME", &home);
+        std::env::set_var("PATH", "");
+
+        let codex = integration_recommendations()
+            .into_iter()
+            .find(|recommendation| {
+                recommendation.target == crate::api::schema::IntegrationTarget::Codex
+            })
+            .expect("codex recommendation should be present");
+
+        assert!(codex.available);
+        assert_eq!(codex.state, IntegrationStatusKind::NotInstalled);
+        assert!(codex.needs_install());
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
         if let Some(path) = original_path {
             std::env::set_var("PATH", path);
         } else {
@@ -2246,6 +2556,29 @@ mod tests {
         assert!(!installed.removed_legacy_pi_extension);
 
         clear_integration_path_env();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_omp_creates_extensions_dir_when_agent_dir_exists() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let agent_dir = home.join(".omp/agent");
+        let ext_dir = agent_dir.join("extensions");
+        fs::create_dir_all(&agent_dir).unwrap();
+        std::env::set_var("HOME", &home);
+
+        let installed = install_omp().unwrap();
+
+        assert_eq!(
+            installed.extension_path,
+            ext_dir.join(OMP_EXTENSION_INSTALL_NAME)
+        );
+        assert!(ext_dir.is_dir());
+        assert!(!installed.removed_legacy_pi_extension);
+
+        std::env::remove_var("HOME");
         let _ = fs::remove_dir_all(base);
     }
 
@@ -2477,15 +2810,41 @@ mod tests {
         let hooks_dir = claude_dir.join("hooks");
         fs::create_dir_all(&hooks_dir).unwrap();
         let hook_path = hooks_dir.join(CLAUDE_HOOK_INSTALL_NAME);
+        let settings = serde_json::json!({
+            "hooks": {
+                "PostToolUse": [{
+                    "matcher": "*",
+                    "hooks": [
+                        {"type": "command", "command": format!("bash '{}' working", hook_path.display()), "timeout": 10},
+                        {"type": "command", "command": "echo keep-post", "timeout": 10}
+                    ]
+                }],
+                "PostToolUseFailure": [{
+                    "matcher": "*",
+                    "hooks": [
+                        {"type": "command", "command": format!("bash '{}' working", hook_path.display()), "timeout": 10},
+                        {"type": "command", "command": "echo keep-failure", "timeout": 10}
+                    ]
+                }],
+                "SubagentStop": [{
+                    "matcher": "*",
+                    "hooks": [
+                        {"type": "command", "command": format!("bash '{}' working", hook_path.display()), "timeout": 10},
+                        {"type": "command", "command": "echo keep-subagent", "timeout": 10}
+                    ]
+                }],
+                "SessionEnd": [{
+                    "matcher": "*",
+                    "hooks": [
+                        {"type": "command", "command": format!("bash '{}' release", hook_path.display()), "timeout": 10},
+                        {"type": "command", "command": "echo keep-session-end", "timeout": 10}
+                    ]
+                }]
+            }
+        });
         fs::write(
             claude_dir.join("settings.json"),
-            format!(
-                r#"{{"hooks":{{"PostToolUse":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}},{{"type":"command","command":"echo keep-post","timeout":10}}]}}],"PostToolUseFailure":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}},{{"type":"command","command":"echo keep-failure","timeout":10}}]}}],"SubagentStop":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}},{{"type":"command","command":"echo keep-subagent","timeout":10}}]}}],"SessionEnd":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' release","timeout":10}},{{"type":"command","command":"echo keep-session-end","timeout":10}}]}}]}}}}"#,
-                hook_path.display(),
-                hook_path.display(),
-                hook_path.display(),
-                hook_path.display(),
-            ),
+            serde_json::to_string(&settings).unwrap(),
         )
         .unwrap();
         std::env::set_var("HOME", &home);
@@ -2589,19 +2948,48 @@ mod tests {
         fs::create_dir_all(&hooks_dir).unwrap();
         let hook_path = hooks_dir.join(CLAUDE_HOOK_INSTALL_NAME);
         fs::write(&hook_path, CLAUDE_HOOK_ASSET).unwrap();
+        let settings = serde_json::json!({
+            "hooks": {
+                "SessionStart": [{
+                    "matcher": "*",
+                    "hooks": [{"type": "command", "command": format!("bash '{}' idle", hook_path.display()), "timeout": 10}]
+                }],
+                "UserPromptSubmit": [{
+                    "matcher": "*",
+                    "hooks": [
+                        {"type": "command", "command": format!("bash '{}' working", hook_path.display()), "timeout": 10},
+                        {"type": "command", "command": "echo keep", "timeout": 10}
+                    ]
+                }],
+                "PermissionRequest": [{
+                    "matcher": "*",
+                    "hooks": [{"type": "command", "command": format!("bash '{}' blocked", hook_path.display()), "timeout": 10}]
+                }],
+                "PostToolUse": [{
+                    "matcher": "*",
+                    "hooks": [{"type": "command", "command": format!("bash '{}' working", hook_path.display()), "timeout": 10}]
+                }],
+                "PostToolUseFailure": [{
+                    "matcher": "*",
+                    "hooks": [{"type": "command", "command": format!("bash '{}' working", hook_path.display()), "timeout": 10}]
+                }],
+                "SubagentStop": [{
+                    "matcher": "*",
+                    "hooks": [{"type": "command", "command": format!("bash '{}' working", hook_path.display()), "timeout": 10}]
+                }],
+                "Stop": [{
+                    "matcher": "*",
+                    "hooks": [{"type": "command", "command": format!("bash '{}' idle", hook_path.display()), "timeout": 10}]
+                }],
+                "SessionEnd": [{
+                    "matcher": "*",
+                    "hooks": [{"type": "command", "command": format!("bash '{}' release", hook_path.display()), "timeout": 10}]
+                }]
+            }
+        });
         fs::write(
             claude_dir.join("settings.json"),
-            format!(
-                r#"{{"hooks":{{"SessionStart":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' idle","timeout":10}}]}}],"UserPromptSubmit":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}},{{"type":"command","command":"echo keep","timeout":10}}]}}],"PermissionRequest":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' blocked","timeout":10}}]}}],"PostToolUse":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}}]}}],"PostToolUseFailure":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}}]}}],"SubagentStop":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}}]}}],"Stop":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' idle","timeout":10}}]}}],"SessionEnd":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' release","timeout":10}}]}}]}}}}"#,
-                hook_path.display(),
-                hook_path.display(),
-                hook_path.display(),
-                hook_path.display(),
-                hook_path.display(),
-                hook_path.display(),
-                hook_path.display(),
-                hook_path.display(),
-            ),
+            serde_json::to_string(&settings).unwrap(),
         )
         .unwrap();
         std::env::set_var("HOME", &home);
@@ -2808,16 +3196,21 @@ mod tests {
         fs::create_dir_all(&codex_dir).unwrap();
         let hook_path = codex_dir.join(CODEX_HOOK_INSTALL_NAME);
         fs::write(&hook_path, CODEX_HOOK_ASSET).unwrap();
+        let hooks = serde_json::json!({
+            "hooks": {
+                "SessionStart": [{"hooks": [{"type": "command", "command": format!("bash '{}' idle", hook_path.display()), "timeout": 10}]}],
+                "UserPromptSubmit": [{"hooks": [
+                    {"type": "command", "command": format!("bash '{}' working", hook_path.display()), "timeout": 10},
+                    {"type": "command", "command": "echo keep", "timeout": 10}
+                ]}],
+                "PreToolUse": [{"hooks": [{"type": "command", "command": format!("bash '{}' working", hook_path.display()), "timeout": 10}]}],
+                "PermissionRequest": [{"hooks": [{"type": "command", "command": format!("bash '{}' blocked", hook_path.display()), "timeout": 10}]}],
+                "Stop": [{"hooks": [{"type": "command", "command": format!("bash '{}' idle", hook_path.display()), "timeout": 10}]}]
+            }
+        });
         fs::write(
             codex_dir.join("hooks.json"),
-            format!(
-                r#"{{"hooks":{{"SessionStart":[{{"hooks":[{{"type":"command","command":"bash '{}' idle","timeout":10}}]}}],"UserPromptSubmit":[{{"hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}},{{"type":"command","command":"echo keep","timeout":10}}]}}],"PreToolUse":[{{"hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}}]}}],"PermissionRequest":[{{"hooks":[{{"type":"command","command":"bash '{}' blocked","timeout":10}}]}}],"Stop":[{{"hooks":[{{"type":"command","command":"bash '{}' idle","timeout":10}}]}}]}}}}"#,
-                hook_path.display(),
-                hook_path.display(),
-                hook_path.display(),
-                hook_path.display(),
-                hook_path.display(),
-            ),
+            serde_json::to_string(&hooks).unwrap(),
         )
         .unwrap();
         fs::write(
@@ -3015,14 +3408,24 @@ mod tests {
             "bash {}",
             shell_single_quote(&hook_path.display().to_string())
         );
+        let settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {"type": "command", "command": command, "timeoutSec": 10},
+                    {"type": "command", "command": "echo keep", "timeoutSec": 10}
+                ],
+                "PostToolUse": [{"type": "command", "command": command, "timeoutSec": 10}],
+                "notification": [{
+                    "type": "command",
+                    "matcher": "permission_prompt|elicitation_dialog|agent_idle",
+                    "command": command,
+                    "timeoutSec": 10
+                }]
+            }
+        });
         fs::write(
             copilot_dir.join("settings.json"),
-            format!(
-                r#"{{"hooks":{{"PreToolUse":[{{"type":"command","command":"{}","timeoutSec":10}},{{"type":"command","command":"echo keep","timeoutSec":10}}],"PostToolUse":[{{"type":"command","command":"{}","timeoutSec":10}}],"notification":[{{"type":"command","matcher":"permission_prompt|elicitation_dialog|agent_idle","command":"{}","timeoutSec":10}}]}}}}"#,
-                command,
-                command,
-                command,
-            ),
+            serde_json::to_string(&settings).unwrap(),
         )
         .unwrap();
         std::env::set_var("HOME", &home);

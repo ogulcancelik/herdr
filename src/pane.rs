@@ -8,7 +8,7 @@ use std::sync::{
 
 use bytes::Bytes;
 use portable_pty::CommandBuilder;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use portable_pty::{native_pty_system, PtySize};
 use ratatui::{layout::Rect, Frame};
 #[cfg(test)]
@@ -19,7 +19,6 @@ use tracing::{debug, error, info, warn};
 use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
-#[cfg(unix)]
 use crate::pty::actor::{PtyIoActor, PtyIoActorConfig, PtyIoActorHandle, PtyReadResult};
 
 mod input;
@@ -136,10 +135,12 @@ fn should_clear_agent_for_foreground_shell(
     previous_agent.is_some() && new_agent.is_none() && foreground_is_pane_shell
 }
 
+#[cfg(unix)]
 fn usable_process_cwd(pid: u32) -> Option<std::path::PathBuf> {
     crate::platform::process_cwd(pid).filter(|cwd| cwd.is_absolute() && cwd.is_dir())
 }
 
+#[cfg(unix)]
 fn foreground_member_cwd_different_from_shell(
     shell_pid: u32,
     shell_cwd: Option<&std::path::PathBuf>,
@@ -391,6 +392,7 @@ fn detection_update_for_publish(
     (!detection.skip_state_update).then_some(detection)
 }
 
+#[cfg(unix)]
 fn spawn_basic_detection_task(
     pane_id: PaneId,
     child_pid: Arc<AtomicU32>,
@@ -640,6 +642,7 @@ pub struct PaneRuntime {
     io: PaneRuntimeIo,
     current_size: Cell<(u16, u16, u32, u32)>,
     child_pid: Arc<AtomicU32>,
+    reported_cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
     child_wait_completed: Option<Arc<AtomicBool>>,
     kitty_keyboard_flags: Arc<AtomicU16>,
     detect_reset_notify: Arc<Notify>,
@@ -650,7 +653,6 @@ pub struct PaneRuntime {
 }
 
 enum PaneRuntimeIo {
-    #[cfg(unix)]
     Actor(PtyIoActorHandle),
     #[cfg(test)]
     TestChannel {
@@ -662,7 +664,6 @@ enum PaneRuntimeIo {
 impl PaneRuntimeIo {
     fn shutdown(&self) {
         match self {
-            #[cfg(unix)]
             PaneRuntimeIo::Actor(actor) => actor.shutdown(),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => {}
@@ -724,7 +725,6 @@ impl PaneRuntimeIo {
 
     fn resize(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
         match self {
-            #[cfg(unix)]
             PaneRuntimeIo::Actor(actor) => {
                 actor.resize(rows, cols, cell_width_px, cell_height_px);
             }
@@ -735,6 +735,7 @@ impl PaneRuntimeIo {
         }
     }
 
+    #[cfg(unix)]
     fn nudge_child_redraw_after_handoff(
         &self,
         rows: u16,
@@ -743,7 +744,6 @@ impl PaneRuntimeIo {
         cell_height_px: u32,
     ) {
         match self {
-            #[cfg(unix)]
             PaneRuntimeIo::Actor(actor) => {
                 actor.nudge_child_redraw_after_handoff(rows, cols, cell_width_px, cell_height_px);
             }
@@ -754,7 +754,6 @@ impl PaneRuntimeIo {
 
     async fn send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::SendError<Bytes>> {
         match self {
-            #[cfg(unix)]
             PaneRuntimeIo::Actor(actor) => actor.write_user_input(bytes).await,
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { sender, .. } => sender.send(bytes).await,
@@ -763,7 +762,6 @@ impl PaneRuntimeIo {
 
     fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         match self {
-            #[cfg(unix)]
             PaneRuntimeIo::Actor(actor) => actor.try_write_user_input(bytes),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { sender, .. } => sender.try_send(bytes),
@@ -909,10 +907,27 @@ fn pane_shell_from(configured_shell: &str, env_shell: Option<String>) -> String 
         return configured_shell.to_string();
     }
 
+    #[cfg(windows)]
+    {
+        let _ = env_shell;
+        return default_pane_shell();
+    }
+
+    #[cfg(not(windows))]
     env_shell
         .map(|shell| shell.trim().to_string())
         .filter(|shell| !shell.is_empty())
-        .unwrap_or_else(|| "/bin/sh".into())
+        .unwrap_or_else(default_pane_shell)
+}
+
+#[cfg(windows)]
+fn default_pane_shell() -> String {
+    "powershell.exe".into()
+}
+
+#[cfg(not(windows))]
+fn default_pane_shell() -> String {
+    "/bin/sh".into()
 }
 
 #[derive(Clone, Copy)]
@@ -997,12 +1012,75 @@ fn pane_shell_command_builder_for_target(
         cmd.env("SHELL", resolve_shell_for_login_mode(&shell)?);
         Ok(cmd)
     } else {
-        Ok(CommandBuilder::new(&shell))
+        let mut cmd = CommandBuilder::new(&shell);
+        apply_windows_powershell_cwd_reporting(&mut cmd, &shell);
+        Ok(cmd)
     }
 }
 
 fn pane_shell_command_builder(shell_config: PaneShellConfig<'_>) -> io::Result<CommandBuilder> {
     pane_shell_command_builder_for_target(shell_config, cfg!(target_os = "macos"))
+}
+
+fn apply_windows_powershell_cwd_reporting(cmd: &mut CommandBuilder, shell: &str) {
+    if !is_windows_powershell_shell(shell) {
+        return;
+    }
+    cmd.arg("-NoExit");
+    cmd.arg("-Command");
+    cmd.arg(windows_powershell_cwd_prompt_wrapper());
+}
+
+fn is_windows_powershell_shell(shell: &str) -> bool {
+    #[cfg(windows)]
+    {
+        let name = Path::new(shell)
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or(shell)
+            .to_ascii_lowercase();
+        matches!(
+            name.as_str(),
+            "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe"
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = shell;
+        false
+    }
+}
+
+fn windows_powershell_cwd_prompt_wrapper() -> &'static str {
+    r#"$global:__HERDR_ORIGINAL_PROMPT = if (Test-Path Function:\prompt) { (Get-Command prompt -CommandType Function).ScriptBlock } else { { "PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) " } }; function global:prompt { try { if ($PWD.Provider.Name -eq 'FileSystem') { $uri = ([System.Uri]$PWD.ProviderPath).AbsoluteUri; [Console]::Write("$([char]27)]7;$uri$([char]7)") } } catch {}; & $global:__HERDR_ORIGINAL_PROMPT }"#
+}
+
+fn usable_reported_cwd(cwd: std::path::PathBuf) -> Option<std::path::PathBuf> {
+    (cwd.is_absolute() && cwd.is_dir()).then_some(cwd)
+}
+
+fn publish_reported_cwd(
+    pane_id: PaneId,
+    cwd: std::path::PathBuf,
+    reported_cwd: &Arc<Mutex<Option<std::path::PathBuf>>>,
+    events: &mpsc::Sender<AppEvent>,
+) {
+    let Some(cwd) = usable_reported_cwd(cwd) else {
+        return;
+    };
+    if let Ok(mut current) = reported_cwd.lock() {
+        if current.as_ref() == Some(&cwd) {
+            return;
+        }
+        *current = Some(cwd.clone());
+    }
+    if let Err(err) = events.try_send(AppEvent::TerminalCwdReported { pane_id, cwd }) {
+        warn!(
+            pane = pane_id.raw(),
+            err = %err,
+            "failed to send terminal cwd report"
+        );
+    }
 }
 
 impl PaneRuntime {
@@ -1291,6 +1369,7 @@ impl PaneRuntime {
         }
         let terminal = Arc::new(PaneTerminal::new(pane_terminal));
         let child_pid = Arc::new(AtomicU32::new(child_pid));
+        let reported_cwd = Arc::new(Mutex::new(None));
         let kitty_keyboard_flags = Arc::new(AtomicU16::new(keyboard_protocol_flags));
 
         let io = {
@@ -1300,6 +1379,7 @@ impl PaneRuntime {
             let render_dirty = render_dirty.clone();
             let child_pid = child_pid.clone();
             let read_events = events.clone();
+            let reported_cwd = reported_cwd.clone();
             let rt = tokio::runtime::Handle::current();
             let delay_rt = rt.clone();
             let on_read = Box::new(move |bytes: &[u8]| {
@@ -1318,6 +1398,9 @@ impl PaneRuntime {
                             render_notify.notify_one();
                         }
                     });
+                }
+                if let Some(cwd) = result.reported_cwd.clone() {
+                    publish_reported_cwd(pane_id, cwd, &reported_cwd, &read_events);
                 }
                 for content in result.clipboard_writes {
                     if let Err(err) = read_events.try_send(AppEvent::ClipboardWrite { content }) {
@@ -1355,6 +1438,7 @@ impl PaneRuntime {
             io,
             current_size: Cell::new((rows, cols, cell_width_px, cell_height_px)),
             child_pid,
+            reported_cwd,
             child_wait_completed: None,
             kitty_keyboard_flags,
             detect_reset_notify,
@@ -1400,6 +1484,7 @@ impl PaneRuntime {
 
         // --- Child watcher task ---
         let child_pid = Arc::new(AtomicU32::new(0));
+        let reported_cwd = Arc::new(Mutex::new(None));
         let child_wait_completed = Arc::new(AtomicBool::new(false));
         {
             let child_pid = child_pid.clone();
@@ -1434,6 +1519,7 @@ impl PaneRuntime {
             let render_dirty = render_dirty.clone();
             let child_pid = child_pid.clone();
             let events = events.clone();
+            let reported_cwd = reported_cwd.clone();
             let rt = tokio::runtime::Handle::current();
             let on_read = Box::new(move |bytes: &[u8]| {
                 let shell_pid = child_pid.load(Ordering::Acquire);
@@ -1452,6 +1538,9 @@ impl PaneRuntime {
                         }
                     });
                 }
+                if let Some(cwd) = result.reported_cwd.clone() {
+                    publish_reported_cwd(pane_id, cwd, &reported_cwd, &events);
+                }
                 for content in result.clipboard_writes {
                     if let Err(err) = events.try_send(AppEvent::ClipboardWrite { content }) {
                         warn!(
@@ -1467,7 +1556,10 @@ impl PaneRuntime {
             });
             PaneRuntimeIo::Actor(PtyIoActor::spawn(PtyIoActorConfig {
                 pane_id: pane_id.raw(),
+                #[cfg(unix)]
                 master_fd: spawned.master_fd,
+                #[cfg(windows)]
+                master: spawned.master,
                 initially_quiesced: false,
                 on_read,
                 on_reader_exit: None,
@@ -1781,6 +1873,7 @@ impl PaneRuntime {
             io,
             current_size: Cell::new((rows, cols, 0, 0)),
             child_pid,
+            reported_cwd,
             child_wait_completed: Some(child_wait_completed),
             kitty_keyboard_flags,
             detect_reset_notify,
@@ -1819,6 +1912,7 @@ impl PaneRuntime {
         self.io.resize(rows, cols, cell_width_px, cell_height_px);
     }
 
+    #[cfg(unix)]
     pub fn nudge_child_redraw_after_handoff(&self) {
         let (rows, cols, cell_width_px, cell_height_px) = self.current_size.get();
         self.io
@@ -2051,6 +2145,15 @@ impl PaneRuntime {
 
     /// Get the current working directory of the child shell process.
     pub fn cwd(&self) -> Option<std::path::PathBuf> {
+        if let Some(cwd) = self
+            .reported_cwd
+            .lock()
+            .ok()
+            .and_then(|reported_cwd| reported_cwd.clone())
+            .and_then(usable_reported_cwd)
+        {
+            return Some(cwd);
+        }
         let pid = self.child_pid.load(Ordering::Relaxed);
         crate::platform::process_cwd(pid)
     }
@@ -2139,6 +2242,7 @@ impl PaneRuntime {
                 },
                 current_size: Cell::new((rows, cols, 0, 0)),
                 child_pid: Arc::new(AtomicU32::new(0)),
+                reported_cwd: Arc::new(Mutex::new(None)),
                 child_wait_completed: None,
                 kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
                 detect_reset_notify: Arc::new(Notify::new()),
@@ -2175,6 +2279,7 @@ mod tests {
         assert!(!process_alive_for_shutdown(43, 42, false, |_| false));
     }
 
+    #[cfg(unix)]
     fn capture_shell_output(command: &str, extra_env: &[(&str, &str)]) -> String {
         let pair = native_pty_system()
             .openpty(PtySize {
@@ -2220,6 +2325,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn pane_shell_falls_back_to_shell_env() {
         assert_eq!(
@@ -2228,10 +2334,22 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn pane_shell_ignores_shell_env_on_windows() {
+        assert_eq!(
+            pane_shell_from("", Some("c:\\windows\\system32\\cmd.exe".to_string())),
+            default_pane_shell()
+        );
+    }
+
     #[test]
     fn pane_shell_ignores_empty_values() {
-        assert_eq!(pane_shell_from("   ", Some("  ".to_string())), "/bin/sh");
-        assert_eq!(pane_shell_from("", None), "/bin/sh");
+        assert_eq!(
+            pane_shell_from("   ", Some("  ".to_string())),
+            default_pane_shell()
+        );
+        assert_eq!(pane_shell_from("", None), default_pane_shell());
     }
 
     #[test]
@@ -2254,6 +2372,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn login_shell_builder_uses_default_prog_with_resolved_shell_env() {
         let cmd = pane_shell_command_builder_for_target(
@@ -2268,6 +2387,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn auto_shell_builder_uses_login_shell_on_macos_target() {
         let cmd = pane_shell_command_builder_for_target(
@@ -2293,6 +2413,27 @@ mod tests {
         assert_eq!(cmd.get_argv(), &[std::ffi::OsString::from("/bin/sh")]);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_powershell_shell_builder_wraps_cwd_reporting_prompt() {
+        let cmd = pane_shell_command_builder_for_target(
+            PaneShellConfig::new("powershell.exe", crate::config::ShellModeConfig::NonLogin),
+            false,
+        )
+        .unwrap();
+        let argv: Vec<_> = cmd
+            .get_argv()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(argv[0], "powershell.exe");
+        assert!(argv.iter().any(|arg| arg == "-NoExit"));
+        assert!(argv
+            .iter()
+            .any(|arg| arg.contains("]7;") && arg.contains("Function:\\prompt")));
+    }
+
     #[test]
     fn login_shell_builder_rejects_missing_shell_instead_of_falling_back() {
         let err = pane_shell_command_builder_for_target(
@@ -2306,6 +2447,7 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
+    #[cfg(unix)]
     #[test]
     fn login_shell_builder_resolves_bare_shell_names_from_path() {
         let _lock = crate::integration::integration_env_lock();
@@ -2347,6 +2489,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(base);
     }
 
+    #[cfg(unix)]
     #[test]
     fn login_shell_resolution_preserves_shell_paths() {
         assert_eq!(resolve_shell_for_login_mode("/bin/sh").unwrap(), "/bin/sh");
@@ -2363,12 +2506,14 @@ mod tests {
         assert_eq!(cmd.get_argv(), &[std::ffi::OsString::from("/bin/sh")]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn pane_terminal_identity_overrides_outer_terminal_env() {
         let output = capture_shell_output("printf '%s\\n%s\\n' \"$TERM\" \"$COLORTERM\"", &[]);
         assert_eq!(output, "xterm-256color\ntruecolor\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn pane_terminal_identity_allows_explicit_override() {
         let output = capture_shell_output(
@@ -2378,6 +2523,7 @@ mod tests {
         assert_eq!(output, "vt100\n24bit\n");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn handoff_history_ansi_captures_primary_screen() {
         let runtime =
@@ -2388,6 +2534,7 @@ mod tests {
         assert!(history.contains("handoff-primary-history"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn handoff_history_ansi_skips_alternate_screen() {
         let runtime = PaneRuntime::test_with_scrollback_bytes(
@@ -2400,6 +2547,7 @@ mod tests {
         assert!(runtime.handoff_history_ansi().is_none());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn handoff_runtime_state_captures_terminal_input_state() {
         let runtime = PaneRuntime::test_with_screen_bytes(
@@ -2426,6 +2574,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn truncate_handoff_history_keeps_recent_utf8_boundary() {
         let history = format!("old\n{}\nrecent\n", "é".repeat(8));
@@ -2436,6 +2585,7 @@ mod tests {
         assert!(truncated.is_char_boundary(0));
     }
 
+    #[cfg(unix)]
     #[test]
     fn truncate_handoff_history_drops_partial_long_line() {
         let history = format!("old\n{}", "x".repeat(64));
@@ -2464,6 +2614,7 @@ mod tests {
             },
             current_size: Cell::new((80, 24, 0, 0)),
             child_pid: Arc::new(AtomicU32::new(0)),
+            reported_cwd: Arc::new(Mutex::new(None)),
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             detect_reset_notify: Arc::new(Notify::new()),
@@ -2492,6 +2643,7 @@ mod tests {
             },
             current_size: Cell::new((80, 24, 0, 0)),
             child_pid: Arc::new(AtomicU32::new(0)),
+            reported_cwd: Arc::new(Mutex::new(None)),
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             detect_reset_notify: Arc::new(Notify::new()),

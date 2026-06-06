@@ -289,7 +289,10 @@ pub(super) fn render_panes(
                 frame.render_widget(block, info.rect);
             }
 
-            let show_cursor = info.is_focused && terminal_active && !pane_is_scrolled_back(rt);
+            let show_cursor = info.is_focused
+                && terminal_active
+                && !pane_is_scrolled_back(rt)
+                && app.pane_exposes_host_cursor(ws_idx, info.id);
             rt.render(frame, info.inner_rect, show_cursor);
             render_pane_scrollbar(app, frame, info, rt);
 

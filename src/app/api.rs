@@ -115,8 +115,12 @@ impl App {
         } else {
             None
         };
+        let terminal_cwd_reported = matches!(ev, AppEvent::TerminalCwdReported { .. });
         let previous_toast = self.state.toast.clone();
         let pane_updates = self.state.handle_app_event(ev);
+        if terminal_cwd_reported {
+            self.mark_git_status_refresh_due(Instant::now());
+        }
         for update in &pane_updates {
             self.refresh_new_herdr_toast_context_for_update(update, &previous_toast);
             self.emit_pane_state_update(update);
@@ -604,6 +608,7 @@ mod tests {
     use super::*;
     use crate::detect::{Agent, AgentState};
 
+    #[cfg(unix)]
     fn init_repo(path: &std::path::Path) {
         let status = std::process::Command::new("git")
             .args(["init", "-q"])
@@ -613,6 +618,7 @@ mod tests {
         assert!(status.success(), "git init failed for {}", path.display());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn herdr_toast_context_uses_live_root_runtime_cwd_label() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -704,6 +710,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(temp_root);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn pane_died_respawns_shell_and_clears_restored_agent_session() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
