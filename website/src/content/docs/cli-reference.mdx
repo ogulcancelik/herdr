@@ -78,11 +78,14 @@ herdr worktree list [--workspace ID | --cwd PATH] [--json]
 herdr worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--focus] [--no-focus] [--json]
 herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus] [--json]
 herdr worktree remove --workspace ID [--force] [--json]
+herdr worktree kill --workspace ID [--dry-run] [--force] [--keep-branch] [--json]
 ```
 
 Worktrees are normal Herdr workspaces with Git checkout provenance. `worktree create` creates a Git worktree checkout, opens it as a workspace, and groups it with the parent repo workspace. Without `--path`, Herdr creates the checkout under `<worktrees.directory>/<repo>/<branch-slug>`.
 
 `workspace close` closes Herdr state only. `worktree remove` is the explicit checkout deletion path; it runs `git worktree remove`, never deletes the branch, and requires `--force` when Git refuses a dirty checkout.
+
+`worktree kill` is the scriptable twin of the TUI's "Kill worktree & branch": it runs the same merge gate (merged PR via `gh`, merged into the default branch, or remote containment) and deletes the local branch only with positive evidence. `--dry-run` prints the gate verdict as JSON (exit 0 evidence found, 3 none); `--keep-branch` always preserves the branch; dirty checkouts exit 4 until `--force`. Agents can use this as the single entry point for post-merge cleanup.
 
 ## Tabs
 
