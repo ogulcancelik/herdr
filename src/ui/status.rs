@@ -128,6 +128,35 @@ pub(super) fn render_copy_feedback(
     frame.render_widget(Paragraph::new(text), inner);
 }
 
+/// Action feedback banner: same placement as the config banner, but the
+/// message renders verbatim (no "config warning:" framing).
+pub(super) fn render_action_notice(
+    frame: &mut Frame,
+    area: Rect,
+    row_offset: u16,
+    message: &str,
+    p: &Palette,
+) {
+    let style = Style::default()
+        .fg(panel_contrast_fg(p))
+        .bg(p.peach)
+        .add_modifier(Modifier::BOLD);
+    let text = format!(" {message} ");
+    let width = (text.len() as u16).min(area.width);
+    let notif_area = Rect::new(
+        area.x + area.width.saturating_sub(width),
+        area.y + row_offset,
+        width,
+        1,
+    );
+    if notif_area.y < area.y + area.height {
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(text).style(style),
+            notif_area,
+        );
+    }
+}
+
 pub(super) fn render_config_diagnostic(frame: &mut Frame, area: Rect, message: &str, p: &Palette) {
     let style = Style::default()
         .fg(panel_contrast_fg(p))

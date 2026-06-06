@@ -421,6 +421,16 @@ fn render_notifications(app: &AppState, frame: &mut Frame, terminal_area: Rect) 
         render_config_diagnostic(frame, terminal_area, message, &app.palette);
     }
     let mut copy_feedback_offset = u16::from(has_config_diagnostic);
+    if let Some(notice) = &app.action_notice {
+        self::status::render_action_notice(
+            frame,
+            terminal_area,
+            copy_feedback_offset,
+            notice,
+            &app.palette,
+        );
+        copy_feedback_offset += 1;
+    }
     if let Some(toast) = &app.toast {
         if app.view.layout == ViewLayout::Mobile {
             render_mobile_toast_banner(

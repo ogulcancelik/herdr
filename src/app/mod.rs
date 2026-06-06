@@ -95,6 +95,7 @@ pub struct App {
     pub(crate) input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
     pub(crate) last_terminal_size: Option<(u16, u16)>,
     pub(crate) config_diagnostic_deadline: Option<Instant>,
+    pub(crate) action_notice_deadline: Option<Instant>,
     pub(crate) toast_deadline: Option<Instant>,
     pub(crate) copy_feedback_deadline: Option<Instant>,
     pub(crate) last_git_remote_status_refresh: Instant,
@@ -416,6 +417,7 @@ impl App {
             request_kill_worktree: None,
             attention_all_clear_chimed: false,
             pending_attention_chime: false,
+            action_notice: None,
             agent_aliases: config.ui.agent_aliases.clone(),
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
@@ -576,6 +578,7 @@ impl App {
 
         Self {
             config_diagnostic_deadline: None,
+            action_notice_deadline: None,
             toast_deadline: None,
             copy_feedback_deadline: None,
             state,

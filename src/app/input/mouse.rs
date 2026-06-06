@@ -2327,6 +2327,7 @@ mod tests {
         let mut app = app_for_mouse_test();
         app.state.mode = Mode::ConfirmRemoveWorktree;
         app.state.worktree_remove = Some(crate::app::state::WorktreeRemoveState {
+            managed: true,
             workspace_id: "issue".into(),
             repo_root: "/repo/herdr".into(),
             path: "/repo/herdr-issue".into(),
@@ -2358,6 +2359,7 @@ mod tests {
         let mut app = app_for_mouse_test();
         app.state.mode = Mode::ConfirmRemoveWorktree;
         app.state.worktree_remove = Some(crate::app::state::WorktreeRemoveState {
+            managed: true,
             workspace_id: "issue".into(),
             repo_root: "/repo/herdr".into(),
             path: "/repo/herdr-issue".into(),

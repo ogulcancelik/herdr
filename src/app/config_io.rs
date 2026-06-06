@@ -1,6 +1,14 @@
 use super::App;
 
 impl App {
+    /// Transient, verbatim feedback for an action that could not run
+    /// (wrong target, nothing to do). Auto-expires after a few seconds.
+    pub(crate) fn show_action_notice(&mut self, message: impl Into<String>) {
+        self.state.action_notice = Some(message.into());
+        self.action_notice_deadline =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(4));
+    }
+
     pub(super) fn update_config_file<F>(&mut self, error_context: &str, update: F) -> bool
     where
         F: FnOnce(&str) -> String,

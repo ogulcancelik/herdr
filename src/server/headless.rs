@@ -2923,6 +2923,16 @@ impl HeadlessServer {
 
         if self
             .app
+            .action_notice_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.app.action_notice_deadline = None;
+            self.app.state.action_notice = None;
+            changed = true;
+        }
+
+        if self
+            .app
             .toast_deadline
             .is_some_and(|deadline| now >= deadline)
         {

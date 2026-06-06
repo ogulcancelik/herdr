@@ -667,6 +667,9 @@ pub struct WorktreeCreateState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeRemoveState {
+    /// False when the checkout was adopted ad hoc (not a herdr-managed
+    /// membership): the workspace is closed by id after removal.
+    pub managed: bool,
     pub workspace_id: String,
     pub repo_root: std::path::PathBuf,
     pub path: std::path::PathBuf,
@@ -1357,6 +1360,9 @@ pub struct AppState {
     /// Chime due: consumed by the App/headless loops (the headless server
     /// forwards it to the foreground client, which owns audio).
     pub pending_attention_chime: bool,
+    /// Transient feedback for a rejected/era action (rendered verbatim,
+    /// auto-expires) — unlike config_diagnostic, which is for config problems.
+    pub action_notice: Option<String>,
     /// Sidebar display aliases for agent labels ([ui] agent_aliases).
     pub agent_aliases: std::collections::HashMap<String, String>,
     pub request_open_existing_worktree: Option<usize>,
@@ -1696,6 +1702,7 @@ impl AppState {
             request_kill_worktree: None,
             attention_all_clear_chimed: false,
             pending_attention_chime: false,
+            action_notice: None,
             agent_aliases: std::collections::HashMap::new(),
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,

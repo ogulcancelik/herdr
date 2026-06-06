@@ -81,7 +81,7 @@ impl App {
             match self.worktree_source_metadata(ws_idx) {
                 Ok(metadata) => metadata,
                 Err(err) => {
-                    self.state.config_diagnostic = Some(err);
+                    self.show_action_notice(err);
                     return;
                 }
             };
@@ -129,8 +129,7 @@ impl App {
     /// a fork of the session instead of starting a shell.
     pub(crate) fn open_branch_session_dialog(&mut self, ws_idx: usize) {
         let Some(plan) = self.focused_branch_plan(ws_idx) else {
-            self.state.config_diagnostic =
-                Some("branch session: focused pane has no resumable agent session".into());
+            self.show_action_notice("branch session: focused pane has no resumable agent session");
             return;
         };
         self.open_new_linked_worktree_dialog(ws_idx);
@@ -171,6 +170,7 @@ impl App {
         };
         self.state.selected = ws_idx;
         self.state.worktree_remove = Some(WorktreeRemoveState {
+            managed: true,
             workspace_id: ws.id.clone(),
             repo_root: space.repo_root,
             path: space.checkout_path,
@@ -191,22 +191,44 @@ impl App {
         let Some(ws) = self.state.workspaces.get(ws_idx) else {
             return;
         };
-        if !ws
+        // Herdr-managed membership is just bookkeeping; any linked git
+        // worktree (created by an agent, by hand, by another tool) gets the
+        // same merge-gated kill. Only non-worktree checkouts are refused —
+        // the main checkout is never killable.
+        let managed_space = ws
             .worktree_space()
-            .is_some_and(|space| space.is_linked_worktree)
-        {
-            self.state.config_diagnostic =
-                Some("This workspace is not a Herdr-managed worktree checkout.".into());
-            return;
-        }
-        let Some(space) = ws.worktree_space().cloned() else {
-            return;
+            .filter(|space| space.is_linked_worktree)
+            .cloned();
+        let (repo_root, checkout, managed) = match managed_space {
+            Some(space) => (space.repo_root, space.checkout_path, true),
+            None => {
+                let git_space = ws.git_space().cloned().or_else(|| {
+                    ws.resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)
+                        .as_deref()
+                        .and_then(crate::workspace::git_space_metadata)
+                });
+                match git_space {
+                    Some(space) if space.is_linked_worktree => {
+                        let main_root = crate::worktree::main_root_from_common_dir(
+                            std::path::Path::new(&space.key),
+                        );
+                        (main_root, space.repo_root, false)
+                    }
+                    _ => {
+                        self.show_action_notice(
+                            "kill worktree: this workspace is not a linked git worktree checkout",
+                        );
+                        return;
+                    }
+                }
+            }
         };
         self.state.selected = ws_idx;
         self.state.worktree_remove = Some(WorktreeRemoveState {
+            managed,
             workspace_id: ws.id.clone(),
-            repo_root: space.repo_root.clone(),
-            path: space.checkout_path.clone(),
+            repo_root: repo_root.clone(),
+            path: checkout.clone(),
             error: None,
             removing: false,
             force_confirmation: false,
@@ -217,8 +239,6 @@ impl App {
         self.state.mode = Mode::ConfirmRemoveWorktree;
 
         let workspace_id = ws.id.clone();
-        let repo_root = space.repo_root;
-        let checkout = space.checkout_path;
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
             let branch = crate::worktree::checkout_branch_name(&checkout);
@@ -272,7 +292,7 @@ impl App {
             }
             Err(message) => {
                 tracing::warn!(branch = %result.branch, error = %message, "branch delete failed");
-                self.state.config_diagnostic = Some(format!(
+                self.show_action_notice(format!(
                     "removed checkout, but failed to delete branch {}: {message}",
                     result.branch
                 ));
@@ -287,7 +307,7 @@ impl App {
             match self.worktree_source_metadata(ws_idx) {
                 Ok(metadata) => metadata,
                 Err(err) => {
-                    self.state.config_diagnostic = Some(err);
+                    self.show_action_notice(err);
                     return;
                 }
             };
@@ -343,7 +363,7 @@ impl App {
             .collect::<Vec<_>>();
 
         if entries.is_empty() {
-            self.state.config_diagnostic = Some("No Git worktrees found for this repo.".into());
+            self.show_action_notice("No Git worktrees found for this repo.");
             return;
         }
 
@@ -806,6 +826,11 @@ impl App {
         match result.result {
             Ok(()) => {
                 tracing::info!(workspace_id = %result.workspace_id, path = %result.path.display(), "git worktree remove completed");
+                let removed_managed = self
+                    .state
+                    .worktree_remove
+                    .as_ref()
+                    .is_none_or(|remove| remove.managed);
                 let branch_to_delete = self
                     .state
                     .worktree_remove
@@ -839,11 +864,13 @@ impl App {
                     .iter()
                     .position(|ws| ws.id == result.workspace_id)
                 {
-                    let still_same_linked_worktree = self.state.workspaces[ws_idx]
-                        .worktree_space()
-                        .is_some_and(|space| {
-                            space.is_linked_worktree && space.checkout_path == result.path
-                        });
+                    let ws = &self.state.workspaces[ws_idx];
+                    let still_same_linked_worktree = ws.worktree_space().is_some_and(|space| {
+                        space.is_linked_worktree && space.checkout_path == result.path
+                    }) || (!removed_managed
+                        && ws
+                            .git_space()
+                            .is_some_and(|space| space.repo_root == result.path));
                     if still_same_linked_worktree {
                         self.state.selected = ws_idx;
                         self.state.close_selected_workspace();
@@ -1102,16 +1129,16 @@ mod tests {
         assert_eq!(app.state.mode, Mode::Navigate);
         assert!(app.state.worktree_create.is_none());
         assert_eq!(
-            app.state.config_diagnostic.as_deref(),
+            app.state.action_notice.as_deref(),
             Some("New and open worktree actions start from the repo parent workspace.")
         );
 
-        app.state.config_diagnostic = None;
+        app.state.action_notice = None;
         app.open_existing_worktree_dialog(0);
 
         assert!(app.state.worktree_open.is_none());
         assert_eq!(
-            app.state.config_diagnostic.as_deref(),
+            app.state.action_notice.as_deref(),
             Some("New and open worktree actions start from the repo parent workspace.")
         );
     }
@@ -1258,6 +1285,7 @@ mod tests {
         let path = std::path::PathBuf::from("/w/herdr/dirty");
         let mut app = app_for_worktree_tests();
         app.state.worktree_remove = Some(WorktreeRemoveState {
+            managed: true,
             workspace_id: "ws".into(),
             repo_root: std::path::PathBuf::from("/repo/herdr"),
             path: path.clone(),
@@ -1289,6 +1317,7 @@ mod tests {
         let path = std::path::PathBuf::from("/w/herdr/missing");
         let mut app = app_for_worktree_tests();
         app.state.worktree_remove = Some(WorktreeRemoveState {
+            managed: true,
             workspace_id: "ws".into(),
             repo_root: std::path::PathBuf::from("/repo/herdr"),
             path: path.clone(),
@@ -1400,7 +1429,7 @@ mod tests {
         assert!(app.state.worktree_create.is_none());
         assert_eq!(app.state.mode, Mode::Navigate);
         assert_eq!(
-            app.state.config_diagnostic.as_deref(),
+            app.state.action_notice.as_deref(),
             Some("branch session: focused pane has no resumable agent session")
         );
     }
@@ -1450,24 +1479,83 @@ mod tests {
         );
     }
     #[test]
-    fn kill_worktree_confirmation_rejects_non_linked_workspace() {
+    fn kill_worktree_confirmation_rejects_non_worktree_workspace() {
         let mut app = app_for_worktree_tests();
-        app.state.workspaces = vec![crate::workspace::Workspace::test_new("main")];
+        let mut ws = crate::workspace::Workspace::test_new("main");
+        // Pin identity away from the test process cwd (which may itself be a
+        // linked worktree) and pretend it's a plain main checkout.
+        ws.identity_cwd = std::path::PathBuf::from("/plain/dir");
+        ws.cached_git_space = None;
+        app.state.workspaces = vec![ws];
         app.state.mode = Mode::Navigate;
 
         app.open_kill_worktree_confirmation(0);
 
         assert!(app.state.worktree_remove.is_none());
         assert_eq!(
-            app.state.config_diagnostic.as_deref(),
-            Some("This workspace is not a Herdr-managed worktree checkout.")
+            app.state.action_notice.as_deref(),
+            Some("kill worktree: this workspace is not a linked git worktree checkout")
         );
+    }
+
+    #[test]
+    fn kill_worktree_adopts_unmanaged_linked_checkout() {
+        let repo = create_committed_repo("kill-unmanaged-repo");
+        let checkout = unique_temp_path("kill-unmanaged-checkout");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "feature/external",
+                checkout.to_str().unwrap(),
+            ],
+        );
+
+        let mut app = app_for_worktree_tests();
+        let mut ws = crate::workspace::Workspace::test_new("external");
+        ws.identity_cwd = checkout.clone();
+        ws.cached_git_space = crate::workspace::git_space_metadata(&checkout);
+        assert!(
+            ws.cached_git_space
+                .as_ref()
+                .is_some_and(|space| space.is_linked_worktree),
+            "external checkout should be detected as a linked worktree"
+        );
+        app.state.workspaces = vec![ws];
+        app.state.mode = Mode::Navigate;
+
+        app.open_kill_worktree_confirmation(0);
+
+        let remove = app
+            .state
+            .worktree_remove
+            .as_ref()
+            .expect("kill should adopt the unmanaged checkout");
+        assert!(!remove.managed);
+        assert!(remove.delete_branch);
+        assert_eq!(
+            std::fs::canonicalize(&remove.path).unwrap(),
+            std::fs::canonicalize(&checkout).unwrap()
+        );
+        assert_eq!(
+            std::fs::canonicalize(&remove.repo_root).unwrap(),
+            std::fs::canonicalize(&repo).unwrap(),
+            "git commands must run from the main checkout"
+        );
+        assert_eq!(app.state.mode, Mode::ConfirmRemoveWorktree);
+
+        let _ = std::fs::remove_dir_all(&checkout);
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[test]
     fn kill_gate_event_updates_pending_dialog() {
         let mut app = app_for_worktree_tests();
         app.state.worktree_remove = Some(WorktreeRemoveState {
+            managed: true,
             workspace_id: "ws".into(),
             repo_root: std::path::PathBuf::from("/repo/herdr"),
             path: std::path::PathBuf::from("/repo/herdr-issue"),
@@ -1502,6 +1590,7 @@ mod tests {
     fn start_worktree_remove_waits_for_pending_merge_gate() {
         let mut app = app_for_worktree_tests();
         app.state.worktree_remove = Some(WorktreeRemoveState {
+            managed: true,
             workspace_id: "ws".into(),
             repo_root: std::path::PathBuf::from("/repo/herdr"),
             path: std::path::PathBuf::from("/repo/herdr-issue"),
@@ -1548,6 +1637,7 @@ mod tests {
 
         let mut app = app_for_worktree_tests();
         app.state.worktree_remove = Some(WorktreeRemoveState {
+            managed: true,
             workspace_id: "ws".into(),
             repo_root: repo.clone(),
             path: checkout.clone(),
@@ -1600,6 +1690,7 @@ mod tests {
 
         let mut app = app_for_worktree_tests();
         app.state.worktree_remove = Some(WorktreeRemoveState {
+            managed: true,
             workspace_id: "ws".into(),
             repo_root: repo.clone(),
             path: std::path::PathBuf::from("/tmp/x"),

@@ -187,6 +187,19 @@ fn run_command_capture(
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Main checkout root derived from a git common dir: "…/repo/.git" -> "…/repo";
+/// bare-style common dirs are returned unchanged (git -C works there too).
+pub(crate) fn main_root_from_common_dir(common_dir: &std::path::Path) -> std::path::PathBuf {
+    if common_dir.file_name().and_then(|name| name.to_str()) == Some(".git") {
+        common_dir
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| common_dir.to_path_buf())
+    } else {
+        common_dir.to_path_buf()
+    }
+}
+
 /// Branch checked out in `checkout`, if any (detached HEAD yields None).
 pub(crate) fn checkout_branch_name(checkout: &std::path::Path) -> Option<String> {
     let path = checkout.to_string_lossy().to_string();
@@ -866,5 +879,16 @@ prunable stale
         let _ = std::fs::remove_dir_all(&checkout);
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&origin);
+    }
+    #[test]
+    fn main_root_from_common_dir_strips_dot_git() {
+        assert_eq!(
+            main_root_from_common_dir(std::path::Path::new("/repo/herdr/.git")),
+            std::path::PathBuf::from("/repo/herdr")
+        );
+        assert_eq!(
+            main_root_from_common_dir(std::path::Path::new("/repo/bare.git")),
+            std::path::PathBuf::from("/repo/bare.git")
+        );
     }
 }
