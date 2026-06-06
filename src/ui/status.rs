@@ -335,7 +335,7 @@ pub(super) fn render_status_line(app: &crate::app::AppState, frame: &mut Frame, 
     }
     spans.insert(0, Span::styled(" ".to_string(), dim));
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).alignment(Alignment::Right),
+        Paragraph::new(Line::from(spans)).alignment(Alignment::Left),
         area,
     );
 }

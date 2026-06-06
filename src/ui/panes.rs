@@ -115,7 +115,8 @@ fn pane_header_rows(
     if !terminal.header_reserved {
         return 0;
     }
-    let rows = 1 + app.prompt_float_lines;
+    // context + prompt rows + a hairline divider separating header from content
+    let rows = 2 + app.prompt_float_lines;
     // Keep a usable PTY: the header never claims more than it leaves behind.
     if pane_inner.height < rows.saturating_mul(2).saturating_add(4) {
         return 0;
@@ -389,13 +390,20 @@ fn render_pane_header(
         .and_then(|pane| app.terminals.get(&pane.attached_terminal_id));
 
     let p = &app.palette;
-    let bar_bg = Style::default().bg(p.surface_dim);
+    let bar_bg = Style::default();
     let buf = frame.buffer_mut();
     for y in header.y..header.y + header.height {
         for x in header.x..header.x + header.width {
             buf[(x, y)].set_symbol(" ");
             buf[(x, y)].set_style(bar_bg);
         }
+    }
+    // Hairline divider — same visual language as the sidebar separators.
+    let divider_y = header.y + header.height - 1;
+    let divider_style = Style::default().fg(p.divider_color());
+    for x in header.x..header.x + header.width {
+        buf[(x, divider_y)].set_symbol("\u{2500}");
+        buf[(x, divider_y)].set_style(divider_style);
     }
 
     // Context line: project · worktree · branch.
@@ -406,10 +414,7 @@ fn render_pane_header(
         .unwrap_or_else(|| ws.display_name());
     spans.push(Span::styled(
         project,
-        Style::default()
-            .bg(p.surface_dim)
-            .fg(p.text)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(p.text).add_modifier(Modifier::BOLD),
     ));
     if let Some(worktree_dir) = ws
         .worktree_space()
@@ -417,35 +422,26 @@ fn render_pane_header(
         .and_then(|space| space.checkout_path.file_name())
         .map(|name| name.to_string_lossy().to_string())
     {
-        spans.push(Span::styled(
-            " \u{b7} ",
-            Style::default().bg(p.surface_dim).fg(p.overlay0),
-        ));
-        spans.push(Span::styled(
-            worktree_dir,
-            Style::default().bg(p.surface_dim).fg(p.mauve),
-        ));
+        spans.push(Span::styled(" \u{b7} ", Style::default().fg(p.overlay0)));
+        spans.push(Span::styled(worktree_dir, Style::default().fg(p.mauve)));
     }
     if let Some(branch) = ws.branch() {
-        spans.push(Span::styled(
-            " \u{b7} ",
-            Style::default().bg(p.surface_dim).fg(p.overlay0),
-        ));
+        spans.push(Span::styled(" \u{b7} ", Style::default().fg(p.overlay0)));
         spans.push(Span::styled(
             format!("\u{e0a0} {branch}"),
-            Style::default().bg(p.surface_dim).fg(p.green),
+            Style::default().fg(p.green),
         ));
         if let Some((ahead, behind)) = ws.ahead_behind() {
             if ahead > 0 {
                 spans.push(Span::styled(
                     format!(" \u{2191}{ahead}"),
-                    Style::default().bg(p.surface_dim).fg(p.yellow),
+                    Style::default().fg(p.yellow),
                 ));
             }
             if behind > 0 {
                 spans.push(Span::styled(
                     format!(" \u{2193}{behind}"),
-                    Style::default().bg(p.surface_dim).fg(p.peach),
+                    Style::default().fg(p.peach),
                 ));
             }
         }
@@ -458,7 +454,7 @@ fn render_pane_header(
             };
             spans.push(Span::styled(
                 format!(" #{} {glyph}", pr.number),
-                Style::default().bg(p.surface_dim).fg(color),
+                Style::default().fg(color),
             ));
         }
     }
@@ -475,7 +471,7 @@ fn render_pane_header(
         Some(prompt) => collapse_prompt_lines(prompt, prompt_rows, width),
         None => Vec::new(),
     };
-    let prompt_style = Style::default().bg(p.surface_dim).fg(p.subtext0);
+    let prompt_style = Style::default().fg(p.subtext0);
     let marker_style = Style::default()
         .bg(p.surface_dim)
         .fg(p.overlay0)
@@ -519,6 +515,7 @@ fn render_pane_header(
 
     // Click-expanded: the full prompt floats below the header, over content.
     if expanded {
+        let overlay_style = Style::default().fg(p.text);
         if let Some(prompt) = prompt {
             let inner = info.inner_rect;
             let full: Vec<String> = prompt
@@ -530,14 +527,14 @@ fn render_pane_header(
                 let y = inner.y + offset;
                 for x in inner.x..inner.x + inner.width {
                     buf[(x, y)].set_symbol(" ");
-                    buf[(x, y)].set_style(prompt_style);
+                    buf[(x, y)].set_style(overlay_style);
                 }
                 buf.set_stringn(
                     inner.x + 1,
                     y,
                     full[offset as usize].clone(),
                     inner.width.saturating_sub(2) as usize,
-                    prompt_style,
+                    overlay_style,
                 );
             }
             if (full.len() as u16) > rows && rows > 0 {
@@ -1156,9 +1153,9 @@ mod tests {
         app.terminals.get_mut(&terminal_id).unwrap().header_reserved = true;
         let (header, content) = carve_pane_header(&app, Some(&terminal_id), pane_inner);
         let header = header.expect("header should be reserved");
-        assert_eq!(header.height, 4);
-        assert_eq!(content.y, pane_inner.y + 4);
-        assert_eq!(content.height, pane_inner.height - 4);
+        assert_eq!(header.height, 5);
+        assert_eq!(content.y, pane_inner.y + 5);
+        assert_eq!(content.height, pane_inner.height - 5);
 
         // Disabled config: nothing reserved.
         app.pane_header = false;
@@ -1179,8 +1176,8 @@ mod tests {
         terminal.header_reserved = true;
         app.terminals.insert(terminal_id.clone(), terminal);
 
-        // 10 rows < 2*4+4: the pane keeps everything.
-        let tiny = Rect::new(0, 0, 80, 10);
+        // 12 rows < 2*5+4: the pane keeps everything.
+        let tiny = Rect::new(0, 0, 80, 12);
         let (header, content) = carve_pane_header(&app, Some(&terminal_id), tiny);
         assert!(header.is_none());
         assert_eq!(content, tiny);
