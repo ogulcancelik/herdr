@@ -2344,6 +2344,11 @@ impl AppState {
             }
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
+            // Tmux control mode events — logged but not state-changing for
+            // herdr-managed panes. External session detection will be fed
+            // through the detection pipeline separately.
+            AppEvent::TmuxPaneOutput { .. } => Vec::new(),
+            AppEvent::TmuxPaneLifecycle { .. } => Vec::new(),
         }
     }
 

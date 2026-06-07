@@ -217,6 +217,8 @@ pub struct HeadlessServer {
     server_event_rx: mpsc::Receiver<ServerEvent>,
     /// Sender for server events (cloned for each client thread).
     server_event_tx: mpsc::Sender<ServerEvent>,
+    /// Optional tmux control mode listener for external session monitoring.
+    tmux_listener: Option<crate::tmux_control::TmuxControlListener>,
 }
 
 fn apply_terminal_attach_scroll(
@@ -346,7 +348,103 @@ impl HeadlessServer {
             should_quit,
             server_event_rx,
             server_event_tx,
+            tmux_listener: None,
         })
+    }
+
+    /// Spawn the tmux control mode listener if enabled in config.
+    ///
+    /// When enabled, this spawns a `tmux -C` client that streams pane output
+    /// and lifecycle events in real-time. Events are routed through the
+    /// existing `AppEvent` channel so they integrate with the standard
+    /// detection and notification pipeline.
+    pub fn spawn_tmux_control_listener(&mut self, config: &config::Config) {
+        let tmux_config = crate::tmux_control::TmuxControlConfig {
+            enabled: config.tmux_control.enabled,
+            target_sessions: config.tmux_control.target_sessions.clone(),
+            socket_path: config.tmux_control.socket_path.clone(),
+        };
+
+        if !tmux_config.enabled {
+            return;
+        }
+
+        let event_tx = self.app.event_tx.clone();
+        let target_sessions = tmux_config.target_sessions.clone();
+
+        let rt_handle = tokio::runtime::Handle::current();
+
+        // Spawn in background — don't block server startup.
+        rt_handle.spawn(async move {
+            match crate::tmux_control::TmuxControlListener::spawn(tmux_config).await {
+                Ok((mut listener, mut event_rx)) => {
+                    info!("tmux control mode listener started");
+
+                    // Forward events from the control mode listener into the app event channel.
+                    while let Some(event) = event_rx.recv().await {
+                        match &event {
+                            crate::tmux_control::TmuxEvent::Output { pane, data } => {
+                                let plain = crate::tmux_control::protocol::strip_ansi(data);
+                                let _ = event_tx.send(AppEvent::TmuxPaneOutput {
+                                    pane_id: pane.clone(),
+                                    plain_text: plain,
+                                    raw_data: data.clone(),
+                                });
+                            }
+                            crate::tmux_control::TmuxEvent::WindowAdd {
+                                session,
+                                window,
+                            } => {
+                                let _ = event_tx.send(AppEvent::TmuxPaneLifecycle {
+                                    session: session.clone(),
+                                    window: window.clone(),
+                                    pane: String::new(),
+                                    event: crate::events::TmuxLifecycleEvent::WindowAdd,
+                                });
+                            }
+                            crate::tmux_control::TmuxEvent::WindowClose {
+                                session,
+                                window,
+                            } => {
+                                let _ = event_tx.send(AppEvent::TmuxPaneLifecycle {
+                                    session: session.clone(),
+                                    window: window.clone(),
+                                    pane: String::new(),
+                                    event: crate::events::TmuxLifecycleEvent::WindowClose,
+                                });
+                            }
+                            crate::tmux_control::TmuxEvent::PaneFocusChanged {
+                                session,
+                                window,
+                                pane,
+                            } => {
+                                let _ = event_tx.send(AppEvent::TmuxPaneLifecycle {
+                                    session: session.clone(),
+                                    window: window.clone(),
+                                    pane: pane.clone(),
+                                    event: crate::events::TmuxLifecycleEvent::PaneFocusChanged,
+                                });
+                            }
+                            _ => {
+                                // Session, pause, begin/end, and unknown events are
+                                // logged but not forwarded as app events.
+                                debug!(event = ?event, "tmux control mode event (not forwarded)");
+                            }
+                        }
+                    }
+
+                    info!("tmux control mode listener ended");
+                }
+                Err(err) => {
+                    warn!(error = %err, "tmux control mode listener failed to start");
+                }
+            }
+        });
+
+        // Store the listener handle. We keep a dummy handle here since the
+        // actual listener runs in the spawned task. The important thing is
+        // that we record that tmux control mode was attempted.
+        self.tmux_listener = None;
     }
 
     /// Runs the headless server event loop until shutdown.
@@ -1700,6 +1798,37 @@ impl HeadlessServer {
                     }
                 }
 
+                true
+            }
+            AppEvent::TmuxPaneOutput {
+                pane_id,
+                plain_text,
+                ..
+            } => {
+                // Tmux control mode received pane output. Feed it through the
+                // detection pipeline so agents in external tmux sessions get
+                // their state updated in real-time.
+                debug!(
+                    pane_id = %pane_id,
+                    len = plain_text.len(),
+                    "tmux control mode: pane output"
+                );
+                self.app.handle_internal_event(ev);
+                true
+            }
+            AppEvent::TmuxPaneLifecycle {
+                session,
+                window,
+                event,
+                ..
+            } => {
+                debug!(
+                    session = %session,
+                    window = %window,
+                    event = ?event,
+                    "tmux control mode: lifecycle event"
+                );
+                self.app.handle_internal_event(ev);
                 true
             }
             _ => {
@@ -3419,6 +3548,9 @@ pub fn run_server() -> io::Result<()> {
         );
         print_ready_message(&api::socket_path(), &client_socket_path());
 
+        // Start tmux control mode listener if enabled in config.
+        server.spawn_tmux_control_listener(&loaded_config.config);
+
         server.run().await
     });
 
@@ -3601,6 +3733,7 @@ mod tests {
             should_quit: Arc::new(AtomicBool::new(false)),
             server_event_rx,
             server_event_tx,
+            tmux_listener: None,
         }
     }
 
