@@ -2400,6 +2400,9 @@ impl AppState {
             let terminal = self.terminals.get_mut(&terminal_id)?;
             update(terminal)?
         };
+        if let Some(applied_ref) = mutation.applied_session_ref.as_ref() {
+            self.evict_duplicate_session_refs(&terminal_id, applied_ref);
+        }
         if mutation.session_ref_changed {
             self.mark_session_dirty();
         }
@@ -2420,6 +2423,32 @@ impl AppState {
             presentation: change.presentation.clone(),
         };
         Some(update)
+    }
+
+    /// Enforce session-id uniqueness across terminals: a session ref just
+    /// verified onto `keep_terminal_id` is dropped from every other terminal,
+    /// where it can only be a leftover mis-delivery from a stale pane-id env.
+    fn evict_duplicate_session_refs(
+        &mut self,
+        keep_terminal_id: &crate::terminal::TerminalId,
+        session_ref: &crate::agent_resume::AgentSessionRef,
+    ) {
+        let mut changed = false;
+        for (terminal_id, terminal) in self.terminals.iter_mut() {
+            if terminal_id == keep_terminal_id {
+                continue;
+            }
+            if terminal.evict_session_ref(session_ref) {
+                tracing::info!(
+                    terminal_id = ?terminal_id,
+                    "evicted duplicate agent session ref"
+                );
+                changed = true;
+            }
+        }
+        if changed {
+            self.mark_session_dirty();
+        }
     }
 
     fn apply_pane_state_change(
@@ -3977,6 +4006,63 @@ mod tests {
         assert_eq!(
             notification_sound_for_state_change(false, AgentState::Unknown, AgentState::Idle),
             None
+        );
+    }
+
+    #[test]
+    fn duplicate_session_refs_are_evicted_from_other_terminals() {
+        let mut state = app_with_workspaces(&["one", "two"]);
+        let pane_one = *state.workspaces[0].panes.keys().next().unwrap();
+        let pane_two = *state.workspaces[1].panes.keys().next().unwrap();
+        let terminal_one = state.workspaces[0]
+            .panes
+            .get(&pane_one)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        let terminal_two = state.workspaces[1]
+            .panes
+            .get(&pane_two)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+
+        let report = |pane_id| AppEvent::AgentSessionReported {
+            pane_id,
+            source: "herdr:claude".into(),
+            agent_label: "claude".into(),
+            seq: Some(1),
+            session_ref: crate::agent_resume::AgentSessionRef::id("session-123"),
+        };
+
+        // Mis-delivered first (stale env id), then the ancestry-verified
+        // report lands the same session on its true pane.
+        state.handle_app_event(report(pane_one));
+        assert!(state
+            .terminals
+            .get(&terminal_one)
+            .unwrap()
+            .persisted_agent_session
+            .is_some());
+
+        state.handle_app_event(report(pane_two));
+        assert!(
+            state
+                .terminals
+                .get(&terminal_two)
+                .unwrap()
+                .persisted_agent_session
+                .is_some(),
+            "true pane keeps the session"
+        );
+        assert!(
+            state
+                .terminals
+                .get(&terminal_one)
+                .unwrap()
+                .persisted_agent_session
+                .is_none(),
+            "stale holder is evicted"
         );
     }
 

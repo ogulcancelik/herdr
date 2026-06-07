@@ -45,6 +45,10 @@ pub struct EffectiveStateChange {
 pub struct TerminalStateMutation {
     pub effective_state_change: Option<EffectiveStateChange>,
     pub session_ref_changed: bool,
+    /// Session ref a report just attached to this terminal. A session id is
+    /// unique to one live agent process, so the caller evicts the same ref
+    /// from every other terminal (mis-deliveries from stale pane-id envs).
+    pub applied_session_ref: Option<crate::agent_resume::AgentSessionRef>,
 }
 
 /// Pure state for a server-owned terminal.
@@ -251,6 +255,7 @@ impl TerminalState {
             ),
             session_ref_changed: previous_session
                 != self.current_session_identity_for_persistence(),
+            applied_session_ref: None,
         }
     }
 
@@ -336,6 +341,7 @@ impl TerminalState {
         }
         self.persisted_agent_session = None;
         self.header_reserved = true;
+        let applied_session_ref = session_ref.clone();
         self.hook_authority = Some(HookAuthority {
             source,
             agent_label,
@@ -356,6 +362,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed: previous_session != current_session,
+            applied_session_ref,
         })
     }
 
@@ -466,6 +473,7 @@ impl TerminalState {
         }
 
         let previous_session = self.current_session_identity_for_persistence();
+        let applied_session_ref = session_ref.clone();
         self.persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
             source,
             agent: agent_label,
@@ -475,7 +483,34 @@ impl TerminalState {
         Some(TerminalStateMutation {
             effective_state_change: None,
             session_ref_changed: previous_session != current_session,
+            applied_session_ref: Some(applied_session_ref),
         })
+    }
+
+    /// Drop any agent session identity equal to `session_ref`. A session id
+    /// belongs to exactly one live agent process; when an ancestry-verified
+    /// report lands that ref on another terminal, every other holder was a
+    /// mis-delivery from an environment carrying a stale pane id.
+    pub fn evict_session_ref(
+        &mut self,
+        session_ref: &crate::agent_resume::AgentSessionRef,
+    ) -> bool {
+        let mut changed = false;
+        if let Some(authority) = self.hook_authority.as_mut() {
+            if authority.session_ref.as_ref() == Some(session_ref) {
+                authority.session_ref = None;
+                changed = true;
+            }
+        }
+        if self
+            .persisted_agent_session
+            .as_ref()
+            .is_some_and(|session| &session.session_ref == session_ref)
+        {
+            self.persisted_agent_session = None;
+            changed = true;
+        }
+        changed
     }
 
     fn known_agent_label_conflicts_with_detected_agent(&self, agent_label: &str) -> bool {
@@ -554,6 +589,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed: previous_session.is_some(),
+            applied_session_ref: None,
         })
     }
 
@@ -614,6 +650,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed: previous_session.is_some(),
+            applied_session_ref: None,
         })
     }
 

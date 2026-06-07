@@ -90,6 +90,10 @@ pub struct App {
     /// Peer PID of the API request currently being handled; lets pane
     /// reports resolve by process ancestry when env pane-ids are stale.
     pub(crate) current_api_peer_pid: Option<u32>,
+    /// Test-only override for pane child PIDs so ancestry reconciliation can
+    /// be exercised without spawning real PTYs.
+    #[cfg(test)]
+    pub(crate) test_pane_child_pids: std::collections::HashMap<crate::layout::PaneId, u32>,
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
     pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
     pub(crate) event_hub: crate::api::EventHub,
@@ -609,6 +613,8 @@ impl App {
             terminal_runtimes: restored_terminal_runtimes,
             event_tx,
             current_api_peer_pid: None,
+            #[cfg(test)]
+            test_pane_child_pids: std::collections::HashMap::new(),
             event_rx,
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
             git_refresh_in_flight: false,
