@@ -842,7 +842,6 @@ fn integration_target_install_layout_available(
 ) -> bool {
     match target {
         crate::api::schema::IntegrationTarget::Codex => codex_standalone_binary_available(),
-        crate::api::schema::IntegrationTarget::Cursor => cursor_install_layout_available(),
         crate::api::schema::IntegrationTarget::Hermes => hermes_install_layout_available(),
         _ => false,
     }
@@ -1961,6 +1960,12 @@ pub(crate) fn install_qodercli() -> io::Result<QodercliInstallPaths> {
 }
 
 pub(crate) fn install_cursor() -> io::Result<CursorInstallPaths> {
+    if !command_available("cursor-agent") {
+        return Err(io::Error::other(
+            "cursor-agent command not found on PATH. install the cursor agent cli first",
+        ));
+    }
+
     let dir = cursor_dir()?;
     if !dir.is_dir() {
         return Err(io::Error::other(format!(
@@ -3081,12 +3086,6 @@ fn qodercli_dir() -> io::Result<PathBuf> {
 
 fn cursor_dir() -> io::Result<PathBuf> {
     config_dir_from_env_or_home(CURSOR_CONFIG_DIR_ENV_VAR, &[".cursor"])
-}
-
-fn cursor_install_layout_available() -> bool {
-    cursor_dir()
-        .map(|dir| dir.is_dir())
-        .unwrap_or(false)
 }
 
 fn home_dir() -> io::Result<PathBuf> {
@@ -5572,6 +5571,31 @@ mod tests {
             "unexpected error: {err}"
         );
 
+        std::env::remove_var(CURSOR_CONFIG_DIR_ENV_VAR);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_cursor_errors_when_cursor_agent_missing() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let cursor_dir = base.join(".cursor");
+        fs::create_dir_all(&cursor_dir).unwrap();
+        std::env::set_var(CURSOR_CONFIG_DIR_ENV_VAR, &cursor_dir);
+        let original_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", base.join("empty-bin"));
+
+        let err = install_cursor().unwrap_err().to_string();
+        assert!(
+            err.contains("cursor-agent command not found"),
+            "unexpected error: {err}"
+        );
+
+        if let Some(path) = original_path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
         std::env::remove_var(CURSOR_CONFIG_DIR_ENV_VAR);
         let _ = fs::remove_dir_all(base);
     }

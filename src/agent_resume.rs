@@ -142,7 +142,7 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
         }
         ("herdr:cursor", "cursor", AgentSessionRefKind::Id) => {
             vec![
-                "agent".into(),
+                "cursor-agent".into(),
                 "--resume".into(),
                 session_ref.value.clone(),
             ]
@@ -282,7 +282,7 @@ mod tests {
             )
             .unwrap()
             .argv,
-            vec!["agent", "--resume", "cursor-session"]
+            vec!["cursor-agent", "--resume", "cursor-session"]
         );
     }
 
