@@ -792,7 +792,7 @@ fn integration_target_command_names(
 }
 
 fn cursor_command_names() -> &'static [&'static str] {
-    &["agent", "cursor-agent"]
+    &["cursor-agent"]
 }
 
 fn integration_target_supported(target: crate::api::schema::IntegrationTarget) -> bool {
@@ -842,6 +842,7 @@ fn integration_target_install_layout_available(
 ) -> bool {
     match target {
         crate::api::schema::IntegrationTarget::Codex => codex_standalone_binary_available(),
+        crate::api::schema::IntegrationTarget::Cursor => cursor_install_layout_available(),
         crate::api::schema::IntegrationTarget::Hermes => hermes_install_layout_available(),
         _ => false,
     }
@@ -3082,6 +3083,12 @@ fn cursor_dir() -> io::Result<PathBuf> {
     config_dir_from_env_or_home(CURSOR_CONFIG_DIR_ENV_VAR, &[".cursor"])
 }
 
+fn cursor_install_layout_available() -> bool {
+    cursor_dir()
+        .map(|dir| dir.is_dir())
+        .unwrap_or(false)
+}
+
 fn home_dir() -> io::Result<PathBuf> {
     if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(home));
@@ -5249,7 +5256,8 @@ mod tests {
         assert!(CURSOR_HOOK_ASSET.contains("conversation_id"));
         assert!(CURSOR_HOOK_ASSET.contains("agent_session_id"));
         assert!(CURSOR_HOOK_ASSET.contains("pane.report_agent_session"));
-        assert!(!CURSOR_HOOK_ASSET.contains("hook_event_name"));
+        assert!(CURSOR_HOOK_ASSET.contains("hook_event_name"));
+        assert!(CURSOR_HOOK_ASSET.contains("sessionStart"));
         assert!(!CURSOR_HOOK_ASSET.contains("\"state\":"));
         assert!(!CURSOR_HOOK_ASSET.contains("pane.release_agent"));
     }
