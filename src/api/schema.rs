@@ -449,6 +449,7 @@ pub enum IntegrationTarget {
     Opencode,
     Hermes,
     Qodercli,
+    Cursor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

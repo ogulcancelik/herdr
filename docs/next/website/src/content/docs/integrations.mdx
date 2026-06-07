@@ -1,6 +1,6 @@
 ---
 title: Integrations
-description: Install Herdr integrations for Pi, OMP, Claude Code, Codex, GitHub Copilot CLI, Droid, Kimi Code CLI, OpenCode, Hermes Agent, and Qoder CLI.
+description: Install Herdr integrations for Pi, OMP, Claude Code, Codex, GitHub Copilot CLI, Droid, Kimi Code CLI, OpenCode, Hermes Agent, Qoder CLI, and Cursor Agent CLI.
 ---
 
 Herdr detects supported agents automatically. Official integrations can add native session identity for restore, semantic state reports, or both. Claude Code, Codex, Droid, and OpenCode state comes from screen detection even when their session identity integrations are installed.
@@ -22,6 +22,7 @@ herdr integration install kimi
 herdr integration install opencode
 herdr integration install hermes
 herdr integration install qodercli
+herdr integration install cursor
 ```
 
 ## Uninstall integrations
@@ -37,6 +38,7 @@ herdr integration uninstall kimi
 herdr integration uninstall opencode
 herdr integration uninstall hermes
 herdr integration uninstall qodercli
+herdr integration uninstall cursor
 ```
 
 ## How Herdr uses integrations
@@ -49,11 +51,11 @@ Herdr combines three signals:
 | Screen heuristics | Infers visible native agent state such as `working` or `blocked`. |
 | Integration events | Reports native session identity, semantic state, or both depending on the integration. |
 
-Claude Code, Codex, Droid, and OpenCode state detection is screen-read first. Their Herdr-owned integrations do not author `idle`, `working`, or `blocked` state. Pi, GitHub Copilot CLI, and Hermes Agent report semantic state and session identity. OMP, Kimi Code CLI, and Qoder CLI report semantic state but do not provide native session restore. Custom socket integrations can report state when they define state that is not visible in the native terminal UI.
+Claude Code, Codex, Cursor Agent CLI, Droid, and OpenCode state detection is screen-read first. Their Herdr-owned integrations do not author `idle`, `working`, or `blocked` state. Pi, GitHub Copilot CLI, and Hermes Agent report semantic state and session identity. OMP, Kimi Code CLI, and Qoder CLI report semantic state but do not provide native session restore. Custom socket integrations can report state when they define state that is not visible in the native terminal UI.
 
-Some integrations report native agent session references. Herdr uses official session references to resume Claude Code, Codex, GitHub Copilot CLI, Droid, Pi, Hermes Agent, and OpenCode panes after a Herdr server restart unless `[session] resume_agents_on_restore = false` disables it.
+Some integrations report native agent session references. Herdr uses official session references to resume Claude Code, Codex, Cursor Agent CLI, GitHub Copilot CLI, Droid, Pi, Hermes Agent, and OpenCode panes after a Herdr server restart unless `[session] resume_agents_on_restore = false` disables it.
 
-Native session restore requires current Herdr integrations: Pi integration version `2`, Claude Code version `5`, Codex version `5`, GitHub Copilot CLI version `1`, Droid version `1`, OpenCode version `4`, or Hermes Agent version `2`. OMP integration version `2`, Kimi Code CLI integration version `1`, and Qoder CLI integration version `1` report agent state only. Check installed versions with `herdr integration status`.
+Native session restore requires current Herdr integrations: Pi integration version `2`, Claude Code version `5`, Codex version `5`, Cursor Agent CLI version `1`, GitHub Copilot CLI version `1`, Droid version `1`, OpenCode version `4`, or Hermes Agent version `2`. OMP integration version `2`, Kimi Code CLI integration version `1`, and Qoder CLI integration version `1` report agent state only. Check installed versions with `herdr integration status`.
 
 ## Pi
 
@@ -192,6 +194,20 @@ The hook reports semantic state to Herdr when Qoder CLI emits lifecycle events.
 Herdr uses `~/.qoder` by default, or `QODER_CONFIG_DIR` when set. The Qoder config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and updates `settings.json` with Herdr hook entries. Uninstall removes the matching hook entries and deletes the hook script.
 
 Native screen heuristics remain available when the hook is not installed.
+
+## Cursor Agent CLI
+
+Install the Cursor Agent CLI hook:
+
+```bash
+herdr integration install cursor
+```
+
+The hook reports session identity through Cursor's `sessionStart` hook while Cursor Agent CLI runs inside a Herdr pane. Cursor state comes from Herdr's screen detection.
+
+Herdr uses `~/.cursor` by default, or `CURSOR_CONFIG_DIR` when set. The Cursor config directory must already exist. Install writes `herdr-agent-state.sh` and adds a Herdr `sessionStart` entry to `hooks.json`. Uninstall removes the matching hook entry and deletes the hook script.
+
+After Cursor emits a session start event, Herdr can use the reported session id to resume the pane with `agent --resume <id>`.
 
 ## Custom status labels
 

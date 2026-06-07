@@ -112,6 +112,10 @@ const QODERCLI_HOOK_ASSET: &str = if cfg!(windows) {
 };
 const QODERCLI_INTEGRATION_VERSION: u32 = 1;
 const QODERCLI_CONFIG_DIR_ENV_VAR: &str = "QODER_CONFIG_DIR";
+const CURSOR_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
+const CURSOR_HOOK_ASSET: &str = include_str!("assets/cursor/herdr-agent-state.sh");
+const CURSOR_INTEGRATION_VERSION: u32 = 1;
+const CURSOR_CONFIG_DIR_ENV_VAR: &str = "CURSOR_CONFIG_DIR";
 const INTEGRATION_VERSION_MARKER: &str = "HERDR_INTEGRATION_VERSION=";
 
 #[derive(Debug)]
@@ -168,6 +172,20 @@ pub(crate) struct HermesInstallPaths {
 pub(crate) struct QodercliInstallPaths {
     pub hook_path: PathBuf,
     pub settings_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct CursorInstallPaths {
+    pub hook_path: PathBuf,
+    pub hooks_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct CursorUninstallResult {
+    pub hook_path: PathBuf,
+    pub hooks_path: PathBuf,
+    pub removed_hook_file: bool,
+    pub updated_hooks: bool,
 }
 
 #[derive(Debug)]
@@ -431,6 +449,19 @@ pub(crate) fn install_target(
                 ),
             ]
         }
+        crate::api::schema::IntegrationTarget::Cursor => {
+            let installed = install_cursor()?;
+            vec![
+                format!(
+                    "installed cursor integration hook to {}",
+                    installed.hook_path.display()
+                ),
+                format!(
+                    "updated cursor hooks at {}",
+                    installed.hooks_path.display()
+                ),
+            ]
+        }
     };
 
     crate::logging::integration_action("install", integration_target_label(target), "ok");
@@ -687,6 +718,33 @@ pub(crate) fn uninstall_target(
             }
             messages
         }
+        crate::api::schema::IntegrationTarget::Cursor => {
+            let result = uninstall_cursor()?;
+            let mut messages = Vec::new();
+            if result.removed_hook_file {
+                messages.push(format!(
+                    "removed cursor hook at {}",
+                    result.hook_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no cursor hook found at {}",
+                    result.hook_path.display()
+                ));
+            }
+            if result.updated_hooks {
+                messages.push(format!(
+                    "removed herdr cursor hook entries from {}",
+                    result.hooks_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no herdr cursor hook entries found in {}",
+                    result.hooks_path.display()
+                ));
+            }
+            messages
+        }
     };
 
     crate::logging::integration_action("uninstall", integration_target_label(target), "ok");
@@ -707,6 +765,7 @@ pub(crate) fn integration_target_label(
         crate::api::schema::IntegrationTarget::Opencode => "opencode",
         crate::api::schema::IntegrationTarget::Hermes => "hermes",
         crate::api::schema::IntegrationTarget::Qodercli => "qodercli",
+        crate::api::schema::IntegrationTarget::Cursor => "cursor",
     }
 }
 
@@ -728,7 +787,12 @@ fn integration_target_command_names(
         crate::api::schema::IntegrationTarget::Opencode => &["opencode"],
         crate::api::schema::IntegrationTarget::Hermes => &["hermes"],
         crate::api::schema::IntegrationTarget::Qodercli => qodercli_command_names(),
+        crate::api::schema::IntegrationTarget::Cursor => cursor_command_names(),
     }
+}
+
+fn cursor_command_names() -> &'static [&'static str] {
+    &["agent", "cursor-agent"]
 }
 
 fn integration_target_supported(target: crate::api::schema::IntegrationTarget) -> bool {
@@ -928,7 +992,7 @@ fn integration_specs() -> [(
     crate::api::schema::IntegrationTarget,
     io::Result<PathBuf>,
     u32,
-); 10] {
+); 11] {
     [
         (
             crate::api::schema::IntegrationTarget::Pi,
@@ -979,6 +1043,11 @@ fn integration_specs() -> [(
             crate::api::schema::IntegrationTarget::Qodercli,
             qodercli_dir().map(|dir| dir.join("hooks").join(QODERCLI_HOOK_INSTALL_NAME)),
             QODERCLI_INTEGRATION_VERSION,
+        ),
+        (
+            crate::api::schema::IntegrationTarget::Cursor,
+            cursor_dir().map(|dir| dir.join(CURSOR_HOOK_INSTALL_NAME)),
+            CURSOR_INTEGRATION_VERSION,
         ),
     ]
 }
@@ -1890,6 +1959,63 @@ pub(crate) fn install_qodercli() -> io::Result<QodercliInstallPaths> {
     })
 }
 
+pub(crate) fn install_cursor() -> io::Result<CursorInstallPaths> {
+    let dir = cursor_dir()?;
+    if !dir.is_dir() {
+        return Err(io::Error::other(format!(
+            "cursor config directory not found at {}. install cursor agent cli first",
+            dir.display()
+        )));
+    }
+
+    let hook_path = dir.join(CURSOR_HOOK_INSTALL_NAME);
+    fs::write(&hook_path, CURSOR_HOOK_ASSET)?;
+    make_executable(&hook_path)?;
+
+    let hooks_path = dir.join("hooks.json");
+    let mut hooks_file = if hooks_path.is_file() {
+        serde_json::from_str::<Value>(&fs::read_to_string(&hooks_path)?).map_err(|err| {
+            io::Error::other(format!("failed to parse {}: {err}", hooks_path.display()))
+        })?
+    } else {
+        json!({ "version": 1 })
+    };
+
+    if hooks_file.get("version").is_none() {
+        hooks_file
+            .as_object_mut()
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "cursor hooks file at {} must be a JSON object",
+                    hooks_path.display()
+                ))
+            })?
+            .insert("version".to_string(), json!(1));
+    }
+
+    let hooks = ensure_hooks_object(
+        &mut hooks_file,
+        &hooks_path,
+        "cursor hooks file",
+        "cursor hooks file hooks",
+    )?;
+    let quoted_hook_path = shell_single_quote(&hook_path.display().to_string());
+    let session_command = format!("bash {quoted_hook_path} session");
+    remove_simple_command_hook(hooks, "beforeSubmitPrompt", &session_command)?;
+    remove_simple_command_hook(hooks, "beforeShellExecution", &session_command)?;
+    remove_simple_command_hook(hooks, "beforeMCPExecution", &session_command)?;
+    remove_simple_command_hook(hooks, "stop", &session_command)?;
+    remove_simple_command_hook(hooks, "sessionEnd", &session_command)?;
+    ensure_simple_command_hook(hooks, "sessionStart", session_command)?;
+
+    fs::write(&hooks_path, serde_json::to_string_pretty(&hooks_file)?)?;
+
+    Ok(CursorInstallPaths {
+        hook_path,
+        hooks_path,
+    })
+}
+
 pub(crate) fn uninstall_qodercli() -> io::Result<QodercliUninstallResult> {
     let hook_path = qodercli_dir()?
         .join("hooks")
@@ -1938,6 +2064,53 @@ pub(crate) fn uninstall_qodercli() -> io::Result<QodercliUninstallResult> {
         settings_path,
         removed_hook_file,
         updated_settings,
+    })
+}
+
+pub(crate) fn uninstall_cursor() -> io::Result<CursorUninstallResult> {
+    let cursor_home = cursor_dir()?;
+    let hook_path = cursor_home.join(CURSOR_HOOK_INSTALL_NAME);
+    let hooks_path = cursor_home.join("hooks.json");
+    let mut updated_hooks = false;
+
+    if hooks_path.is_file() {
+        let mut hooks_file = serde_json::from_str::<Value>(&fs::read_to_string(&hooks_path)?)
+            .map_err(|err| {
+                io::Error::other(format!("failed to parse {}: {err}", hooks_path.display()))
+            })?;
+
+        if let Some(hooks) = hooks_object_if_present(
+            &mut hooks_file,
+            &hooks_path,
+            "cursor hooks file",
+            "cursor hooks file hooks",
+        )? {
+            let quoted_hook_path = shell_single_quote(&hook_path.display().to_string());
+            let session_command = format!("bash {quoted_hook_path} session");
+            updated_hooks |=
+                remove_simple_command_hook(hooks, "sessionStart", &session_command)?;
+            updated_hooks |=
+                remove_simple_command_hook(hooks, "beforeSubmitPrompt", &session_command)?;
+            updated_hooks |=
+                remove_simple_command_hook(hooks, "beforeShellExecution", &session_command)?;
+            updated_hooks |=
+                remove_simple_command_hook(hooks, "beforeMCPExecution", &session_command)?;
+            updated_hooks |= remove_simple_command_hook(hooks, "stop", &session_command)?;
+            updated_hooks |= remove_simple_command_hook(hooks, "sessionEnd", &session_command)?;
+        }
+
+        if updated_hooks {
+            fs::write(&hooks_path, serde_json::to_string_pretty(&hooks_file)?)?;
+        }
+    }
+
+    let removed_hook_file = remove_file_if_exists(&hook_path)?;
+
+    Ok(CursorUninstallResult {
+        hook_path,
+        hooks_path,
+        removed_hook_file,
+        updated_hooks,
     })
 }
 
@@ -2144,6 +2317,52 @@ fn remove_direct_command_hook(
         !(entry.get("type").and_then(Value::as_str) == Some("command")
             && entry.get("command").and_then(Value::as_str) == Some(command))
     });
+    let removed = entries.len() != before;
+    if entries.is_empty() {
+        hooks.remove(event);
+    }
+    Ok(removed)
+}
+
+// Cursor hooks.json uses the minimal shape `{ "command": "..." }` documented at
+// https://cursor.com/docs/hooks. Keep this separate from the nested codex and
+// flat copilot helpers so install/uninstall does not rewrite unrelated hooks.
+fn ensure_simple_command_hook(
+    hooks: &mut Map<String, Value>,
+    event: &str,
+    command: String,
+) -> io::Result<()> {
+    let entries = hooks
+        .entry(event.to_string())
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| io::Error::other(format!("hook entries for {event} must be an array")))?;
+
+    if entries.iter().any(|entry| {
+        entry.get("command").and_then(Value::as_str) == Some(command.as_str())
+    }) {
+        return Ok(());
+    }
+
+    entries.push(json!({ "command": command }));
+    Ok(())
+}
+
+fn remove_simple_command_hook(
+    hooks: &mut Map<String, Value>,
+    event: &str,
+    command: &str,
+) -> io::Result<bool> {
+    let Some(entries_value) = hooks.get_mut(event) else {
+        return Ok(false);
+    };
+
+    let entries = entries_value
+        .as_array_mut()
+        .ok_or_else(|| io::Error::other(format!("hook entries for {event} must be an array")))?;
+
+    let before = entries.len();
+    entries.retain(|entry| entry.get("command").and_then(Value::as_str) != Some(command));
     let removed = entries.len() != before;
     if entries.is_empty() {
         hooks.remove(event);
@@ -2859,6 +3078,10 @@ fn qodercli_dir() -> io::Result<PathBuf> {
     config_dir_from_env_or_home(QODERCLI_CONFIG_DIR_ENV_VAR, &[".qoder"])
 }
 
+fn cursor_dir() -> io::Result<PathBuf> {
+    config_dir_from_env_or_home(CURSOR_CONFIG_DIR_ENV_VAR, &[".cursor"])
+}
+
 fn home_dir() -> io::Result<PathBuf> {
     if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(home));
@@ -2901,6 +3124,7 @@ mod tests {
         std::env::remove_var(COPILOT_HOME_ENV_VAR);
         std::env::remove_var(KIMI_CODE_HOME_ENV_VAR);
         std::env::remove_var(QODERCLI_CONFIG_DIR_ENV_VAR);
+        std::env::remove_var(CURSOR_CONFIG_DIR_ENV_VAR);
     }
 
     fn kimi_hook_command(hook_path: &Path, action: &str) -> String {
@@ -5021,6 +5245,13 @@ mod tests {
         assert!(QODERCLI_HOOK_ASSET.contains("hook_event_name"));
         assert!(QODERCLI_HOOK_ASSET.contains("agent_session_id"));
         assert!(!QODERCLI_HOOK_ASSET.contains("QODER_HOOK_EVENT"));
+        assert!(CURSOR_HOOK_ASSET.contains("HERDR_INTEGRATION_ID=cursor"));
+        assert!(CURSOR_HOOK_ASSET.contains("conversation_id"));
+        assert!(CURSOR_HOOK_ASSET.contains("agent_session_id"));
+        assert!(CURSOR_HOOK_ASSET.contains("pane.report_agent_session"));
+        assert!(!CURSOR_HOOK_ASSET.contains("hook_event_name"));
+        assert!(!CURSOR_HOOK_ASSET.contains("\"state\":"));
+        assert!(!CURSOR_HOOK_ASSET.contains("pane.release_agent"));
     }
 
     #[test]
@@ -5166,6 +5397,174 @@ mod tests {
         );
 
         std::env::remove_var(QODERCLI_CONFIG_DIR_ENV_VAR);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_cursor_writes_hook_and_updates_hooks_json() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let cursor_dir = base.join(".cursor");
+        fs::create_dir_all(&cursor_dir).unwrap();
+        fs::write(
+            cursor_dir.join("hooks.json"),
+            r#"{"version":1,"hooks":{"stop":[{"command":"echo keep-me"}]}}"#,
+        )
+        .unwrap();
+        std::env::set_var(CURSOR_CONFIG_DIR_ENV_VAR, &cursor_dir);
+
+        let installed = install_cursor().unwrap();
+
+        assert_eq!(
+            installed.hook_path,
+            cursor_dir.join(CURSOR_HOOK_INSTALL_NAME)
+        );
+        assert_eq!(installed.hooks_path, cursor_dir.join("hooks.json"));
+        assert_eq!(
+            fs::read_to_string(&installed.hook_path).unwrap(),
+            CURSOR_HOOK_ASSET
+        );
+
+        let hooks_file: Value =
+            serde_json::from_str(&fs::read_to_string(cursor_dir.join("hooks.json")).unwrap())
+                .unwrap();
+        let hooks = hooks_file.get("hooks").and_then(Value::as_object).unwrap();
+        let session_start = hooks
+            .get("sessionStart")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert_eq!(session_start.len(), 1);
+        assert!(session_start[0]
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(|command| command.contains("herdr-agent-state.sh session")));
+        assert!(hooks.get("beforeSubmitPrompt").is_none());
+        assert!(hooks.get("beforeShellExecution").is_none());
+        let stop = hooks.get("stop").and_then(Value::as_array).unwrap();
+        assert_eq!(stop.len(), 1);
+        assert_eq!(stop[0].get("command").and_then(Value::as_str), Some("echo keep-me"));
+
+        std::env::remove_var(CURSOR_CONFIG_DIR_ENV_VAR);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_cursor_is_idempotent_for_hook_entries() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let cursor_dir = base.join(".cursor");
+        fs::create_dir_all(&cursor_dir).unwrap();
+        std::env::set_var(CURSOR_CONFIG_DIR_ENV_VAR, &cursor_dir);
+
+        install_cursor().unwrap();
+        install_cursor().unwrap();
+
+        let hooks_file: Value =
+            serde_json::from_str(&fs::read_to_string(cursor_dir.join("hooks.json")).unwrap())
+                .unwrap();
+        let hooks = hooks_file.get("hooks").and_then(Value::as_object).unwrap();
+        let session_start = hooks
+            .get("sessionStart")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert_eq!(session_start.len(), 1);
+
+        std::env::remove_var(CURSOR_CONFIG_DIR_ENV_VAR);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn uninstall_cursor_removes_herdr_hooks_and_preserves_others() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let cursor_dir = base.join(".cursor");
+        fs::create_dir_all(&cursor_dir).unwrap();
+        std::env::set_var(CURSOR_CONFIG_DIR_ENV_VAR, &cursor_dir);
+
+        install_cursor().unwrap();
+        let mut hooks_file: Value =
+            serde_json::from_str(&fs::read_to_string(cursor_dir.join("hooks.json")).unwrap())
+                .unwrap();
+        hooks_file["hooks"]["beforeSubmitPrompt"] = json!([{ "command": "echo user-defined" }]);
+        fs::write(
+            cursor_dir.join("hooks.json"),
+            serde_json::to_string_pretty(&hooks_file).unwrap(),
+        )
+        .unwrap();
+
+        let result = uninstall_cursor().unwrap();
+        assert!(result.removed_hook_file);
+        assert!(result.updated_hooks);
+        assert!(!cursor_dir.join(CURSOR_HOOK_INSTALL_NAME).is_file());
+
+        let hooks_file: Value =
+            serde_json::from_str(&fs::read_to_string(cursor_dir.join("hooks.json")).unwrap())
+                .unwrap();
+        let hooks = hooks_file.get("hooks").and_then(Value::as_object).unwrap();
+        assert!(!hooks.contains_key("sessionStart"));
+        assert!(hooks.contains_key("beforeSubmitPrompt"));
+
+        std::env::remove_var(CURSOR_CONFIG_DIR_ENV_VAR);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_cursor_uses_cursor_config_dir_env() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let cursor_dir = base.join("custom-cursor");
+        fs::create_dir_all(&cursor_dir).unwrap();
+        std::env::set_var(CURSOR_CONFIG_DIR_ENV_VAR, &cursor_dir);
+
+        let installed = install_cursor().unwrap();
+
+        assert_eq!(installed.hook_path, cursor_dir.join(CURSOR_HOOK_INSTALL_NAME));
+        assert_eq!(installed.hooks_path, cursor_dir.join("hooks.json"));
+
+        clear_integration_path_env();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn cursor_v1_integration_status_is_current() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let cursor_dir = base.join(".cursor");
+        fs::create_dir_all(&cursor_dir).unwrap();
+        let hook_path = cursor_dir.join(CURSOR_HOOK_INSTALL_NAME);
+        fs::write(
+            &hook_path,
+            "#!/bin/sh\n# HERDR_INTEGRATION_ID=cursor\n# HERDR_INTEGRATION_VERSION=1\n",
+        )
+        .unwrap();
+        std::env::set_var(CURSOR_CONFIG_DIR_ENV_VAR, &cursor_dir);
+
+        let statuses = installed_integration_statuses();
+        let cursor = statuses
+            .iter()
+            .find(|status| status.target == crate::api::schema::IntegrationTarget::Cursor)
+            .expect("cursor integration status");
+        assert_eq!(cursor.state, IntegrationStatusKind::Current);
+        assert_eq!(cursor.installed_version, Some(CURSOR_INTEGRATION_VERSION));
+
+        clear_integration_path_env();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_cursor_errors_when_config_dir_missing() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let missing = base.join(".cursor");
+        std::env::set_var(CURSOR_CONFIG_DIR_ENV_VAR, &missing);
+
+        let err = install_cursor().unwrap_err().to_string();
+        assert!(
+            err.contains("cursor config directory not found"),
+            "unexpected error: {err}"
+        );
+
+        std::env::remove_var(CURSOR_CONFIG_DIR_ENV_VAR);
         let _ = fs::remove_dir_all(base);
     }
 }
