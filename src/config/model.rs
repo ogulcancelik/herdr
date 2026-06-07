@@ -265,6 +265,7 @@ pub struct Config {
     pub advanced: AdvancedConfig,
     pub experimental: ExperimentalConfig,
     pub remote: RemoteConfig,
+    pub tmux_control: TmuxControlConfig,
 }
 
 #[derive(Debug)]
@@ -489,6 +490,29 @@ impl Default for RemoteConfig {
     fn default() -> Self {
         Self {
             manage_ssh_config: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct TmuxControlConfig {
+    /// Enable tmux control mode monitoring. When true, herdr spawns a
+    /// `tmux -C` client to receive push-based pane output and lifecycle
+    /// events. Default: false.
+    pub enabled: bool,
+    /// Session names to monitor. Empty means all sessions.
+    pub target_sessions: Vec<String>,
+    /// Tmux socket path (for `-L` flag). None means default tmux socket.
+    pub socket_path: Option<String>,
+}
+
+impl Default for TmuxControlConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            target_sessions: Vec::new(),
+            socket_path: None,
         }
     }
 }

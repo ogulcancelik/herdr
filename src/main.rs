@@ -53,6 +53,7 @@ mod sound;
 mod terminal;
 mod terminal_notify;
 mod terminal_theme;
+mod tmux_control;
 mod ui;
 mod update;
 mod workspace;
@@ -306,6 +307,16 @@ pane_history = false
 # Maximum scrollback buffer size in bytes retained per pane terminal.
 # Matches Ghostty's default scrollback-limit behavior.
 # scrollback_limit_bytes = 10000000
+
+# Tmux control mode: receive push-based pane output and lifecycle events
+# from tmux sessions. Supplements herdr's built-in screen heuristics.
+[tmux_control]
+# Enable tmux control mode monitoring (default: false)
+# enabled = true
+# Session names to monitor. Empty = all sessions.
+# target_sessions = []
+# Tmux socket path (for -L flag). Null = default socket.
+# socket_path = null
 "##;
 
 fn should_block_nested(config: &config::Config) -> bool {
@@ -500,6 +511,10 @@ fn main() -> io::Result<()> {
                 "herdr integration <subcommand>",
                 "Manage built-in agent integrations",
             ),
+            (
+                "herdr tmux status",
+                "Show tmux control mode status and config",
+            ),
         ] {
             println!("  {command:<32} {description}");
         }
@@ -569,6 +584,7 @@ fn main() -> io::Result<()> {
                 "wait",
                 "session",
                 "integration",
+                "tmux",
             ]
             .contains(&arg.as_str())
         {

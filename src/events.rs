@@ -105,4 +105,31 @@ pub enum AppEvent {
     WorktreeAddFinished(WorktreeAddResult),
     /// Background `git worktree remove` completed.
     WorktreeRemoveFinished(WorktreeRemoveResult),
+    /// Pane output received via tmux control mode.
+    TmuxPaneOutput {
+        /// The tmux pane ID (e.g., "42").
+        pane_id: String,
+        /// Plain text output with ANSI codes stripped.
+        plain_text: String,
+        /// Raw output with ANSI escape sequences preserved.
+        raw_data: String,
+    },
+    /// Tmux control mode detected a pane lifecycle event.
+    TmuxPaneLifecycle {
+        session: String,
+        window: String,
+        pane: String,
+        event: TmuxLifecycleEvent,
+    },
+}
+
+/// Lifecycle events from tmux control mode.
+#[derive(Debug, Clone)]
+pub enum TmuxLifecycleEvent {
+    /// A new window was added.
+    WindowAdd,
+    /// A window was closed.
+    WindowClose,
+    /// The active pane changed.
+    PaneFocusChanged,
 }
