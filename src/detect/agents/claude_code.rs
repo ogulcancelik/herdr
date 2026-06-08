@@ -209,7 +209,7 @@ fn has_claude_yes_no_choice(content: &str) -> bool {
 /// on the spinner glyph + trailing ellipsis rather than specific wording.
 /// Include Claude's narrow-pane middle-dot frame too.
 pub(in crate::detect) fn has_spinner_activity(content: &str) -> bool {
-    const SPINNER_CHARS: &str = "·✱✲✳✴✵✶✷✸✹✺✻✼✽✾✿❀❁❂❃❇❈❉❊❋✢✣✤✥✦✧✨⊛⊕⊙◉◎◍⁂⁕※⍟☼★☆";
+    const SPINNER_CHARS: &str = "●·✱✲✳✴✵✶✷✸✹✺✻✼✽✾✿❀❁❂❃❇❈❉❊❋✢✣✤✥✦✧✨⊛⊕⊙◉◎◍⁂⁕※⍟☼★☆";
     for line in content.lines() {
         let trimmed = line.trim();
         let mut chars = trimmed.chars();
@@ -363,6 +363,30 @@ mod tests {
         let content = prompt_box_below(
             "● Started. I'll tell you when it finishes.\n\n✻ Crunched for 7s · 1 shell still running\n\n● hi",
         );
+
+        assert_eq!(detect(&content), AgentState::Idle);
+        assert!(!has_working_chrome(&content));
+    }
+
+    #[test]
+    fn token_counter_spinner_line_is_working() {
+        // Current Claude Code live spinner: "● <Verb>… (Xs · ↓ N tokens)".
+        // The "●" glyph (U+25CF) was missing from SPINNER_CHARS, so an actively
+        // working pane decayed to idle. Completed-message bullets use "⏺"
+        // (U+23FA) and must keep NOT matching.
+        let content = prompt_box_below(
+            "⏺ Earlier completed message.\n\n● Thundering… (2m 53s · ↓ 10.8k tokens)",
+        );
+
+        assert_eq!(detect(&content), AgentState::Working);
+        assert!(has_working_chrome(&content));
+    }
+
+    #[test]
+    fn completed_message_bullet_with_ellipsis_is_not_working_chrome() {
+        // "⏺" (U+23FA) completed bullet must not be mistaken for the "●" spinner,
+        // even when the message text itself ends with an ellipsis.
+        let content = prompt_box_below("⏺ Done thinking about it…");
 
         assert_eq!(detect(&content), AgentState::Idle);
         assert!(!has_working_chrome(&content));
