@@ -47,14 +47,20 @@ if hook_input_file:
     except Exception:
         hook_input = {}
 
-if hook_input.get("hook_event_name") not in (None, "sessionStart"):
+def first_text(*keys):
+    for key in keys:
+        value = hook_input.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+hook_event_name = first_text("hook_event_name", "hookEventName")
+if hook_event_name not in (None, "sessionStart"):
     raise SystemExit(0)
 
 request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
 report_seq = time.time_ns()
-session_id = hook_input.get("session_id")
-if not isinstance(session_id, str) or not session_id:
-    session_id = hook_input.get("conversation_id")
+session_id = first_text("session_id", "sessionId", "conversation_id", "conversationId")
 agent_session_id = session_id if isinstance(session_id, str) and session_id else None
 if agent_session_id:
     request = {

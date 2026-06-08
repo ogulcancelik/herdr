@@ -207,7 +207,7 @@ The hook reports session identity through Cursor's `sessionStart` hook while Cur
 
 Herdr uses `~/.cursor` by default, or `CURSOR_CONFIG_DIR` when set. The Cursor config directory must already exist. Install writes `herdr-agent-state.sh` and adds a Herdr `sessionStart` entry to `hooks.json`. Uninstall removes the matching hook entry and deletes the hook script.
 
-After Cursor emits a session start event, Herdr can use the reported session id to resume the pane with `cursor-agent --resume <id>`. Herdr requires `cursor-agent` on `PATH`; it does not launch the generic `agent` command.
+After Cursor emits a session start event, Herdr can use the reported session id to resume the pane with `cursor-agent --resume <id>`. The `cursor-agent` command must be on `PATH` when Herdr restores the pane; Herdr does not launch the generic `agent` command.
 
 ## Custom status labels
 

@@ -151,7 +151,7 @@ states:
 - 🔵 **done** — work finished, you have not looked at it yet
 - 🟢 **idle** — done and seen
 
-detection works by reading foreground process and terminal output. zero config, no hooks required. official claude code, codex, droid, and opencode integrations provide session restore identity; pi, omp, github copilot cli, kimi code cli, hermes, qodercli, and custom socket integrations can report their own state.
+detection works by reading foreground process and terminal output. zero config, no hooks required. official claude code, codex, cursor agent cli, droid, and opencode integrations provide session restore identity; pi, omp, github copilot cli, kimi code cli, hermes, qodercli, and custom socket integrations can report their own state.
 
 ## lives in your terminal
 
@@ -258,7 +258,7 @@ In-app settings cover theme, sound, and toast preferences. Herdr writes logs und
 - [install](https://herdr.dev/docs/install/) — install, update, Homebrew, mise, and Nix
 - [session state](https://herdr.dev/docs/session-state/) — detach, restart restore, agent restore, and live handoff
 - [configuration](https://herdr.dev/docs/configuration/) — keybindings, themes, notifications, environment variables
-- [integrations](https://herdr.dev/docs/integrations/) — pi, omp, claude code, codex, github copilot cli, droid, kimi code cli, opencode, hermes, qodercli integrations
+- [integrations](https://herdr.dev/docs/integrations/) — pi, omp, claude code, codex, cursor agent cli, github copilot cli, droid, kimi code cli, opencode, hermes, qodercli integrations
 - [`SKILL.md`](./SKILL.md) — reusable agent skill
 - [socket api](https://herdr.dev/docs/socket-api/) — socket protocol and cli reference
 
