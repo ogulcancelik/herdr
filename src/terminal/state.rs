@@ -142,6 +142,23 @@ impl TerminalState {
         self
     }
 
+    /// Update the scraped spinner activity, holding the last value through
+    /// transient scrape misses while the agent is still working.
+    ///
+    /// The detector republishes whenever the spinner text changes, and a line
+    /// caught mid-redraw (or between verb changes) scrapes as `None`. Writing
+    /// that `None` straight through clears `live_activity` for a frame, so the
+    /// sidebar status row flickers between the spinner text ("the original")
+    /// and the bare state label ("ours"). Hold the last activity until the
+    /// agent actually leaves the working state.
+    pub fn update_live_activity(&mut self, activity: Option<String>, detected_state: AgentState) {
+        if activity.is_some() {
+            self.live_activity = activity;
+        } else if detected_state != AgentState::Working {
+            self.live_activity = None;
+        }
+    }
+
     #[cfg(test)]
     pub fn set_detected_state(
         &mut self,
@@ -761,6 +778,7 @@ impl TerminalState {
         self.fallback_visible_working = false;
         self.fallback_observed_at = None;
         self.stale_hook_idle_since = None;
+        self.live_activity = None;
         self.hook_authority = None;
         self.persisted_agent_session = None;
         self.agent_metadata.clear();
@@ -898,6 +916,27 @@ mod tests {
 
     fn test_terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
+    }
+
+    #[test]
+    fn live_activity_survives_transient_scrape_miss_while_working() {
+        let mut terminal = test_terminal();
+
+        terminal.update_live_activity(Some("Cogitating".into()), AgentState::Working);
+        assert_eq!(terminal.live_activity.as_deref(), Some("Cogitating"));
+
+        // A frame caught mid-redraw scrapes as None, but the agent is still
+        // working — hold the last activity instead of flickering to the label.
+        terminal.update_live_activity(None, AgentState::Working);
+        assert_eq!(terminal.live_activity.as_deref(), Some("Cogitating"));
+
+        // A fresh scrape replaces it.
+        terminal.update_live_activity(Some("Manifesting".into()), AgentState::Working);
+        assert_eq!(terminal.live_activity.as_deref(), Some("Manifesting"));
+
+        // Once the agent genuinely leaves working, a None clears it.
+        terminal.update_live_activity(None, AgentState::Idle);
+        assert_eq!(terminal.live_activity, None);
     }
 
     #[test]

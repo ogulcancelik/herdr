@@ -2236,7 +2236,7 @@ impl AppState {
                 observed_at,
             } => self
                 .update_terminal_state(pane_id, |terminal| {
-                    terminal.live_activity = activity.clone();
+                    terminal.update_live_activity(activity.clone(), state);
                     Some(terminal.set_detected_state_with_screen_signals_at(
                         agent,
                         state,
