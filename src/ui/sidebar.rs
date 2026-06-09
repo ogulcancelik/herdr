@@ -336,13 +336,27 @@ fn grouped_child_display_label(label: &str, branch: Option<&str>, has_custom_nam
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkspaceListEntry {
-    Workspace { ws_idx: usize, indented: bool },
+    Workspace {
+        ws_idx: usize,
+        indented: bool,
+    },
+    /// A workspace on a federated peer server, folded into the project group
+    /// it shares with local checkouts (indented) or trailing the list as its
+    /// own project (unindented). Selecting one switches servers.
+    Remote {
+        peer_idx: usize,
+        ws_idx: usize,
+        indented: bool,
+    },
 }
 
 fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], idx: usize) -> bool {
     matches!(
         entries.get(idx.saturating_add(1)),
-        Some(WorkspaceListEntry::Workspace { indented: true, .. })
+        Some(
+            WorkspaceListEntry::Workspace { indented: true, .. }
+                | WorkspaceListEntry::Remote { indented: true, .. }
+        )
     )
 }
 
@@ -458,7 +472,134 @@ pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> 
             }
         }
     }
+    fold_remote_entries(app, &mut entries);
     entries
+}
+
+/// Fold federated peer workspaces into the spaces list: rows whose
+/// project_key matches a local checkout splice in (indented) after that
+/// project's block; remote-only projects trail the list grouped together.
+/// Remote rows of a collapsed local group stay hidden with it.
+fn fold_remote_entries(app: &AppState, entries: &mut Vec<WorkspaceListEntry>) {
+    // project_key -> remote rows, in (config peer order, summary order).
+    let mut remotes_by_project = std::collections::HashMap::<&str, Vec<(usize, usize)>>::new();
+    let mut project_order = Vec::<&str>::new();
+    for (peer_idx, peer) in app.peer_summaries.iter().enumerate() {
+        for (ws_idx, ws) in peer.workspaces.iter().enumerate() {
+            let Some(project_key) = ws.project_key.as_deref() else {
+                continue;
+            };
+            let rows = remotes_by_project.entry(project_key).or_insert_with(|| {
+                project_order.push(project_key);
+                Vec::new()
+            });
+            rows.push((peer_idx, ws_idx));
+        }
+    }
+    if remotes_by_project.is_empty() {
+        return;
+    }
+
+    // Last entry index of each local project's block, and whether that block
+    // is a collapsed worktree group (remote rows hide with it).
+    let mut block_end = std::collections::HashMap::<&str, usize>::new();
+    let mut collapsed_projects = std::collections::HashSet::<&str>::new();
+    for (entry_idx, entry) in entries.iter().enumerate() {
+        let WorkspaceListEntry::Workspace { ws_idx, .. } = entry else {
+            continue;
+        };
+        let Some(ws) = app.workspaces.get(*ws_idx) else {
+            continue;
+        };
+        let Some(project_key) = ws.project_key() else {
+            continue;
+        };
+        block_end.insert(project_key, entry_idx);
+        if ws
+            .worktree_space()
+            .is_some_and(|space| app.collapsed_space_keys.contains(&space.key))
+        {
+            collapsed_projects.insert(project_key);
+        }
+    }
+
+    // Splice matched projects back-to-front so earlier indices stay valid.
+    let mut matched = project_order
+        .iter()
+        .filter_map(|project_key| block_end.get(project_key).map(|end| (*end, *project_key)))
+        .collect::<Vec<_>>();
+    matched.sort_by_key(|(end, _)| std::cmp::Reverse(*end));
+    for (end, project_key) in matched {
+        if collapsed_projects.contains(project_key) {
+            continue;
+        }
+        let rows = &remotes_by_project[project_key];
+        for (offset, (peer_idx, ws_idx)) in rows.iter().enumerate() {
+            entries.insert(
+                end + 1 + offset,
+                WorkspaceListEntry::Remote {
+                    peer_idx: *peer_idx,
+                    ws_idx: *ws_idx,
+                    indented: true,
+                },
+            );
+        }
+    }
+
+    // Remote-only projects trail the list; the first row of each project is
+    // unindented and labels the project, the rest indent under it.
+    for project_key in project_order {
+        if block_end.contains_key(project_key) {
+            continue;
+        }
+        for (offset, (peer_idx, ws_idx)) in remotes_by_project[project_key].iter().enumerate() {
+            entries.push(WorkspaceListEntry::Remote {
+                peer_idx: *peer_idx,
+                ws_idx: *ws_idx,
+                indented: offset > 0,
+            });
+        }
+    }
+}
+
+/// Status dot for remote rows, matching the local state_dot palette:
+/// blocked red, working yellow, done teal, idle green (settled), unknown dim.
+fn remote_status_dot(
+    status: crate::api::schema::AgentStatus,
+    p: &crate::app::state::Palette,
+) -> (&'static str, Style) {
+    use crate::api::schema::AgentStatus;
+    match status {
+        AgentStatus::Blocked => ("●", Style::default().fg(p.red)),
+        AgentStatus::Working => ("●", Style::default().fg(p.yellow)),
+        AgentStatus::Done => ("●", Style::default().fg(p.teal)),
+        AgentStatus::Idle => ("○", Style::default().fg(p.green)),
+        AgentStatus::Unknown => ("·", Style::default().fg(p.overlay0)),
+    }
+}
+
+/// Display label for a remote row: `host:branch` (matched/indented rows) or
+/// `project · host:branch` for rows that lead a remote-only project group.
+pub(crate) fn remote_entry_label(
+    app: &AppState,
+    peer_idx: usize,
+    ws_idx: usize,
+    indented: bool,
+) -> String {
+    let Some(peer) = app.peer_summaries.get(peer_idx) else {
+        return String::new();
+    };
+    let Some(ws) = peer.workspaces.get(ws_idx) else {
+        return String::new();
+    };
+    let host = peer.host.as_deref().unwrap_or(peer.peer.as_str());
+    let target = ws.branch.as_deref().unwrap_or(ws.workspace.as_str());
+    if indented {
+        format!("{host}:{target}")
+    } else {
+        let project = ws.project_label.as_deref().unwrap_or(ws.workspace.as_str());
+        format!("{project} · {host}:{target}")
+    }
 }
 
 pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32, pane_gap: u16) -> Rect {
@@ -504,6 +645,14 @@ fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> us
                     app.sidebar_row_gap
                 };
                 row_height.saturating_add(gap)
+            }
+            WorkspaceListEntry::Remote { indented, .. } => {
+                let gap = if *indented && next_entry_is_indented_workspace(&entries, entry_idx) {
+                    0
+                } else {
+                    app.sidebar_row_gap
+                };
+                1u16.saturating_add(gap)
             }
         };
         if used_rows.saturating_add(needed) > body.height {
@@ -604,7 +753,10 @@ pub(crate) fn agent_panel_scrollbar_rect(app: &AppState, area: Rect) -> Option<R
 pub(crate) fn compute_workspace_list_areas(
     app: &AppState,
     area: Rect,
-) -> (Vec<crate::app::state::WorkspaceCardArea>, Vec<()>) {
+) -> (
+    Vec<crate::app::state::WorkspaceCardArea>,
+    Vec<crate::app::state::RemoteCardArea>,
+) {
     let ws_area = workspace_list_rect(area, app.sidebar_section_split, app.sidebar_pane_gap);
     if ws_area == Rect::default() {
         return (Vec::new(), Vec::new());
@@ -620,7 +772,7 @@ pub(crate) fn compute_workspace_list_areas(
     let mut row_y = body.y;
     let body_bottom = body.y + body.height;
     let mut cards = Vec::new();
-    let headers = Vec::new();
+    let mut remote_cards = Vec::new();
 
     let entries = workspace_list_entries(app);
     for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
@@ -649,10 +801,31 @@ pub(crate) fn compute_workspace_list_areas(
                 });
                 row_y = row_y.saturating_add(row_height + gap);
             }
+            WorkspaceListEntry::Remote {
+                peer_idx,
+                ws_idx,
+                indented,
+            } => {
+                let gap = if *indented && next_entry_is_indented_workspace(&entries, entry_idx) {
+                    0
+                } else {
+                    app.sidebar_row_gap
+                };
+                if row_y.saturating_add(1).saturating_add(gap) > body_bottom {
+                    break;
+                }
+                remote_cards.push(crate::app::state::RemoteCardArea {
+                    peer_idx: *peer_idx,
+                    ws_idx: *ws_idx,
+                    rect: Rect::new(body.x, row_y, body.width, 1),
+                    indented: *indented,
+                });
+                row_y = row_y.saturating_add(1 + gap);
+            }
         }
     }
 
-    (cards, headers)
+    (cards, remote_cards)
 }
 
 pub(crate) fn compute_workspace_card_areas(
@@ -1032,6 +1205,45 @@ fn render_workspace_list(
         }
     }
 
+    for card in &app.view.remote_card_areas {
+        let Some(peer) = app.peer_summaries.get(card.peer_idx) else {
+            continue;
+        };
+        let Some(remote_ws) = peer.workspaces.get(card.ws_idx) else {
+            continue;
+        };
+        if card.rect.y >= list_bottom {
+            continue;
+        }
+        let stale = peer.is_stale() || peer.error.is_some();
+        let (icon, icon_style) = remote_status_dot(remote_ws.status, p);
+        let label = remote_entry_label(app, card.peer_idx, card.ws_idx, card.indented);
+        let max_label =
+            (card.rect.width as usize).saturating_sub(if card.indented { 5 } else { 3 });
+        let label = if label.len() > max_label {
+            format!("{}…", &label[..max_label.saturating_sub(1)])
+        } else {
+            label
+        };
+        let mut label_style = Style::default().fg(p.subtext0);
+        let mut final_icon_style = icon_style;
+        if stale {
+            label_style = label_style.add_modifier(Modifier::DIM);
+            final_icon_style = final_icon_style.add_modifier(Modifier::DIM);
+        }
+        let indent = if card.indented { "   " } else { " " };
+        let line = Line::from(vec![
+            Span::styled(indent, Style::default()),
+            Span::styled(icon, final_icon_style),
+            Span::styled(" ", Style::default()),
+            Span::styled(label, label_style),
+        ]);
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect::new(card.rect.x, card.rect.y, card.rect.width, 1),
+        );
+    }
+
     if let Some(y) = insertion_row.filter(|y| *y < list_bottom) {
         let indicator_right = scrollbar_rect
             .map(|rect| rect.x)
@@ -1264,6 +1476,185 @@ mod tests {
     use super::*;
     use crate::{detect::Agent, workspace::Workspace};
     use ratatui::{backend::TestBackend, Terminal};
+
+    fn remote_summary(
+        workspace: &str,
+        project_key: Option<&str>,
+        project_label: Option<&str>,
+        branch: Option<&str>,
+    ) -> crate::api::schema::PeerWorkspaceSummary {
+        crate::api::schema::PeerWorkspaceSummary {
+            id: format!("ws_{workspace}"),
+            workspace: workspace.into(),
+            project_key: project_key.map(str::to_string),
+            project_label: project_label.map(str::to_string),
+            branch: branch.map(str::to_string),
+            is_linked_worktree: branch.is_some(),
+            agent: Some("cc".into()),
+            status: crate::api::schema::AgentStatus::Working,
+            status_age_secs: Some(10),
+            activity: None,
+        }
+    }
+
+    fn peer_with_workspaces(
+        name: &str,
+        workspaces: Vec<crate::api::schema::PeerWorkspaceSummary>,
+    ) -> crate::peers::PeerSummaryState {
+        let mut peer = crate::peers::PeerSummaryState::new(&crate::config::PeerConfig {
+            name: name.into(),
+            ..Default::default()
+        });
+        peer.workspaces = workspaces;
+        peer.last_ok = Some(std::time::Instant::now());
+        peer
+    }
+
+    fn workspace_with_project_key(name: &str, project_key: &str) -> Workspace {
+        let mut ws = Workspace::test_new(name);
+        ws.cached_git_space = Some(crate::workspace::GitSpaceMetadata {
+            key: format!("/repo/{name}/.git"),
+            checkout_key: format!("/repo/{name}"),
+            label: name.into(),
+            repo_root: std::path::PathBuf::from(format!("/repo/{name}")),
+            is_linked_worktree: false,
+            project_key: project_key.into(),
+        });
+        ws
+    }
+
+    #[test]
+    fn remote_rows_fold_under_matching_local_project() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![
+            workspace_with_project_key("herdr", "github.com/gerchowl/herdr"),
+            workspace_with_project_key("other", "github.com/gerchowl/other"),
+        ];
+        app.peer_summaries = vec![peer_with_workspaces(
+            "anvil",
+            vec![remote_summary(
+                "herdr",
+                Some("github.com/gerchowl/herdr"),
+                Some("herdr"),
+                Some("fix/pty"),
+            )],
+        )];
+
+        let entries = workspace_list_entries(&app);
+        assert_eq!(
+            entries,
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false
+                },
+                WorkspaceListEntry::Remote {
+                    peer_idx: 0,
+                    ws_idx: 0,
+                    indented: true
+                },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 1,
+                    indented: false
+                },
+            ]
+        );
+        assert_eq!(remote_entry_label(&app, 0, 0, true), "anvil:fix/pty");
+    }
+
+    #[test]
+    fn remote_only_projects_trail_the_list_with_project_leader() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![workspace_with_project_key(
+            "herdr",
+            "github.com/gerchowl/herdr",
+        )];
+        app.peer_summaries = vec![peer_with_workspaces(
+            "sage",
+            vec![
+                remote_summary(
+                    "dotfiles",
+                    Some("github.com/gerchowl/dotfiles"),
+                    Some("dotfiles"),
+                    None,
+                ),
+                remote_summary(
+                    "dotfiles-wt",
+                    Some("github.com/gerchowl/dotfiles"),
+                    Some("dotfiles"),
+                    Some("vm-dev"),
+                ),
+            ],
+        )];
+
+        let entries = workspace_list_entries(&app);
+        assert_eq!(
+            entries,
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false
+                },
+                WorkspaceListEntry::Remote {
+                    peer_idx: 0,
+                    ws_idx: 0,
+                    indented: false
+                },
+                WorkspaceListEntry::Remote {
+                    peer_idx: 0,
+                    ws_idx: 1,
+                    indented: true
+                },
+            ]
+        );
+        // The leader row carries the project label.
+        assert_eq!(
+            remote_entry_label(&app, 0, 0, false),
+            "dotfiles · sage:dotfiles"
+        );
+        assert_eq!(remote_entry_label(&app, 0, 1, true), "sage:vm-dev");
+    }
+
+    #[test]
+    fn collapsed_local_group_hides_matched_remote_rows() {
+        let mut app = crate::app::state::AppState::test_new();
+        let space = |linked: bool| crate::workspace::WorktreeSpaceMembership {
+            key: "family-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: if linked {
+                "/repo/herdr-wt".into()
+            } else {
+                "/repo/herdr".into()
+            },
+            is_linked_worktree: linked,
+        };
+        let mut parent = workspace_with_project_key("herdr", "github.com/gerchowl/herdr");
+        parent.worktree_space = Some(space(false));
+        let mut child = workspace_with_project_key("herdr-wt", "github.com/gerchowl/herdr");
+        child.worktree_space = Some(space(true));
+        app.workspaces = vec![parent, child];
+        app.peer_summaries = vec![peer_with_workspaces(
+            "anvil",
+            vec![remote_summary(
+                "herdr",
+                Some("github.com/gerchowl/herdr"),
+                Some("herdr"),
+                Some("fix/pty"),
+            )],
+        )];
+
+        let expanded = workspace_list_entries(&app);
+        assert!(expanded
+            .iter()
+            .any(|entry| matches!(entry, WorkspaceListEntry::Remote { .. })));
+
+        app.collapsed_space_keys.insert("family-key".into());
+        let collapsed = workspace_list_entries(&app);
+        assert!(!collapsed
+            .iter()
+            .any(|entry| matches!(entry, WorkspaceListEntry::Remote { .. })));
+    }
 
     #[test]
     fn render_sidebar_toggle_draws_expanded_collapse_icon() {
@@ -1503,6 +1894,7 @@ mod tests {
             label: "herdr".into(),
             repo_root: std::path::PathBuf::from(format!("/repo/{name}")),
             is_linked_worktree: false,
+            project_key: format!("dir:{key}"),
         });
         ws
     }

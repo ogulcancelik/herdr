@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 mod agents;
 mod integrations;
 mod panes;
+pub(crate) mod peers;
 mod responses;
 mod tabs;
 mod workspaces;
@@ -119,6 +120,42 @@ impl App {
                 self.render_dirty.store(true, Ordering::Release);
                 self.render_notify.notify_one();
             }
+            return;
+        }
+
+        if let AppEvent::PeerPollDue = ev {
+            // One worker per peer: a hung host must not delay the others.
+            for peer in self.state.peers.clone() {
+                let event_tx = self.event_tx.clone();
+                std::thread::spawn(move || {
+                    let fetch = crate::peers::fetch_peer_summary(&peer);
+                    let _ = event_tx.blocking_send(AppEvent::PeerSummaryFetched(fetch));
+                });
+            }
+            return;
+        }
+
+        if let AppEvent::PeerSummaryFetched(fetch) = ev {
+            let Some(summary) = self
+                .state
+                .peer_summaries
+                .iter_mut()
+                .find(|summary| summary.peer == fetch.peer)
+            else {
+                // Peer was removed from config while the fetch was in flight.
+                return;
+            };
+            match fetch.result {
+                Ok((host, workspaces)) => {
+                    summary.host = (!host.is_empty()).then_some(host);
+                    summary.workspaces = workspaces;
+                    summary.last_ok = Some(std::time::Instant::now());
+                    summary.error = None;
+                }
+                Err(error) => summary.error = Some(error),
+            }
+            self.render_dirty.store(true, Ordering::Release);
+            self.render_notify.notify_one();
             return;
         }
 
@@ -587,6 +624,7 @@ impl App {
                     },
                 }
             }
+            Method::PeersSummary(_) => return self.handle_peers_summary(request.id),
             Method::WorkspaceList(_) => return self.handle_workspace_list(request.id),
             Method::WorkspaceGet(target) => return self.handle_workspace_get(request.id, target),
             Method::WorkspaceCreate(params) => {
@@ -682,6 +720,112 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "git init failed for {}", path.display());
+    }
+
+    #[tokio::test]
+    async fn peer_summary_fetch_merges_into_state() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut config = crate::config::Config::default();
+        config.peers = vec![crate::config::PeerConfig {
+            name: "anvil".into(),
+            ..Default::default()
+        }];
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        assert_eq!(app.state.peer_summaries.len(), 1);
+        assert!(app.state.peer_summaries[0].is_stale());
+
+        app.handle_internal_event(AppEvent::PeerSummaryFetched(
+            crate::peers::PeerSummaryFetch {
+                peer: "anvil".into(),
+                result: Ok((
+                    "anvil-host".into(),
+                    vec![crate::api::schema::PeerWorkspaceSummary {
+                        id: "ws_1".into(),
+                        workspace: "herdr".into(),
+                        project_key: Some("github.com/gerchowl/herdr".into()),
+                        project_label: Some("herdr".into()),
+                        branch: Some("fix/pty".into()),
+                        is_linked_worktree: true,
+                        agent: Some("cc".into()),
+                        status: crate::api::schema::AgentStatus::Blocked,
+                        status_age_secs: Some(840),
+                        activity: None,
+                    }],
+                )),
+            },
+        ));
+        let summary = &app.state.peer_summaries[0];
+        assert_eq!(summary.host.as_deref(), Some("anvil-host"));
+        assert_eq!(summary.workspaces.len(), 1);
+        assert!(!summary.is_stale());
+        assert!(summary.error.is_none());
+
+        // Errors keep the last good data but record the failure.
+        app.handle_internal_event(AppEvent::PeerSummaryFetched(
+            crate::peers::PeerSummaryFetch {
+                peer: "anvil".into(),
+                result: Err("ssh: connect timed out".into()),
+            },
+        ));
+        let summary = &app.state.peer_summaries[0];
+        assert_eq!(summary.workspaces.len(), 1);
+        assert_eq!(summary.error.as_deref(), Some("ssh: connect timed out"));
+
+        // Unknown peers (removed from config mid-flight) are ignored.
+        app.handle_internal_event(AppEvent::PeerSummaryFetched(
+            crate::peers::PeerSummaryFetch {
+                peer: "ghost".into(),
+                result: Err("nope".into()),
+            },
+        ));
+        assert_eq!(app.state.peer_summaries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn peers_summary_reports_workspace_project_and_status() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+
+        let mut workspace = crate::workspace::Workspace::test_new("herdr");
+        workspace.cached_git_branch = Some("feat/peer-federation".into());
+        workspace.cached_git_space = Some(crate::workspace::GitSpaceMetadata {
+            key: "/repo/herdr/.git".into(),
+            checkout_key: "/repo/herdr".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            is_linked_worktree: false,
+            project_key: "github.com/gerchowl/herdr".into(),
+        });
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(app.state.workspaces[0].tabs[0].root_pane)
+            .cloned()
+            .unwrap();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Claude);
+        terminal.state = AgentState::Blocked;
+        terminal.state_changed_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(90));
+
+        let response = app.handle_peers_summary("req_peers".into());
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let result = &value["result"];
+        assert!(result["host"].as_str().is_some_and(|h| !h.is_empty()));
+        let summary = &result["workspaces"][0];
+        assert_eq!(summary["workspace"], "herdr");
+        assert_eq!(summary["project_key"], "github.com/gerchowl/herdr");
+        assert_eq!(summary["project_label"], "herdr");
+        assert_eq!(summary["branch"], "feat/peer-federation");
+        assert_eq!(summary["status"], "blocked");
+        assert_eq!(summary["agent"], "cc");
+        assert!(summary["status_age_secs"].as_u64().unwrap() >= 90);
     }
 
     #[tokio::test]

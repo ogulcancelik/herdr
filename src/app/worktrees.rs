@@ -58,6 +58,10 @@ impl App {
                     label: membership.label.clone(),
                     repo_root: membership.repo_root.clone(),
                     is_linked_worktree: membership.is_linked_worktree,
+                    project_key: crate::workspace::project_key_for_common_dir(
+                        std::path::Path::new(&membership.key),
+                        &membership.label,
+                    ),
                 })
             })
             .ok_or_else(|| {
@@ -1422,6 +1426,7 @@ mod tests {
             label: "herdr".into(),
             repo_root: "/repo/herdr".into(),
             is_linked_worktree: false,
+            project_key: "dir:herdr".into(),
         });
 
         app.open_branch_session_dialog(0);
@@ -1445,6 +1450,7 @@ mod tests {
             label: "herdr".into(),
             repo_root: "/repo/herdr".into(),
             is_linked_worktree: false,
+            project_key: "dir:herdr".into(),
         });
 
         let ws = &app.state.workspaces[0];

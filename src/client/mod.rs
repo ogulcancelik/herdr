@@ -193,6 +193,31 @@ impl ClientState {
 // Error types
 // ---------------------------------------------------------------------------
 
+/// Path of the launcher's switch file. Set by the outermost herdr process;
+/// a client that receives SwitchServer writes the SSH target here and exits,
+/// and the launcher chains into `herdr --remote <target>`.
+pub const SWITCH_FILE_ENV_VAR: &str = "HERDR_SWITCH_FILE";
+
+/// Record a server-switch target for the launcher. Returns false when no
+/// launcher registered a switch file (nothing to chain into).
+fn record_switch_target(ssh_target: &str) -> bool {
+    let Ok(path) = std::env::var(SWITCH_FILE_ENV_VAR) else {
+        return false;
+    };
+    if path.is_empty() {
+        return false;
+    }
+    std::fs::write(&path, ssh_target).is_ok()
+}
+
+/// Read and clear a recorded switch target, if any.
+pub fn take_switch_target(path: &std::path::Path) -> Option<String> {
+    let target = std::fs::read_to_string(path).ok()?;
+    let target = target.trim().to_string();
+    let _ = std::fs::remove_file(path);
+    (!target.is_empty()).then_some(target)
+}
+
 /// Errors that can occur during client operation.
 #[derive(Debug)]
 pub enum ClientError {
@@ -225,6 +250,9 @@ impl std::fmt::Display for ClientError {
             }
             ClientError::ServerShutdown { reason } => {
                 match reason.as_deref() {
+                    Some("switching") => {
+                        write!(f, "switching server")?;
+                    }
                     Some("detached") => {
                         if let Ok(reattach_command) =
                             std::env::var(crate::remote::REATTACH_COMMAND_ENV_VAR)
@@ -639,7 +667,7 @@ fn run_client_with_mode(
             err,
             ClientError::ServerShutdown {
                 reason: Some(reason)
-            } if reason == "detached"
+            } if reason == "detached" || reason == "switching"
         ) {
             return Ok(());
         }
@@ -861,6 +889,19 @@ async fn run_client_loop(
                 }
                 ServerMessage::ServerShutdown { reason } => {
                     return Err(ClientError::ServerShutdown { reason });
+                }
+                ServerMessage::SwitchServer { ssh_target } => {
+                    // Record the target for the launcher's attach loop, then
+                    // exit exactly like a detach. The outermost herdr process
+                    // reads the file and starts the next leg.
+                    if record_switch_target(&ssh_target) {
+                        return Err(ClientError::ServerShutdown {
+                            reason: Some("switching".to_string()),
+                        });
+                    }
+                    // No launcher to chain into (e.g. bare `herdr client`):
+                    // stay attached and let the user switch manually.
+                    eprintln!("herdr: server requested switch to {ssh_target}, but no launcher is present (HERDR_SWITCH_FILE unset)");
                 }
                 ServerMessage::Notify { kind, message } => {
                     handle_notify(kind, &message, &state.sound_config);

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -388,6 +388,14 @@ pub enum ServerMessage {
     MouseCapture {
         /// True when Herdr mouse UI is enabled or the focused pane app requests mouse reporting.
         enabled: bool,
+    },
+
+    /// A federated peer row was selected: the client should detach and
+    /// reattach to this SSH target (`herdr --remote <ssh_target>`). The
+    /// client records the target for its launcher and exits like a detach.
+    SwitchServer {
+        /// SSH destination of the peer server.
+        ssh_target: String,
     },
 }
 

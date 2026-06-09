@@ -37,6 +37,7 @@ mod kitty_graphics;
 mod layout;
 mod logging;
 mod pane;
+mod peers;
 mod persist;
 mod platform;
 mod product_announcements;
@@ -330,6 +331,47 @@ fn exit_if_nested_disabled(config: &config::Config) {
     }
 }
 
+enum AttachLeg {
+    /// Local server/client attach (auto-detect launch).
+    Local,
+    /// Remote attach over the SSH bridge.
+    Remote(remote::RemoteLaunch),
+}
+
+/// Run attach legs until the client exits without requesting a server
+/// switch. A leg's client records its switch target (a federated peer's SSH
+/// destination, from a sidebar remote row) in the switch file; each recorded
+/// target chains into a fresh `--remote` leg.
+fn run_attach_legs(first: AttachLeg) -> io::Result<()> {
+    let switch_file = std::env::temp_dir().join(format!("herdr-switch-{}", std::process::id()));
+    // Inherited by the (possibly nested) client process of every leg.
+    std::env::set_var(client::SWITCH_FILE_ENV_VAR, &switch_file);
+
+    let mut leg = first;
+    loop {
+        let result = match &leg {
+            AttachLeg::Local => server::autodetect::auto_detect_launch(),
+            AttachLeg::Remote(launch) => remote::run_remote(launch.clone()),
+        };
+
+        match client::take_switch_target(&switch_file) {
+            Some(target) => {
+                let keybindings = match &leg {
+                    AttachLeg::Remote(launch) => launch.keybindings,
+                    // Match the CLI's --remote-keybindings default.
+                    AttachLeg::Local => remote::RemoteKeybindings::Local,
+                };
+                leg = AttachLeg::Remote(remote::RemoteLaunch {
+                    target,
+                    keybindings,
+                    live_handoff: false,
+                });
+            }
+            None => return result,
+        }
+    }
+}
+
 fn main() -> io::Result<()> {
     let raw_args: Vec<String> = std::env::args().collect();
     let args = match session::configure_from_args(&raw_args) {
@@ -567,7 +609,7 @@ fn main() -> io::Result<()> {
     }
 
     if let Some(remote_launch) = remote_launch {
-        return remote::run_remote(remote_launch);
+        return run_attach_legs(AttachLeg::Remote(remote_launch));
     }
 
     let loaded_config = config::Config::load();
@@ -578,7 +620,7 @@ fn main() -> io::Result<()> {
     // Auto-detect launch: when --no-session is NOT set, use server/client mode.
     // Check if a server is running, spawn one if needed, then attach as client.
     if !no_session {
-        if let Err(err) = server::autodetect::auto_detect_launch() {
+        if let Err(err) = run_attach_legs(AttachLeg::Local) {
             eprintln!("herdr: {err}");
             std::process::exit(1);
         }

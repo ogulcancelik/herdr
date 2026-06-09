@@ -52,6 +52,8 @@ pub enum Method {
     TabRename(TabRenameParams),
     #[serde(rename = "tab.close")]
     TabClose(TabTarget),
+    #[serde(rename = "peers.summary")]
+    PeersSummary(EmptyParams),
     #[serde(rename = "agent.list")]
     AgentList(EmptyParams),
     #[serde(rename = "agent.get")]
@@ -672,6 +674,11 @@ pub enum ResponseResult {
         #[serde(default)]
         capabilities: Option<ServerCapabilities>,
     },
+    PeersSummary {
+        /// Short hostname of the answering server.
+        host: String,
+        workspaces: Vec<PeerWorkspaceSummary>,
+    },
     WorkspaceInfo {
         workspace: WorkspaceInfo,
     },
@@ -1041,6 +1048,39 @@ pub enum PaneAgentState {
     Working,
     Blocked,
     Unknown,
+}
+
+/// One workspace in a federated peer's `peers.summary` response: just enough
+/// for the sidebar's project-folded remote rows and cross-server attention.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerWorkspaceSummary {
+    /// Workspace id on the peer server (e.g. "ws_3"), used to focus it
+    /// remotely during switch-on-select.
+    #[serde(default)]
+    pub id: String,
+    /// Workspace display name (custom name or derived label).
+    pub workspace: String,
+    /// Machine-independent project identity (normalized origin URL or
+    /// "dir:<name>"), used to fold remote rows into local project groups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_key: Option<String>,
+    /// Repo folder name, labels remote-only project groups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub is_linked_worktree: bool,
+    /// Short agent label of the workspace's attention-leading pane (e.g. "cc").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    pub status: AgentStatus,
+    /// Seconds since the leading pane's state last changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_age_secs: Option<u64>,
+    /// Live status-line activity while Working (e.g. "Implementing the parser").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

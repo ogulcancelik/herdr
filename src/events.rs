@@ -62,6 +62,10 @@ pub enum AppEvent {
     PrStatePollDue,
     /// Background gh results: per-workspace PR state for worktree branches.
     PrStatesUpdated(Vec<(String, Option<crate::worktree::PrStateInfo>)>),
+    /// The peer-summary poll interval elapsed; spawn SSH fetches per peer.
+    PeerPollDue,
+    /// Background SSH result: one peer's federated summary (or error).
+    PeerSummaryFetched(crate::peers::PeerSummaryFetch),
     /// A user prompt submitted to an agent pane (integration hook report).
     HookPromptReported {
         pane_id: PaneId,

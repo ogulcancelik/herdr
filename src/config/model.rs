@@ -242,6 +242,7 @@ pub struct Config {
     pub advanced: AdvancedConfig,
     pub experimental: ExperimentalConfig,
     pub remote: RemoteConfig,
+    pub peers: Vec<PeerConfig>,
 }
 
 #[derive(Debug)]
@@ -394,6 +395,47 @@ pub struct WorktreesConfig {
     /// they group under their open parent repo workspace and get the managed
     /// worktree actions. Default: true.
     pub adopt_external: bool,
+}
+
+/// A federated peer Herdr server. Declared as `[[peers]]` entries. Peers are
+/// polled over SSH for a lightweight workspace/agent summary; their rows fold
+/// into the sidebar's project groups and selecting one switches the client to
+/// that server.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct PeerConfig {
+    /// Short host badge shown on remote rows (e.g. "anvil"). Required.
+    pub name: String,
+    /// SSH destination used for polling and attach. Defaults to `name`.
+    pub ssh: String,
+    /// Command run on the peer to fetch its summary. The default wraps the
+    /// herdr CLI in a login shell so profile-managed PATHs (nix, brew) apply.
+    pub summary_command: String,
+}
+
+impl Default for PeerConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            ssh: String::new(),
+            summary_command: default_peer_summary_command().to_string(),
+        }
+    }
+}
+
+pub fn default_peer_summary_command() -> &'static str {
+    "sh -lc 'herdr peers summary --json'"
+}
+
+impl PeerConfig {
+    /// SSH destination, falling back to the peer name.
+    pub fn ssh_target(&self) -> &str {
+        if self.ssh.is_empty() {
+            &self.name
+        } else {
+            &self.ssh
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

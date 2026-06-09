@@ -936,8 +936,11 @@ impl AppState {
     pub(crate) fn visible_workspace_order(&self) -> Vec<usize> {
         let order = crate::ui::workspace_list_entries(self)
             .into_iter()
-            .map(|entry| match entry {
-                crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } => ws_idx,
+            .filter_map(|entry| match entry {
+                crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } => Some(ws_idx),
+                // Remote rows are mouse targets only; keyboard navigation
+                // cycles local workspaces.
+                crate::ui::WorkspaceListEntry::Remote { .. } => None,
             })
             .collect::<Vec<_>>();
         if order.is_empty() {
@@ -2251,7 +2254,12 @@ impl AppState {
                 Vec::new()
             }
             // Handled in the shared api.rs preprocessing before reaching here.
-            AppEvent::PrStatePollDue | AppEvent::PrStatesUpdated(_) => Vec::new(),
+            // Consumed by the shared preprocessing in app/api.rs before this
+            // match runs in either loop.
+            AppEvent::PrStatePollDue
+            | AppEvent::PrStatesUpdated(_)
+            | AppEvent::PeerPollDue
+            | AppEvent::PeerSummaryFetched(_) => Vec::new(),
             AppEvent::HookPromptReported { pane_id, prompt } => self
                 .update_terminal_state(pane_id, |terminal| {
                     terminal.last_prompt = Some(prompt.clone());
@@ -2881,6 +2889,7 @@ mod tests {
             label: "repo".into(),
             repo_root: "/repo".into(),
             is_linked_worktree: linked,
+            project_key: format!("dir:{key}"),
         };
         state.workspaces[0].cached_git_space = Some(space("family", false));
         state.workspaces[1].cached_git_space = Some(space("family", true));
@@ -3355,6 +3364,7 @@ mod tests {
                     label: "other".into(),
                     repo_root: "/other/repo".into(),
                     is_linked_worktree: false,
+                    project_key: "dir:other".into(),
                 }),
             }],
         );

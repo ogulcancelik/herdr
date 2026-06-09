@@ -279,6 +279,27 @@ impl App {
                 })
                 .expect("pr-state tick thread should spawn");
         }
+        {
+            // Peer-summary poll tick: the shared event handler snapshots the
+            // configured [[peers]] and spawns the SSH fetch workers.
+            let peer_tick_tx = event_tx.clone();
+            std::thread::Builder::new()
+                .name("peer-summary-tick".into())
+                .spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(
+                        crate::peers::PEER_POLL_INITIAL_DELAY_SECS,
+                    ));
+                    loop {
+                        if peer_tick_tx.blocking_send(AppEvent::PeerPollDue).is_err() {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(
+                            crate::peers::PEER_POLL_INTERVAL_SECS,
+                        ));
+                    }
+                })
+                .expect("peer-summary tick thread should spawn");
+        }
         let render_notify = Arc::new(Notify::new());
         let render_dirty = Arc::new(AtomicBool::new(false));
 
@@ -442,6 +463,13 @@ impl App {
             action_notice: None,
             agent_aliases: config.ui.agent_aliases.clone(),
             adopt_external_worktrees: config.worktrees.adopt_external,
+            peers: config.peers.clone(),
+            peer_summaries: config
+                .peers
+                .iter()
+                .map(crate::peers::PeerSummaryState::new)
+                .collect(),
+            request_peer_switch: None,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
             request_remove_linked_worktree: None,
@@ -485,6 +513,7 @@ impl App {
                 layout: state::ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
+                remote_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 status_line_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
@@ -810,6 +839,14 @@ impl App {
 
             if let Some(ws_idx) = self.state.request_branch_session.take() {
                 self.open_branch_session_dialog(ws_idx);
+                needs_render = true;
+            }
+
+            if self.state.request_peer_switch.take().is_some() {
+                // Monolithic --no-session mode has no client to re-point.
+                self.show_action_notice(
+                    "peer switch requires client/server mode (run without --no-session)",
+                );
                 needs_render = true;
             }
 
@@ -1212,6 +1249,22 @@ impl App {
                 self.state.status_line = config.ui.status_line;
                 self.state.agent_aliases = config.ui.agent_aliases.clone();
                 self.state.adopt_external_worktrees = config.worktrees.adopt_external;
+                if self.state.peers != config.peers {
+                    // Keep polled data for peers that survive the reload.
+                    self.state.peer_summaries = config
+                        .peers
+                        .iter()
+                        .map(|peer| {
+                            self.state
+                                .peer_summaries
+                                .iter()
+                                .find(|summary| summary.peer == peer.name)
+                                .cloned()
+                                .unwrap_or_else(|| crate::peers::PeerSummaryState::new(peer))
+                        })
+                        .collect();
+                    self.state.peers = config.peers.clone();
+                }
                 // Re-clamp the live width to the new bounds. No source guard — bounds
                 // always apply, including to widths owned by Persisted or Manual.
                 self.state.sidebar_width = self

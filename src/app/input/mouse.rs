@@ -535,6 +535,17 @@ impl AppState {
                         return None;
                     }
 
+                    // Remote (federated peer) rows: request a server switch.
+                    if let Some(card) = self
+                        .view
+                        .remote_card_areas
+                        .iter()
+                        .find(|card| mouse.row == card.rect.y)
+                    {
+                        self.request_peer_switch = Some((card.peer_idx, card.ws_idx));
+                        return None;
+                    }
+
                     if self.on_agent_panel_scope_toggle(mouse.column, mouse.row) {
                         self.agent_panel_scope = match self.agent_panel_scope {
                             AgentPanelScope::CurrentWorkspace => AgentPanelScope::AllWorkspaces,

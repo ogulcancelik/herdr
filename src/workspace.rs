@@ -24,7 +24,7 @@ use self::git::git_ahead_behind;
 pub use self::{
     git::{
         derive_label_from_cwd, git_branch, git_space_metadata, git_status_cache_key,
-        GitSpaceMetadata, GitStatusCacheEntry,
+        project_key_for_common_dir, GitSpaceMetadata, GitStatusCacheEntry,
     },
     tab::Tab,
 };
@@ -650,6 +650,15 @@ impl Workspace {
 
     pub fn worktree_space(&self) -> Option<&WorktreeSpaceMembership> {
         self.worktree_space.as_ref()
+    }
+
+    /// Machine-independent project identity (normalized origin URL or
+    /// "dir:<name>" fallback) used to fold checkouts of the same project
+    /// across federated peer servers. See [[peers]] config.
+    pub fn project_key(&self) -> Option<&str> {
+        self.cached_git_space
+            .as_ref()
+            .map(|space| space.project_key.as_str())
     }
 
     #[cfg(test)]

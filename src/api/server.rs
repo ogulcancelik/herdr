@@ -337,6 +337,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::TabFocus(_) => "tab.focus",
         Method::TabRename(_) => "tab.rename",
         Method::TabClose(_) => "tab.close",
+        Method::PeersSummary(_) => "peers.summary",
         Method::AgentList(_) => "agent.list",
         Method::AgentGet(_) => "agent.get",
         Method::AgentRead(_) => "agent.read",

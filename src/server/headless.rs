@@ -491,6 +491,17 @@ impl HeadlessServer {
                 }
             }
 
+            if let Some((peer_idx, ws_idx)) = self.app.state.request_peer_switch.take() {
+                if let Some((ssh_target, peer_label)) =
+                    self.app.prepare_peer_switch(peer_idx, ws_idx)
+                {
+                    self.app
+                        .show_action_notice(format!("switching to {peer_label}…"));
+                    self.send_to_foreground_client(ServerMessage::SwitchServer { ssh_target });
+                }
+                needs_render = true;
+            }
+
             if self.app.state.request_submit_worktree_create {
                 self.app.state.request_submit_worktree_create = false;
                 self.app.start_worktree_add();

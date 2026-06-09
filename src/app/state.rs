@@ -648,6 +648,20 @@ pub struct WorkspaceCardArea {
     pub indented: bool,
 }
 
+/// Hit area of a federated remote workspace row in the spaces list.
+/// Clicking one requests a server switch instead of a workspace focus.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteCardArea {
+    /// Index into `state.peer_summaries`.
+    pub peer_idx: usize,
+    /// Index into that peer's `workspaces` summary vec.
+    pub ws_idx: usize,
+    pub rect: Rect,
+    /// Indented rows fold under a project block; unindented rows lead a
+    /// remote-only project group and carry the project label.
+    pub indented: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeCreateState {
     /// When set, the created workspace's root pane resumes a fork of this
@@ -814,6 +828,7 @@ pub struct ViewState {
     pub layout: ViewLayout,
     pub sidebar_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
+    pub remote_card_areas: Vec<RemoteCardArea>,
     pub tab_bar_rect: Rect,
     pub status_line_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
@@ -1368,6 +1383,13 @@ pub struct AppState {
     pub agent_aliases: std::collections::HashMap<String, String>,
     /// Auto-adopt external linked worktrees into managed groups.
     pub adopt_external_worktrees: bool,
+    /// Configured federated peer servers ([[peers]]), config-owned.
+    pub peers: Vec<crate::config::PeerConfig>,
+    /// Latest polled summary per configured peer (sidebar remote rows).
+    pub peer_summaries: Vec<crate::peers::PeerSummaryState>,
+    /// A remote row was selected: switch the client to this peer workspace.
+    /// (peer_idx, ws_idx) into peer_summaries. Consumed by both loops.
+    pub request_peer_switch: Option<(usize, usize)>,
     pub request_open_existing_worktree: Option<usize>,
     pub request_new_workspace_cwd: Option<std::path::PathBuf>,
     pub request_remove_linked_worktree: Option<usize>,
@@ -1728,6 +1750,9 @@ impl AppState {
             action_notice: None,
             agent_aliases: std::collections::HashMap::new(),
             adopt_external_worktrees: true,
+            peers: Vec::new(),
+            peer_summaries: Vec::new(),
+            request_peer_switch: None,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
             request_remove_linked_worktree: None,
@@ -1762,6 +1787,7 @@ impl AppState {
                 layout: ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
+                remote_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 status_line_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
