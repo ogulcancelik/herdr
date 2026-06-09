@@ -1435,6 +1435,8 @@ pub struct AppState {
     pub sidebar_pane_gap: u16,
     /// Max height of the prompt section in the pane header. 0 = context only.
     pub prompt_float_lines: u16,
+    /// Auto-collapse every sidebar worktree group except the focused one.
+    pub auto_collapse_groups: bool,
     /// Reserve the agent pane header strip.
     pub pane_header: bool,
     /// Show the global machine status line.
@@ -1799,6 +1801,7 @@ impl AppState {
             sidebar_row_gap: crate::config::DEFAULT_SIDEBAR_ROW_GAP,
             sidebar_pane_gap: crate::config::DEFAULT_SIDEBAR_PANE_GAP,
             prompt_float_lines: crate::config::DEFAULT_PROMPT_FLOAT_LINES,
+            auto_collapse_groups: false,
             pane_header: true,
             status_line: true,
             system_stats: None,

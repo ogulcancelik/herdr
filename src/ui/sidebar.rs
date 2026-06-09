@@ -297,6 +297,52 @@ fn space_aggregate_state(app: &AppState, key: &str) -> (AgentState, bool) {
         .unwrap_or((AgentState::Unknown, true))
 }
 
+/// Pane counts per state bucket across a worktree space's members, in
+/// attention-priority order: blocked, done (unseen idle), working, idle.
+fn space_state_counts(app: &AppState, key: &str) -> Vec<(AgentState, bool, usize)> {
+    let mut blocked = 0usize;
+    let mut done = 0usize;
+    let mut working = 0usize;
+    let mut idle = 0usize;
+    for ws in app
+        .workspaces
+        .iter()
+        .filter(|ws| ws.worktree_space().is_some_and(|space| space.key == key))
+    {
+        for (state, seen) in ws.pane_states(&app.terminals) {
+            match (state, seen) {
+                (AgentState::Blocked, _) => blocked += 1,
+                (AgentState::Idle, false) => done += 1,
+                (AgentState::Working, _) => working += 1,
+                (AgentState::Idle, true) => idle += 1,
+                (AgentState::Unknown, _) => {}
+            }
+        }
+    }
+    [
+        (AgentState::Blocked, true, blocked),
+        (AgentState::Idle, false, done),
+        (AgentState::Working, true, working),
+        (AgentState::Idle, true, idle),
+    ]
+    .into_iter()
+    .filter(|(_, _, count)| *count > 0)
+    .collect()
+}
+
+/// Traffic-light count glyph: a filled circled digit for 1..=10, "\u{25cf}N"
+/// beyond that.
+fn circled_count(count: usize) -> String {
+    const CIRCLED: [&str; 10] = [
+        "\u{2776}", "\u{2777}", "\u{2778}", "\u{2779}", "\u{277a}", "\u{277b}", "\u{277c}",
+        "\u{277d}", "\u{277e}", "\u{277f}",
+    ];
+    match count {
+        1..=10 => CIRCLED[count - 1].to_string(),
+        other => format!("\u{25cf}{other}"),
+    }
+}
+
 pub(crate) fn workspace_parent_group_state(
     app: &AppState,
     ws_idx: usize,
@@ -371,19 +417,7 @@ pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> 
                 .push(ws_idx);
         }
     }
-    let grouped_keys = members_by_key
-        .iter()
-        .filter(|(_, members)| {
-            members.len() >= 2
-                && members.iter().any(|idx| {
-                    app.workspaces
-                        .get(*idx)
-                        .and_then(|ws| ws.worktree_space())
-                        .is_some_and(|space| !space.is_linked_worktree)
-                })
-        })
-        .map(|(key, _)| key.clone())
-        .collect::<std::collections::HashSet<_>>();
+    let grouped_keys = app.collapsible_space_keys();
 
     let visible_group_idx = if matches!(app.mode, Mode::Navigate) {
         Some(app.selected)
@@ -941,6 +975,7 @@ fn render_workspace_list(
         let label = ws.display_name_from(&app.terminals, terminal_runtimes);
         let mut line1 = Vec::new();
         let mut show_workspace_icon = true;
+        let mut collapsed_group_key: Option<String> = None;
         if card.indented {
             line1.push(Span::styled("   ", Style::default()));
         } else if let Some((key, collapsed)) = workspace_parent_group_state(app, i) {
@@ -956,6 +991,7 @@ fn render_workspace_list(
                 line1.push(Span::styled(" ", Style::default()));
                 line1.push(Span::styled(state_icon, state_style));
                 show_workspace_icon = false;
+                collapsed_group_key = Some(key);
             }
             line1.push(Span::styled(" ", Style::default()));
         } else {
@@ -974,6 +1010,17 @@ fn render_workspace_list(
             line1.push(Span::styled(display_label, name_style));
         } else {
             line1.push(Span::styled(label, name_style));
+        }
+        // Collapsed groups summarize their hidden members as a traffic
+        // light: per-state counts in attention-priority order.
+        if let Some(key) = collapsed_group_key.as_deref() {
+            for (state, seen, count) in space_state_counts(app, key) {
+                line1.push(Span::styled(" ", Style::default()));
+                line1.push(Span::styled(
+                    circled_count(count),
+                    Style::default().fg(state_label_color(state, seen, p)),
+                ));
+            }
         }
 
         frame.render_widget(
@@ -1264,6 +1311,64 @@ mod tests {
     use super::*;
     use crate::{detect::Agent, workspace::Workspace};
     use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn space_state_counts_buckets_panes_by_attention_state() {
+        use crate::detect::AgentState;
+        use crate::workspace::WorktreeSpaceMembership;
+
+        let space = |idx: usize, linked: bool| WorktreeSpaceMembership {
+            key: "grp".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: format!("/repo/ws-{idx}").into(),
+            is_linked_worktree: linked,
+        };
+
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces.push(Workspace::test_new("parent"));
+        app.workspaces.push(Workspace::test_new("child"));
+        app.workspaces[0].worktree_space = Some(space(0, false));
+        app.workspaces[1].worktree_space = Some(space(1, true));
+        app.ensure_test_terminals();
+
+        // parent pane is Blocked; child pane is Idle+unseen (a "done" light).
+        let parent_tid = {
+            let tab = &app.workspaces[0].tabs[0];
+            tab.panes
+                .values()
+                .next()
+                .unwrap()
+                .attached_terminal_id
+                .clone()
+        };
+        let (child_tid, child_pane) = {
+            let tab = &app.workspaces[1].tabs[0];
+            let pane = tab.panes.keys().next().copied().unwrap();
+            (app.workspaces[1].terminal_id(pane).unwrap().clone(), pane)
+        };
+        app.terminals.get_mut(&parent_tid).unwrap().state = AgentState::Blocked;
+        app.terminals.get_mut(&child_tid).unwrap().state = AgentState::Idle;
+        app.workspaces[1].tabs[0]
+            .panes
+            .get_mut(&child_pane)
+            .unwrap()
+            .seen = false;
+
+        let counts = space_state_counts(&app, "grp");
+
+        assert!(counts.contains(&(AgentState::Blocked, true, 1)));
+        assert!(counts.contains(&(AgentState::Idle, false, 1)));
+        // No Working/Idle-seen panes → those buckets are filtered out.
+        assert_eq!(counts.len(), 2);
+    }
+
+    #[test]
+    fn circled_count_uses_filled_digits_through_ten_then_falls_back() {
+        assert_eq!(circled_count(1), "\u{2776}");
+        assert_eq!(circled_count(10), "\u{277f}");
+        assert_eq!(circled_count(11), "\u{25cf}11");
+    }
 
     #[test]
     fn render_sidebar_toggle_draws_expanded_collapse_icon() {

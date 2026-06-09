@@ -82,10 +82,11 @@ fn pane_attention_priority(state: AgentState, seen: bool) -> u8 {
 }
 
 impl Workspace {
-    pub fn aggregate_state(
-        &self,
-        terminals: &HashMap<TerminalId, TerminalState>,
-    ) -> (AgentState, bool) {
+    /// (state, seen) for every pane in the workspace with a live terminal.
+    pub fn pane_states<'a>(
+        &'a self,
+        terminals: &'a HashMap<TerminalId, TerminalState>,
+    ) -> impl Iterator<Item = (AgentState, bool)> + 'a {
         self.tabs
             .iter()
             .flat_map(|tab| tab.panes.values())
@@ -94,6 +95,13 @@ impl Workspace {
                     .get(&pane.attached_terminal_id)
                     .map(|terminal| (terminal.state, pane.seen))
             })
+    }
+
+    pub fn aggregate_state(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+    ) -> (AgentState, bool) {
+        self.pane_states(terminals)
             .max_by_key(|(state, seen)| pane_attention_priority(*state, *seen))
             .unwrap_or((AgentState::Unknown, true))
     }

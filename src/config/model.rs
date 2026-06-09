@@ -266,6 +266,9 @@ pub struct KeysConfig {
     pub new_worktree: BindingConfig,
     /// Branch the focused pane's agent session into a new worktree. Unset by default.
     pub branch_session: BindingConfig,
+    /// Collapse every sidebar worktree group at once; pressed again, expand
+    /// them all. Unset by default.
+    pub toggle_collapse_all: BindingConfig,
     /// Delete a linked worktree checkout AND its local branch once the merge
     /// gate (PR merged / branch merged into the default branch) passes.
     /// Unset by default.
@@ -413,6 +416,9 @@ pub struct UiConfig {
     /// Max height of the prompt section in the pane header (the last
     /// submitted prompt, middle-collapsed). 0 = context-only header. Default: 3.
     pub prompt_float_lines: u16,
+    /// Auto-collapse every sidebar worktree group except the one holding the
+    /// focused workspace. Default: false.
+    pub auto_collapse_groups: bool,
     /// Reserve a header strip (project · worktree · branch + last prompt) at
     /// the top of agent panes. The pane PTY shrinks accordingly. Default: true.
     pub pane_header: bool,
@@ -548,6 +554,7 @@ impl Default for KeysConfig {
             new_workspace: BindingConfig::one("prefix+shift+n"),
             new_worktree: BindingConfig::one("prefix+shift+g"),
             branch_session: BindingConfig::empty(),
+            toggle_collapse_all: BindingConfig::empty(),
             kill_worktree: BindingConfig::empty(),
             focus_attention: BindingConfig::empty(),
             focus_attention_previous: BindingConfig::empty(),
@@ -621,6 +628,7 @@ impl Default for UiConfig {
             sidebar_row_gap: DEFAULT_SIDEBAR_ROW_GAP,
             sidebar_pane_gap: DEFAULT_SIDEBAR_PANE_GAP,
             prompt_float_lines: DEFAULT_PROMPT_FLOAT_LINES,
+            auto_collapse_groups: false,
             pane_header: true,
             status_line: true,
             mouse_capture: true,

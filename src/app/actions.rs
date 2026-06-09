@@ -741,12 +741,84 @@ impl AppState {
             .is_some_and(|tab_idx| tab_idx == self.workspaces[ws_idx].active_tab)
     }
 
+    /// Keys of every worktree-space family rendered as a collapsible sidebar
+    /// group: at least two member workspaces, one of them the non-linked
+    /// parent checkout. Canonical source for collapse-all and auto-collapse.
+    pub(crate) fn collapsible_space_keys(&self) -> std::collections::HashSet<String> {
+        let mut members = std::collections::HashMap::<&str, (usize, bool)>::new();
+        for ws in &self.workspaces {
+            if let Some(space) = ws.worktree_space() {
+                let entry = members.entry(space.key.as_str()).or_insert((0, false));
+                entry.0 += 1;
+                entry.1 |= !space.is_linked_worktree;
+            }
+        }
+        members
+            .into_iter()
+            .filter(|(_, (count, has_parent))| *count >= 2 && *has_parent)
+            .map(|(key, _)| key.to_string())
+            .collect()
+    }
+
+    /// Collapse every sidebar worktree group at once; if all are already
+    /// collapsed, expand them all instead.
+    pub(crate) fn toggle_all_space_groups(&mut self) {
+        let keys = self.collapsible_space_keys();
+        if keys.is_empty() {
+            return;
+        }
+        let all_collapsed = keys
+            .iter()
+            .all(|key| self.collapsed_space_keys.contains(key));
+        let mut changed = false;
+        for key in keys {
+            if all_collapsed {
+                changed |= self.collapsed_space_keys.remove(&key);
+            } else {
+                changed |= self.collapsed_space_keys.insert(key);
+            }
+        }
+        if changed {
+            self.mark_session_dirty();
+        }
+    }
+
+    /// Single chokepoint for workspace-focus changes; reacts with sidebar
+    /// auto-collapse when `[ui] auto_collapse_groups` is enabled.
+    pub(crate) fn set_active_workspace(&mut self, idx: Option<usize>) {
+        let changed = self.active != idx;
+        self.active = idx;
+        if changed && self.auto_collapse_groups {
+            self.auto_collapse_inactive_groups();
+        }
+    }
+
+    /// Collapse every worktree group except the focused workspace's own.
+    fn auto_collapse_inactive_groups(&mut self) {
+        let focused_key = self
+            .active
+            .and_then(|idx| self.workspaces.get(idx))
+            .and_then(|ws| ws.worktree_space())
+            .map(|space| space.key.clone());
+        let mut changed = false;
+        for key in self.collapsible_space_keys() {
+            if focused_key.as_deref() == Some(key.as_str()) {
+                changed |= self.collapsed_space_keys.remove(&key);
+            } else {
+                changed |= self.collapsed_space_keys.insert(key);
+            }
+        }
+        if changed {
+            self.mark_session_dirty();
+        }
+    }
+
     pub fn switch_workspace(&mut self, idx: usize) {
         if idx < self.workspaces.len() {
             let previous_focus = self.current_pane_focus_target();
             self.selection = None;
             self.selection_autoscroll = None;
-            self.active = Some(idx);
+            self.set_active_workspace(Some(idx));
             self.selected = idx;
             let workspace_id = self.workspaces[idx].id.clone();
             crate::logging::workspace_focused(&workspace_id);
@@ -786,7 +858,7 @@ impl AppState {
         let workspace_changed = self.active != Some(ws_idx);
         self.selection = None;
         self.selection_autoscroll = None;
-        self.active = Some(ws_idx);
+        self.set_active_workspace(Some(ws_idx));
         self.selected = ws_idx;
         let workspace_id = self.workspaces[ws_idx].id.clone();
         if workspace_changed {
@@ -1017,7 +1089,9 @@ impl AppState {
         .min(self.workspaces.len());
         self.workspaces.insert(target_idx, workspace);
 
-        self.active = active_id.and_then(|id| self.workspaces.iter().position(|ws| ws.id == id));
+        let resolved_active =
+            active_id.and_then(|id| self.workspaces.iter().position(|ws| ws.id == id));
+        self.set_active_workspace(resolved_active);
         self.selected = selected_id
             .and_then(|id| self.workspaces.iter().position(|ws| ws.id == id))
             .unwrap_or(0);
@@ -1398,7 +1472,7 @@ impl AppState {
         }
         self.remove_unattached_terminal_ids(terminal_ids);
         if self.workspaces.is_empty() {
-            self.active = None;
+            self.set_active_workspace(None);
             self.selected = 0;
             self.workspace_scroll = 0;
             self.tab_scroll = 0;
@@ -1407,7 +1481,7 @@ impl AppState {
             if self.selected >= self.workspaces.len() {
                 self.selected = self.workspaces.len() - 1;
             }
-            self.active = Some(self.selected);
+            self.set_active_workspace(Some(self.selected));
             self.workspace_scroll = self
                 .workspace_scroll
                 .min(self.workspaces.len().saturating_sub(1));
@@ -2554,7 +2628,7 @@ impl AppState {
             self.workspaces.remove(ws_idx);
             self.remove_unattached_terminal_ids(workspace_terminal_ids);
             if self.workspaces.is_empty() {
-                self.active = None;
+                self.set_active_workspace(None);
                 self.selected = 0;
                 if self.mode == Mode::Terminal {
                     self.mode = Mode::Navigate;
@@ -2562,7 +2636,7 @@ impl AppState {
             } else {
                 if let Some(active) = self.active {
                     if active >= self.workspaces.len() {
-                        self.active = Some(self.workspaces.len() - 1);
+                        self.set_active_workspace(Some(self.workspaces.len() - 1));
                     }
                 }
                 if self.selected >= self.workspaces.len() {
@@ -4675,5 +4749,102 @@ mod tests {
         assert!(!deferred);
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "notes");
+    }
+
+    #[test]
+    fn collapsible_space_keys_needs_two_members_and_a_parent() {
+        let mut state = app_with_workspaces(&["parent", "child"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree(&mut state, 1);
+
+        let keys = state.collapsible_space_keys();
+        assert_eq!(keys.len(), 1);
+        assert!(keys.contains("repo-key"));
+    }
+
+    #[test]
+    fn collapsible_space_keys_excludes_groups_without_a_parent() {
+        // Two linked worktrees sharing a key but no non-linked parent present.
+        let mut state = app_with_workspaces(&["child-a", "child-b"]);
+        mark_linked_worktree(&mut state, 0);
+        mark_linked_worktree(&mut state, 1);
+
+        assert!(state.collapsible_space_keys().is_empty());
+    }
+
+    #[test]
+    fn collapsible_space_keys_excludes_lone_parent() {
+        let mut state = app_with_workspaces(&["parent"]);
+        mark_parent_worktree(&mut state, 0);
+
+        assert!(state.collapsible_space_keys().is_empty());
+    }
+
+    #[test]
+    fn toggle_all_space_groups_collapses_then_expands() {
+        let mut state = app_with_workspaces(&["parent", "child"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree(&mut state, 1);
+
+        state.toggle_all_space_groups();
+        assert!(state.collapsed_space_keys.contains("repo-key"));
+
+        // Second invocation, with everything collapsed, expands all again.
+        state.toggle_all_space_groups();
+        assert!(!state.collapsed_space_keys.contains("repo-key"));
+    }
+
+    #[test]
+    fn toggle_all_space_groups_is_noop_without_groups() {
+        let mut state = app_with_workspaces(&["solo"]);
+        state.toggle_all_space_groups();
+        assert!(state.collapsed_space_keys.is_empty());
+    }
+
+    #[test]
+    fn set_active_workspace_auto_collapses_inactive_groups_when_enabled() {
+        // Two distinct groups; focusing one collapses the other, never its own.
+        let mut state = app_with_workspaces(&["a-parent", "a-child", "b-parent", "b-child"]);
+        for (idx, key, linked) in [
+            (0, "key-a", false),
+            (1, "key-a", true),
+            (2, "key-b", false),
+            (3, "key-b", true),
+        ] {
+            state.workspaces[idx].worktree_space =
+                Some(crate::workspace::WorktreeSpaceMembership {
+                    key: key.into(),
+                    label: "herdr".into(),
+                    repo_root: "/repo/herdr".into(),
+                    checkout_path: format!("/repo/ws-{idx}").into(),
+                    is_linked_worktree: linked,
+                });
+        }
+        state.auto_collapse_groups = true;
+        state.active = Some(2); // start focused on group b
+
+        state.set_active_workspace(Some(0)); // focus group a
+
+        assert!(
+            !state.collapsed_space_keys.contains("key-a"),
+            "focused group stays expanded"
+        );
+        assert!(
+            state.collapsed_space_keys.contains("key-b"),
+            "inactive group collapses"
+        );
+    }
+
+    #[test]
+    fn set_active_workspace_does_not_auto_collapse_when_disabled() {
+        let mut state = app_with_workspaces(&["parent", "child"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree(&mut state, 1);
+        state.auto_collapse_groups = false;
+        state.active = Some(1);
+
+        state.set_active_workspace(Some(0));
+
+        assert!(state.collapsed_space_keys.is_empty());
     }
 }

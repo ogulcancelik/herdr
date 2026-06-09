@@ -513,6 +513,7 @@ pub(crate) enum NavigateAction {
     Zoom,
     EnterResizeMode,
     ToggleSidebar,
+    ToggleCollapseAll,
     CyclePaneNext,
     CyclePanePrevious,
     LastPane,
@@ -631,6 +632,7 @@ fn action_for_key(
         (&kb.zoom, NavigateAction::Zoom),
         (&kb.resize_mode, NavigateAction::EnterResizeMode),
         (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
+        (&kb.toggle_collapse_all, NavigateAction::ToggleCollapseAll),
         (&kb.reload_config, NavigateAction::ReloadConfig),
         (
             &kb.open_notification_target,
@@ -851,6 +853,10 @@ pub(super) fn execute_navigate_action_in_context(
         NavigateAction::EnterResizeMode => state.mode = Mode::Resize,
         NavigateAction::ToggleSidebar => {
             state.sidebar_collapsed = !state.sidebar_collapsed;
+            leave_navigate_mode(state);
+        }
+        NavigateAction::ToggleCollapseAll => {
+            state.toggle_all_space_groups();
             leave_navigate_mode(state);
         }
         NavigateAction::CyclePaneNext => {
