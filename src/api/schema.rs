@@ -677,6 +677,13 @@ pub enum ResponseResult {
     PeersSummary {
         /// Short hostname of the answering server.
         host: String,
+        /// herdr version string of the answering server (spot un-deployed peers).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+        /// Machine health snapshot, piggybacked from the peer's existing
+        /// status-line sampler (no extra sampling cost).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system: Option<PeerSystemSummary>,
         workspaces: Vec<PeerWorkspaceSummary>,
     },
     WorkspaceInfo {
@@ -1048,6 +1055,22 @@ pub enum PaneAgentState {
     Working,
     Blocked,
     Unknown,
+}
+
+/// Machine health for a federated peer's `servers` sidebar row. Sourced from
+/// the peer's existing 2s status-line sampler — no extra measurement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerSystemSummary {
+    /// Global CPU utilization, 0..=100 (rounded; keeps the response `Eq`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_used: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_total: Option<u64>,
+    /// Free space on the volume holding $HOME, in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_free: Option<u64>,
 }
 
 /// One workspace in a federated peer's `peers.summary` response: just enough

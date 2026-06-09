@@ -361,7 +361,12 @@ fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], idx: usize) 
 }
 
 pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested: usize) -> usize {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split, app.sidebar_pane_gap);
+    let ws_area = workspace_list_rect(
+        area,
+        app.sidebar_section_split,
+        app.sidebar_pane_gap,
+        servers_section_height(app),
+    );
     let body = workspace_list_body_rect(ws_area, false);
     if body.height == 0 {
         return requested;
@@ -602,9 +607,52 @@ pub(crate) fn remote_entry_label(
     }
 }
 
-pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32, pane_gap: u16) -> Rect {
+/// Max peer rows shown in the `servers` section before it stops growing
+/// (extra peers still poll; the section just caps its height).
+const SERVERS_SECTION_MAX_ROWS: u16 = 8;
+
+/// Height the `servers` section wants: 0 with no peers, else a header row
+/// plus one row per peer (capped), or just the header when collapsed.
+pub(crate) fn servers_section_height(app: &AppState) -> u16 {
+    let peers = app.peer_summaries.len();
+    if peers == 0 {
+        return 0;
+    }
+    if app.servers_collapsed {
+        return 1;
+    }
+    1 + (peers as u16).min(SERVERS_SECTION_MAX_ROWS)
+}
+
+/// Split the spaces-section rect into the `servers` band (top) and the
+/// workspace-list area (below). The band never takes more than half the
+/// section, so the workspace list always keeps room.
+pub(crate) fn carve_servers_band(ws_area: Rect, servers_height: u16) -> (Rect, Rect) {
+    if servers_height == 0 || ws_area.height == 0 {
+        return (Rect::default(), ws_area);
+    }
+    let band_h = servers_height.min(ws_area.height / 2);
+    if band_h == 0 {
+        return (Rect::default(), ws_area);
+    }
+    let servers_area = Rect::new(ws_area.x, ws_area.y, ws_area.width, band_h);
+    let list_area = Rect::new(
+        ws_area.x,
+        ws_area.y + band_h,
+        ws_area.width,
+        ws_area.height - band_h,
+    );
+    (servers_area, list_area)
+}
+
+pub(crate) fn workspace_list_rect(
+    area: Rect,
+    split_ratio: f32,
+    pane_gap: u16,
+    servers_height: u16,
+) -> Rect {
     let (ws_area, _) = expanded_sidebar_sections(area, split_ratio, pane_gap);
-    ws_area
+    carve_servers_band(ws_area, servers_height).1
 }
 
 pub(crate) fn workspace_list_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
@@ -757,7 +805,12 @@ pub(crate) fn compute_workspace_list_areas(
     Vec<crate::app::state::WorkspaceCardArea>,
     Vec<crate::app::state::RemoteCardArea>,
 ) {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split, app.sidebar_pane_gap);
+    let ws_area = workspace_list_rect(
+        area,
+        app.sidebar_section_split,
+        app.sidebar_pane_gap,
+        servers_section_height(app),
+    );
     if ws_area == Rect::default() {
         return (Vec::new(), Vec::new());
     }
@@ -1032,9 +1085,211 @@ pub(super) fn render_sidebar(
     let (ws_area, detail_area) =
         expanded_sidebar_sections(area, app.sidebar_section_split, app.sidebar_pane_gap);
 
-    render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
+    let (servers_area, list_area) = carve_servers_band(ws_area, servers_section_height(app));
+    if servers_area != Rect::default() {
+        render_servers_section(app, frame, servers_area, is_navigating);
+    }
+    render_workspace_list(app, terminal_runtimes, frame, list_area, is_navigating);
     render_agent_detail(app, terminal_runtimes, frame, detail_area);
     render_sidebar_toggle(app, frame, area, false, p);
+}
+
+/// Compute hit areas for the `servers` section: the header rect (toggles
+/// collapse) and one rect per visible peer row (switches to that peer).
+pub(crate) fn compute_server_section_areas(
+    app: &AppState,
+    area: Rect,
+) -> (Rect, Vec<crate::app::state::ServerCardArea>) {
+    let (servers_area, _) = carve_servers_band(
+        workspace_list_rect(area, app.sidebar_section_split, app.sidebar_pane_gap, 0),
+        servers_section_height(app),
+    );
+    if servers_area == Rect::default() || servers_area.height == 0 {
+        return (Rect::default(), Vec::new());
+    }
+    let header_rect = Rect::new(servers_area.x, servers_area.y, servers_area.width, 1);
+    let mut cards = Vec::new();
+    if !app.servers_collapsed {
+        let max_rows = servers_area.height.saturating_sub(1);
+        for (peer_idx, _) in app
+            .peer_summaries
+            .iter()
+            .enumerate()
+            .take(max_rows as usize)
+        {
+            cards.push(crate::app::state::ServerCardArea {
+                peer_idx,
+                rect: Rect::new(
+                    servers_area.x,
+                    servers_area.y + 1 + peer_idx as u16,
+                    servers_area.width,
+                    1,
+                ),
+            });
+        }
+    }
+    (header_rect, cards)
+}
+
+fn render_servers_section(app: &AppState, frame: &mut Frame, area: Rect, is_navigating: bool) {
+    let p = &app.palette;
+    let chevron = if app.servers_collapsed { "▸" } else { "▾" };
+    let down = app
+        .peer_summaries
+        .iter()
+        .filter(|peer| peer.reachability() == crate::peers::PeerReachability::Down)
+        .count();
+    let header = if down > 0 {
+        format!("{chevron} servers ({down} down)")
+    } else {
+        format!("{chevron} servers")
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            header,
+            Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+        )])),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    let _ = is_navigating;
+
+    if app.servers_collapsed {
+        return;
+    }
+
+    let body_bottom = area.y + area.height;
+    for card in &app.view.server_card_areas {
+        if card.rect.y >= body_bottom {
+            break;
+        }
+        let Some(peer) = app.peer_summaries.get(card.peer_idx) else {
+            continue;
+        };
+        frame.render_widget(
+            Paragraph::new(server_row_line(peer, card.rect.width, p)),
+            card.rect,
+        );
+    }
+}
+
+/// One `servers` row: ● host  12ms  cpu 19% mem 13/16G  ·  3 agents.
+fn server_row_line<'a>(
+    peer: &'a crate::peers::PeerSummaryState,
+    width: u16,
+    p: &crate::app::state::Palette,
+) -> Line<'a> {
+    use crate::peers::PeerReachability;
+    let reach = peer.reachability();
+    let (dot, dot_color) = match reach {
+        PeerReachability::Live => ("●", p.green),
+        PeerReachability::Slow => ("●", p.yellow),
+        PeerReachability::Down => ("○", p.red),
+    };
+    let host = peer.host.clone().unwrap_or_else(|| peer.peer.clone());
+    let mut spans = vec![
+        Span::styled(" ", Style::default()),
+        Span::styled(dot, Style::default().fg(dot_color)),
+        Span::styled(" ", Style::default()),
+        Span::styled(host, Style::default().fg(p.subtext0)),
+    ];
+
+    if reach == PeerReachability::Down {
+        let detail = match peer.last_ok {
+            Some(at) => format!("  unreachable {}", format_age(at.elapsed().as_secs())),
+            None => "  unreachable".to_string(),
+        };
+        spans.push(Span::styled(detail, Style::default().fg(p.overlay0)));
+        return clamp_line(Line::from(spans), width);
+    }
+
+    if let Some(ms) = peer.latency_ms {
+        let color = if ms > crate::peers::PEER_SLOW_LATENCY_MS {
+            p.yellow
+        } else {
+            p.overlay0
+        };
+        spans.push(Span::styled(
+            format!("  {ms}ms"),
+            Style::default().fg(color),
+        ));
+    }
+    if let Some(system) = peer.system.as_ref() {
+        if let Some(cpu) = system.cpu_percent {
+            spans.push(Span::styled(
+                format!("  cpu {cpu}%"),
+                Style::default().fg(p.overlay0),
+            ));
+        }
+        if let (Some(used), Some(total)) = (system.mem_used, system.mem_total) {
+            spans.push(Span::styled(
+                format!(" mem {}/{}", format_gib(used), format_gib(total)),
+                Style::default().fg(p.overlay0),
+            ));
+        }
+    }
+    let agents = peer.workspaces.len();
+    if agents > 0 {
+        let blocked = peer
+            .workspaces
+            .iter()
+            .filter(|ws| ws.status == crate::api::schema::AgentStatus::Blocked)
+            .count();
+        let (text, color) = if blocked > 0 {
+            (format!("  {blocked} ● blocked"), p.red)
+        } else {
+            (format!("  {agents} agents"), p.overlay0)
+        };
+        spans.push(Span::styled(text, Style::default().fg(color)));
+    }
+    clamp_line(Line::from(spans), width)
+}
+
+fn format_gib(bytes: u64) -> String {
+    let gib = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    if gib >= 10.0 {
+        format!("{gib:.0}G")
+    } else {
+        format!("{gib:.1}G")
+    }
+}
+
+fn format_age(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h", secs / 3600)
+    }
+}
+
+/// Truncate a single-line span list to `width` columns with an ellipsis.
+fn clamp_line(line: Line<'_>, width: u16) -> Line<'_> {
+    let total: usize = line
+        .spans
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum();
+    if total <= width as usize {
+        return line;
+    }
+    let mut budget = (width as usize).saturating_sub(1);
+    let mut out = Vec::new();
+    for span in line.spans {
+        if budget == 0 {
+            break;
+        }
+        let len = span.content.chars().count();
+        if len <= budget {
+            budget -= len;
+            out.push(span);
+        } else {
+            let truncated: String = span.content.chars().take(budget).collect();
+            out.push(Span::styled(format!("{truncated}…"), span.style));
+            budget = 0;
+        }
+    }
+    Line::from(out)
 }
 
 fn render_workspace_list(
@@ -1508,6 +1763,85 @@ mod tests {
         peer.workspaces = workspaces;
         peer.last_ok = Some(std::time::Instant::now());
         peer
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn servers_section_height_tracks_peers_and_collapse() {
+        let mut app = crate::app::state::AppState::test_new();
+        assert_eq!(servers_section_height(&app), 0);
+        app.peer_summaries = vec![
+            peer_with_workspaces("anvil", vec![]),
+            peer_with_workspaces("sage", vec![]),
+        ];
+        assert_eq!(servers_section_height(&app), 3); // header + 2 rows
+        app.servers_collapsed = true;
+        assert_eq!(servers_section_height(&app), 1); // header only
+    }
+
+    #[test]
+    fn compute_server_section_areas_lays_out_header_and_rows() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.peer_summaries = vec![
+            peer_with_workspaces("anvil", vec![]),
+            peer_with_workspaces("sage", vec![]),
+        ];
+        let area = Rect::new(0, 0, 30, 30);
+        let (header, cards) = compute_server_section_areas(&app, area);
+        assert_ne!(header, Rect::default());
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[0].peer_idx, 0);
+        assert_eq!(cards[1].rect.y, cards[0].rect.y + 1);
+
+        app.servers_collapsed = true;
+        let (header, cards) = compute_server_section_areas(&app, area);
+        assert_ne!(header, Rect::default());
+        assert!(cards.is_empty());
+    }
+
+    #[test]
+    fn server_row_line_shows_health_for_live_peer() {
+        let p = crate::app::state::AppState::test_new().palette;
+        let mut peer = peer_with_workspaces(
+            "anvil",
+            vec![remote_summary(
+                "herdr",
+                Some("github.com/gerchowl/herdr"),
+                Some("herdr"),
+                Some("fix/pty"),
+            )],
+        );
+        peer.host = Some("anvil".into());
+        peer.latency_ms = Some(34);
+        peer.system = Some(crate::api::schema::PeerSystemSummary {
+            cpu_percent: Some(71),
+            mem_used: Some(48 * 1024 * 1024 * 1024),
+            mem_total: Some(64 * 1024 * 1024 * 1024),
+            disk_free: None,
+        });
+        let text = line_text(&server_row_line(&peer, 60, &p));
+        assert!(text.contains("anvil"), "{text}");
+        assert!(text.contains("34ms"), "{text}");
+        assert!(text.contains("cpu 71%"), "{text}");
+        assert!(text.contains("mem 48G/64G"), "{text}");
+        assert!(
+            text.contains("blocked") || text.contains("agents"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn server_row_line_marks_unreachable_peer() {
+        let p = crate::app::state::AppState::test_new().palette;
+        let mut peer = peer_with_workspaces("ksb", vec![]);
+        peer.last_ok = None;
+        peer.error = Some("connect timed out".into());
+        let text = line_text(&server_row_line(&peer, 40, &p));
+        assert!(text.contains("ksb"), "{text}");
+        assert!(text.contains("unreachable"), "{text}");
     }
 
     fn workspace_with_project_key(name: &str, project_key: &str) -> Workspace {

@@ -146,9 +146,12 @@ impl App {
                 return;
             };
             match fetch.result {
-                Ok((host, workspaces)) => {
-                    summary.host = (!host.is_empty()).then_some(host);
-                    summary.workspaces = workspaces;
+                Ok(payload) => {
+                    summary.host = (!payload.host.is_empty()).then_some(payload.host);
+                    summary.version = payload.version;
+                    summary.system = payload.system;
+                    summary.latency_ms = Some(payload.latency_ms);
+                    summary.workspaces = payload.workspaces;
                     summary.last_ok = Some(std::time::Instant::now());
                     summary.error = None;
                 }
@@ -737,9 +740,17 @@ mod tests {
         app.handle_internal_event(AppEvent::PeerSummaryFetched(
             crate::peers::PeerSummaryFetch {
                 peer: "anvil".into(),
-                result: Ok((
-                    "anvil-host".into(),
-                    vec![crate::api::schema::PeerWorkspaceSummary {
+                result: Ok(crate::peers::PeerSummaryPayload {
+                    host: "anvil-host".into(),
+                    version: Some("0.6.8".into()),
+                    system: Some(crate::api::schema::PeerSystemSummary {
+                        cpu_percent: Some(71),
+                        mem_used: Some(48_000_000_000),
+                        mem_total: Some(64_000_000_000),
+                        disk_free: Some(200_000_000_000),
+                    }),
+                    latency_ms: 34,
+                    workspaces: vec![crate::api::schema::PeerWorkspaceSummary {
                         id: "ws_1".into(),
                         workspace: "herdr".into(),
                         project_key: Some("github.com/gerchowl/herdr".into()),
@@ -751,14 +762,21 @@ mod tests {
                         status_age_secs: Some(840),
                         activity: None,
                     }],
-                )),
+                }),
             },
         ));
         let summary = &app.state.peer_summaries[0];
         assert_eq!(summary.host.as_deref(), Some("anvil-host"));
+        assert_eq!(summary.version.as_deref(), Some("0.6.8"));
+        assert_eq!(summary.latency_ms, Some(34));
+        assert_eq!(
+            summary.system.as_ref().and_then(|s| s.cpu_percent),
+            Some(71)
+        );
         assert_eq!(summary.workspaces.len(), 1);
         assert!(!summary.is_stale());
         assert!(summary.error.is_none());
+        assert_eq!(summary.reachability(), crate::peers::PeerReachability::Live);
 
         // Errors keep the last good data but record the failure.
         app.handle_internal_event(AppEvent::PeerSummaryFetched(

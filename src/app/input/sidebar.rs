@@ -10,7 +10,12 @@ impl AppState {
         if self.sidebar_collapsed || sidebar.width <= 1 || sidebar.height == 0 {
             return Rect::default();
         }
-        crate::ui::workspace_list_rect(sidebar, self.sidebar_section_split, self.sidebar_pane_gap)
+        crate::ui::workspace_list_rect(
+            sidebar,
+            self.sidebar_section_split,
+            self.sidebar_pane_gap,
+            crate::ui::servers_section_height(self),
+        )
     }
 
     pub(super) fn agent_panel_rect(&self) -> Rect {

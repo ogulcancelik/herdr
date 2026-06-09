@@ -648,6 +648,15 @@ pub struct WorkspaceCardArea {
     pub indented: bool,
 }
 
+/// Hit area of a peer row in the `servers` section. Clicking one switches
+/// to that peer's first workspace; clicking the header toggles the section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerCardArea {
+    /// Index into `state.peer_summaries`.
+    pub peer_idx: usize,
+    pub rect: Rect,
+}
+
 /// Hit area of a federated remote workspace row in the spaces list.
 /// Clicking one requests a server switch instead of a workspace focus.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -829,6 +838,10 @@ pub struct ViewState {
     pub sidebar_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub remote_card_areas: Vec<RemoteCardArea>,
+    /// Hit areas for peer rows in the `servers` section.
+    pub server_card_areas: Vec<ServerCardArea>,
+    /// Hit area for the `servers` section header (toggles collapse).
+    pub servers_header_rect: Rect,
     pub tab_bar_rect: Rect,
     pub status_line_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
@@ -1390,6 +1403,8 @@ pub struct AppState {
     /// A remote row was selected: switch the client to this peer workspace.
     /// (peer_idx, ws_idx) into peer_summaries. Consumed by both loops.
     pub request_peer_switch: Option<(usize, usize)>,
+    /// Whether the `servers` sidebar section is collapsed to its header.
+    pub servers_collapsed: bool,
     pub request_open_existing_worktree: Option<usize>,
     pub request_new_workspace_cwd: Option<std::path::PathBuf>,
     pub request_remove_linked_worktree: Option<usize>,
@@ -1753,6 +1768,7 @@ impl AppState {
             peers: Vec::new(),
             peer_summaries: Vec::new(),
             request_peer_switch: None,
+            servers_collapsed: false,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
             request_remove_linked_worktree: None,
@@ -1788,6 +1804,8 @@ impl AppState {
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 remote_card_areas: Vec::new(),
+                server_card_areas: Vec::new(),
+                servers_header_rect: Rect::default(),
                 tab_bar_rect: Rect::default(),
                 status_line_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),

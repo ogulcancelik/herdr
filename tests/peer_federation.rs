@@ -312,7 +312,10 @@ fn peer_summary_folds_into_sidebar_and_click_switches_server() {
     let (_, error) = client_handshake(&mut stream, 13, 90, 30).expect("handshake should complete");
     assert!(error.is_none(), "handshake rejected: {error:?}");
 
-    // The first poll fires ~3s after A starts; allow generous slack.
+    // The first poll fires ~3s after A starts; allow generous slack. The
+    // servers section header renders once the peer summary lands.
+    wait_for_frame_row(&mut stream, "servers", Duration::from_secs(45))
+        .expect("servers section should appear once the peer is polled");
     let row = wait_for_frame_row(&mut stream, "proj · ", Duration::from_secs(45))
         .expect("peer workspace should fold into the sidebar");
 

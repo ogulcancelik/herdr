@@ -1,4 +1,4 @@
-use crate::api::schema::{PeerWorkspaceSummary, ResponseResult};
+use crate::api::schema::{PeerSystemSummary, PeerWorkspaceSummary, ResponseResult};
 use crate::app::App;
 
 use super::responses::encode_success;
@@ -18,9 +18,23 @@ impl App {
             id,
             ResponseResult::PeersSummary {
                 host: short_host_name(),
+                version: Some(crate::build_info::version()),
+                system: self.state.system_stats.as_ref().map(system_summary),
                 workspaces,
             },
         )
+    }
+}
+
+/// Map the local status-line stats sampler onto the federated summary shape.
+fn system_summary(stats: &crate::system_stats::SystemStats) -> PeerSystemSummary {
+    PeerSystemSummary {
+        cpu_percent: stats
+            .cpu_percent
+            .map(|cpu| cpu.round().clamp(0.0, 100.0) as u8),
+        mem_used: stats.mem_used,
+        mem_total: stats.mem_total,
+        disk_free: stats.disk_free,
     }
 }
 

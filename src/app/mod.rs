@@ -470,6 +470,7 @@ impl App {
                 .map(crate::peers::PeerSummaryState::new)
                 .collect(),
             request_peer_switch: None,
+            servers_collapsed: false,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
             request_remove_linked_worktree: None,
@@ -514,6 +515,8 @@ impl App {
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 remote_card_areas: Vec::new(),
+                server_card_areas: Vec::new(),
+                servers_header_rect: Rect::default(),
                 tab_bar_rect: Rect::default(),
                 status_line_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),

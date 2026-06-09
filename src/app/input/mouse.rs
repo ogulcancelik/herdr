@@ -503,6 +503,28 @@ impl AppState {
                         return None;
                     }
 
+                    // Servers section: header toggles collapse, a peer row
+                    // switches to that peer's first workspace.
+                    let header = self.view.servers_header_rect;
+                    if header != ratatui::layout::Rect::default()
+                        && mouse.row == header.y
+                        && mouse.column >= header.x
+                        && mouse.column < header.x + header.width
+                    {
+                        self.servers_collapsed = !self.servers_collapsed;
+                        self.mark_session_dirty();
+                        return None;
+                    }
+                    if let Some(card) = self
+                        .view
+                        .server_card_areas
+                        .iter()
+                        .find(|card| mouse.row == card.rect.y)
+                    {
+                        self.request_peer_switch = Some((card.peer_idx, 0));
+                        return None;
+                    }
+
                     let cards = if self.view.workspace_card_areas.is_empty() {
                         crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect)
                     } else {
