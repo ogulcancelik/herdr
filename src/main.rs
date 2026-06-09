@@ -256,6 +256,14 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"
 
+# Sidebar width in columns when collapsed (toggled with prefix+b).
+# Set to 0 to make the sidebar fully disappear when toggled.
+# sidebar_hidden_width = 4
+
+# Hide the tab bar when the workspace has a single tab.
+# Tab bar reappears automatically when a second tab is created.
+# hide_tab_bar_when_single_tab = false
+
 # Background notification popup delivery
 [ui.toast]
 # off = disable pop-up notifications

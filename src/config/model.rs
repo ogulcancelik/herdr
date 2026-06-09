@@ -449,6 +449,11 @@ pub struct UiConfig {
     pub toast: ToastConfig,
     /// Play sounds when agents change state in background workspaces.
     pub sound: SoundConfig,
+    /// Sidebar width in columns when collapsed (default: 4).
+    /// Set to 0 to make the sidebar fully disappear when toggled.
+    pub sidebar_hidden_width: u16,
+    /// Hide the tab bar when the active workspace has 0 or 1 tabs.
+    pub hide_tab_bar_when_single_tab: bool,
 }
 
 /// Cursor shape (DECSCUSR) used for the forced IME anchor.
@@ -629,6 +634,8 @@ impl Default for UiConfig {
             accent: "cyan".into(),
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
+            sidebar_hidden_width: 4,
+            hide_tab_bar_when_single_tab: false,
         }
     }
 }

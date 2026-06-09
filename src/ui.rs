@@ -88,8 +88,6 @@ use crate::app::state::ViewLayout;
 use crate::app::{AppState, Mode};
 use crate::terminal::TerminalRuntimeRegistry;
 
-const COLLAPSED_WIDTH: u16 = 4; // num + space + dot + separator
-
 // Braille spinner frames — smooth rotation
 const SPINNERS: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -178,7 +176,7 @@ fn compute_view_internal(
     }
 
     let sidebar_w = if app.sidebar_collapsed {
-        COLLAPSED_WIDTH
+        app.sidebar_hidden_width
     } else {
         app.sidebar_width
             .clamp(app.sidebar_min_width, app.sidebar_max_width)
@@ -187,8 +185,12 @@ fn compute_view_internal(
     let [sidebar_area, main_area] =
         Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Min(1)]).areas(area);
 
-    let has_tabs = app.active.and_then(|i| app.workspaces.get(i)).is_some();
-    let (tab_bar_rect, terminal_area) = if has_tabs && main_area.height > 1 {
+    let active_ws = app.active.and_then(|i| app.workspaces.get(i));
+    let show_tab_bar = active_ws.is_some()
+        && main_area.height > 1
+        && !(app.hide_tab_bar_when_single_tab
+            && active_ws.map_or(false, |ws| ws.tabs.len() <= 1));
+    let (tab_bar_rect, terminal_area) = if show_tab_bar {
         let [tab_bar_rect, terminal_area] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(main_area);
         (tab_bar_rect, terminal_area)

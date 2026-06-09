@@ -493,6 +493,8 @@ impl App {
             sidebar_width_source,
             sidebar_width_auto: false,
             sidebar_collapsed: false,
+            sidebar_hidden_width: config.ui.sidebar_hidden_width,
+            hide_tab_bar_when_single_tab: config.ui.hide_tab_bar_when_single_tab,
             sidebar_section_split,
             agent_panel_scope,
             mouse_capture: config.ui.mouse_capture,
@@ -1202,6 +1204,8 @@ impl App {
                 }
                 self.state.sound = config.ui.sound.clone();
                 self.state.toast_config = config.ui.toast.clone();
+                self.state.sidebar_hidden_width = config.ui.sidebar_hidden_width;
+                self.state.hide_tab_bar_when_single_tab = config.ui.hide_tab_bar_when_single_tab;
             }
         }
 

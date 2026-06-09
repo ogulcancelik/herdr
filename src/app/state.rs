@@ -1328,6 +1328,10 @@ pub struct AppState {
     pub sidebar_width_source: SidebarWidthSource,
     pub sidebar_width_auto: bool,
     pub sidebar_collapsed: bool,
+    /// Sidebar width in columns when collapsed. 0 = fully hidden.
+    pub sidebar_hidden_width: u16,
+    /// Hide the tab bar when the active workspace has 0 or 1 tabs.
+    pub hide_tab_bar_when_single_tab: bool,
     /// Ratio of sidebar height allocated to the workspaces section.
     pub sidebar_section_split: f32,
     pub agent_panel_scope: AgentPanelScope,
@@ -1661,6 +1665,8 @@ impl AppState {
             sidebar_width_source: SidebarWidthSource::ConfigDefault,
             sidebar_width_auto: false,
             sidebar_collapsed: false,
+            sidebar_hidden_width: 4,
+            hide_tab_bar_when_single_tab: false,
             sidebar_section_split: 0.5,
             agent_panel_scope: AgentPanelScope::AllWorkspaces,
             mouse_capture: true,
