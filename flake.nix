@@ -29,7 +29,10 @@
         system:
         let
           pkgs = pkgsFor system;
-          herdr = pkgs.callPackage ./nix/package.nix { };
+          herdr = pkgs.callPackage ./nix/package.nix {
+            buildChannel = "fork";
+            buildId = self.shortRev or self.dirtyShortRev or null;
+          };
         in
         {
           inherit herdr;
@@ -85,7 +88,10 @@
       formatter = forAllSystems (system: (pkgsFor system).nixfmt);
 
       overlays.default = final: _prev: {
-        herdr = final.callPackage ./nix/package.nix { };
+        herdr = final.callPackage ./nix/package.nix {
+          buildChannel = "fork";
+          buildId = self.shortRev or self.dirtyShortRev or null;
+        };
       };
     };
 }
