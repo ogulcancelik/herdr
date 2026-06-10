@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::Span,
     Frame,
 };
@@ -386,6 +386,23 @@ pub fn render_with_runtime_registry(
     let sidebar_area = app.view.sidebar_rect;
     let tab_bar_area = app.view.tab_bar_rect;
     let terminal_area = app.view.terminal_area;
+
+    // Chrome background: when the theme defines a panel color, the sidebar and
+    // status line paint it (like the tab bar) so the chrome frames the
+    // terminal field as one tone — otherwise they'd show the host terminal's
+    // default background through. Themes with panel_bg = Reset keep the
+    // transparent chrome.
+    if app.palette.panel_bg != Color::Reset && app.view.layout != ViewLayout::Mobile {
+        let chrome = Style::default().bg(app.palette.panel_bg);
+        let buf = frame.buffer_mut();
+        for rect in [sidebar_area, app.view.status_line_rect] {
+            for y in rect.y..rect.y.saturating_add(rect.height) {
+                for x in rect.x..rect.x.saturating_add(rect.width) {
+                    buf[(x, y)].set_style(chrome);
+                }
+            }
+        }
+    }
 
     if app.view.layout == ViewLayout::Mobile {
         render_mobile_header(app, terminal_runtimes, frame, app.view.mobile_header_rect);
@@ -784,6 +801,60 @@ mod tests {
         assert_eq!(custom_style.bg, Some(app.palette.accent));
         assert_eq!(custom_style.fg, Some(app.palette.surface_dim));
         assert!(custom_style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn sidebar_and_status_line_paint_panel_bg_chrome() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.palette.panel_bg = Color::Rgb(46, 50, 58);
+        app.workspaces = vec![Workspace::test_new("test")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let sb = app.view.sidebar_rect;
+        assert_eq!(
+            buffer[(sb.x, sb.y + sb.height - 1)].style().bg,
+            Some(app.palette.panel_bg),
+            "sidebar bottom-left cell carries the chrome bg"
+        );
+        let sl = app.view.status_line_rect;
+        assert_eq!(
+            buffer[(sl.x + sl.width - 1, sl.y)].style().bg,
+            Some(app.palette.panel_bg),
+            "status line right edge carries the chrome bg"
+        );
+    }
+
+    #[test]
+    fn chrome_stays_transparent_when_panel_bg_resets() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.palette.panel_bg = Color::Reset;
+        app.workspaces = vec![Workspace::test_new("test")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let sb = app.view.sidebar_rect;
+        let bg = buffer[(sb.x, sb.y + sb.height - 1)].style().bg;
+        assert!(
+            bg.is_none() || bg == Some(Color::Reset),
+            "reset-panel themes keep the transparent chrome, got {bg:?}"
+        );
     }
 
     #[test]
