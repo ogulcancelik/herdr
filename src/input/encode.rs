@@ -243,7 +243,7 @@ fn encode_modified_special(code: KeyCode, mods: KeyModifiers) -> Option<Vec<u8>>
         KeyCode::Delete => Some(format!("\x1b[3;{modifier}~").into_bytes()),
         KeyCode::PageUp => Some(format!("\x1b[5;{modifier}~").into_bytes()),
         KeyCode::PageDown => Some(format!("\x1b[6;{modifier}~").into_bytes()),
-        // F1-F4: CSI 1;{mod}{P-S}
+        // F1-F4: CSI 1;{mod}{P-S} guardrails-ok
         KeyCode::F(1) => Some(format!("\x1b[1;{modifier}P").into_bytes()),
         KeyCode::F(2) => Some(format!("\x1b[1;{modifier}Q").into_bytes()),
         KeyCode::F(3) => Some(format!("\x1b[1;{modifier}R").into_bytes()),

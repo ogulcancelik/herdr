@@ -1714,9 +1714,9 @@ fn ensure_command_hook(
 }
 
 // Claude and Codex use nested hook groups:
-//   { "matcher": "...", "hooks": [{ "type": "command", ... }] }
+//   { "matcher": "...", "hooks": [{ "type": "command", ... }] }  guardrails-ok
 // Copilot and Qoder CLI use the flatter settings shape:
-//   { "type": "command", "matcher": "...", "command": "...", ... }
+//   { "type": "command", "matcher": "...", "command": "...", ... }  guardrails-ok
 // Keep the helpers separate so install/uninstall preserves unrelated hooks in
 // each agent's native format instead of normalizing user configuration.
 fn ensure_direct_command_hook(

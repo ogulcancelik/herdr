@@ -404,7 +404,7 @@ fn blit_frame_to_with_cursor_memory(
 
     // Some native IMEs track candidate-window placement from normal terminal
     // cursor updates and may not observe cursor moves emitted inside synchronized
-    // output. Re-emit only the resolved final cursor anchor after the sync block;
+    // output. Re-emit only the resolved final cursor anchor after the sync block; guardrails-ok
     // intermediate paint cursor positions remain hidden and the focused pane's
     // requested cursor visibility is preserved.
     write_ime_anchor_cursor_state(&mut writer, host_cursor);

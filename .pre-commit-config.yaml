@@ -3,23 +3,20 @@
 # PATH. Installed automatically by the devShell shellHook; manually via
 # `just install-hooks`.
 #
-# Rollout status: `no-debug-leftovers` is a HARD gate (herdr has tracing; the
-# remaining println/eprintln are CLI/UX output, allowlisted via
-# GUARDRAILS_OUTPUT_GLOBS). `no-fake-impl` and `no-commented-code` stay
-# **warn-only** (via scripts/guardrails-nudge — report, never block) until their
-# existing hits are triaged; promote one by pointing its entry at the gate with
-# an env-glob like below. Per-line escape hatch anywhere: `guardrails-ok`.
+# Rollout status: all three agent-drift gates are now HARD gates. herdr's source
+# is clean of real stubs and debug spew; the few flagged lines are legitimate CLI
+# output (allowlisted via GUARDRAILS_OUTPUT_GLOBS) or doc-comment prose/examples
+# (annotated `guardrails-ok`). Per-line escape hatch anywhere: `guardrails-ok`.
 default_install_hook_types: [pre-commit, commit-msg]
 repos:
   - repo: local
     hooks:
-      # --- agent-drift gates (warn-only for now) -------------------------------
+      # --- agent-drift gates (hard) --------------------------------------------
       - id: no-fake-impl
-        name: "no fake/placeholder implementations (nudge)"
-        entry: scripts/guardrails-nudge no-fake-impl
+        name: "no fake/placeholder implementations"
+        entry: guardrails-no-fake-impl
         language: system
         pass_filenames: true
-        verbose: true
       # Promoted to a hard gate: herdr already has a tracing facade, and the only
       # println/eprintln left are legitimate CLI/UX output, allowlisted below as
       # output surfaces. A stray dbg!/print!/println! in app or library code is a
@@ -30,11 +27,10 @@ repos:
         language: system
         pass_filenames: true
       - id: no-commented-code
-        name: "no commented-out code (nudge)"
-        entry: scripts/guardrails-nudge no-commented-code
+        name: "no commented-out code"
+        entry: guardrails-no-commented-code
         language: system
         pass_filenames: true
-        verbose: true
 
       # --- hard gates ----------------------------------------------------------
       - id: gitleaks
