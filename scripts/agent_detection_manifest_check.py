@@ -38,6 +38,7 @@ REGION_RE = re.compile(
     r"^(whole_recent|whole_recent_without_current_prompt_marker|after_last_prompt_marker|"
     r"before_current_prompt_marker|current_prompt_block_marker|after_current_prompt_block_marker|"
     r"prompt_box_body|above_prompt_box|last_non_empty_above_prompt_box|after_last_horizontal_rule|"
+    r"osc_title|osc_progress|"
     r"bottom_lines\([1-9][0-9]*\)|bottom_non_empty_lines\([1-9][0-9]*\))$"
 )
 VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*$")

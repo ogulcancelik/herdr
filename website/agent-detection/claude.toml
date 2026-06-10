@@ -1,8 +1,16 @@
 id = "claude"
-version = "2026.06.10.1"
-min_engine_version = 1
+version = "2026.06.10.3"
+min_engine_version = 2
 updated_at = "2026-06-10T00:00:00Z"
 aliases = ["claude-code"]
+
+[[rules]]
+id = "osc_title_working"
+state = "working"
+priority = 1100
+region = "osc_title"
+visible_working = true
+regex = ['^[\x{2800}-\x{28FF}] ']
 
 [[rules]]
 id = "transcript_viewer"
@@ -18,6 +26,29 @@ any = [
   { contains = ["↑↓ scroll"] },
   { contains = ["? for shortcuts"] },
 ]
+
+[[rules]]
+id = "live_blocked_form"
+state = "blocked"
+priority = 980
+region = "after_last_horizontal_rule"
+visible_blocker = true
+contains = ["enter to select", "esc to cancel"]
+any = [
+  { contains = ["tab/arrow keys to navigate"] },
+  { contains = ["arrow keys to navigate"] },
+  { contains = ["arrows to navigate"] },
+  { contains = ["↑/↓ to navigate"] },
+  { contains = ["↑↓ to navigate"] },
+]
+
+[[rules]]
+id = "dynamic_workflow_prompt"
+state = "blocked"
+priority = 980
+region = "whole_recent"
+visible_blocker = true
+contains = ["run a dynamic workflow?", "esc to cancel"]
 
 [[rules]]
 id = "live_prompt_box"
@@ -47,45 +78,6 @@ not = [
 ]
 
 [[rules]]
-id = "live_blocked_form"
-state = "blocked"
-priority = 980
-region = "after_last_horizontal_rule"
-visible_blocker = true
-contains = ["enter to select", "esc to cancel"]
-any = [
-  { contains = ["tab/arrow keys to navigate"] },
-  { contains = ["arrow keys to navigate"] },
-  { contains = ["arrows to navigate"] },
-  { contains = ["↑/↓ to navigate"] },
-  { contains = ["↑↓ to navigate"] },
-]
-
-[[rules]]
-id = "dynamic_workflow_prompt"
-state = "blocked"
-priority = 980
-region = "whole_recent"
-visible_blocker = true
-contains = ["run a dynamic workflow?", "esc to cancel"]
-
-[[rules]]
-id = "generic_permission_prompt"
-state = "blocked"
-priority = 840
-region = "after_last_horizontal_rule"
-visible_blocker = true
-contains = ["do you want to proceed?", "esc to cancel"]
-all = [
-  { any = [
-    { line_regex = ['(?i)^\s*❯?\s*1\.\s*yes\b'] },
-    { line_regex = ['(?i)^\s*2\.\s*yes\b'] },
-    { line_regex = ['(?i)^\s*2\.\s*no\b'] },
-    { line_regex = ['(?i)^\s*3\.\s*no\b'] },
-  ] },
-]
-
-[[rules]]
 id = "bash_permission_prompt"
 state = "blocked"
 priority = 850
@@ -104,59 +96,20 @@ all = [
 ]
 
 [[rules]]
-id = "interrupt_chrome_working"
-state = "working"
-priority = 970
-region = "above_prompt_box"
-visible_working = true
-any = [
-  { contains = ["esc to interrupt"] },
-  { contains = ["ctrl+c to interrupt"] },
+id = "generic_permission_prompt"
+state = "blocked"
+priority = 840
+region = "after_last_horizontal_rule"
+visible_blocker = true
+contains = ["do you want to proceed?", "esc to cancel"]
+all = [
+  { any = [
+    { line_regex = ['(?i)^\s*❯?\s*1\.\s*yes\b'] },
+    { line_regex = ['(?i)^\s*2\.\s*yes\b'] },
+    { line_regex = ['(?i)^\s*2\.\s*no\b'] },
+    { line_regex = ['(?i)^\s*3\.\s*no\b'] },
+  ] },
 ]
-
-[[rules]]
-id = "spinner_activity_working"
-state = "working"
-priority = 960
-region = "above_prompt_box"
-visible_working = true
-line_regex = ['^\s*[·✱✲✳✴✵✶✷✸✹✺✻✼✽✾✿❀❁❂❃❇❈❉❊❋✢✣✤✥✦✧✨⊛⊕⊙◉◎◍⁂⁕※⍟☼★☆]\s+.*\p{Alphabetic}.*…']
-
-[[rules]]
-id = "ascii_spinner_activity_working"
-state = "working"
-priority = 960
-region = "above_prompt_box"
-visible_working = true
-line_regex = ['^\s*\*\s+\p{Alphabetic}.*…\s*\([^)]*\b[1-9][0-9]*s\b[^)]*\)']
-
-[[rules]]
-id = "latest_background_status_working"
-state = "working"
-priority = 960
-region = "last_non_empty_above_prompt_box"
-visible_working = true
-any = [
-  { regex = ['(?i)^\W*waiting for [1-9][0-9]* background agents? to finish$'] },
-  { regex = ['(?i).*\b[1-9][0-9]* shells? still running\b'] },
-  { regex = ['(?i).*\b[1-9][0-9]* local agents? still running\b'] },
-]
-
-[[rules]]
-id = "bottom_agent_status_working"
-state = "working"
-priority = 955
-region = "bottom_non_empty_lines(10)"
-visible_working = true
-line_regex = ['^\s*◯\s+(?:Explore|Agent)\b.*\b[1-9][0-9]*s\b(?:\s*·.*)?$']
-
-[[rules]]
-id = "dynamic_workflow_progress_working"
-state = "working"
-priority = 965
-region = "bottom_non_empty_lines(10)"
-visible_working = true
-line_regex = ['^\s*[◯●]\s+.*\b(?:[0-9]+/[1-9][0-9]*) agents done\b.*\b[1-9][0-9]*s\b']
 
 [[rules]]
 id = "legacy_no_prompt_blocker"
@@ -177,3 +130,18 @@ any = [
 not = [
   { regex = ['(?m)^\s*❯\s*$'] },
 ]
+
+[[rules]]
+id = "osc_title_idle"
+state = "idle"
+priority = 250
+region = "osc_title"
+visible_idle = true
+regex = ['^\x{2733} ']
+
+[[rules]]
+id = "osc_progress_idle"
+state = "idle"
+priority = 250
+region = "osc_progress"
+regex = ['^4;0']

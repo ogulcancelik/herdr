@@ -1,7 +1,23 @@
 id = "codex"
-version = "2026.06.10.1"
-min_engine_version = 1
+version = "2026.06.10.2"
+min_engine_version = 2
 updated_at = "2026-06-10T00:00:00Z"
+
+[[rules]]
+id = "osc_title_blocked"
+state = "blocked"
+priority = 1100
+region = "osc_title"
+visible_blocker = true
+contains = ["Action Required"]
+
+[[rules]]
+id = "osc_title_working"
+state = "working"
+priority = 1050
+region = "osc_title"
+visible_working = true
+regex = ['^[\x{2800}-\x{28FF}] ']
 
 [[rules]]
 id = "transcript_viewer"
@@ -29,45 +45,16 @@ any = [
 ]
 
 [[rules]]
-id = "current_live_working"
+id = "background_terminal_working"
 state = "working"
-priority = 710
-region = "current_prompt_block_marker"
+priority = 800
+region = "bottom_non_empty_lines(6)"
 visible_working = true
 any = [
-  { line_regex = ['(?i)^\s*• queued follow-up inputs'] },
-  { line_regex = ['(?i)^\s*• messages to be submitted after next tool call'] },
-  { contains = ["Waiting for background terminal"] },
   { contains = ["background terminal running"] },
+  { contains = ["Waiting for background terminal"] },
   { contains = ["/ps to view"] },
   { contains = ["/stop to close"] },
-  { regex = ['(?i)^\s*•.*\([0-9]+[hms](?: [0-9]+[hms]){0,2}.*esc\s*(…|to interrupt|to .+…)'] },
-]
-
-[[rules]]
-id = "current_working_status"
-state = "working"
-priority = 700
-region = "current_prompt_block_marker"
-any = [
-  { line_regex = ['(?i)^\s*• queued follow-up inputs'] },
-  { line_regex = ['(?i)^\s*• messages to be submitted after next tool call'] },
-  { contains = ["Working ("] },
-  { contains = ["Waiting for background terminal ("] },
-  { contains = ["Booting MCP server:"] },
-  { contains = ["reviewing approval request ("] },
-  { regex = ['(?i)reviewing .* approval requests \('] },
-  { regex = ['(?i)^\s*•.*\([0-9]+[hms](?: [0-9]+[hms]){0,2}\).* • esc(…| to interrupt| to .+…)'] },
-]
-
-[[rules]]
-id = "current_working_status_with_detail"
-state = "working"
-priority = 690
-region = "after_current_prompt_block_marker"
-any = [
-  { contains = ["Queued follow-up inputs"] },
-  { contains = ["Messages to be submitted after next tool call"] },
 ]
 
 [[rules]]
@@ -83,23 +70,13 @@ any = [
 ]
 
 [[rules]]
-id = "fallback_working"
-state = "working"
-priority = 500
-region = "whole_recent_without_current_prompt_marker"
-visible_working = true
-any = [
-  { line_regex = ['(?i)^\s*•.*\([0-9]+[hms](?: [0-9]+[hms]){0,2}.*esc\s*(…|to interrupt|to .+…)'] },
-  { contains = ["esc to interrupt"] },
-  { all = [{ contains = ["ctrl+c to interrupt"] }, { line_regex = ['(?i)^\s*•'] }] },
-  { all = [{ contains = ["press esc to interrupt"] }, { line_regex = ['(?i)^\s*•'] }] },
-]
-
-[[rules]]
-id = "fallback_status_working"
-state = "working"
-priority = 490
-region = "whole_recent_without_current_prompt_marker"
-any = [
-  { line_regex = ['(?i)^\s*•.*(Working \(|Waiting for background terminal \(|Booting MCP server:|reviewing approval request \(|reviewing .* approval requests \()'] },
+id = "osc_title_idle"
+state = "idle"
+priority = 100
+region = "osc_title"
+visible_idle = true
+regex = ['\S']
+not = [
+  { regex = ['^[\x{2800}-\x{28FF}]'] },
+  { contains = ["Action Required"] },
 ]
