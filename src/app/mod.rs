@@ -8,6 +8,7 @@ pub(crate) mod actions;
 mod agent_resume;
 mod agents;
 mod api;
+pub(crate) use api::peers::short_host_name;
 mod api_helpers;
 mod config_io;
 mod creation;

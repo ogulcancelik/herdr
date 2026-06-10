@@ -460,8 +460,9 @@ fn render_pane_header(
     }
     buf.set_line(header.x, header.y, &Line::from(spans), header.width);
 
-    // Prompt section.
-    let prompt_rows = header.height.saturating_sub(1) as usize;
+    // Prompt section. Reserve BOTH the context row above and the hairline
+    // divider row below — the prompt must not render onto the divider's line.
+    let prompt_rows = header.height.saturating_sub(2) as usize;
     if prompt_rows == 0 {
         return;
     }
@@ -486,7 +487,54 @@ fn render_pane_header(
         );
         return;
     }
-    let expanded = app.expanded_prompt_pane == Some(info.id);
+    // Expanded: the full prompt REPLACES the collapsed view in place — same
+    // header anchor and colors — extending downward over content, rather than
+    // floating below the still-visible minimized header.
+    if app.expanded_prompt_pane == Some(info.id) {
+        if let Some(prompt) = prompt {
+            let full: Vec<String> = prompt
+                .lines()
+                .map(|line| line.trim_end().to_string())
+                .collect();
+            let first_y = header.y + 1;
+            let bottom = info.inner_rect.y + info.inner_rect.height;
+            let avail = bottom.saturating_sub(first_y);
+            let shown = (full.len() as u16).min(avail);
+            for offset in 0..shown {
+                let y = first_y + offset;
+                for x in header.x..header.x + header.width {
+                    buf[(x, y)].set_symbol(" ");
+                    buf[(x, y)].set_style(bar_bg);
+                }
+                let prefix = if offset == 0 { "\u{276f} " } else { "  " };
+                let mut text = format!("{prefix}{}", full[offset as usize]);
+                if offset == 0 {
+                    text.push_str(" \u{25b4}");
+                }
+                buf.set_stringn(
+                    header.x + 1,
+                    y,
+                    text,
+                    header.width.saturating_sub(1) as usize,
+                    prompt_style,
+                );
+            }
+            if (full.len() as u16) > shown && shown > 0 {
+                buf.set_stringn(
+                    header.x + 1,
+                    first_y + shown - 1,
+                    format!(
+                        "\u{22ef} +{} more lines \u{22ef}",
+                        full.len() as u16 - shown
+                    ),
+                    header.width.saturating_sub(1) as usize,
+                    marker_style,
+                );
+            }
+        }
+        return;
+    }
+
     let collapsed_content = lines.iter().any(|line| line.is_marker)
         || lines.iter().any(|line| line.text.contains('\u{2026}'));
     for (row, line) in lines.iter().enumerate() {
@@ -497,12 +545,8 @@ fn render_pane_header(
         };
         let prefix = if row == 0 { "\u{276f} " } else { "  " };
         let mut text = format!("{prefix}{}", line.text);
-        if row == 0 && (collapsed_content || expanded) {
-            text = format!(
-                "{} {}",
-                text,
-                if expanded { "\u{25b4}" } else { "\u{25be}" }
-            );
+        if row == 0 && collapsed_content {
+            text = format!("{text} \u{25be}");
         }
         buf.set_stringn(
             header.x + 1,
@@ -511,42 +555,6 @@ fn render_pane_header(
             header.width.saturating_sub(1) as usize,
             style,
         );
-    }
-
-    // Click-expanded: the full prompt floats below the header, over content.
-    if expanded {
-        let overlay_style = Style::default().fg(p.text);
-        if let Some(prompt) = prompt {
-            let inner = info.inner_rect;
-            let full: Vec<String> = prompt
-                .lines()
-                .map(|line| line.trim_end().to_string())
-                .collect();
-            let rows = (full.len() as u16).min(inner.height.saturating_sub(1));
-            for offset in 0..rows {
-                let y = inner.y + offset;
-                for x in inner.x..inner.x + inner.width {
-                    buf[(x, y)].set_symbol(" ");
-                    buf[(x, y)].set_style(overlay_style);
-                }
-                buf.set_stringn(
-                    inner.x + 1,
-                    y,
-                    full[offset as usize].clone(),
-                    inner.width.saturating_sub(2) as usize,
-                    overlay_style,
-                );
-            }
-            if (full.len() as u16) > rows && rows > 0 {
-                buf.set_stringn(
-                    inner.x + 1,
-                    inner.y + rows - 1,
-                    format!("\u{22ef} +{} more lines \u{22ef}", full.len() as u16 - rows),
-                    inner.width.saturating_sub(2) as usize,
-                    marker_style,
-                );
-            }
-        }
     }
 }
 
