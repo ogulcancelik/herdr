@@ -26,11 +26,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1780937511,
-        "narHash": "sha256-6EANggqQQwiPKanXIY/qIb+CpzhicykerofOKeicJos=",
+        "lastModified": 1781077680,
+        "narHash": "sha256-bZKgrlRRVsE2LHYdW7rCamsBmYFb5az8vo1tQzG2ZaE=",
         "owner": "gerchowl",
         "repo": "guardrails",
-        "rev": "f575c37ca2252e22c6e1b4b78266110a934ae21d",
+        "rev": "9b7963f7f1fd6805578df238154d63b9423dc798",
         "type": "github"
       },
       "original": {
