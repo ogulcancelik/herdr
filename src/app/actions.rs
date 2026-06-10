@@ -1399,12 +1399,21 @@ impl AppState {
         &self,
         ws_idx: usize,
     ) -> Vec<crate::terminal::TerminalId> {
+        // The workspace's float terminal (if any) is part of its teardown
+        // set — floats live outside tab.panes, so without this the close
+        // paths would orphan the float's PTY.
+        let float_terminal = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| self.floats.get(&ws.id))
+            .map(|float| float.terminal_id.clone());
         self.workspaces
             .get(ws_idx)
             .into_iter()
             .flat_map(|ws| &ws.tabs)
             .flat_map(|tab| tab.panes.values())
             .map(|pane| pane.attached_terminal_id.clone())
+            .chain(float_terminal)
             .collect()
     }
 
@@ -1437,6 +1446,21 @@ impl AppState {
         &mut self,
         terminal_ids: impl IntoIterator<Item = crate::terminal::TerminalId>,
     ) {
+        // Floats are keyed by workspace id; drop entries whose workspace is
+        // gone so a closed workspace's float doesn't linger (and so its
+        // terminal below counts as unattached and gets reaped).
+        let live_workspace_ids: std::collections::HashSet<&str> =
+            self.workspaces.iter().map(|ws| ws.id.as_str()).collect();
+        let dead_floats: Vec<String> = self
+            .floats
+            .keys()
+            .filter(|ws_id| !live_workspace_ids.contains(ws_id.as_str()))
+            .cloned()
+            .collect();
+        drop(live_workspace_ids);
+        for ws_id in dead_floats {
+            self.floats.remove(&ws_id);
+        }
         for terminal_id in terminal_ids {
             let still_attached = self.workspaces.iter().any(|ws| {
                 ws.tabs.iter().any(|tab| {
@@ -1444,7 +1468,10 @@ impl AppState {
                         .values()
                         .any(|pane| pane.attached_terminal_id == terminal_id)
                 })
-            });
+            }) || self
+                .floats
+                .values()
+                .any(|float| float.terminal_id == terminal_id);
             if !still_attached
                 && self.terminals.remove(&terminal_id).is_some()
                 && !self.terminal_runtime_shutdowns.contains(&terminal_id)
@@ -4776,6 +4803,39 @@ mod tests {
         assert!(!deferred);
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "notes");
+    }
+
+    #[test]
+    fn closing_workspace_reaps_its_float_even_when_hidden() {
+        let mut state = app_with_workspaces(&["doomed", "other"]);
+        state.selected = 0;
+        let ws_id = state.workspaces[0].id.clone();
+        let float_terminal = crate::terminal::TerminalState::new(
+            crate::terminal::TerminalId::alloc(),
+            "/tmp".into(),
+        );
+        let float_tid = float_terminal.id.clone();
+        state.terminals.insert(float_tid.clone(), float_terminal);
+        state.floats.insert(
+            ws_id,
+            crate::app::float::FloatPane {
+                pane_id: crate::layout::PaneId::from_raw(9999),
+                terminal_id: float_tid.clone(),
+                visible: false, // hidden floats must be reaped too
+            },
+        );
+
+        state.close_selected_workspace();
+
+        assert!(state.floats.is_empty(), "float entry removed");
+        assert!(
+            !state.terminals.contains_key(&float_tid),
+            "float terminal removed"
+        );
+        assert!(
+            state.terminal_runtime_shutdowns.contains(&float_tid),
+            "float PTY scheduled for shutdown"
+        );
     }
 
     #[test]

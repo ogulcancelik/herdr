@@ -6,6 +6,7 @@ use ratatui::{
 };
 
 mod dialogs;
+mod float;
 mod keybind_help;
 mod menus;
 mod mobile;
@@ -24,6 +25,8 @@ use self::dialogs::{
     render_confirm_close_overlay, render_new_linked_worktree_overlay,
     render_open_existing_worktree_overlay, render_remove_worktree_overlay, render_rename_overlay,
 };
+pub(crate) use self::float::float_overlay_inner_rect;
+use self::float::{render_float_overlay, resize_float_runtime};
 use self::keybind_help::render_keybind_help_overlay;
 use self::menus::{
     render_context_menu, render_copy_mode_overlay, render_global_launcher_menu,
@@ -268,6 +271,7 @@ fn compute_view_internal(
             terminal_area,
             cell_size,
         );
+        resize_float_runtime(app, terminal_runtimes, terminal_area, cell_size);
     }
 
     let toast_hit_area = app
@@ -340,6 +344,7 @@ fn compute_mobile_view(
             terminal_area,
             cell_size,
         );
+        resize_float_runtime(app, terminal_runtimes, terminal_area, cell_size);
     }
     let header_hits = compute_mobile_header_hit_areas(app, header_rect);
 
@@ -419,6 +424,10 @@ pub fn render_with_runtime_registry(
 
     // Ambient notifications sit above panes, but below interactive overlays.
     render_notifications(app, frame, terminal_area);
+
+    // The ephemeral float paints above the pane field and notifications but
+    // below the modal overlays (rendered as a post-pass: no Mode variant).
+    render_float_overlay(app, terminal_runtimes, frame, terminal_area);
 
     match app.mode {
         Mode::Onboarding => render_onboarding_overlay(app, frame, frame.area()),

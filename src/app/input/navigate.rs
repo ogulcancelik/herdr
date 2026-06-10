@@ -55,6 +55,10 @@ impl App {
                 let previous_mode = self.state.mode;
                 self.launch_focused_scrollback_editor();
                 finish_action_context(&mut self.state, ActionContext::Prefix, previous_mode);
+            } else if action == NavigateAction::ToggleFloat {
+                let previous_mode = self.state.mode;
+                self.toggle_float_pane();
+                finish_action_context(&mut self.state, ActionContext::Prefix, previous_mode);
             } else {
                 execute_navigate_action_in_context(
                     &mut self.state,
@@ -91,6 +95,9 @@ impl App {
         if let Some(action) = navigate_mode_action_for_key(&self.state, raw_key) {
             if action == NavigateAction::EditScrollback {
                 self.launch_focused_scrollback_editor();
+            } else if action == NavigateAction::ToggleFloat {
+                self.toggle_float_pane();
+                leave_navigate_mode(&mut self.state);
             } else {
                 execute_navigate_action_in_context(
                     &mut self.state,
@@ -112,10 +119,16 @@ impl App {
         let Some(ws_idx) = self.state.active else {
             return false;
         };
-        let Some(rt) = self
+        // A visible float owns terminal input: double-prefix passthrough
+        // lands in the float's shell, not the focused layout pane.
+        let float_rt = self
             .state
-            .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
-        else {
+            .visible_float_for_active_workspace()
+            .and_then(|float| self.terminal_runtimes.get(&float.terminal_id));
+        let Some(rt) = float_rt.or_else(|| {
+            self.state
+                .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+        }) else {
             return false;
         };
 
@@ -509,6 +522,7 @@ pub(crate) enum NavigateAction {
     SplitHorizontal,
     ClosePane,
     EditScrollback,
+    ToggleFloat,
     CopyMode,
     Zoom,
     EnterResizeMode,
@@ -619,6 +633,7 @@ fn action_for_key(
         (&kb.close_tab, NavigateAction::CloseTab),
         (&kb.rename_pane, NavigateAction::RenamePane),
         (&kb.edit_scrollback, NavigateAction::EditScrollback),
+        (&kb.toggle_float, NavigateAction::ToggleFloat),
         (&kb.copy_mode, NavigateAction::CopyMode),
         (&kb.focus_pane_left, NavigateAction::FocusPaneLeft),
         (&kb.focus_pane_down, NavigateAction::FocusPaneDown),
@@ -847,6 +862,9 @@ pub(super) fn execute_navigate_action_in_context(
             }
         }
         NavigateAction::EditScrollback => {}
+        // Handled at the App level (PTY spawn needs event_tx/runtimes),
+        // mirroring EditScrollback above.
+        NavigateAction::ToggleFloat => {}
         NavigateAction::CopyMode => state.enter_copy_mode(terminal_runtimes),
         NavigateAction::Zoom => {
             state.toggle_zoom();

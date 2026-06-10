@@ -286,6 +286,10 @@ pub struct KeysConfig {
     /// Toggle the full last-prompt view in the focused pane's header (keyboard
     /// twin of clicking the header). Unset by default.
     pub toggle_prompt_expand: BindingConfig,
+    /// Toggle the per-workspace ephemeral floating pane: first press spawns
+    /// and shows it, pressing again while visible hides it (the shell keeps
+    /// running), and the next press shows the same float. Unset by default.
+    pub toggle_float: BindingConfig,
     /// Delete a linked worktree checkout AND its local branch once the merge
     /// gate (PR merged / branch merged into the default branch) passes.
     /// Unset by default.
@@ -618,6 +622,7 @@ impl Default for KeysConfig {
             branch_session: BindingConfig::empty(),
             toggle_collapse_all: BindingConfig::empty(),
             toggle_prompt_expand: BindingConfig::empty(),
+            toggle_float: BindingConfig::empty(),
             kill_worktree: BindingConfig::empty(),
             focus_attention: BindingConfig::empty(),
             focus_attention_previous: BindingConfig::empty(),
