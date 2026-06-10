@@ -115,6 +115,8 @@ When enabled, `herdr --remote` writes a private temporary SSH config that includ
 
 ## Keybindings
 
+For a cheat sheet of the built-in defaults, see [Keybindings](/docs/keybindings/).
+
 Herdr has a prefix mode similar to tmux. The default prefix is `ctrl+b`. Keybinding strings are explicit: `prefix+n` means press the configured prefix and then `n`; `ctrl+alt+n` is a direct terminal-mode shortcut.
 
 A small keybinding override looks like this:
@@ -181,13 +183,13 @@ Optional actions are unset by default. Bind them with `prefix+` for prefix-mode 
 [keys]
 previous_workspace = "prefix+shift+left"
 next_workspace = "prefix+shift+right"
-last_pane = "prefix+tab"
+last_pane = "prefix+semicolon"
 open_worktree = "prefix+shift+o"
 remove_worktree = "prefix+alt+d"
 next_tab = ["prefix+n", "ctrl+alt+]"]
 ```
 
-`last_pane` switches back to the last focused pane across workspaces and tabs. It is unset by default because the tmux-style pane binding `prefix+l` is already used for pane-right focus.
+`last_pane` switches back to the last focused pane across workspaces and tabs. It is unset by default. `prefix+l` is already bound to focus pane right, and `prefix+tab` is bound to cycle pane next, so use a free chord such as `prefix+semicolon`.
 
 Key strings accept plain keys, modifier combinations such as `ctrl+a`, `shift+n`, `alt+1`, `cmd+k`, and special keys such as `enter`, `tab`, `esc`, `left`, `right`, `up`, and `down`. Named punctuation such as `minus`, `comma`, `ampersand`, `plus`, and `backtick` is also accepted. Plain direct printable keys such as `n` are unsafe because they intercept typing; use `prefix+n` unless you intentionally want a direct binding. The `navigate_workspace_*` and `navigate_pane_*` fields are navigate-mode-only and may use plain keys such as `j` or `k`; they must not use `prefix+`, `esc`, `enter`, `tab`, `shift+tab`, `left`, `right`, or unmodified `1` through `9`. Left and right arrows are permanent aliases for pane-left and pane-right navigation. These navigate-mode shortcuts are independent from general action bindings such as `focus_pane_down = "prefix+j"`; when both use the same key, the navigate-mode shortcut wins while navigate mode is open. Alt, Cmd/Super, and punctuation with modifiers depend on your terminal and tmux settings.
 

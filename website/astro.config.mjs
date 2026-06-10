@@ -107,6 +107,7 @@ export default defineConfig({
             { label: 'Quick start', slug: 'docs/quick-start' },
             { label: 'How to work with Herdr', slug: 'docs/how-to-work' },
             { label: 'Concepts', slug: 'docs/concepts' },
+            { label: 'Keybindings', slug: 'docs/keybindings' },
           ],
         },
         {
