@@ -3,10 +3,16 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+    # Shareable code-quality / governance gates + toolbelt (prek/gitleaks/
+    # cargo-deny/…), wired into the devShell so the discipline is the same
+    # everywhere. Follows our nixpkgs to keep a single package set.
+    guardrails.url = "github:gerchowl/guardrails";
+    guardrails.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =
-    { self, nixpkgs }:
+    { self, nixpkgs, guardrails }:
     let
       lib = nixpkgs.lib;
       systems = [
@@ -50,9 +56,13 @@
           pkgs = pkgsFor system;
         in
         {
-          default = pkgs.mkShell {
-            name = "herdr-dev";
-            packages = with pkgs; [
+          # guardrails brings the governance toolbelt (prek/gitleaks/cargo-deny/
+          # …) and auto-installs the pre-commit hooks; `extra` carries herdr's
+          # own build toolchain. SDKROOT comes from the darwin stdenv for free,
+          # so the only env we restore is the libghostty-vt build tuning.
+          default = guardrails.lib.${system}.mkDevShell {
+            inherit pkgs;
+            extra = with pkgs; [
               cargo
               cargo-nextest
               clippy
@@ -64,11 +74,10 @@
               rustfmt
               zig_0_15
             ];
-
-            env = {
-              LIBGHOSTTY_VT_OPTIMIZE = "Debug";
-              LIBGHOSTTY_VT_SIMD = "true";
-            };
+            hook = ''
+              export LIBGHOSTTY_VT_OPTIMIZE=Debug
+              export LIBGHOSTTY_VT_SIMD=true
+            '';
           };
         }
       );

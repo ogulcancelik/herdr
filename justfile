@@ -23,12 +23,12 @@ check: ci
     python3 -m unittest scripts.test_changelog scripts.test_preview scripts.test_vendor_libghostty_vt
     @echo "docs reminder: if this changes user-facing behavior, make sure the relevant release docs are updated or called out before release."
 
-# Install repo-local git hooks
+# Install the guardrails git hooks (gates + conventional-commit check) via prek.
+# Normally automatic on `direnv`/`nix develop` entry; this is the manual path.
 install-hooks:
-    git config core.hooksPath .githooks
-    chmod +x .githooks/pre-commit
-    chmod +x .githooks/commit-msg
-    @echo "installed git hooks from .githooks"
+    git config --local --unset-all core.hooksPath 2>/dev/null || true
+    prek install --install-hooks -t pre-commit -t commit-msg
+    @echo "installed guardrails hooks via prek (pre-commit + commit-msg)"
 
 # Build release binary
 build:
