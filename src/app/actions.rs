@@ -118,6 +118,23 @@ impl AppState {
         })
     }
 
+    /// Toggle the full-prompt header expansion for the focused pane — the
+    /// keyboard twin of clicking the pane header.
+    pub(crate) fn toggle_focused_prompt_expand(&mut self) {
+        let Some(pane_id) = self
+            .active
+            .and_then(|idx| self.workspaces.get(idx))
+            .and_then(|ws| ws.focused_pane_id())
+        else {
+            return;
+        };
+        self.expanded_prompt_pane = if self.expanded_prompt_pane == Some(pane_id) {
+            None
+        } else {
+            Some(pane_id)
+        };
+    }
+
     fn pane_focus_target_indices(&self, target: &PaneFocusTarget) -> Option<(usize, usize)> {
         let ws_idx = self
             .workspaces
@@ -4856,5 +4873,18 @@ mod tests {
         state.set_active_workspace(Some(0));
 
         assert!(state.collapsed_space_keys.is_empty());
+    }
+
+    #[test]
+    fn toggle_focused_prompt_expand_round_trips_for_focused_pane() {
+        let mut state = app_with_workspaces(&["a"]);
+        state.active = Some(0);
+        let pane = state.workspaces[0].focused_pane_id().expect("focused pane");
+
+        assert_eq!(state.expanded_prompt_pane, None);
+        state.toggle_focused_prompt_expand();
+        assert_eq!(state.expanded_prompt_pane, Some(pane));
+        state.toggle_focused_prompt_expand();
+        assert_eq!(state.expanded_prompt_pane, None);
     }
 }

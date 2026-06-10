@@ -270,6 +270,9 @@ pub struct KeysConfig {
     /// Collapse every sidebar worktree group at once; pressed again, expand
     /// them all. Unset by default.
     pub toggle_collapse_all: BindingConfig,
+    /// Toggle the full last-prompt view in the focused pane's header (keyboard
+    /// twin of clicking the header). Unset by default.
+    pub toggle_prompt_expand: BindingConfig,
     /// Delete a linked worktree checkout AND its local branch once the merge
     /// gate (PR merged / branch merged into the default branch) passes.
     /// Unset by default.
@@ -597,6 +600,7 @@ impl Default for KeysConfig {
             new_worktree: BindingConfig::one("prefix+shift+g"),
             branch_session: BindingConfig::empty(),
             toggle_collapse_all: BindingConfig::empty(),
+            toggle_prompt_expand: BindingConfig::empty(),
             kill_worktree: BindingConfig::empty(),
             focus_attention: BindingConfig::empty(),
             focus_attention_previous: BindingConfig::empty(),

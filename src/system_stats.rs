@@ -76,8 +76,7 @@ pub fn spawn_sampler(
                 let gpu_percent = read_gpu_percent();
 
                 let stats = SystemStats {
-                    host: sysinfo::System::host_name()
-                        .map(|h| h.split('.').next().unwrap_or(&h).to_string()),
+                    host: Some(crate::app::short_host_name()),
                     cpu_percent,
                     mem_used,
                     mem_total,

@@ -77,10 +77,37 @@ impl App {
     }
 }
 
+/// Short, stable hostname for the status line and peer identity. Cached for the
+/// session. On macOS this prefers the user-set `LocalHostName` over the network
+/// hostname, which on corp/campus DHCP (e.g. ETH `staff-net-*.intern.ethz.ch`)
+/// is an unstable name nobody recognizes.
 pub(crate) fn short_host_name() -> String {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<String> = OnceLock::new();
+    CACHED.get_or_init(compute_short_host_name).clone()
+}
+
+fn compute_short_host_name() -> String {
+    #[cfg(target_os = "macos")]
+    if let Some(name) = macos_local_host_name() {
+        return name;
+    }
     sysinfo::System::host_name()
         .map(|h| h.split('.').next().unwrap_or(&h).to_string())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_local_host_name() -> Option<String> {
+    let out = std::process::Command::new("/usr/sbin/scutil")
+        .args(["--get", "LocalHostName"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!name.is_empty()).then_some(name)
 }
 
 fn workspace_peer_summary(

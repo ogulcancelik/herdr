@@ -265,6 +265,7 @@ pub struct Keybinds {
     pub new_worktree: ActionKeybinds,
     pub branch_session: ActionKeybinds,
     pub toggle_collapse_all: ActionKeybinds,
+    pub toggle_prompt_expand: ActionKeybinds,
     pub kill_worktree: ActionKeybinds,
     pub focus_attention: ActionKeybinds,
     pub focus_attention_previous: ActionKeybinds,
@@ -450,6 +451,10 @@ impl Config {
             toggle_collapse_all: action!(
                 "keys.toggle_collapse_all",
                 &self.keys.toggle_collapse_all
+            ),
+            toggle_prompt_expand: action!(
+                "keys.toggle_prompt_expand",
+                &self.keys.toggle_prompt_expand
             ),
             kill_worktree: action!("keys.kill_worktree", &self.keys.kill_worktree),
             focus_attention: action!("keys.focus_attention", &self.keys.focus_attention),
