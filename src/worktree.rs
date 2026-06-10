@@ -54,29 +54,36 @@ pub(crate) fn branch_to_path_slug(branch: &str) -> String {
 }
 
 pub(crate) fn expand_tilde_path(path: &str) -> PathBuf {
+    expand_tilde_path_from_env(path, cfg!(windows), |key| std::env::var_os(key))
+}
+
+fn expand_tilde_path_from_env(
+    path: &str,
+    is_windows: bool,
+    env: impl Fn(&str) -> Option<OsString> + Copy,
+) -> PathBuf {
     if path == "~" {
-        return home_dir_from_env(cfg!(windows), |key| std::env::var_os(key))
-            .unwrap_or_else(|_| PathBuf::from(path));
+        return home_dir_from_env(is_windows, env).unwrap_or_else(|_| PathBuf::from(path));
     }
 
     let tilde_rest = path.strip_prefix("~/").or_else(|| {
-        if cfg!(windows) {
+        if is_windows {
             path.strip_prefix("~\\")
         } else {
             None
         }
     });
     if let Some(rest) = tilde_rest {
-        return home_dir_from_env(cfg!(windows), |key| std::env::var_os(key))
-            .map(|home| join_tilde_rest(home, rest))
+        return home_dir_from_env(is_windows, env)
+            .map(|home| join_tilde_rest(home, rest, is_windows))
             .unwrap_or_else(|_| PathBuf::from(path));
     }
 
     PathBuf::from(path)
 }
 
-fn join_tilde_rest(home: PathBuf, rest: &str) -> PathBuf {
-    if cfg!(windows) {
+fn join_tilde_rest(home: PathBuf, rest: &str, is_windows: bool) -> PathBuf {
+    if is_windows {
         rest.split(['/', '\\'])
             .filter(|component| !component.is_empty())
             .fold(home, |path, component| path.join(component))
@@ -450,21 +457,17 @@ prunable stale
 
     #[test]
     fn expand_tilde_path_uses_home_when_available() {
-        let old_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", "/home/me");
         assert_eq!(
-            expand_tilde_path("~/.herdr/worktrees"),
+            expand_tilde_path_from_env("~/.herdr/worktrees", false, |key| match key {
+                "HOME" => Some("/home/me".into()),
+                _ => None,
+            }),
             PathBuf::from("/home/me/.herdr/worktrees")
         );
         assert_eq!(
-            expand_tilde_path("/tmp/worktrees"),
+            expand_tilde_path_from_env("/tmp/worktrees", false, |_| None),
             PathBuf::from("/tmp/worktrees")
         );
-        if let Some(home) = old_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
-        }
     }
 
     #[test]
@@ -514,27 +517,24 @@ prunable stale
     #[cfg(not(windows))]
     #[test]
     fn non_windows_tilde_expansion_keeps_windows_separator_literal() {
-        let old_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", "/home/me");
         assert_eq!(
-            expand_tilde_path(r"~\.herdr\worktrees"),
+            expand_tilde_path_from_env(r"~\.herdr\worktrees", false, |key| match key {
+                "HOME" => Some("/home/me".into()),
+                _ => None,
+            }),
             PathBuf::from(r"~\.herdr\worktrees")
         );
-        if let Some(home) = old_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
-        }
     }
 
     #[cfg(windows)]
     #[test]
     fn windows_tilde_expansion_normalizes_separators() {
-        let old_home = std::env::var_os("HOME");
-        let old_userprofile = std::env::var_os("USERPROFILE");
-        std::env::set_var("HOME", "~");
-        std::env::set_var("USERPROFILE", r"C:\Users\herdr");
-        let default_path = expand_tilde_path("~/.herdr/worktrees");
+        let env = |key| match key {
+            "HOME" => Some("~".into()),
+            "USERPROFILE" => Some(r"C:\Users\herdr".into()),
+            _ => None,
+        };
+        let default_path = expand_tilde_path_from_env("~/.herdr/worktrees", true, env);
         assert_eq!(
             default_path,
             PathBuf::from(r"C:\Users\herdr\.herdr\worktrees")
@@ -544,19 +544,9 @@ prunable stale
             r"C:\Users\herdr\.herdr\worktrees"
         );
         assert_eq!(
-            expand_tilde_path(r"~\.herdr\worktrees"),
+            expand_tilde_path_from_env(r"~\.herdr\worktrees", true, env),
             PathBuf::from(r"C:\Users\herdr\.herdr\worktrees")
         );
-        if let Some(home) = old_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
-        }
-        if let Some(userprofile) = old_userprofile {
-            std::env::set_var("USERPROFILE", userprofile);
-        } else {
-            std::env::remove_var("USERPROFILE");
-        }
     }
 
     #[test]
