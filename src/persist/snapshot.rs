@@ -855,6 +855,57 @@ mod tests {
     }
 
     #[test]
+    fn worktree_space_membership_survives_serialize_parse_round_trip() {
+        // Sibling workspaces (#25) group purely via stamped membership — a
+        // snapshot round-trip must preserve it or restore loses grouping.
+        let snap = SessionSnapshot {
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("wsib".to_string()),
+                custom_name: Some("sibling".to_string()),
+                identity_cwd: PathBuf::from("/repo/wt/feature"),
+                worktree_space: Some(crate::workspace::WorktreeSpaceMembership {
+                    key: "github.com/gerchowl/herdr".into(),
+                    label: "herdr".into(),
+                    repo_root: "/repo/herdr".into(),
+                    checkout_path: "/repo/wt/feature".into(),
+                    is_linked_worktree: true,
+                }),
+                tabs: vec![TabSnapshot {
+                    custom_name: None,
+                    layout: LayoutSnapshot::Pane(0),
+                    panes: HashMap::new(),
+                    zoomed: false,
+                    focused: Some(0),
+                    root_pane: Some(0),
+                }],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            agent_panel_scope: AgentPanelScope::CurrentWorkspace,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: std::collections::HashSet::new(),
+            version: SNAPSHOT_VERSION,
+            pane_id_aliases: std::collections::HashMap::new(),
+        };
+
+        let json = serde_json::to_string_pretty(&snap).unwrap();
+        let restored = parse_snapshot(&json).unwrap();
+
+        let space = restored.workspaces[0]
+            .worktree_space
+            .as_ref()
+            .expect("membership survives the round trip");
+        assert_eq!(space.key, "github.com/gerchowl/herdr");
+        assert_eq!(
+            space.checkout_path,
+            PathBuf::from("/repo/wt/feature"),
+            "identity pin target preserved"
+        );
+    }
+
+    #[test]
     fn capture_contract_tracks_worktree_space_membership() {
         let mut state = state_with_workspaces(&["main"]);
         state.workspaces[0].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {

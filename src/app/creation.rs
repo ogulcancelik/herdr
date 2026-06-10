@@ -131,6 +131,10 @@ impl App {
                 if let Some(name) = custom_name {
                     self.state.workspaces[idx].set_custom_name(name);
                 }
+                // Second (load-bearing) save: create_workspace_with_options
+                // scheduled one BEFORE membership/name were stamped above; the
+                // debounced saver must capture the stamped state or a crash in
+                // the window would restore the sibling ungrouped.
                 self.schedule_session_save();
             }
             Err(e) => {
