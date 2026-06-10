@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Direction, Rect};
 use tracing::warn;
 
@@ -1387,6 +1387,71 @@ impl AppState {
         }
     }
 
+    /// Page the focused pane's host scrollback (Shift+PageUp/Down). `dir` is
+    /// -1 for up (into history) / +1 for down (toward live). A page is the
+    /// pane's visible height minus one row of overlap. Returns false when
+    /// there is no focused pane to scroll.
+    pub(crate) fn scroll_focused_pane_page(
+        &self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+        dir: i8,
+    ) -> bool {
+        let Some((pane_id, page)) = self.focused_pane_scroll_page(terminal_runtimes) else {
+            return false;
+        };
+        if dir < 0 {
+            self.scroll_pane_up(terminal_runtimes, pane_id, page);
+        } else {
+            self.scroll_pane_down(terminal_runtimes, pane_id, page);
+        }
+        true
+    }
+
+    /// Jump the focused pane's host scrollback to the top of history
+    /// (Shift+Home) or back to the live bottom (Shift+End).
+    pub(crate) fn scroll_focused_pane_edge(
+        &self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+        to_top: bool,
+    ) -> bool {
+        let Some(pane_id) = self.focused_pane_id_for_scroll() else {
+            return false;
+        };
+        let offset = if to_top {
+            self.pane_scroll_metrics(terminal_runtimes, pane_id)
+                .map_or(0, |metrics| metrics.max_offset_from_bottom)
+        } else {
+            0
+        };
+        self.set_pane_scroll_offset(terminal_runtimes, pane_id, offset);
+        true
+    }
+
+    fn focused_pane_id_for_scroll(&self) -> Option<crate::layout::PaneId> {
+        self.workspaces
+            .get(self.active?)
+            .and_then(|ws| ws.focused_pane_id())
+    }
+
+    fn focused_pane_scroll_page(
+        &self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) -> Option<(crate::layout::PaneId, usize)> {
+        let pane_id = self.focused_pane_id_for_scroll()?;
+        // Prefer the live viewport height; fall back to the laid-out pane rect.
+        let page = self
+            .pane_scroll_metrics(terminal_runtimes, pane_id)
+            .map(|metrics| metrics.viewport_rows)
+            .or_else(|| {
+                self.pane_info_by_id(pane_id)
+                    .map(|info| info.inner_rect.height as usize)
+            })
+            .unwrap_or(1)
+            .saturating_sub(1)
+            .max(1);
+        Some((pane_id, page))
+    }
+
     pub(crate) fn pane_scroll_metrics(
         &self,
         terminal_runtimes: &TerminalRuntimeRegistry,
@@ -1480,9 +1545,14 @@ impl AppState {
     ) {
         let lines_per_notch = self.mouse_scroll_lines;
 
+        // Shift+wheel is a deterministic escape hatch: always scroll herdr's
+        // own scrollback, even in alt-screen / mouse-reporting panes where a
+        // bare wheel is forwarded to the app.
+        let shift_held = mouse.modifiers.contains(KeyModifiers::SHIFT);
+
         if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
             self.focus_pane(info.id);
-            if self.forward_pane_wheel(terminal_runtimes, &info, mouse) {
+            if !shift_held && self.forward_pane_wheel(terminal_runtimes, &info, mouse) {
                 return;
             }
             match mouse.kind {

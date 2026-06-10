@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 use tracing::{debug, warn};
 
 use crate::{
@@ -24,6 +24,27 @@ impl App {
         };
         if let Some(runtime) = self.lookup_runtime_sender(input.ws_idx, input.pane_id) {
             let _ = runtime.try_send_bytes(input.bytes);
+        }
+    }
+
+    /// Handle a Shift-modified scrollback key (PageUp/PageDown/Home/End) by
+    /// scrolling the focused pane's host scrollback. Returns true if the key
+    /// was a scrollback key and was consumed.
+    fn handle_terminal_scrollback_key(&mut self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::PageUp => self
+                .state
+                .scroll_focused_pane_page(&self.terminal_runtimes, -1),
+            KeyCode::PageDown => self
+                .state
+                .scroll_focused_pane_page(&self.terminal_runtimes, 1),
+            KeyCode::Home => self
+                .state
+                .scroll_focused_pane_edge(&self.terminal_runtimes, true),
+            KeyCode::End => self
+                .state
+                .scroll_focused_pane_edge(&self.terminal_runtimes, false),
+            _ => false,
         }
     }
 
@@ -73,6 +94,16 @@ impl App {
 
         if self.state.is_prefix_key(key) {
             self.state.mode = Mode::Prefix;
+            return None;
+        }
+
+        // Shift+PageUp/Down/Home/End scroll herdr's own scrollback in the
+        // focused pane, regardless of the app's mouse mode — a deterministic
+        // keyboard path that never gets "stuck" forwarding to the app. Bare
+        // Page/Home/End still go to the app.
+        if key.modifiers.contains(KeyModifiers::SHIFT)
+            && self.handle_terminal_scrollback_key(key.code)
+        {
             return None;
         }
 
@@ -230,6 +261,127 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), col, row));
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+    }
+
+    fn app_with_scrollback(bytes: &[u8]) -> (App, crate::layout::PaneInfo) {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = pane_infos[0].clone();
+        ws.insert_test_runtime(
+            pane_id,
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                64 * 1024,
+                bytes,
+            ),
+        );
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+        (app, info)
+    }
+
+    fn offset_from_bottom(app: &App, pane_id: crate::layout::PaneId) -> usize {
+        app.state
+            .pane_scroll_metrics(&app.terminal_runtimes, pane_id)
+            .map_or(0, |metrics| metrics.offset_from_bottom)
+    }
+
+    fn shift_key(code: KeyCode) -> TerminalKey {
+        TerminalKey::new(code, KeyModifiers::SHIFT)
+    }
+
+    #[tokio::test]
+    async fn shift_page_up_scrolls_host_scrollback_then_shift_end_returns_to_bottom() {
+        let (mut app, info) = app_with_scrollback(&numbered_lines_bytes(200));
+        assert_eq!(offset_from_bottom(&app, info.id), 0);
+
+        app.handle_terminal_key_headless(shift_key(KeyCode::PageUp));
+        let scrolled = offset_from_bottom(&app, info.id);
+        assert!(scrolled > 0, "Shift+PageUp should scroll into history");
+
+        app.handle_terminal_key_headless(shift_key(KeyCode::PageUp));
+        assert!(
+            offset_from_bottom(&app, info.id) > scrolled,
+            "a second Shift+PageUp should page further up"
+        );
+
+        app.handle_terminal_key_headless(shift_key(KeyCode::End));
+        assert_eq!(
+            offset_from_bottom(&app, info.id),
+            0,
+            "Shift+End should snap back to the live bottom"
+        );
+    }
+
+    #[tokio::test]
+    async fn shift_home_jumps_to_top_of_scrollback() {
+        let (mut app, info) = app_with_scrollback(&numbered_lines_bytes(200));
+        let max = app
+            .state
+            .pane_scroll_metrics(&app.terminal_runtimes, info.id)
+            .map_or(0, |metrics| metrics.max_offset_from_bottom);
+        assert!(max > 0);
+
+        app.handle_terminal_key_headless(shift_key(KeyCode::Home));
+        assert_eq!(offset_from_bottom(&app, info.id), max);
+    }
+
+    #[tokio::test]
+    async fn bare_page_up_forwards_to_mouse_app_while_shift_scrolls() {
+        // Mouse-reporting pane (DECSET 1000): bare PageUp forwards to the app
+        // (this is the "stuck" case the user hit in agent chats); Shift+PageUp
+        // must still scroll herdr scrollback.
+        let mut bytes = numbered_lines_bytes(200);
+        bytes.extend_from_slice(b"\x1b[?1000h");
+        let (mut app, info) = app_with_scrollback(&bytes);
+
+        app.handle_terminal_key_headless(TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()));
+        assert_eq!(
+            offset_from_bottom(&app, info.id),
+            0,
+            "bare PageUp must pass through to the mouse-capturing app"
+        );
+
+        app.handle_terminal_key_headless(shift_key(KeyCode::PageUp));
+        assert!(
+            offset_from_bottom(&app, info.id) > 0,
+            "Shift+PageUp must scroll herdr scrollback even in a mouse-reporting pane"
+        );
+    }
+
+    #[tokio::test]
+    async fn shift_wheel_scrolls_host_scrollback_even_when_app_captures_mouse() {
+        // DECSET 1000 enables mouse reporting on the main screen, so a bare
+        // wheel forwards to the app; Shift+wheel must still host-scroll.
+        let mut bytes = numbered_lines_bytes(200);
+        bytes.extend_from_slice(b"\x1b[?1000h");
+        let (mut app, info) = app_with_scrollback(&bytes);
+        let col = info.inner_rect.x + 1;
+        let row = info.inner_rect.y + 1;
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp, col, row));
+        assert_eq!(
+            offset_from_bottom(&app, info.id),
+            0,
+            "bare wheel should forward to the mouse-capturing app, not scroll"
+        );
+
+        app.handle_mouse(modified_mouse(
+            MouseEventKind::ScrollUp,
+            col,
+            row,
+            KeyModifiers::SHIFT,
+        ));
+        assert!(
+            offset_from_bottom(&app, info.id) > 0,
+            "Shift+wheel must scroll herdr scrollback even under mouse capture"
+        );
     }
 
     fn modified_mouse(
