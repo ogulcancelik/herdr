@@ -186,6 +186,7 @@ branch_session = "prefix+shift+b"
 kill_worktree = "prefix+alt+k"
 focus_attention = "prefix+a"
 focus_attention_previous = "prefix+shift+a"
+toggle_float = "prefix+f"
 next_tab = ["prefix+n", "ctrl+alt+]"]
 ```
 
@@ -194,6 +195,8 @@ next_tab = ["prefix+n", "ctrl+alt+]"]
 `kill_worktree` deletes a linked worktree checkout **and its local branch** — but the branch only when a merge gate passes: Herdr asks `gh pr view <branch>` for a merged PR (also pinned to the origin remote's repo, so multi-remote fork checkouts resolve correctly), falling back to `git branch --merged <default-branch>`, then to remote containment — the branch tip being reachable from another pushed remote ref (e.g. merged into an integration branch) also counts as evidence. The confirm dialog shows the evidence ("PR #12 merged" / "merged into master") or, when there is none, downgrades to a checkout-only delete with the branch kept. This is the one deliberate exception to Herdr's "branches are never deleted" rule, and it never fires without positive evidence. Also available as `Kill worktree & branch...` in the workspace context menu.
 
 `branch_session` branches the focused pane's agent session into a new worktree: it opens the same dialog as `new_worktree`, but the created workspace's root pane resumes a fork of the agent conversation in the new checkout instead of starting a shell (Claude Code uses `--fork-session` so the original session is untouched; other supported agents resume the same session). The focused pane must have a resumable agent session reported through a Herdr integration, and the workspace must be a Git repo parent (same rule as `new_worktree`).
+
+`toggle_float` toggles a per-workspace ephemeral floating pane: a centered overlay (about 80% x 70% of the pane area) running your shell in the workspace's directory, for quick throwaway commands. The first press spawns and shows it; pressing the same binding while it is visible hides it without killing the shell, and the next press brings the same float back. The float closes when its process exits (`exit` or Ctrl-D), is never saved to the session, and does not survive a restart. While the float is visible all terminal input goes to it; `esc` is forwarded into the float's shell rather than dismissing it, so vi-mode and fzf keep working.
 
 `last_pane` switches back to the last focused pane across workspaces and tabs. It is unset by default because the tmux-style pane binding `prefix+l` is already used for pane-right focus.
 

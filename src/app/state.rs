@@ -1367,6 +1367,10 @@ pub struct AppState {
     /// Terminal ids whose size is currently owned by a direct attach client.
     pub direct_attach_resize_locks: std::collections::HashSet<crate::terminal::TerminalId>,
     pub(crate) pane_id_aliases: std::collections::HashMap<u32, PaneId>,
+    /// Per-workspace ephemeral floating panes, keyed by workspace id.
+    /// Floats live outside the workspace/tab/pane tree: never persisted,
+    /// never enumerated by pane walkers, reaped when their process exits.
+    pub floats: std::collections::HashMap<String, crate::app::float::FloatPane>,
     pub workspaces: Vec<Workspace>,
     pub active: Option<usize>,
     pub(crate) previous_pane_focus: Option<PaneFocusTarget>,
@@ -1749,6 +1753,7 @@ impl AppState {
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
+            floats: std::collections::HashMap::new(),
             workspaces: Vec::new(),
             active: None,
             previous_pane_focus: None,

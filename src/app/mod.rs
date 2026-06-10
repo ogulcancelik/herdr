@@ -12,6 +12,7 @@ pub(crate) use api::peers::short_host_name;
 mod api_helpers;
 mod config_io;
 mod creation;
+pub(crate) mod float;
 mod ids;
 mod input;
 mod runtime;
@@ -446,6 +447,7 @@ impl App {
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
+            floats: std::collections::HashMap::new(),
             workspaces,
             active,
             previous_pane_focus: None,
@@ -1447,28 +1449,18 @@ impl App {
                 }
                 crate::raw_input::RawInputEvent::Paste(text) => {
                     if self.state.mode == Mode::Terminal {
-                        if let Some(ws_idx) = self.state.active {
-                            if let Some(ws) = self.state.workspaces.get(ws_idx) {
-                                if let Some(focused) = ws.focused_pane_id() {
-                                    if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
-                                        &self.terminal_runtimes,
-                                        ws_idx,
-                                        focused,
-                                    ) {
-                                        let _ = runtime.try_send_bytes(bytes::Bytes::from(
-                                            if runtime
-                                                .input_state()
-                                                .map(|s| s.bracketed_paste)
-                                                .unwrap_or(false)
-                                            {
-                                                format!("\x1b[200~{text}\x1b[201~")
-                                            } else {
-                                                text
-                                            },
-                                        ));
-                                    }
-                                }
-                            }
+                        if let Some(runtime) = self.terminal_input_runtime() {
+                            let _ = runtime.try_send_bytes(bytes::Bytes::from(
+                                if runtime
+                                    .input_state()
+                                    .map(|s| s.bracketed_paste)
+                                    .unwrap_or(false)
+                                {
+                                    format!("\x1b[200~{text}\x1b[201~")
+                                } else {
+                                    text
+                                },
+                            ));
                         }
                     }
                 }

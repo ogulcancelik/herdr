@@ -173,6 +173,16 @@ impl App {
         }
 
         if let AppEvent::PaneDied { pane_id } = &ev {
+            // Floating panes live outside the workspace tree: when their
+            // process exits, reap the float here (this handler runs in both
+            // the App and headless event loops) and skip the workspace pane
+            // teardown below entirely.
+            if self.state.remove_float_for_pane(*pane_id) {
+                self.shutdown_detached_terminal_runtimes();
+                self.render_dirty.store(true, Ordering::Release);
+                self.render_notify.notify_one();
+                return;
+            }
             if self.runtime_exit_action(*pane_id) == RuntimeExitAction::RespawnShell
                 && self.respawn_shell_for_launch_pane(*pane_id)
             {
