@@ -4,6 +4,14 @@ use crate::app::state::{AppState, Mode, ViewLayout};
 
 use super::ScrollbarClickTarget;
 
+fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
+    rect.width > 0
+        && col >= rect.x
+        && col < rect.x + rect.width
+        && row >= rect.y
+        && row < rect.y + rect.height
+}
+
 impl AppState {
     pub(super) fn workspace_list_rect(&self) -> Rect {
         let sidebar = self.view.sidebar_rect;
@@ -457,11 +465,19 @@ impl AppState {
             self.sidebar_pane_gap,
         );
         let rect = crate::ui::agent_panel_toggle_rect(detail_area, self.agent_panel_scope);
-        rect.width > 0
-            && col >= rect.x
-            && col < rect.x + rect.width
-            && row >= rect.y
-            && row < rect.y + rect.height
+        rect_contains(rect, col, row)
+    }
+
+    pub(super) fn on_servers_panel_scope_toggle(&self, col: u16, row: u16) -> bool {
+        if self.sidebar_collapsed {
+            return false;
+        }
+
+        let rect = crate::ui::panel_scope_toggle_rect(
+            self.view.servers_header_rect,
+            self.servers_panel_scope,
+        );
+        rect_contains(rect, col, row)
     }
 
     pub(super) fn agent_detail_target_at(
@@ -511,7 +527,7 @@ mod tests {
 
     use super::super::{app_for_mouse_test, capture_snapshot, mouse, unique_temp_path};
     use crate::{
-        app::state::{AgentPanelScope, DragTarget, Mode},
+        app::state::{AgentPanelScope, DragTarget, Mode, PanelScope},
         detect::Agent,
         workspace::Workspace,
     };
@@ -801,6 +817,54 @@ mod tests {
             snapshot.agent_panel_scope,
             AgentPanelScope::CurrentWorkspace
         );
+    }
+
+    #[test]
+    fn clicking_servers_header_toggle_switches_servers_scope() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let mut peer = crate::peers::PeerSummaryState::new(&crate::config::PeerConfig {
+            name: "anvil".into(),
+            ..Default::default()
+        });
+        peer.last_ok = Some(std::time::Instant::now());
+        app.state.peer_summaries = vec![peer];
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 30));
+
+        let header = app.state.view.servers_header_rect;
+        assert_ne!(header, Rect::default());
+
+        // Clicking the header outside the all/current label is a no-op (the
+        // old collapse-on-header-click behavior is gone).
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            header.x + 1,
+            header.y,
+        ));
+        assert_eq!(app.state.servers_panel_scope, PanelScope::All);
+
+        // Clicking the label flips the scope and persists it.
+        let toggle = crate::ui::panel_scope_toggle_rect(header, app.state.servers_panel_scope);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+        assert_eq!(app.state.servers_panel_scope, PanelScope::Current);
+        let snapshot = capture_snapshot(&app.state);
+        assert_eq!(snapshot.servers_panel_scope, PanelScope::Current);
+
+        // Toggling again returns to all.
+        let toggle = crate::ui::panel_scope_toggle_rect(header, app.state.servers_panel_scope);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+        assert_eq!(app.state.servers_panel_scope, PanelScope::All);
     }
 
     #[test]

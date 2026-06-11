@@ -8,7 +8,7 @@ use ratatui::{
 
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::status::{agent_icon, state_dot, state_label, state_label_color};
-use crate::app::state::{AgentPanelScope, Palette};
+use crate::app::state::{AgentPanelScope, Palette, PanelScope};
 use crate::app::{AppState, Mode};
 use crate::detect::AgentState;
 use crate::terminal::TerminalRuntimeRegistry;
@@ -108,6 +108,29 @@ fn agent_panel_toggle_label(scope: AgentPanelScope) -> &'static str {
         AgentPanelScope::CurrentWorkspace => "current",
         AgentPanelScope::AllWorkspaces => "all",
     }
+}
+
+fn panel_scope_toggle_label(scope: PanelScope) -> &'static str {
+    match scope {
+        PanelScope::Current => "current",
+        PanelScope::All => "all",
+    }
+}
+
+/// Right-aligned all/current toggle inside a one-row section header — the
+/// servers and spaces counterpart of [`agent_panel_toggle_rect`].
+pub(crate) fn panel_scope_toggle_rect(header: Rect, scope: PanelScope) -> Rect {
+    if header.width == 0 || header.height == 0 {
+        return Rect::default();
+    }
+
+    let width = panel_scope_toggle_label(scope).chars().count() as u16;
+    Rect::new(
+        header.x + header.width.saturating_sub(width),
+        header.y,
+        width.min(header.width),
+        1,
+    )
 }
 
 pub(crate) fn agent_panel_toggle_rect(area: Rect, scope: AgentPanelScope) -> Rect {
@@ -676,19 +699,40 @@ fn server_band_slots(app: &AppState) -> Vec<Option<crate::app::state::PeerSwitch
     slots
 }
 
+/// The band rows actually rendered, honoring the servers scope toggle:
+/// `all` keeps every slot, `current` only the local server — plus the home
+/// row when a fleet snapshot origin exists, because the way home must never
+/// hide.
+fn visible_server_band_slots(app: &AppState) -> Vec<Option<crate::app::state::PeerSwitchRequest>> {
+    let slots = server_band_slots(app);
+    match app.servers_panel_scope {
+        PanelScope::All => slots,
+        PanelScope::Current => slots
+            .into_iter()
+            .filter(|slot| {
+                matches!(
+                    slot,
+                    None | Some(crate::app::state::PeerSwitchRequest::Home)
+                )
+            })
+            .collect(),
+    }
+}
+
 /// Height the `servers` section wants: 0 with nothing but the self row,
-/// else a header row plus two lines per server row (capped) — or just the
-/// header when collapsed.
+/// else a header row plus two lines per visible server row (capped) plus
+/// the trailing hairline divider that separates `servers` from `spaces`.
 pub(crate) fn servers_section_height(app: &AppState) -> u16 {
-    let slots = server_band_slots(app).len() as u16;
-    if slots <= 1 {
+    if server_band_slots(app).len() <= 1 {
         return 0;
     }
-    if app.servers_collapsed {
-        return 1;
-    }
-    let rows = slots.min(SERVERS_SECTION_MAX_ROWS);
-    1 + rows * SERVER_ROW_LINES
+    let rows = (visible_server_band_slots(app).len() as u16).min(SERVERS_SECTION_MAX_ROWS);
+    1 + rows * SERVER_ROW_LINES + 1
+}
+
+/// The band minus its trailing divider row: the header plus the server rows.
+fn server_band_rows_area(area: Rect) -> Rect {
+    Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1))
 }
 
 /// Split the spaces-section rect into the `servers` band (top) and the
@@ -1171,11 +1215,11 @@ fn server_slot_rect(servers_area: Rect, slot: u16) -> Option<Rect> {
         .then(|| Rect::new(servers_area.x, y, servers_area.width, SERVER_ROW_LINES))
 }
 
-/// Compute hit areas for the `servers` section: the header rect (toggles
-/// collapse) and one two-line rect per visible switchable row (home,
-/// snapshot, config peer — see [`server_band_slots`] for the order). The
-/// local server's slot deliberately gets NO card — clicking yourself must
-/// never request a server switch.
+/// Compute hit areas for the `servers` section: the header rect (hosts the
+/// all/current scope toggle) and one two-line rect per visible switchable
+/// row (home, snapshot, config peer — see [`server_band_slots`] for the
+/// order). The local server's slot deliberately gets NO card — clicking
+/// yourself must never request a server switch.
 pub(crate) fn compute_server_section_areas(
     app: &AppState,
     area: Rect,
@@ -1188,50 +1232,70 @@ pub(crate) fn compute_server_section_areas(
         return (Rect::default(), Vec::new());
     }
     let header_rect = Rect::new(servers_area.x, servers_area.y, servers_area.width, 1);
+    let rows_area = server_band_rows_area(servers_area);
     let mut cards = Vec::new();
-    if !app.servers_collapsed {
-        for (slot, target) in server_band_slots(app).into_iter().enumerate() {
-            // The self row (None) gets no card.
-            let Some(target) = target else {
-                continue;
-            };
-            let Some(rect) = server_slot_rect(servers_area, slot as u16) else {
-                break;
-            };
-            cards.push(crate::app::state::ServerCardArea { target, rect });
-        }
+    for (slot, target) in visible_server_band_slots(app).into_iter().enumerate() {
+        // The self row (None) gets no card.
+        let Some(target) = target else {
+            continue;
+        };
+        let Some(rect) = server_slot_rect(rows_area, slot as u16) else {
+            break;
+        };
+        cards.push(crate::app::state::ServerCardArea { target, rect });
     }
     (header_rect, cards)
 }
 
 fn render_servers_section(app: &AppState, frame: &mut Frame, area: Rect, is_navigating: bool) {
     let p = &app.palette;
-    let chevron = if app.servers_collapsed { "▸" } else { "▾" };
     let down = app
         .peer_summaries
         .iter()
         .filter(|peer| peer.reachability() == crate::peers::PeerReachability::Down)
         .count();
     let header = if down > 0 {
-        format!("{chevron} servers ({down} down)")
+        format!(" servers ({down} down)")
     } else {
-        format!("{chevron} servers")
+        " servers".to_string()
     };
+    let header_rect = Rect::new(area.x, area.y, area.width, 1);
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             header,
             Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
         )])),
-        Rect::new(area.x, area.y, area.width, 1),
+        header_rect,
     );
+    let toggle_rect = panel_scope_toggle_rect(header_rect, app.servers_panel_scope);
+    if toggle_rect != Rect::default() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                panel_scope_toggle_label(app.servers_panel_scope),
+                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+            ))
+            .alignment(Alignment::Right),
+            toggle_rect,
+        );
+    }
     let _ = is_navigating;
 
-    if app.servers_collapsed {
-        return;
+    // Hairline divider on the band's last row: the same visual language as
+    // the spaces↔agents divider below.
+    if area.height > 1 {
+        let divider_y = area.y + area.height - 1;
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "─".repeat(area.width as usize),
+                Style::default().fg(p.divider_color()),
+            )),
+            Rect::new(area.x, divider_y, area.width, 1),
+        );
     }
 
-    for (slot, target) in server_band_slots(app).into_iter().enumerate() {
-        let Some(rect) = server_slot_rect(area, slot as u16) else {
+    let rows_area = server_band_rows_area(area);
+    for (slot, target) in visible_server_band_slots(app).into_iter().enumerate() {
+        let Some(rect) = server_slot_rect(rows_area, slot as u16) else {
             break;
         };
         // The currently-attached machine reads like the active workspace row —
@@ -2050,17 +2114,20 @@ mod tests {
     }
 
     #[test]
-    fn servers_section_height_tracks_peers_and_collapse() {
+    fn servers_section_height_tracks_peers_and_scope() {
         let mut app = crate::app::state::AppState::test_new();
         assert_eq!(servers_section_height(&app), 0);
         app.peer_summaries = vec![
             peer_with_workspaces("anvil", vec![]),
             peer_with_workspaces("sage", vec![]),
         ];
-        // Header + two lines each for the self row and both peers.
-        assert_eq!(servers_section_height(&app), 7);
-        app.servers_collapsed = true;
-        assert_eq!(servers_section_height(&app), 1); // header only
+        // Header + two lines each for the self row and both peers + the
+        // trailing divider before the spaces list.
+        assert_eq!(servers_section_height(&app), 1 + 3 * SERVER_ROW_LINES + 1);
+        // Scope current: only the self row renders, the band stays visible
+        // (header keeps the toggle reachable).
+        app.servers_panel_scope = PanelScope::Current;
+        assert_eq!(servers_section_height(&app), 1 + SERVER_ROW_LINES + 1);
     }
 
     #[test]
@@ -2070,7 +2137,9 @@ mod tests {
             peer_with_workspaces("anvil", vec![]),
             peer_with_workspaces("sage", vec![]),
         ];
-        let area = Rect::new(0, 0, 30, 30);
+        // Tall enough that the half-section cap fits the full band: header +
+        // three two-line rows + the trailing divider (8 rows).
+        let area = Rect::new(0, 0, 30, 34);
         let (header, cards) = compute_server_section_areas(&app, area);
         assert_ne!(header, Rect::default());
         assert_eq!(cards.len(), 2);
@@ -2100,7 +2169,9 @@ mod tests {
         assert_eq!(cards[1].rect.y, cards[0].rect.y + SERVER_ROW_LINES);
         assert_eq!(cards[1].rect.height, SERVER_ROW_LINES);
 
-        app.servers_collapsed = true;
+        // Scope current without a carried snapshot: only the self row stays,
+        // which has no hit-area — the header (with its toggle) remains.
+        app.servers_panel_scope = PanelScope::Current;
         let (header, cards) = compute_server_section_areas(&app, area);
         assert_ne!(header, Rect::default());
         assert!(cards.is_empty());
@@ -2138,8 +2209,8 @@ mod tests {
             ]
         );
 
-        // Header + five two-line rows.
-        assert_eq!(servers_section_height(&app), 1 + 5 * SERVER_ROW_LINES);
+        // Header + five two-line rows + the trailing divider.
+        assert_eq!(servers_section_height(&app), 1 + 5 * SERVER_ROW_LINES + 1);
 
         // The hit-areas skip the self slot: home sits directly under the
         // header, the first snapshot row two lines below the self row.
@@ -2173,8 +2244,88 @@ mod tests {
         let mut app = crate::app::state::AppState::test_new();
         // The typical spoke: zero config peers, but a carried snapshot.
         app.fleet_snapshot = Some(carried_snapshot("mba22", vec!["anvil"]));
-        // Header + home + self + one snapshot row.
-        assert_eq!(servers_section_height(&app), 1 + 3 * SERVER_ROW_LINES);
+        // Header + home + self + one snapshot row + the trailing divider.
+        assert_eq!(servers_section_height(&app), 1 + 3 * SERVER_ROW_LINES + 1);
+    }
+
+    #[test]
+    fn servers_current_scope_keeps_home_row_when_snapshot_present() {
+        use crate::app::state::PeerSwitchRequest;
+        let mut app = crate::app::state::AppState::test_new();
+        app.fleet_snapshot = Some(carried_snapshot("mba22", vec!["anvil", "ksb"]));
+        app.peer_summaries = vec![peer_with_workspaces("ownpeer", vec![])];
+        app.servers_panel_scope = PanelScope::Current;
+
+        // The way home must never hide: scope current keeps home + self.
+        assert_eq!(
+            visible_server_band_slots(&app),
+            vec![Some(PeerSwitchRequest::Home), None]
+        );
+        assert_eq!(servers_section_height(&app), 1 + 2 * SERVER_ROW_LINES + 1);
+
+        // Home stays clickable directly under the header; snapshot/config
+        // peers lose their hit-areas with their rows.
+        let (header, cards) = compute_server_section_areas(&app, Rect::new(0, 0, 30, 80));
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].target, PeerSwitchRequest::Home);
+        assert_eq!(cards[0].rect.y, header.y + 1);
+    }
+
+    #[test]
+    fn servers_header_scope_toggle_sits_right_aligned_in_header_row() {
+        let header = Rect::new(2, 5, 24, 1);
+        let toggle = panel_scope_toggle_rect(header, PanelScope::All);
+        assert_eq!(toggle, Rect::new(2 + 24 - 3, 5, 3, 1));
+        let toggle = panel_scope_toggle_rect(header, PanelScope::Current);
+        assert_eq!(toggle, Rect::new(2 + 24 - 7, 5, 7, 1));
+        assert_eq!(
+            panel_scope_toggle_rect(Rect::default(), PanelScope::All),
+            Rect::default()
+        );
+    }
+
+    #[test]
+    fn servers_band_renders_scope_label_and_divider_above_spaces() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = crate::app::Mode::Terminal;
+        app.peer_summaries = vec![peer_with_workspaces("anvil", vec![])];
+
+        let area = Rect::new(0, 0, 30, 40);
+        let mut terminal =
+            Terminal::new(TestBackend::new(30, 40)).expect("test terminal should initialize");
+        let runtimes = TerminalRuntimeRegistry::new();
+        terminal
+            .draw(|frame| render_sidebar(&app, &runtimes, frame, area))
+            .expect("sidebar should render");
+
+        let (ws_area, _) =
+            expanded_sidebar_sections(area, app.sidebar_section_split, app.sidebar_pane_gap);
+        let (servers_area, list_area) = carve_servers_band(ws_area, servers_section_height(&app));
+        let buffer = terminal.backend().buffer();
+
+        // Header row: " servers" with the right-aligned scope label.
+        let header_text: String = (servers_area.x..servers_area.x + servers_area.width)
+            .map(|x| buffer[(x, servers_area.y)].symbol().to_string())
+            .collect();
+        assert!(header_text.starts_with(" servers"), "{header_text:?}");
+        assert!(header_text.trim_end().ends_with("all"), "{header_text:?}");
+
+        // The band's last row is a hairline divider — the same visual
+        // language as the spaces↔agents divider.
+        let divider_y = servers_area.y + servers_area.height - 1;
+        for x in servers_area.x..servers_area.x + servers_area.width {
+            assert_eq!(buffer[(x, divider_y)].symbol(), "─", "col {x}");
+        }
+
+        // The spaces header starts directly below the divider.
+        let spaces_text: String = (list_area.x..list_area.x + list_area.width)
+            .map(|x| buffer[(x, list_area.y)].symbol().to_string())
+            .collect();
+        assert!(spaces_text.starts_with(" spaces"), "{spaces_text:?}");
     }
 
     #[test]

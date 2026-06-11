@@ -479,7 +479,6 @@ impl App {
                 .collect(),
             fleet_snapshot: None,
             request_peer_switch: None,
-            servers_collapsed: false,
             servers_panel_scope: panel_scope_from_config(config.ui.servers_panel_scope),
             spaces_panel_scope: panel_scope_from_config(config.ui.spaces_panel_scope),
             request_open_existing_worktree: None,

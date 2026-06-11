@@ -976,6 +976,15 @@ pub enum PanelScope {
     All,
 }
 
+impl PanelScope {
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Current => Self::All,
+            Self::All => Self::Current,
+        }
+    }
+}
+
 /// The three sidebar section scopes captured/persisted together.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PanelScopes {
@@ -1444,8 +1453,6 @@ pub struct AppState {
     /// A server row was selected (or switch_home pressed): switch the
     /// client to this target. Consumed by both loops.
     pub request_peer_switch: Option<PeerSwitchRequest>,
-    /// Whether the `servers` sidebar section is collapsed to its header.
-    pub servers_collapsed: bool,
     /// Scope of the `servers` sidebar section: all server rows, or only the
     /// current machine (plus the home row when attached remotely).
     pub servers_panel_scope: PanelScope,
@@ -1830,7 +1837,6 @@ impl AppState {
             peer_summaries: Vec::new(),
             fleet_snapshot: None,
             request_peer_switch: None,
-            servers_collapsed: false,
             servers_panel_scope: PanelScope::All,
             spaces_panel_scope: PanelScope::All,
             request_open_existing_worktree: None,
