@@ -6,7 +6,11 @@ use ratatui::{
     Frame,
 };
 
+use super::medallion::{ring_medallion, MedallionStyle};
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
+use super::state_signal::{
+    join_states, medallion_rings, packed_rects, pr_state_glyph, StateClass, StateJoin,
+};
 use super::status::{agent_icon, state_dot, state_label, state_label_color};
 use crate::app::state::{AgentPanelScope, Palette, PanelScope};
 use crate::app::{AppState, Mode};
@@ -338,23 +342,52 @@ fn workspace_row_height(ws: &crate::workspace::Workspace) -> u16 {
     }
 }
 
-fn workspace_attention_priority(state: AgentState, seen: bool) -> u8 {
-    match (state, seen) {
-        (AgentState::Blocked, _) => 4,
-        (AgentState::Idle, false) => 3,
-        (AgentState::Working, _) => 2,
-        (AgentState::Idle, true) => 1,
-        (AgentState::Unknown, _) => 0,
-    }
-}
-
 fn space_aggregate_state(app: &AppState, key: &str) -> (AgentState, bool) {
     app.workspaces
         .iter()
         .filter(|ws| ws.worktree_space().is_some_and(|space| space.key == key))
         .map(|ws| ws.aggregate_state(&app.terminals))
-        .max_by_key(|(state, seen)| workspace_attention_priority(*state, *seen))
+        .max_by_key(|(state, seen)| StateClass::of(*state, *seen))
         .unwrap_or((AgentState::Unknown, true))
+}
+
+/// The join (severity-sorted top-3 state multiset) of one workspace's panes.
+fn workspace_join(app: &AppState, ws: &crate::workspace::Workspace) -> StateJoin {
+    join_states(
+        ws.pane_states(&app.terminals)
+            .map(|(state, seen)| StateClass::of(state, seen)),
+    )
+}
+
+/// The join across every member workspace of a worktree space.
+fn space_join(app: &AppState, key: &str) -> StateJoin {
+    join_states(
+        app.workspaces
+            .iter()
+            .filter(|ws| ws.worktree_space().is_some_and(|space| space.key == key))
+            .flat_map(|ws| ws.pane_states(&app.terminals))
+            .map(|(state, seen)| StateClass::of(state, seen)),
+    )
+}
+
+/// The join across every local workspace — the self server-row medallion.
+fn local_server_join(app: &AppState) -> StateJoin {
+    join_states(
+        app.workspaces
+            .iter()
+            .flat_map(|ws| ws.pane_states(&app.terminals))
+            .map(|(state, seen)| StateClass::of(state, seen)),
+    )
+}
+
+/// The join across a peer's workspace summaries (one status per workspace —
+/// the granularity the peer protocol carries).
+fn peer_join(peer: &crate::peers::PeerSummaryState) -> StateJoin {
+    join_states(
+        peer.workspaces
+            .iter()
+            .map(|ws| StateClass::of_remote(ws.status)),
+    )
 }
 
 /// Pane counts per state bucket across a worktree space's members, in
@@ -388,19 +421,6 @@ fn space_state_counts(app: &AppState, key: &str) -> Vec<(AgentState, bool, usize
     .into_iter()
     .filter(|(_, _, count)| *count > 0)
     .collect()
-}
-
-/// Traffic-light count glyph: a filled circled digit for 1..=10, "\u{25cf}N"
-/// beyond that.
-fn circled_count(count: usize) -> String {
-    const CIRCLED: [&str; 10] = [
-        "\u{2776}", "\u{2777}", "\u{2778}", "\u{2779}", "\u{277a}", "\u{277b}", "\u{277c}",
-        "\u{277d}", "\u{277e}", "\u{277f}",
-    ];
-    match count {
-        1..=10 => CIRCLED[count - 1].to_string(),
-        other => format!("\u{25cf}{other}"),
-    }
 }
 
 pub(crate) fn workspace_parent_group_state(
@@ -762,20 +782,23 @@ fn fold_remote_entries(app: &AppState, entries: &mut Vec<WorkspaceListEntry>) {
     }
 }
 
-/// Status dot for remote rows, matching the local state_dot palette:
-/// blocked red, working yellow, done teal, idle green (settled), unknown dim.
+/// Status dot for remote rows: the same shape language as the local
+/// `state_dot` (`●` live signal, `○` settled idle, `·` none), colored by
+/// the shared severity mapping.
 fn remote_status_dot(
     status: crate::api::schema::AgentStatus,
     p: &crate::app::state::Palette,
 ) -> (&'static str, Style) {
     use crate::api::schema::AgentStatus;
-    match status {
-        AgentStatus::Blocked => ("●", Style::default().fg(p.red)),
-        AgentStatus::Working => ("●", Style::default().fg(p.yellow)),
-        AgentStatus::Done => ("●", Style::default().fg(p.teal)),
-        AgentStatus::Idle => ("○", Style::default().fg(p.green)),
-        AgentStatus::Unknown => ("·", Style::default().fg(p.overlay0)),
-    }
+    let glyph = match status {
+        AgentStatus::Blocked | AgentStatus::Working | AgentStatus::Done => "●",
+        AgentStatus::Idle => "○",
+        AgentStatus::Unknown => "·",
+    };
+    (
+        glyph,
+        Style::default().fg(StateClass::of_remote(status).color(p)),
+    )
 }
 
 /// Display name of the active server filter for the spaces header, if one
@@ -1496,14 +1519,14 @@ fn render_servers_section(app: &AppState, frame: &mut Frame, area: Rect, is_navi
         // the standard highlight fill, one visual language for "current"
         // across workspaces, agents, and servers.
         let is_current = target.is_none();
-        let rows = match target {
+        let (rows, join) = match target {
             // The local server: no hit-area, anchors the band.
             None => self_server_rows(app),
             Some(crate::app::state::PeerSwitchRequest::Home) => {
                 let Some(snapshot) = app.fleet_snapshot.as_ref() else {
                     continue;
                 };
-                home_server_rows(snapshot, p)
+                (home_server_rows(snapshot, p), None)
             }
             Some(crate::app::state::PeerSwitchRequest::SnapshotPeer { entry_idx }) => {
                 let Some(peer) = app
@@ -1531,8 +1554,49 @@ fn render_servers_section(app: &AppState, frame: &mut Frame, area: Rect, is_navi
                 }
             }
         }
+        // The medallion's base_bg must be the row's ACTUAL fill so the
+        // rounded corners compose with the current-row highlight.
+        let base_bg = if is_current {
+            p.surface_dim
+        } else {
+            ratatui::style::Color::Reset
+        };
+        let rows = match join {
+            Some(join) => with_leading_medallion(rows, &join, base_bg, app, p),
+            None => rows,
+        };
         render_server_rows(frame, rect, rows);
     }
+}
+
+/// The configured medallion raster: `[ui] medallion_style` ("sextant"
+/// default, "quadrant" for fonts without sextant coverage).
+fn configured_medallion_style(app: &AppState) -> MedallionStyle {
+    match app.medallion_style {
+        crate::config::MedallionStyleConfig::Sextant => MedallionStyle::Sextant,
+        crate::config::MedallionStyleConfig::Quadrant => MedallionStyle::Quadrant,
+    }
+}
+
+/// Prepend the ring medallion (the band's leading state mark, #42) to a
+/// two-line server row: rings = the row's join (outer→inner), then a gap
+/// column so the name/health columns line up with the non-medallion rows'
+/// three-column lead-in.
+fn with_leading_medallion(
+    [title, health]: [Line<'static>; 2],
+    join: &StateJoin,
+    base_bg: ratatui::style::Color,
+    app: &AppState,
+    p: &Palette,
+) -> [Line<'static>; 2] {
+    let rings = medallion_rings(join, p);
+    let [top, bottom] = ring_medallion(&rings, base_bg, configured_medallion_style(app));
+    let lead = |mut mark: Vec<Span<'static>>, rest: Line<'static>| {
+        mark.push(Span::styled(" ", Style::default()));
+        mark.extend(rest.spans);
+        Line::from(mark)
+    };
+    [lead(top, title), lead(bottom, health)]
 }
 
 /// Paint a two-line server row into its slot rect, clamping each line.
@@ -1547,20 +1611,20 @@ fn render_server_rows(frame: &mut Frame, rect: Rect, [title, health]: [Line<'sta
     );
 }
 
-/// Indentation that lines the health glyphs up under the server name.
+/// Indentation that lines the health glyphs up under the server name for
+/// rows WITHOUT a leading medallion (home, unreachable peers) — the same
+/// three columns the medallion + gap occupy.
 const SERVER_HEALTH_INDENT: &str = "   ";
 
-/// The local server's row: `● mba22 ✦` plus battery and net throughput on
-/// the title line (#41 — peers don't carry those), over the shared
+/// The local server's row: the leading state medallion (the join of every
+/// local agent state, #42), then `mba22 ✦` plus battery and net throughput
+/// on the title line (#41 — peers don't carry those), over the shared
 /// fixed-width metric line, all fed from the same local `SystemStats`
 /// sample the HUD shows.
-fn self_server_rows(app: &AppState) -> [Line<'static>; 2] {
+fn self_server_rows(app: &AppState) -> ([Line<'static>; 2], Option<StateJoin>) {
     use super::status::{battery_icon, battery_style, format_net_io, push_band_metric};
     let p = &app.palette;
     let mut title = vec![
-        Span::styled(" ", Style::default()),
-        Span::styled("●", Style::default().fg(p.accent)),
-        Span::styled(" ", Style::default()),
         Span::styled(
             crate::app::short_host_name(),
             Style::default().fg(p.text).add_modifier(Modifier::BOLD),
@@ -1597,19 +1661,10 @@ fn self_server_rows(app: &AppState) -> [Line<'static>; 2] {
             p,
         );
     }
-    let (mut blocked, mut working) = (0usize, 0usize);
-    for ws in &app.workspaces {
-        for (state, _) in ws.pane_states(&app.terminals) {
-            match state {
-                AgentState::Blocked => blocked += 1,
-                AgentState::Working => working += 1,
-                _ => {}
-            }
-        }
-    }
-    push_rollup_spans(&mut health, blocked, working, p);
-    health.insert(0, Span::styled(SERVER_HEALTH_INDENT, Style::default()));
-    [Line::from(title), Line::from(health)]
+    (
+        [Line::from(title), Line::from(health)],
+        Some(local_server_join(app)),
+    )
 }
 
 /// The pinned origin row of a carried fleet snapshot: `← mba22 home` over a
@@ -1647,8 +1702,8 @@ fn home_server_rows(
 fn snapshot_server_rows(
     peer: &crate::peers::PeerSummaryState,
     p: &crate::app::state::Palette,
-) -> [Line<'static>; 2] {
-    let [mut title, health] = peer_server_rows(peer, p);
+) -> ([Line<'static>; 2], Option<StateJoin>) {
+    let ([mut title, health], join) = peer_server_rows(peer, p);
     // The down form already renders `unreachable {age}` on the health line.
     if peer.reachability() != crate::peers::PeerReachability::Down {
         if let Some(at) = peer.last_ok {
@@ -1658,32 +1713,28 @@ fn snapshot_server_rows(
             ));
         }
     }
-    [title, health]
+    ([title, health], join)
 }
 
-/// One peer's two `servers` lines:
-/// `● anvil  34ms` over `    71% 48G/64G ❶` (the band's fixed-width metric
-/// line), or the compact `unreachable {age}` form when the peer is down.
+/// One peer's two `servers` lines: the leading state medallion (the join of
+/// the peer's workspace statuses, #42) before `anvil  34ms` over the band's
+/// fixed-width metric line — or the compact `unreachable {age}` form with a
+/// muted hollow dot when the peer is down (shape = reachability).
 fn peer_server_rows(
     peer: &crate::peers::PeerSummaryState,
     p: &crate::app::state::Palette,
-) -> [Line<'static>; 2] {
+) -> ([Line<'static>; 2], Option<StateJoin>) {
     use crate::peers::PeerReachability;
     let reach = peer.reachability();
-    let (dot, dot_color) = match reach {
-        PeerReachability::Live => ("●", p.green),
-        PeerReachability::Slow => ("●", p.yellow),
-        PeerReachability::Down => ("○", p.red),
-    };
     let host = peer.host.clone().unwrap_or_else(|| peer.peer.clone());
-    let mut title = vec![
-        Span::styled(" ", Style::default()),
-        Span::styled(dot, Style::default().fg(dot_color)),
-        Span::styled(" ", Style::default()),
-        Span::styled(host, Style::default().fg(p.subtext0)),
-    ];
 
     if reach == PeerReachability::Down {
+        let title = Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled("○", Style::default().fg(p.overlay0)),
+            Span::styled(" ", Style::default()),
+            Span::styled(host, Style::default().fg(p.subtext0)),
+        ]);
         let detail = match peer.last_ok {
             Some(at) => format!("unreachable {}", format_age(at.elapsed().as_secs())),
             None => "unreachable".to_string(),
@@ -1692,9 +1743,10 @@ fn peer_server_rows(
             Span::styled(SERVER_HEALTH_INDENT, Style::default()),
             Span::styled(detail, Style::default().fg(p.overlay0)),
         ]);
-        return [Line::from(title), health];
+        return ([title, health], None);
     }
 
+    let mut title = vec![Span::styled(host, Style::default().fg(p.subtext0))];
     if let Some(ms) = peer.latency_ms {
         let color = if ms > crate::peers::PEER_SLOW_LATENCY_MS {
             p.yellow
@@ -1720,19 +1772,10 @@ fn peer_server_rows(
             p,
         );
     }
-    let blocked = peer
-        .workspaces
-        .iter()
-        .filter(|ws| ws.status == crate::api::schema::AgentStatus::Blocked)
-        .count();
-    let working = peer
-        .workspaces
-        .iter()
-        .filter(|ws| ws.status == crate::api::schema::AgentStatus::Working)
-        .count();
-    push_rollup_spans(&mut health, blocked, working, p);
-    health.insert(0, Span::styled(SERVER_HEALTH_INDENT, Style::default()));
-    [Line::from(title), Line::from(health)]
+    (
+        [Line::from(title), Line::from(health)],
+        Some(peer_join(peer)),
+    )
 }
 
 /// A server row's metric line in the band's fixed-width glyph language:
@@ -1790,29 +1833,6 @@ fn server_health_spans(
         );
     }
     spans
-}
-
-/// Append the agent rollup as collapsed-group-style traffic lights:
-/// circled blocked count (red) then working count (yellow), zeros omitted.
-fn push_rollup_spans(
-    spans: &mut Vec<Span<'static>>,
-    blocked: usize,
-    working: usize,
-    p: &crate::app::state::Palette,
-) {
-    for (count, state) in [
-        (blocked, AgentState::Blocked),
-        (working, AgentState::Working),
-    ] {
-        if count == 0 {
-            continue;
-        }
-        spans.push(Span::styled(" ", Style::default()));
-        spans.push(Span::styled(
-            circled_count(count),
-            Style::default().fg(state_label_color(state, true, p)),
-        ));
-    }
 }
 
 fn format_age(secs: u64) -> String {
@@ -1959,6 +1979,7 @@ fn render_workspace_list(
         let mut line1 = Vec::new();
         let mut show_workspace_icon = true;
         let mut collapsed_group_key: Option<String> = None;
+        let mut group_key: Option<String> = None;
         if card.indented {
             line1.push(Span::styled("   ", Style::default()));
         } else if let Some((key, collapsed)) = workspace_parent_group_state(app, i) {
@@ -1974,8 +1995,9 @@ fn render_workspace_list(
                 line1.push(Span::styled(" ", Style::default()));
                 line1.push(Span::styled(state_icon, state_style));
                 show_workspace_icon = false;
-                collapsed_group_key = Some(key);
+                collapsed_group_key = Some(key.clone());
             }
+            group_key = Some(key);
             line1.push(Span::styled(" ", Style::default()));
         } else {
             line1.push(Span::styled(" ", Style::default()));
@@ -1994,14 +2016,35 @@ fn render_workspace_list(
         } else {
             line1.push(Span::styled(label, name_style));
         }
-        // Collapsed groups summarize their hidden members as a traffic
-        // light: per-state counts in attention-priority order.
+        // The row's state language as packed rects (#42): the group join on
+        // space header rows — even when expanded, the primary row always
+        // carries its group's aggregate — the workspace's own join elsewhere.
+        // Hollow ▯ = no live agents.
+        let join = match group_key.as_deref() {
+            Some(key) => space_join(app, key),
+            None => workspace_join(app, ws),
+        };
+        line1.push(Span::styled(" ", Style::default()));
+        line1.extend(packed_rects(&join, p));
+        // Collapsed groups additionally summarize their hidden members with
+        // exact per-state counts: plain colored digits in the terminal font.
         if let Some(key) = collapsed_group_key.as_deref() {
             for (state, seen, count) in space_state_counts(app, key) {
                 line1.push(Span::styled(" ", Style::default()));
                 line1.push(Span::styled(
-                    circled_count(count),
+                    count.to_string(),
                     Style::default().fg(state_label_color(state, seen, p)),
+                ));
+            }
+        }
+        // Single-line rows carry the PR glyph inline (their branch IS the
+        // label); two-line rows render it on the branch line below.
+        if row_height == 1 {
+            if let Some(pr) = ws.pr_state() {
+                let (glyph, color) = pr_state_glyph(pr.state, p);
+                line1.push(Span::styled(
+                    format!(" #{} {glyph}", pr.number),
+                    Style::default().fg(color),
                 ));
             }
         }
@@ -2013,6 +2056,9 @@ fn render_workspace_list(
 
         if row_height > 1 && row_y + 1 < list_bottom {
             if let Some(branch) = ws.branch() {
+                // Ahead/behind arrows render only when non-zero: silence
+                // means in sync with upstream (#42, deliberate — a synced
+                // chip on every row would be noise at sidebar density).
                 let upstream_label = ws.git_ahead_behind().and_then(|(ahead, behind)| {
                     let mut parts = Vec::new();
                     if ahead > 0 {
@@ -2023,12 +2069,22 @@ fn render_workspace_list(
                     }
                     (!parts.is_empty()).then_some(parts)
                 });
+                // Compact PR state after the ahead/behind arrows (#42): the
+                // same `#N ⊙/◐/✓/✗` language as the pane-header HUD.
+                let pr_label = ws.pr_state().map(|pr| {
+                    let (glyph, color) = pr_state_glyph(pr.state, p);
+                    (format!("#{} {glyph}", pr.number), color)
+                });
                 let reserved = upstream_label
                     .as_ref()
                     .map(|parts| {
                         parts.iter().map(|(label, _)| label.len()).sum::<usize>() + parts.len()
                     })
-                    .unwrap_or(0);
+                    .unwrap_or(0)
+                    + pr_label
+                        .as_ref()
+                        .map(|(label, _)| label.chars().count() + 1)
+                        .unwrap_or(0);
                 let max_branch_len = (card.rect.width as usize).saturating_sub(5 + reserved);
                 let branch_display = if branch.len() > max_branch_len {
                     format!("{}…", &branch[..max_branch_len.saturating_sub(1)])
@@ -2053,6 +2109,10 @@ fn render_workspace_list(
                         }
                         spans.push(Span::styled(label, Style::default().fg(color)));
                     }
+                }
+                if let Some((label, color)) = pr_label {
+                    spans.push(Span::styled(" ", Style::default()));
+                    spans.push(Span::styled(label, Style::default().fg(color)));
                 }
                 frame.render_widget(
                     Paragraph::new(Line::from(spans)),
@@ -2718,9 +2778,11 @@ mod tests {
         let app = crate::app::state::AppState::test_new();
         let mut peer = peer_with_workspaces("anvil", vec![]);
         peer.last_ok = Some(std::time::Instant::now() - std::time::Duration::from_secs(30));
-        let [title, _] = snapshot_server_rows(&peer, &app.palette);
+        let ([title, _], join) = snapshot_server_rows(&peer, &app.palette);
         let title = line_text(&title);
         assert!(title.contains("30s old"), "{title}");
+        // Reachable snapshot rows carry a join for the leading medallion.
+        assert!(join.is_some());
     }
 
     #[test]
@@ -2739,7 +2801,9 @@ mod tests {
             gpu_percent: Some(8),
             ..Default::default()
         });
-        let [title, health] = self_server_rows(&app);
+        let ([title, health], join) = self_server_rows(&app);
+        // The self row always joins the local agent states (none here).
+        assert_eq!(join, Some(join_states([])));
         let title = line_text(&title);
         let health = line_text(&health);
         assert!(title.contains(&crate::app::short_host_name()), "{title}");
@@ -2771,7 +2835,7 @@ mod tests {
             cpu_percent: Some(42.0),
             ..Default::default()
         });
-        let [title, health] = self_server_rows(&app);
+        let ([title, health], _) = self_server_rows(&app);
         let title = line_text(&title);
         let health = line_text(&health);
         assert!(!title.contains("\u{f06f3}"), "{title}");
@@ -2799,18 +2863,19 @@ mod tests {
             mem_total: Some(64 * 1024 * 1024 * 1024),
             disk_free: None,
         });
-        let [title, health] = peer_server_rows(&peer, &p);
+        let ([title, health], join) = peer_server_rows(&peer, &p);
         let title = line_text(&title);
         let health = line_text(&health);
         assert!(title.contains("anvil"), "{title}");
         assert!(title.contains("34ms"), "{title}");
         // The second line speaks the band's fixed-width glyph language
-        // (cpu right-aligned width-3, no `·` separators) and rolls the one
-        // working agent up as a circled count.
+        // (cpu right-aligned width-3, no `·` separators); the agent rollup
+        // moved into the leading medallion's join — no dingbat counts.
         assert!(health.contains("\u{f0ee0}  71%"), "{health}");
         assert!(health.contains("\u{f035b} 48G/64G"), "{health}");
         assert!(!health.contains('\u{b7}'), "{health}");
-        assert!(health.contains('\u{2776}'), "{health}"); // ❶ working
+        assert!(!health.contains('\u{2776}'), "{health}");
+        assert_eq!(join, Some(join_states([StateClass::Working])));
         assert!(!health.contains("anvil"), "{health}");
     }
 
@@ -2826,7 +2891,7 @@ mod tests {
             mem_total: Some(512 * G),
             disk_free: None,
         });
-        let [_, health] = peer_server_rows(&peer, &p);
+        let ([_, health], _) = peer_server_rows(&peer, &p);
         let health = line_text(&health);
         // 100% fills the width-3 column exactly; mem used pads to the
         // width of total so the slash column never jitters.
@@ -2840,13 +2905,22 @@ mod tests {
         let mut peer = peer_with_workspaces("ksb", vec![]);
         peer.last_ok = None;
         peer.error = Some("connect timed out".into());
-        let [title, health] = peer_server_rows(&peer, &p);
+        let ([title, health], join) = peer_server_rows(&peer, &p);
         assert!(line_text(&title).contains("ksb"));
         assert!(line_text(&health).trim_start().starts_with("unreachable"));
+        // Unreachable peers keep the compact form: a muted hollow dot
+        // instead of the medallion (shape = reachability), no join.
+        assert!(join.is_none());
+        let hollow_dot = title
+            .spans
+            .iter()
+            .find(|span| span.content == "○")
+            .expect("unreachable row should lead with a hollow dot");
+        assert_eq!(hollow_dot.style.fg, Some(p.overlay0));
 
         // A peer that was reachable once shows the outage age.
         peer.last_ok = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(300));
-        let [_, health] = peer_server_rows(&peer, &p);
+        let ([_, health], _) = peer_server_rows(&peer, &p);
         assert!(line_text(&health).contains("unreachable 5m"));
     }
 
@@ -3398,11 +3472,349 @@ mod tests {
         assert_eq!(counts.len(), 2);
     }
 
+    /// Two local workspaces in the worktree space "grp": an unlinked parent
+    /// and a linked child, with live (Unknown-state) test terminals.
+    fn space_group_app() -> crate::app::state::AppState {
+        use crate::workspace::WorktreeSpaceMembership;
+        let space = |idx: usize, linked: bool| WorktreeSpaceMembership {
+            key: "grp".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: format!("/repo/ws-{idx}").into(),
+            is_linked_worktree: linked,
+        };
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces.push(Workspace::test_new("parent"));
+        app.workspaces.push(Workspace::test_new("child"));
+        app.workspaces[0].worktree_space = Some(space(0, false));
+        app.workspaces[1].worktree_space = Some(space(1, true));
+        app.ensure_test_terminals();
+        app.mode = crate::app::Mode::Terminal;
+        app.active = Some(0);
+        app
+    }
+
+    fn set_pane_state(
+        app: &mut crate::app::state::AppState,
+        ws_idx: usize,
+        state: AgentState,
+        seen: bool,
+    ) {
+        let pane = app.workspaces[ws_idx].tabs[0]
+            .panes
+            .keys()
+            .next()
+            .copied()
+            .unwrap();
+        let tid = app.workspaces[ws_idx].terminal_id(pane).unwrap().clone();
+        app.terminals.get_mut(&tid).unwrap().state = state;
+        app.workspaces[ws_idx].tabs[0]
+            .panes
+            .get_mut(&pane)
+            .unwrap()
+            .seen = seen;
+    }
+
+    /// Render the full sidebar with the view's card areas populated the way
+    /// the live render path does, returning the buffer for cell asserts.
+    fn render_sidebar_to_buffer(
+        app: &mut crate::app::state::AppState,
+        area: Rect,
+    ) -> ratatui::buffer::Buffer {
+        let (cards, remotes) = compute_workspace_list_areas(app, area);
+        app.view.workspace_card_areas = cards;
+        app.view.remote_card_areas = remotes;
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test terminal should initialize");
+        let runtimes = TerminalRuntimeRegistry::new();
+        terminal
+            .draw(|frame| render_sidebar(app, &runtimes, frame, area))
+            .expect("sidebar should render");
+        terminal.backend().buffer().clone()
+    }
+
+    fn row_glyph_positions(
+        buffer: &ratatui::buffer::Buffer,
+        rect: Rect,
+        y: u16,
+        glyph: &str,
+    ) -> Vec<u16> {
+        (rect.x..rect.x + rect.width)
+            .filter(|x| buffer[(*x, y)].symbol() == glyph)
+            .collect()
+    }
+
+    /// The dingbat circled digits (U+2776..=U+277F) retired with #42: no
+    /// render path may emit them anymore.
+    fn assert_no_circled_digit_dingbats(buffer: &ratatui::buffer::Buffer) {
+        let area = *buffer.area();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                for ch in buffer[(x, y)].symbol().chars() {
+                    assert!(
+                        !(0x2776..=0x277f).contains(&(ch as u32)),
+                        "dingbat {ch:?} rendered at ({x},{y})"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
-    fn circled_count_uses_filled_digits_through_ten_then_falls_back() {
-        assert_eq!(circled_count(1), "\u{2776}");
-        assert_eq!(circled_count(10), "\u{277f}");
-        assert_eq!(circled_count(11), "\u{25cf}11");
+    fn servers_band_rows_lead_with_the_join_medallion() {
+        use crate::api::schema::AgentStatus;
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("one");
+        let _second = ws.test_split(ratatui::layout::Direction::Horizontal);
+        app.workspaces = vec![ws];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.mode = crate::app::Mode::Terminal;
+        // Local join: one blocked + one working pane.
+        let panes: Vec<_> = app.workspaces[0].tabs[0].panes.keys().copied().collect();
+        for (pane, state) in panes
+            .into_iter()
+            .zip([AgentState::Blocked, AgentState::Working])
+        {
+            let tid = app.workspaces[0].terminal_id(pane).unwrap().clone();
+            app.terminals.get_mut(&tid).unwrap().state = state;
+        }
+        // Peer join: blocked + working workspace statuses.
+        let mut blocked = remote_summary("a", None, None, None);
+        blocked.status = AgentStatus::Blocked;
+        let mut working = remote_summary("b", None, None, None);
+        working.status = AgentStatus::Working;
+        app.peer_summaries = vec![peer_with_workspaces("anvil", vec![blocked, working])];
+
+        let area = Rect::new(0, 0, 30, 40);
+        let buffer = render_sidebar_to_buffer(&mut app, area);
+        let p = &app.palette;
+
+        let (ws_area, _) =
+            expanded_sidebar_sections(area, app.sidebar_section_split, app.sidebar_pane_gap);
+        let (servers_area, _) = carve_servers_band(ws_area, servers_section_height(&app));
+        let rows_area = server_band_rows_area(servers_area);
+        let self_rect = server_slot_rect(rows_area, 0).expect("self slot");
+        let peer_rect = server_slot_rect(rows_area, 1).expect("peer slot");
+
+        // Self row: the medallion IS the leading mark. Two rings (r·y) →
+        // the top cells elect the outer (blocked) color, the bottom cells
+        // the inner (working) color; default sextant glyphs leave the
+        // grid-corner sub-blocks to the row fill (bg = surface_dim, the
+        // current-server highlight).
+        let sextant_corners = ['\u{1fb3b}', '\u{1fb3a}', '\u{1fb2c}', '\u{1fb1d}'];
+        for (i, (dx, dy, fg)) in [
+            (0, 0, p.red),
+            (1, 0, p.red),
+            (0, 1, p.yellow),
+            (1, 1, p.yellow),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let cell = &buffer[(self_rect.x + dx, self_rect.y + dy)];
+            assert_eq!(
+                cell.symbol().chars().next().unwrap(),
+                sextant_corners[i],
+                "self cell {i}"
+            );
+            assert_eq!(cell.style().fg, Some(fg), "self cell {i}");
+            assert_eq!(cell.style().bg, Some(p.surface_dim), "self cell {i}");
+        }
+        // The host name follows the medallion + gap column.
+        let title: String = buffer_row_text(&buffer, self_rect, self_rect.y)
+            .chars()
+            .skip(3)
+            .collect();
+        assert!(
+            title.starts_with(&crate::app::short_host_name()),
+            "{title:?}"
+        );
+
+        // Peer row: same join language, no highlight fill underneath.
+        let tl = &buffer[(peer_rect.x, peer_rect.y)];
+        assert_eq!(tl.style().fg, Some(p.red));
+        assert_eq!(
+            tl.style().bg,
+            Some(ratatui::style::Color::Reset),
+            "peer rows keep the plain row fill"
+        );
+        let bl = &buffer[(peer_rect.x, peer_rect.y + 1)];
+        assert_eq!(bl.style().fg, Some(p.yellow));
+
+        // The rollup chips are gone: no circled-digit dingbats anywhere.
+        assert_no_circled_digit_dingbats(&buffer);
+    }
+
+    #[test]
+    fn medallion_style_config_switches_the_band_to_quadrant_glyphs() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.mode = crate::app::Mode::Terminal;
+        app.peer_summaries = vec![peer_with_workspaces("anvil", vec![])];
+        app.medallion_style = crate::config::MedallionStyleConfig::Quadrant;
+
+        let area = Rect::new(0, 0, 30, 40);
+        let buffer = render_sidebar_to_buffer(&mut app, area);
+
+        let (ws_area, _) =
+            expanded_sidebar_sections(area, app.sidebar_section_split, app.sidebar_pane_gap);
+        let (servers_area, _) = carve_servers_band(ws_area, servers_section_height(&app));
+        let self_rect = server_slot_rect(server_band_rows_area(servers_area), 0).expect("self");
+        // Quadrant fallback: the 2x2 half-block raster instead of sextants.
+        assert_eq!(buffer[(self_rect.x, self_rect.y)].symbol(), "\u{259f}");
+        // No live agents: the medallion still marks presence in muted color.
+        assert_eq!(
+            buffer[(self_rect.x, self_rect.y)].style().fg,
+            Some(app.palette.overlay0)
+        );
+    }
+
+    #[test]
+    fn collapsed_group_renders_packed_rects_and_plain_digit_counts() {
+        let mut app = space_group_app();
+        set_pane_state(&mut app, 0, AgentState::Blocked, true);
+        set_pane_state(&mut app, 1, AgentState::Working, true);
+        app.collapsed_space_keys.insert("grp".into());
+
+        let area = Rect::new(0, 0, 30, 40);
+        let buffer = render_sidebar_to_buffer(&mut app, area);
+        let p = &app.palette;
+
+        let card = app.view.workspace_card_areas[0];
+        let row = buffer_row_text(&buffer, card.rect, card.rect.y);
+        // Group join r·y as packed rects, then exact counts as PLAIN digits
+        // in the terminal font — `▮▮ 1 1`, not `❶❶`.
+        assert!(row.contains("\u{25ae}\u{25ae} 1 1"), "{row:?}");
+        let rects = row_glyph_positions(&buffer, card.rect, card.rect.y, "\u{25ae}");
+        assert_eq!(buffer[(rects[0], card.rect.y)].style().fg, Some(p.red));
+        assert_eq!(buffer[(rects[1], card.rect.y)].style().fg, Some(p.yellow));
+        let digits = row_glyph_positions(&buffer, card.rect, card.rect.y, "1");
+        assert_eq!(digits.len(), 2, "{row:?}");
+        assert_eq!(buffer[(digits[0], card.rect.y)].style().fg, Some(p.red));
+        assert_eq!(buffer[(digits[1], card.rect.y)].style().fg, Some(p.yellow));
+        assert_no_circled_digit_dingbats(&buffer);
+    }
+
+    #[test]
+    fn expanded_primary_row_still_carries_the_group_join_rects() {
+        let mut app = space_group_app();
+        set_pane_state(&mut app, 0, AgentState::Idle, true);
+        set_pane_state(&mut app, 1, AgentState::Working, true);
+
+        let area = Rect::new(0, 0, 30, 40);
+        let buffer = render_sidebar_to_buffer(&mut app, area);
+        let p = &app.palette;
+
+        // The expanded parent row aggregates its group: y·g rects even
+        // though the member rows are visible ("main row has no traffic
+        // light" fix).
+        let parent = app.view.workspace_card_areas[0];
+        let rects = row_glyph_positions(&buffer, parent.rect, parent.rect.y, "\u{25ae}");
+        assert_eq!(rects.len(), 2, "parent row carries the group join");
+        assert_eq!(buffer[(rects[0], parent.rect.y)].style().fg, Some(p.yellow));
+        assert_eq!(buffer[(rects[1], parent.rect.y)].style().fg, Some(p.green));
+
+        // The member row renders only its OWN join: a single working rect.
+        let child = app.view.workspace_card_areas[1];
+        let rects = row_glyph_positions(&buffer, child.rect, child.rect.y, "\u{25ae}");
+        assert_eq!(rects.len(), 1, "member row carries its own join");
+        assert_eq!(buffer[(rects[0], child.rect.y)].style().fg, Some(p.yellow));
+    }
+
+    #[test]
+    fn workspace_row_with_no_live_agents_renders_a_hollow_rect() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("solo")];
+        app.ensure_test_terminals(); // Unknown state — no live agent signal
+        app.active = Some(0);
+        app.mode = crate::app::Mode::Terminal;
+
+        let area = Rect::new(0, 0, 30, 40);
+        let buffer = render_sidebar_to_buffer(&mut app, area);
+
+        let card = app.view.workspace_card_areas[0];
+        let hollow = row_glyph_positions(&buffer, card.rect, card.rect.y, "\u{25af}");
+        assert_eq!(hollow.len(), 1, "no live agents → one hollow rect");
+        assert_eq!(
+            buffer[(hollow[0], card.rect.y)].style().fg,
+            Some(app.palette.overlay0)
+        );
+        assert!(row_glyph_positions(&buffer, card.rect, card.rect.y, "\u{25ae}").is_empty());
+    }
+
+    #[test]
+    fn workspace_rows_render_cached_pr_state_glyphs() {
+        let mut app = space_group_app();
+        // Two-line parent row: branch line carries `#12 ⊙` after the branch.
+        app.workspaces[0].cached_git_branch = Some("feat-x".into());
+        app.workspaces[0].pr_state = Some(crate::worktree::PrStateInfo {
+            state: crate::worktree::PrState::Open,
+            number: 12,
+        });
+        // One-line member row: the glyph rides the label line.
+        app.workspaces[1].cached_git_branch = Some("worktree/feat-y".into());
+        app.workspaces[1].pr_state = Some(crate::worktree::PrStateInfo {
+            state: crate::worktree::PrState::Draft,
+            number: 7,
+        });
+
+        let area = Rect::new(0, 0, 30, 40);
+        let buffer = render_sidebar_to_buffer(&mut app, area);
+        let p = &app.palette;
+
+        let parent = app.view.workspace_card_areas[0];
+        assert_eq!(parent.rect.height, 2);
+        let branch_line = buffer_row_text(&buffer, parent.rect, parent.rect.y + 1);
+        assert!(
+            branch_line.contains("feat-x #12 \u{2299}"),
+            "{branch_line:?}"
+        );
+        let glyph = row_glyph_positions(&buffer, parent.rect, parent.rect.y + 1, "\u{2299}");
+        assert_eq!(
+            buffer[(glyph[0], parent.rect.y + 1)].style().fg,
+            Some(p.accent)
+        );
+
+        let child = app.view.workspace_card_areas[1];
+        assert_eq!(child.rect.height, 1);
+        let row = buffer_row_text(&buffer, child.rect, child.rect.y);
+        assert!(row.contains("#7 \u{25d0}"), "{row:?}");
+        let glyph = row_glyph_positions(&buffer, child.rect, child.rect.y, "\u{25d0}");
+        assert_eq!(
+            buffer[(glyph[0], child.rect.y)].style().fg,
+            Some(p.overlay0)
+        );
+    }
+
+    /// Consolidation proof for the agents panel + leading circles: every
+    /// state rendering sources its color from the one severity mapping.
+    #[test]
+    fn agent_icons_and_state_dots_source_colors_from_the_state_mapping() {
+        let p = crate::app::state::AppState::test_new().palette;
+        for (state, seen, class) in [
+            (AgentState::Blocked, true, StateClass::Blocked),
+            (AgentState::Working, true, StateClass::Working),
+            (AgentState::Idle, false, StateClass::Done),
+            (AgentState::Idle, true, StateClass::Idle),
+            (AgentState::Unknown, true, StateClass::None),
+        ] {
+            let expected = Some(class.color(&p));
+            assert_eq!(agent_icon(state, seen, 0, &p).1.fg, expected, "{class:?}");
+            assert_eq!(state_dot(state, seen, &p).1.fg, expected, "{class:?}");
+            assert_eq!(
+                Some(state_label_color(state, seen, &p)),
+                expected,
+                "{class:?}"
+            );
+        }
+        // The blocked/working/done anchors stay pinned to the palette.
+        assert_eq!(StateClass::Blocked.color(&p), p.red);
+        assert_eq!(StateClass::Working.color(&p), p.yellow);
+        assert_eq!(StateClass::Done.color(&p), p.teal);
+        assert_eq!(StateClass::Idle.color(&p), p.green);
     }
 
     #[test]

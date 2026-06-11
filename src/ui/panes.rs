@@ -452,12 +452,7 @@ fn render_pane_header(
             }
         }
         if let Some(pr) = ws.pr_state() {
-            let (glyph, color) = match pr.state {
-                crate::worktree::PrState::Open => ("\u{2299}", p.accent),
-                crate::worktree::PrState::Draft => ("\u{25d0}", p.overlay0),
-                crate::worktree::PrState::Merged => ("\u{2713}", p.mauve),
-                crate::worktree::PrState::Closed => ("\u{2717}", p.red),
-            };
+            let (glyph, color) = crate::ui::state_signal::pr_state_glyph(pr.state, p);
             spans.push(Span::styled(
                 format!(" #{} {glyph}", pr.number),
                 Style::default().fg(color),

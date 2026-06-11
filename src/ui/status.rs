@@ -183,29 +183,41 @@ pub(super) fn render_config_diagnostic(frame: &mut Frame, area: Rect, message: &
     }
 }
 
+/// Leading state circle: shape carries seen/unseen (`●` live signal or
+/// unseen-done, `○` settled idle, `·` none), color comes from the shared
+/// severity mapping ([`crate::ui::state_signal::StateClass`]).
 pub(super) fn state_dot(state: AgentState, seen: bool, p: &Palette) -> (&'static str, Style) {
-    match (state, seen) {
-        (AgentState::Blocked, _) => ("●", Style::default().fg(p.red)),
-        (AgentState::Working, _) => ("●", Style::default().fg(p.yellow)),
-        (AgentState::Idle, false) => ("●", Style::default().fg(p.teal)),
-        (AgentState::Idle, true) => ("○", Style::default().fg(p.green)),
-        (AgentState::Unknown, _) => ("·", Style::default().fg(p.overlay0)),
-    }
+    let glyph = match (state, seen) {
+        (AgentState::Blocked | AgentState::Working, _) | (AgentState::Idle, false) => "●",
+        (AgentState::Idle, true) => "○",
+        (AgentState::Unknown, _) => "·",
+    };
+    (
+        glyph,
+        Style::default().fg(state_label_color(state, seen, p)),
+    )
 }
 
+/// Agents-panel icon: the richer glyph set (escalation, animated spinner,
+/// checkmark), colored by the same severity mapping as every other state
+/// rendering.
 pub(super) fn agent_icon(
     state: AgentState,
     seen: bool,
     tick: u32,
     p: &Palette,
 ) -> (&'static str, Style) {
-    match (state, seen) {
-        (AgentState::Blocked, _) => ("◉", Style::default().fg(p.red)),
-        (AgentState::Working, _) => (super::spinner_frame(tick), Style::default().fg(p.yellow)),
-        (AgentState::Idle, false) => ("●", Style::default().fg(p.teal)),
-        (AgentState::Idle, true) => ("✓", Style::default().fg(p.green)),
-        (AgentState::Unknown, _) => ("○", Style::default().fg(p.overlay0)),
-    }
+    let glyph = match (state, seen) {
+        (AgentState::Blocked, _) => "◉",
+        (AgentState::Working, _) => super::spinner_frame(tick),
+        (AgentState::Idle, false) => "●",
+        (AgentState::Idle, true) => "✓",
+        (AgentState::Unknown, _) => "○",
+    };
+    (
+        glyph,
+        Style::default().fg(state_label_color(state, seen, p)),
+    )
 }
 
 pub(super) fn state_label(state: AgentState, seen: bool) -> &'static str {
@@ -219,13 +231,7 @@ pub(super) fn state_label(state: AgentState, seen: bool) -> &'static str {
 }
 
 pub(super) fn state_label_color(state: AgentState, seen: bool, p: &Palette) -> Color {
-    match (state, seen) {
-        (AgentState::Blocked, _) => p.red,
-        (AgentState::Working, _) => p.yellow,
-        (AgentState::Idle, false) => p.teal,
-        (AgentState::Idle, true) => p.green,
-        (AgentState::Unknown, _) => p.overlay0,
-    }
+    crate::ui::state_signal::StateClass::of(state, seen).color(p)
 }
 
 /// Utilization color: green below 60%, yellow from 60%, red from 85%.

@@ -74,14 +74,11 @@ impl Tab {
     }
 }
 
-fn pane_attention_priority(state: AgentState, seen: bool) -> u8 {
-    match (state, seen) {
-        (AgentState::Blocked, _) => 4,
-        (AgentState::Idle, false) => 3,
-        (AgentState::Working, _) => 2,
-        (AgentState::Idle, true) => 1,
-        (AgentState::Unknown, _) => 0,
-    }
+/// Attention priority of a pane state: the shared severity ladder
+/// ([`crate::ui::state_signal::StateClass`]) — blocked > done-unseen >
+/// working > settled idle > none.
+fn pane_attention_priority(state: AgentState, seen: bool) -> crate::ui::state_signal::StateClass {
+    crate::ui::state_signal::StateClass::of(state, seen)
 }
 
 impl Workspace {

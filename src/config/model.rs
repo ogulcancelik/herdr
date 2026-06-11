@@ -174,6 +174,17 @@ pub enum TabModeConfig {
     Workspace,
 }
 
+/// Sub-cell raster of the servers-band state medallion (#42): `sextant`
+/// (2x3 sub-blocks via Symbols for Legacy Computing — the default) or
+/// `quadrant` (2x2 half blocks) for fonts without sextant coverage.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MedallionStyleConfig {
+    #[default]
+    Sextant,
+    Quadrant,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct TerminalConfig {
@@ -521,6 +532,9 @@ pub struct UiConfig {
     /// Spaces sidebar scope: "all" shows the full workspace list, "current"
     /// only the focused workspace's space group. Default: "all".
     pub spaces_panel_scope: PanelScopeConfig,
+    /// Servers-band state-medallion raster: "sextant" (default) or
+    /// "quadrant" for fonts without Symbols for Legacy Computing coverage.
+    pub medallion_style: MedallionStyleConfig,
     /// Display alias overrides for agent labels in the sidebar, e.g.
     /// `agent_aliases = { claude = "CC" }`. Built-in short codes apply
     /// when no override is set (claude -> cc, codex -> cd, ...).
@@ -725,6 +739,7 @@ impl Default for UiConfig {
             agent_panel_scope: PanelScopeConfig::All,
             servers_panel_scope: PanelScopeConfig::All,
             spaces_panel_scope: PanelScopeConfig::All,
+            medallion_style: MedallionStyleConfig::default(),
             agent_aliases: std::collections::HashMap::new(),
             accent: "cyan".into(),
             toast: ToastConfig::default(),

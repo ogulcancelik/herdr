@@ -18,6 +18,7 @@ mod release_notes;
 mod scrollbar;
 mod settings;
 mod sidebar;
+pub(crate) mod state_signal;
 mod status;
 mod tabs;
 mod widgets;

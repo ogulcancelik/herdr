@@ -20,8 +20,8 @@ pub use self::{
     model::{
         validated_prompt_float_lines, validated_sidebar_bounds, validated_sidebar_pane_gap,
         validated_sidebar_row_gap, Config, ConfigReloadReport, ConfigReloadStatus, KeysConfig,
-        NewTerminalCwdConfig, PanelScopeConfig, PeerConfig, ShellModeConfig, TabModeConfig,
-        ToastConfig, ToastDelivery, UpdateChannelConfig,
+        MedallionStyleConfig, NewTerminalCwdConfig, PanelScopeConfig, PeerConfig, ShellModeConfig,
+        TabModeConfig, ToastConfig, ToastDelivery, UpdateChannelConfig,
     },
     sound::SoundConfig,
     theme::{parse_color, CustomThemeColors, ThemeConfig},

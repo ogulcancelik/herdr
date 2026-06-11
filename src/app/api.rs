@@ -19,6 +19,49 @@ enum RuntimeExitAction {
     ClosePane,
 }
 
+/// One background `gh pr view` query of the 120s PR poll: a unique
+/// (repo, branch) pair plus every workspace its result applies to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrPollTarget {
+    workspace_ids: Vec<String>,
+    repo_root: std::path::PathBuf,
+    checkout: std::path::PathBuf,
+    branch: String,
+}
+
+/// PR-poll targets across ALL workspaces with a branch (#42) — linked
+/// worktrees AND primary/standalone checkouts (previously linked-only,
+/// which left most sidebar rows without PR state). Deduplicated by
+/// (repo root, branch) so shared checkouts cost one gh call per cycle.
+fn pr_poll_targets(state: &super::AppState) -> Vec<PrPollTarget> {
+    let mut targets: Vec<PrPollTarget> = Vec::new();
+    for ws in &state.workspaces {
+        let Some(branch) = ws.branch() else {
+            continue;
+        };
+        let (repo_root, checkout) = if let Some(space) = ws.worktree_space() {
+            (space.repo_root.clone(), space.checkout_path.clone())
+        } else if let Some(git) = ws.git_space() {
+            (git.repo_root.clone(), git.repo_root.clone())
+        } else {
+            continue;
+        };
+        match targets
+            .iter_mut()
+            .find(|target| target.repo_root == repo_root && target.branch == branch)
+        {
+            Some(target) => target.workspace_ids.push(ws.id.clone()),
+            None => targets.push(PrPollTarget {
+                workspace_ids: vec![ws.id.clone()],
+                repo_root,
+                checkout,
+                branch,
+            }),
+        }
+    }
+    targets
+}
+
 impl App {
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
         if let AppEvent::ClipboardWrite { content } = ev {
@@ -68,31 +111,24 @@ impl App {
         }
 
         if let AppEvent::PrStatePollDue = ev {
-            let targets: Vec<_> = self
-                .state
-                .workspaces
-                .iter()
-                .filter_map(|ws| {
-                    let space = ws.worktree_space().filter(|s| s.is_linked_worktree)?;
-                    let branch = ws.branch()?;
-                    Some((
-                        ws.id.clone(),
-                        space.repo_root.clone(),
-                        space.checkout_path.clone(),
-                        branch,
-                    ))
-                })
-                .collect();
+            let targets = pr_poll_targets(&self.state);
             if !targets.is_empty() {
                 let event_tx = self.event_tx.clone();
                 std::thread::spawn(move || {
                     let results: Vec<_> = targets
                         .into_iter()
-                        .map(|(id, root, checkout, branch)| {
-                            (
-                                id,
-                                crate::worktree::query_pr_state(&root, &checkout, &branch),
-                            )
+                        .flat_map(|target| {
+                            // One gh call per unique (repo, branch); the
+                            // result fans out to every workspace on it.
+                            let pr_state = crate::worktree::query_pr_state(
+                                &target.repo_root,
+                                &target.checkout,
+                                &target.branch,
+                            );
+                            target
+                                .workspace_ids
+                                .into_iter()
+                                .map(move |id| (id, pr_state))
                         })
                         .collect();
                     let _ = event_tx.blocking_send(AppEvent::PrStatesUpdated(results));
@@ -1096,5 +1132,72 @@ mod tests {
                 number: 6,
             })
         );
+    }
+
+    /// The 120s PR poll covers ALL workspaces with a branch (#42): linked
+    /// worktrees, the primary checkout of a space, and standalone repos —
+    /// deduplicated to one gh call per (repo, branch).
+    #[test]
+    fn pr_poll_targets_cover_linked_primary_and_standalone_checkouts() {
+        use crate::workspace::{Workspace, WorktreeSpaceMembership};
+        let membership = |idx: usize, linked: bool, root: &str| WorktreeSpaceMembership {
+            key: root.into(),
+            label: "herdr".into(),
+            repo_root: root.into(),
+            checkout_path: format!("{root}/ws-{idx}").into(),
+            is_linked_worktree: linked,
+        };
+
+        let mut state = crate::app::state::AppState::test_new();
+        // Linked worktree member.
+        let mut linked = Workspace::test_new("linked");
+        linked.worktree_space = Some(membership(1, true, "/repo/herdr"));
+        linked.cached_git_branch = Some("feat/a".into());
+        // Primary (non-linked) checkout of the same space.
+        let mut primary = Workspace::test_new("primary");
+        primary.worktree_space = Some(membership(0, false, "/repo/herdr"));
+        primary.cached_git_branch = Some("master".into());
+        // Standalone repo: no worktree space, only live git metadata.
+        let mut standalone = Workspace::test_new("solo");
+        standalone.cached_git_space = Some(crate::workspace::GitSpaceMetadata {
+            key: "/repo/solo/.git".into(),
+            checkout_key: "/repo/solo".into(),
+            label: "solo".into(),
+            repo_root: "/repo/solo".into(),
+            is_linked_worktree: false,
+            project_key: "github.com/g/solo".into(),
+        });
+        standalone.cached_git_branch = Some("main".into());
+        // Second workspace on the SAME standalone repo+branch: dedupes into
+        // the standalone target instead of a second gh call.
+        let mut duplicate = Workspace::test_new("solo-2");
+        duplicate.cached_git_space = standalone.cached_git_space.clone();
+        duplicate.cached_git_branch = Some("main".into());
+        // No branch -> never polled.
+        let branchless = Workspace::test_new("scratch");
+
+        let ids: Vec<String> = [&linked, &primary, &standalone, &duplicate]
+            .map(|ws| ws.id.clone())
+            .to_vec();
+        state.workspaces = vec![linked, primary, standalone, duplicate, branchless];
+
+        let targets = pr_poll_targets(&state);
+
+        assert_eq!(targets.len(), 3, "{targets:?}");
+        assert_eq!(targets[0].workspace_ids, vec![ids[0].clone()]);
+        assert_eq!(targets[0].branch, "feat/a");
+        assert_eq!(
+            targets[0].checkout,
+            std::path::PathBuf::from("/repo/herdr/ws-1")
+        );
+        assert_eq!(targets[1].workspace_ids, vec![ids[1].clone()]);
+        assert_eq!(targets[1].branch, "master");
+        // The standalone pair shares one query; both ids ride its result.
+        assert_eq!(
+            targets[2].workspace_ids,
+            vec![ids[2].clone(), ids[3].clone()]
+        );
+        assert_eq!(targets[2].repo_root, std::path::PathBuf::from("/repo/solo"));
+        assert_eq!(targets[2].checkout, std::path::PathBuf::from("/repo/solo"));
     }
 }

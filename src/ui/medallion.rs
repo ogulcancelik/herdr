@@ -62,12 +62,10 @@ use ratatui::text::Span;
 
 /// Medallion width in terminal cells (per line; the medallion is two lines
 /// tall).
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const MEDALLION_WIDTH: u16 = 2;
 
 /// Sub-cell raster resolution for [`ring_medallion`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum MedallionStyle {
     /// 2x3 sub-blocks per cell via U+1FB00..=U+1FB3B sextants (plus half/full
     /// blocks for the patterns Unicode carves out of that range).
@@ -97,7 +95,6 @@ enum Pixel {
 ///
 /// `base_bg` paints every sub-region outside the outer ring and is the bg of
 /// every cell, so the medallion composes with row highlight/selection fills.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn ring_medallion(
     rings: &[Color],
     base_bg: Color,
