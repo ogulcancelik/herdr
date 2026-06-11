@@ -9,8 +9,8 @@ use ratatui::{
 use super::medallion::{ring_medallion, MedallionStyle};
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::state_signal::{
-    counts_lead_width, join_states, leading_count_spans, medallion_rings, packed_rects,
-    pr_state_glyph, tally_states, StateClass, StateJoin, StateTally,
+    join_states, leading_count_spans, medallion_rings, packed_rects, pr_state_glyph, tally_states,
+    StateClass, StateJoin, StateTally,
 };
 use super::status::{agent_icon, state_dot, state_label, state_label_color};
 use crate::app::state::{AgentPanelScope, Palette, PanelScope};
@@ -1557,8 +1557,9 @@ fn render_servers_section(app: &AppState, frame: &mut Frame, area: Rect, is_navi
 
     let rows_area = server_band_rows_area(area);
     // Two phases: build every visible row first so the count columns share a
-    // band-GLOBAL digit width (one server hitting 10 widens every row), then
-    // paint.
+    // band-GLOBAL digit width (one server hitting 10 widens every row) and
+    // the name fields a band-global pad width (the longest name sets where
+    // the count columns start), then paint.
     let mut prepared = Vec::new();
     for (slot, target) in visible_server_band_slots(app).into_iter().enumerate() {
         let Some(rect) = server_slot_rect(rows_area, slot as u16) else {
@@ -1568,14 +1569,14 @@ fn render_servers_section(app: &AppState, frame: &mut Frame, area: Rect, is_navi
         // the standard highlight fill, one visual language for "current"
         // across workspaces, agents, and servers.
         let is_current = target.is_none();
-        let (rows, tally, ghosted) = match target {
+        let build = match target {
             // The local server: no hit-area, anchors the band.
             None => self_server_rows(app),
             Some(crate::app::state::PeerSwitchRequest::Home) => {
                 let Some(snapshot) = app.fleet_snapshot.as_ref() else {
                     continue;
                 };
-                (home_server_rows(snapshot, p), None, false)
+                home_server_rows(snapshot, p)
             }
             Some(crate::app::state::PeerSwitchRequest::SnapshotPeer { entry_idx }) => {
                 let Some(peer) = app
@@ -1594,15 +1595,20 @@ fn render_servers_section(app: &AppState, frame: &mut Frame, area: Rect, is_navi
                 peer_server_rows(peer, p)
             }
         };
-        prepared.push((rect, is_current, rows, tally, ghosted));
+        prepared.push((rect, is_current, build));
     }
     let digit_width = prepared
         .iter()
-        .filter_map(|(_, _, _, tally, _)| tally.as_ref())
+        .filter_map(|(_, _, build)| build.tally.as_ref())
         .map(StateTally::digit_width)
         .max()
         .unwrap_or(1);
-    for (rect, is_current, rows, tally, ghosted) in prepared {
+    let name_width = prepared
+        .iter()
+        .map(|(_, _, build)| spans_display_width(&build.name))
+        .max()
+        .unwrap_or(0);
+    for (rect, is_current, build) in prepared {
         if is_current {
             let buf = frame.buffer_mut();
             let fill = Style::default().bg(p.surface_dim);
@@ -1619,15 +1625,32 @@ fn render_servers_section(app: &AppState, frame: &mut Frame, area: Rect, is_navi
         } else {
             ratatui::style::Color::Reset
         };
-        let rows = match tally {
-            Some(tally) => match configured_medallion_style(app) {
-                None => with_leading_counts(rows, &tally, digit_width, ghosted, p),
-                Some(style) => with_leading_medallion(rows, &tally.join(), base_bg, style, p),
-            },
-            None => rows,
+        let rows = match configured_medallion_style(app) {
+            None => name_first_band_row(build, name_width, digit_width, p),
+            Some(style) => {
+                let ServerRowBuild {
+                    name,
+                    title_rest,
+                    health,
+                    tally,
+                    ..
+                } = build;
+                let lines = [joined_band_title(name, title_rest), health];
+                match tally {
+                    Some(tally) => with_leading_medallion(lines, &tally.join(), base_bg, style, p),
+                    None => lines,
+                }
+            }
         };
         render_server_rows(frame, rect, rows);
     }
+}
+
+/// Display width in terminal cells of a span run — the band pads its name
+/// fields by display width, not char count.
+fn spans_display_width(spans: &[Span<'_>]) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    spans.iter().map(|span| span.content.as_ref().width()).sum()
 }
 
 /// The configured medallion raster: `[ui] medallion_style` ("sextant"
@@ -1642,8 +1665,7 @@ fn configured_medallion_style(app: &AppState) -> Option<MedallionStyle> {
 
 /// Prepend the ring medallion (the band's leading state mark, #42) to a
 /// two-line server row: rings = the row's join (outer→inner), then a gap
-/// column so the name/health columns line up with the non-medallion rows'
-/// three-column lead-in.
+/// column before the name/health columns.
 fn with_leading_medallion(
     [title, health]: [Line<'static>; 2],
     join: &StateJoin,
@@ -1661,29 +1683,57 @@ fn with_leading_medallion(
     [lead(top, title), lead(bottom, health)]
 }
 
-/// One band row as built by the slot builders: the two lines, the state
-/// tally feeding the leading counts (None = no counts: home row), and
-/// whether the row is a ghost (unreachable — counts grey out with it).
-type ServerRowBuild = ([Line<'static>; 2], Option<StateTally>, bool);
-
-/// Prepend the leading count columns (#42 final form: `0 2 1 herdr`) to a
-/// two-line server row: title gets the counts, the health line indents by
-/// the same width so both stay aligned across the band.
-fn with_leading_counts(
-    [title, health]: [Line<'static>; 2],
-    tally: &StateTally,
-    digit_width: usize,
+/// One band row as built by the slot builders, split where the band-wide
+/// alignment happens: the name+marker spans (the padded leading field), the
+/// rest of the title line (latency / battery / net / ghost age — whatever
+/// follows the count columns), the flush-left health line, the state tally
+/// feeding the count columns (None = no counts: home row), and whether the
+/// row is a ghost (unreachable — counts grey out with it).
+struct ServerRowBuild {
+    name: Vec<Span<'static>>,
+    title_rest: Vec<Span<'static>>,
+    health: Line<'static>,
+    tally: Option<StateTally>,
     ghosted: bool,
+}
+
+/// Assemble a band row in the default counts mode, name first:
+/// `<name+marker> <r y g counts> <rest>` over the flush-left health line.
+/// The name field pads to the band-wide max display width so the count
+/// columns stay vertically aligned across rows; rows without counts (home)
+/// pad the same way.
+fn name_first_band_row(
+    build: ServerRowBuild,
+    name_width: usize,
+    digit_width: usize,
     p: &Palette,
 ) -> [Line<'static>; 2] {
-    let mut lead = leading_count_spans(tally, digit_width, ghosted, p);
-    lead.extend(title.spans);
-    let mut indent = vec![Span::styled(
-        " ".repeat(counts_lead_width(digit_width)),
-        Style::default(),
-    )];
-    indent.extend(health.spans);
-    [Line::from(lead), Line::from(indent)]
+    let ServerRowBuild {
+        mut name,
+        title_rest,
+        health,
+        tally,
+        ghosted,
+    } = build;
+    let pad = name_width.saturating_sub(spans_display_width(&name)) + 1;
+    name.push(Span::styled(" ".repeat(pad), Style::default()));
+    if let Some(tally) = tally {
+        name.extend(leading_count_spans(&tally, digit_width, ghosted, p));
+    }
+    name.extend(title_rest);
+    [Line::from(name), health]
+}
+
+/// The unpadded `<name> <rest>` title line — the medallion mode keeps its
+/// leading ring mark instead of the count columns, so nothing aligns by
+/// name width there.
+fn joined_band_title(name: Vec<Span<'static>>, title_rest: Vec<Span<'static>>) -> Line<'static> {
+    let mut spans = name;
+    if !title_rest.is_empty() {
+        spans.push(Span::styled(" ", Style::default()));
+        spans.extend(title_rest);
+    }
+    Line::from(spans)
 }
 
 /// Paint a two-line server row into its slot rect, clamping each line.
@@ -1698,20 +1748,15 @@ fn render_server_rows(frame: &mut Frame, rect: Rect, [title, health]: [Line<'sta
     );
 }
 
-/// Indentation that lines the health glyphs up under the server name for
-/// rows WITHOUT a leading medallion (home, unreachable peers) — the same
-/// three columns the medallion + gap occupy.
-const SERVER_HEALTH_INDENT: &str = "    ";
-
-/// The local server's row: the leading state medallion (the join of every
-/// local agent state, #42), then `mba22 ✦` plus battery and net throughput
-/// on the title line (#41 — peers don't carry those), over the shared
-/// fixed-width metric line, all fed from the same local `SystemStats`
-/// sample the HUD shows.
+/// The local server's row: `mba22 ✦` (the name field), then — after the
+/// count columns — the battery as a COLORED GLYPH ONLY (the level lives in
+/// the color; the status line keeps the percent) and net throughput (#41 —
+/// peers don't carry those), over the shared flush-left fixed-width metric
+/// line, all fed from the same local `SystemStats` sample the HUD shows.
 fn self_server_rows(app: &AppState) -> ServerRowBuild {
-    use super::status::{battery_icon, battery_style, format_net_io, push_band_metric};
+    use super::status::{band_battery_style, battery_icon, format_net_io, push_band_metric};
     let p = &app.palette;
-    let mut title = vec![
+    let name = vec![
         Span::styled(
             crate::app::short_host_name(),
             Style::default().fg(p.text).add_modifier(Modifier::BOLD),
@@ -1719,20 +1764,18 @@ fn self_server_rows(app: &AppState) -> ServerRowBuild {
         Span::styled(" ✦", Style::default().fg(p.accent)),
     ];
 
+    let mut title_rest: Vec<Span<'static>> = Vec::new();
     let mut health: Vec<Span<'static>> = Vec::new();
     if let Some(stats) = app.system_stats.as_ref() {
         if let Some(percent) = stats.battery_percent {
-            push_band_metric(
-                &mut title,
-                battery_icon(percent, stats.battery_charging),
-                format!("{percent}%"),
-                battery_style(percent, p),
-                p,
-            );
+            title_rest.push(Span::styled(
+                battery_icon(percent, stats.battery_charging).to_string(),
+                band_battery_style(percent, p),
+            ));
         }
         if let (Some(rx), Some(tx)) = (stats.net_rx_per_sec, stats.net_tx_per_sec) {
             push_band_metric(
-                &mut title,
+                &mut title_rest,
                 "\u{f06f3}", // nf-md-network
                 format_net_io(rx, tx),
                 Style::default().fg(p.teal),
@@ -1748,21 +1791,24 @@ fn self_server_rows(app: &AppState) -> ServerRowBuild {
             p,
         );
     }
-    (
-        [Line::from(title), Line::from(health)],
-        Some(local_server_tally(app)),
-        false,
-    )
+    ServerRowBuild {
+        name,
+        title_rest,
+        health: Line::from(health),
+        tally: Some(local_server_tally(app)),
+        ghosted: false,
+    }
 }
 
 /// The pinned origin row of a carried fleet snapshot: `← mba22 home` over a
-/// dim snapshot-age line. Selecting it re-attaches the client locally.
+/// dim flush-left snapshot-age line. It carries no counts; its name field
+/// still pads to the band width so the count columns stay aligned.
+/// Selecting it re-attaches the client locally.
 fn home_server_rows(
     snapshot: &crate::peers::FleetSnapshotState,
     p: &crate::app::state::Palette,
-) -> [Line<'static>; 2] {
-    let title = Line::from(vec![
-        Span::styled(" ", Style::default()),
+) -> ServerRowBuild {
+    let name = vec![
         Span::styled("←", Style::default().fg(p.accent)),
         Span::styled(" ", Style::default()),
         Span::styled(
@@ -1770,18 +1816,21 @@ fn home_server_rows(
             Style::default().fg(p.text).add_modifier(Modifier::BOLD),
         ),
         Span::styled(" home", Style::default().fg(p.accent)),
-    ]);
-    let health = Line::from(vec![
-        Span::styled(SERVER_HEALTH_INDENT, Style::default()),
-        Span::styled(
-            format!(
-                "snapshot {} old",
-                format_age(snapshot.received_at.elapsed().as_secs())
-            ),
-            Style::default().fg(p.overlay0),
+    ];
+    let health = Line::from(vec![Span::styled(
+        format!(
+            "snapshot {} old",
+            format_age(snapshot.received_at.elapsed().as_secs())
         ),
-    ]);
-    [title, health]
+        Style::default().fg(p.overlay0),
+    )]);
+    ServerRowBuild {
+        name,
+        title_rest: Vec::new(),
+        health,
+        tally: None,
+        ghosted: false,
+    }
 }
 
 /// A carried fleet-snapshot row: the regular peer row plus an explicit
@@ -1791,23 +1840,27 @@ fn snapshot_server_rows(
     peer: &crate::peers::PeerSummaryState,
     p: &crate::app::state::Palette,
 ) -> ServerRowBuild {
-    let ([mut title, health], tally, ghosted) = peer_server_rows(peer, p);
+    let mut build = peer_server_rows(peer, p);
     // The down (ghost) form already carries the broken-link icon + age.
     if peer.reachability() != crate::peers::PeerReachability::Down {
         if let Some(at) = peer.last_ok {
-            title.spans.push(Span::styled(
-                format!("  {} old", format_age(at.elapsed().as_secs())),
+            let sep = if build.title_rest.is_empty() {
+                ""
+            } else {
+                "  "
+            };
+            build.title_rest.push(Span::styled(
+                format!("{sep}{} old", format_age(at.elapsed().as_secs())),
                 Style::default().fg(p.overlay0),
             ));
         }
     }
-    ([title, health], tally, ghosted)
+    build
 }
 
-/// One peer's two `servers` lines: the leading state medallion (the join of
-/// the peer's workspace statuses, #42) before `anvil  34ms` over the band's
-/// fixed-width metric line — or the compact `unreachable {age}` form with a
-/// muted hollow dot when the peer is down (shape = reachability).
+/// One peer's two `servers` lines: `anvil` (the name field), then — after
+/// the count columns — ` 34ms`, over the band's flush-left fixed-width
+/// metric line. A down peer renders as the GHOST of the same row.
 fn peer_server_rows(
     peer: &crate::peers::PeerSummaryState,
     p: &crate::app::state::Palette,
@@ -1818,36 +1871,28 @@ fn peer_server_rows(
 
     if reach == PeerReachability::Down {
         // Unreachable = the GHOST of the normal row (#42 refinement): the
-        // hollow no-conn dot, then the name and the LAST-KNOWN stats — all
-        // greyed out and italic, the title struck through, the age where
-        // latency would sit. The stale data stays visible; its styling says
-        // "as of {age}".
+        // same order — struck name, then the (greyed) counts, then the
+        // broken-link glyph + outage age in the latency slot, with the
+        // LAST-KNOWN stats below — all muted + italic. The stale data stays
+        // visible; its styling says "as of {age}".
         // nf-md-link_variant_off (broken chain) in the latency slot says
         // no-conn; the age says how stale the ghosted stats are.
         let age = match peer.last_ok {
-            Some(at) => format!("  \u{f033a} {}", format_age(at.elapsed().as_secs())),
-            None => "  \u{f033a}".to_string(),
+            Some(at) => format!("\u{f033a} {}", format_age(at.elapsed().as_secs())),
+            None => "\u{f033a}".to_string(),
         };
-        let title = Line::from(vec![
-            Span::styled(
-                "○ ",
-                Style::default()
-                    .fg(p.overlay0)
-                    .add_modifier(Modifier::ITALIC),
-            ),
-            Span::styled(
-                host,
-                Style::default()
-                    .fg(p.overlay0)
-                    .add_modifier(Modifier::ITALIC | Modifier::CROSSED_OUT),
-            ),
-            Span::styled(
-                age,
-                Style::default()
-                    .fg(p.overlay0)
-                    .add_modifier(Modifier::ITALIC),
-            ),
-        ]);
+        let name = vec![Span::styled(
+            host,
+            Style::default()
+                .fg(p.overlay0)
+                .add_modifier(Modifier::ITALIC | Modifier::CROSSED_OUT),
+        )];
+        let title_rest = vec![Span::styled(
+            age,
+            Style::default()
+                .fg(p.overlay0)
+                .add_modifier(Modifier::ITALIC),
+        )];
         let mut health: Vec<Span<'static>> = Vec::new();
         if let Some(system) = peer.system.as_ref() {
             health = server_health_spans(
@@ -1864,18 +1909,25 @@ fn peer_server_rows(
                     .add_modifier(Modifier::ITALIC);
             }
         }
-        return ([title, Line::from(health)], Some(peer_tally(peer)), true);
+        return ServerRowBuild {
+            name,
+            title_rest,
+            health: Line::from(health),
+            tally: Some(peer_tally(peer)),
+            ghosted: true,
+        };
     }
 
-    let mut title = vec![Span::styled(host, Style::default().fg(p.subtext0))];
+    let name = vec![Span::styled(host, Style::default().fg(p.subtext0))];
+    let mut title_rest: Vec<Span<'static>> = Vec::new();
     if let Some(ms) = peer.latency_ms {
         let color = if ms > crate::peers::PEER_SLOW_LATENCY_MS {
             p.yellow
         } else {
             p.overlay0
         };
-        title.push(Span::styled(
-            format!("  \u{f04c5} {ms}ms"), // nf-md-speedometer
+        title_rest.push(Span::styled(
+            format!("\u{f04c5} {ms}ms"), // nf-md-speedometer
             Style::default().fg(color),
         ));
     }
@@ -1893,11 +1945,13 @@ fn peer_server_rows(
             p,
         );
     }
-    (
-        [Line::from(title), Line::from(health)],
-        Some(peer_tally(peer)),
-        false,
-    )
+    ServerRowBuild {
+        name,
+        title_rest,
+        health: Line::from(health),
+        tally: Some(peer_tally(peer)),
+        ghosted: false,
+    }
 }
 
 /// A server row's metric line in the band's fixed-width glyph language:
@@ -2153,8 +2207,15 @@ fn render_workspace_list(
             Some(key) => space_join(app, key),
             None => workspace_join(app, ws),
         };
-        line1.push(Span::styled(" ", Style::default()));
-        line1.extend(packed_rects(&join, p));
+        // Rects render only where they AGGREGATE: always on group-leading
+        // rows (the join spans members the leading mark can't show), but on
+        // individual rows only when the join has more than one element — a
+        // single ▮ would just repeat the leading circle's color. The hollow
+        // ▯ (no live agents) keeps rendering everywhere.
+        if group_key.is_some() || join.is_empty() || join.classes().len() > 1 {
+            line1.push(Span::styled(" ", Style::default()));
+            line1.extend(packed_rects(&join, p));
+        }
         // Collapsed groups additionally summarize their hidden members with
         // exact per-state counts: plain colored digits in the terminal font.
         if let Some(key) = collapsed_group_key.as_deref() {
@@ -2214,7 +2275,10 @@ fn render_workspace_list(
                         .as_ref()
                         .map(|(label, _)| label.chars().count() + 1)
                         .unwrap_or(0);
-                let max_branch_len = (card.rect.width as usize).saturating_sub(5 + reserved);
+                // The branch glyph (`` — the same one the pane-header HUD
+                // uses) anchors the line as git metadata of the row above,
+                // not a phantom sibling workspace; +2 cells in the budget.
+                let max_branch_len = (card.rect.width as usize).saturating_sub(7 + reserved);
                 let branch_display = if branch.len() > max_branch_len {
                     format!("{}…", &branch[..max_branch_len.saturating_sub(1)])
                 } else {
@@ -2228,6 +2292,7 @@ fn render_workspace_list(
                 let branch_indent = if card.indented { "     " } else { "   " };
                 let mut spans = vec![
                     Span::styled(branch_indent, Style::default()),
+                    Span::styled("\u{e0a0} ", Style::default().fg(branch_color)),
                     Span::styled(branch_display, Style::default().fg(branch_color)),
                 ];
                 if let Some(parts) = upstream_label {
@@ -2585,7 +2650,11 @@ mod tests {
     }
 
     fn line_text(line: &Line<'_>) -> String {
-        line.spans.iter().map(|s| s.content.as_ref()).collect()
+        spans_text(&line.spans)
+    }
+
+    fn spans_text(spans: &[Span<'_>]) -> String {
+        spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
     #[test]
@@ -2892,13 +2961,16 @@ mod tests {
     fn home_server_rows_mark_origin_and_snapshot_age() {
         let app = crate::app::state::AppState::test_new();
         let snapshot = carried_snapshot("mba22", vec![]);
-        let [title, health] = home_server_rows(&snapshot, &app.palette);
-        let title = line_text(&title);
-        let health = line_text(&health);
-        assert!(title.contains('←'), "{title}");
-        assert!(title.contains("mba22"), "{title}");
-        assert!(title.contains("home"), "{title}");
-        assert!(health.contains("snapshot"), "{health}");
+        let row = home_server_rows(&snapshot, &app.palette);
+        let name = spans_text(&row.name);
+        let health = line_text(&row.health);
+        // Name-first: the arrow + origin + home marker ARE the name field.
+        assert!(name.starts_with('←'), "{name}");
+        assert!(name.contains("mba22"), "{name}");
+        assert!(name.contains("home"), "{name}");
+        // No counts on the home row; the age line is flush left.
+        assert!(row.tally.is_none());
+        assert!(health.starts_with("snapshot"), "{health}");
         assert!(health.contains("old"), "{health}");
     }
 
@@ -2907,11 +2979,13 @@ mod tests {
         let app = crate::app::state::AppState::test_new();
         let mut peer = peer_with_workspaces("anvil", vec![]);
         peer.last_ok = Some(std::time::Instant::now() - std::time::Duration::from_secs(30));
-        let ([title, _], join, _ghosted) = snapshot_server_rows(&peer, &app.palette);
-        let title = line_text(&title);
-        assert!(title.contains("30s old"), "{title}");
-        // Reachable snapshot rows carry a join for the leading medallion.
-        assert!(join.is_some());
+        let row = snapshot_server_rows(&peer, &app.palette);
+        // The staleness chip rides the title's trailing metrics, not the
+        // name field (which must stay paddable).
+        let rest = spans_text(&row.title_rest);
+        assert!(rest.contains("30s old"), "{rest}");
+        // Reachable snapshot rows carry a tally for the count columns.
+        assert!(row.tally.is_some());
     }
 
     #[test]
@@ -2930,23 +3004,33 @@ mod tests {
             gpu_percent: Some(8),
             ..Default::default()
         });
-        let ([title, health], join, _ghosted) = self_server_rows(&app);
+        let row = self_server_rows(&app);
         // The self row always joins the local agent states (none here).
-        assert_eq!(join, Some(tally_states([])));
-        let title = line_text(&title);
-        let health = line_text(&health);
-        assert!(title.contains(&crate::app::short_host_name()), "{title}");
-        assert!(title.contains('\u{2726}'), "{title}"); // ✦ current marker
-                                                        // Battery and net live on the title line (#41): quintile glyph +
-                                                        // charge, then the net glyph with ▼rx ▲tx.
-        assert!(title.contains("\u{f0079} 85%"), "{title}");
+        assert_eq!(row.tally, Some(tally_states([])));
+        let name = spans_text(&row.name);
+        let rest = spans_text(&row.title_rest);
+        let health = line_text(&row.health);
+        // Name-first: host + the ✦ current marker form the name field.
+        assert!(name.starts_with(&crate::app::short_host_name()), "{name}");
+        assert!(name.contains('\u{2726}'), "{name}"); // ✦ current marker
+                                                      // Battery and net trail the counts: the battery is GLYPH ONLY
+                                                      // (level = color, no percent text), then the net glyph with
+                                                      // ▼rx ▲tx.
+        assert!(rest.contains('\u{f0079}'), "{rest}");
+        assert!(!rest.contains('%'), "battery keeps no percent text: {rest}");
+        let battery = row
+            .title_rest
+            .iter()
+            .find(|span| span.content.contains('\u{f0079}'))
+            .expect("battery glyph span");
+        assert_eq!(battery.style.fg, Some(app.palette.green), "85% = green");
         assert!(
-            title.contains("\u{f06f3} \u{25bc}1.5K \u{25b2}512B"),
-            "{title}"
+            rest.contains("\u{f06f3} \u{25bc}1.5K \u{25b2}512B"),
+            "{rest}"
         );
         // The metric line: cpu/mem/disk/gpu, space-separated (no `·`),
-        // cpu/gpu right-aligned width-3.
-        assert!(health.contains("\u{f0ee0}  42%"), "{health}");
+        // cpu/gpu right-aligned width-3, flush left (no indent).
+        assert!(health.starts_with("\u{f0ee0}  42%"), "{health}");
         assert!(health.contains("\u{f035b} 13G/16G"), "{health}");
         assert!(health.contains("\u{f02ca} 213G"), "{health}");
         assert!(health.contains("\u{f08ae}   8%"), "{health}");
@@ -2964,11 +3048,13 @@ mod tests {
             cpu_percent: Some(42.0),
             ..Default::default()
         });
-        let ([title, health], _, _ghosted) = self_server_rows(&app);
-        let title = line_text(&title);
-        let health = line_text(&health);
-        assert!(!title.contains("\u{f06f3}"), "{title}");
-        assert!(!title.contains('%'), "{title}");
+        let row = self_server_rows(&app);
+        let health = line_text(&row.health);
+        assert!(
+            row.title_rest.is_empty(),
+            "{:?}",
+            spans_text(&row.title_rest)
+        );
         assert!(!health.contains("\u{f08ae}"), "{health}");
     }
 
@@ -2992,19 +3078,22 @@ mod tests {
             mem_total: Some(64 * 1024 * 1024 * 1024),
             disk_free: None,
         });
-        let ([title, health], join, _ghosted) = peer_server_rows(&peer, &p);
-        let title = line_text(&title);
-        let health = line_text(&health);
-        assert!(title.contains("anvil"), "{title}");
-        assert!(title.contains("34ms"), "{title}");
+        let row = peer_server_rows(&peer, &p);
+        let name = spans_text(&row.name);
+        let rest = spans_text(&row.title_rest);
+        let health = line_text(&row.health);
+        // Name first; the latency rides the trailing metrics after the
+        // count columns.
+        assert_eq!(name, "anvil");
+        assert!(rest.contains("34ms"), "{rest}");
         // The second line speaks the band's fixed-width glyph language
-        // (cpu right-aligned width-3, no `·` separators); the agent rollup
-        // moved into the leading medallion's join — no dingbat counts.
-        assert!(health.contains("\u{f0ee0}  71%"), "{health}");
+        // (cpu right-aligned width-3, no `·` separators, flush left); the
+        // agent rollup lives in the count columns — no dingbat counts.
+        assert!(health.starts_with("\u{f0ee0}  71%"), "{health}");
         assert!(health.contains("\u{f035b} 48G/64G"), "{health}");
         assert!(!health.contains('\u{b7}'), "{health}");
         assert!(!health.contains('\u{2776}'), "{health}");
-        assert_eq!(join, Some(tally_states([StateClass::Working])));
+        assert_eq!(row.tally, Some(tally_states([StateClass::Working])));
         assert!(!health.contains("anvil"), "{health}");
     }
 
@@ -3020,8 +3109,8 @@ mod tests {
             mem_total: Some(512 * G),
             disk_free: None,
         });
-        let ([_, health], _, _ghosted) = peer_server_rows(&peer, &p);
-        let health = line_text(&health);
+        let row = peer_server_rows(&peer, &p);
+        let health = line_text(&row.health);
         // 100% fills the width-3 column exactly; mem used pads to the
         // width of total so the slash column never jitters.
         assert!(health.contains("\u{f0ee0} 100%"), "{health}");
@@ -3041,14 +3130,24 @@ mod tests {
             mem_total: Some(16 * 1024 * 1024 * 1024),
             disk_free: Some(100 * 1024 * 1024 * 1024),
         });
-        let ([title, health], tally, _ghosted) = peer_server_rows(&peer, &p);
-        // Ghost of the normal row (#42): hollow no-conn dot, struck name,
-        // broken-link glyph in the latency slot, everything muted + italic —
+        let row = peer_server_rows(&peer, &p);
+        // Ghost of the normal row (#42): the struck name LEADS (same
+        // name-first order as live rows), the broken-link glyph sits in the
+        // latency slot after the counts, everything muted + italic —
         // including the LAST-KNOWN stats, which stay visible.
-        let text = line_text(&title);
-        assert!(text.contains("ksb"), "{text:?}");
-        assert!(text.contains('\u{f033a}'), "broken-link icon: {text:?}");
-        for span in title.spans.iter().filter(|s| !s.content.trim().is_empty()) {
+        let name_text = spans_text(&row.name);
+        let rest_text = spans_text(&row.title_rest);
+        assert!(name_text.starts_with("ksb"), "{name_text:?}");
+        assert!(
+            rest_text.contains('\u{f033a}'),
+            "broken-link icon: {rest_text:?}"
+        );
+        for span in row
+            .name
+            .iter()
+            .chain(row.title_rest.iter())
+            .filter(|s| !s.content.trim().is_empty())
+        {
             assert_eq!(span.style.fg, Some(p.overlay0), "muted: {:?}", span.content);
             assert!(
                 span.style.add_modifier.contains(Modifier::ITALIC),
@@ -3056,28 +3155,34 @@ mod tests {
                 span.content
             );
         }
-        let name = title
-            .spans
+        let name = row
+            .name
             .iter()
             .find(|span| span.content.contains("ksb"))
             .expect("name span");
         assert!(name.style.add_modifier.contains(Modifier::CROSSED_OUT));
-        let health_text = line_text(&health);
+        let health_text = line_text(&row.health);
         assert!(
             health_text.contains("42%"),
             "last-known stats: {health_text:?}"
         );
-        for span in health.spans.iter().filter(|s| !s.content.trim().is_empty()) {
+        for span in row
+            .health
+            .spans
+            .iter()
+            .filter(|s| !s.content.trim().is_empty())
+        {
             assert_eq!(span.style.fg, Some(p.overlay0));
             assert!(span.style.add_modifier.contains(Modifier::ITALIC));
         }
         // The ghosted tally still feeds the (greyed) count columns.
-        assert!(tally.is_some());
+        assert!(row.tally.is_some());
 
         // A peer that was reachable once shows the outage age by the icon.
         peer.last_ok = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(300));
-        let ([title, _], _, _ghosted) = peer_server_rows(&peer, &p);
-        assert!(line_text(&title).contains("5m"), "{:?}", line_text(&title));
+        let row = peer_server_rows(&peer, &p);
+        let rest = spans_text(&row.title_rest);
+        assert!(rest.contains("5m"), "{rest:?}");
     }
 
     fn workspace_with_project_key(name: &str, project_key: &str) -> Workspace {
@@ -3717,7 +3822,7 @@ mod tests {
     }
 
     #[test]
-    fn servers_band_rows_lead_with_counts() {
+    fn servers_band_rows_lead_with_name_then_counts() {
         use crate::api::schema::AgentStatus;
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("one");
@@ -3753,32 +3858,87 @@ mod tests {
         let self_rect = server_slot_rect(rows_area, 0).expect("self slot");
         let peer_rect = server_slot_rect(rows_area, 1).expect("peer slot");
 
-        // Default mark = leading counts `1 1 0 <name>`: fixed r/y/g columns,
-        // zeros muted, single-digit width band-wide.
+        // Default mark = name first, then the counts `<name> 1 1 0`: fixed
+        // r/y/g columns, zeros muted, single-digit width band-wide. The
+        // name field pads to the band-wide max display width, so the count
+        // columns sit at the same x on every row.
+        let host = crate::app::short_host_name();
+        let name_width = spans_display_width(&[Span::raw(format!("{host} ✦"))]).max("anvil".len());
+        let counts_x = |rect: Rect| rect.x + name_width as u16 + 1;
         for rect in [self_rect, peer_rect] {
-            assert_eq!(buffer[(rect.x, rect.y)].symbol(), "1");
-            assert_eq!(buffer[(rect.x, rect.y)].style().fg, Some(p.red));
-            assert_eq!(buffer[(rect.x + 2, rect.y)].symbol(), "1");
-            assert_eq!(buffer[(rect.x + 2, rect.y)].style().fg, Some(p.yellow));
-            assert_eq!(buffer[(rect.x + 4, rect.y)].symbol(), "0");
+            let x = counts_x(rect);
+            assert_eq!(buffer[(x, rect.y)].symbol(), "1");
+            assert_eq!(buffer[(x, rect.y)].style().fg, Some(p.red));
+            assert_eq!(buffer[(x + 2, rect.y)].symbol(), "1");
+            assert_eq!(buffer[(x + 2, rect.y)].style().fg, Some(p.yellow));
+            assert_eq!(buffer[(x + 4, rect.y)].symbol(), "0");
             assert_eq!(
-                buffer[(rect.x + 4, rect.y)].style().fg,
+                buffer[(x + 4, rect.y)].style().fg,
                 Some(p.overlay0),
                 "zero column is muted"
             );
         }
-        // The host name follows the counts lead.
-        let title: String = buffer_row_text(&buffer, self_rect, self_rect.y)
-            .chars()
-            .skip(6)
-            .collect();
+        // Both rows lead with their names at the row's left edge.
         assert!(
-            title.starts_with(&crate::app::short_host_name()),
-            "{title:?}"
+            buffer_row_text(&buffer, self_rect, self_rect.y).starts_with(&host),
+            "{:?}",
+            buffer_row_text(&buffer, self_rect, self_rect.y)
+        );
+        assert!(
+            buffer_row_text(&buffer, peer_rect, peer_rect.y).starts_with("anvil"),
+            "{:?}",
+            buffer_row_text(&buffer, peer_rect, peer_rect.y)
         );
 
         // The rollup chips are gone: no circled-digit dingbats anywhere.
         assert_no_circled_digit_dingbats(&buffer);
+    }
+
+    #[test]
+    fn band_name_padding_aligns_count_columns_across_rows() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.mode = crate::app::Mode::Terminal;
+        // Two peers with very different name widths: the count columns must
+        // land at the same x on both rows (padded to the band-wide max).
+        app.peer_summaries = vec![
+            peer_with_workspaces("anvil-dev", vec![]),
+            peer_with_workspaces("k", vec![]),
+        ];
+
+        let area = Rect::new(0, 0, 30, 40);
+        let buffer = render_sidebar_to_buffer(&mut app, area);
+
+        let (ws_area, _) =
+            expanded_sidebar_sections(area, app.sidebar_section_split, app.sidebar_pane_gap);
+        let (servers_area, _) = carve_servers_band(ws_area, servers_section_height(&app));
+        let rows_area = server_band_rows_area(servers_area);
+        let long_rect = server_slot_rect(rows_area, 1).expect("long-name peer slot");
+        let short_rect = server_slot_rect(rows_area, 2).expect("short-name peer slot");
+        assert!(buffer_row_text(&buffer, long_rect, long_rect.y).starts_with("anvil-dev"));
+        assert!(buffer_row_text(&buffer, short_rect, short_rect.y).starts_with("k "));
+
+        // Neither peer name contains a digit, so the first digit cell IS
+        // the first count column.
+        let first_digit_x = |rect: Rect| {
+            (rect.x..rect.x + rect.width)
+                .find(|&x| {
+                    buffer[(x, rect.y)]
+                        .symbol()
+                        .chars()
+                        .all(|c| c.is_ascii_digit())
+                })
+                .expect("count column present")
+        };
+        let long_x = first_digit_x(long_rect);
+        let short_x = first_digit_x(short_rect);
+        assert_eq!(long_x, short_x, "count columns align across name widths");
+        assert!(
+            long_x > long_rect.x + "anvil-dev".len() as u16,
+            "counts start after the longest name"
+        );
     }
 
     #[test]
@@ -3810,16 +3970,27 @@ mod tests {
         let self_rect = server_slot_rect(rows_area, 0).expect("self slot");
         let peer_rect = server_slot_rect(rows_area, 1).expect("peer slot");
 
+        // Counts sit after the padded name field on every row.
+        let host = crate::app::short_host_name();
+        let name_width = spans_display_width(&[Span::raw(format!("{host} ✦"))]).max("anvil".len());
         // Peer: ` 0 10  0` — the working column hits two digits.
-        let peer_title = buffer_row_text(&buffer, peer_rect, peer_rect.y);
+        let peer_title: String = buffer_row_text(&buffer, peer_rect, peer_rect.y)
+            .chars()
+            .skip(name_width + 1)
+            .collect();
         assert!(peer_title.starts_with(" 0 10  0 "), "{peer_title:?}");
         assert_eq!(
-            buffer[(peer_rect.x + 3, peer_rect.y)].style().fg,
+            buffer[(peer_rect.x + name_width as u16 + 1 + 3, peer_rect.y)]
+                .style()
+                .fg,
             Some(p.yellow)
         );
-        // Self (no agents): every column widens to match — ` 0  0  0 <host>`.
-        let self_title = buffer_row_text(&buffer, self_rect, self_rect.y);
-        assert!(self_title.starts_with(" 0  0  0 "), "{self_title:?}");
+        // Self (no agents): every column widens to match — `<host> 0  0  0`.
+        let self_title: String = buffer_row_text(&buffer, self_rect, self_rect.y)
+            .chars()
+            .skip(name_width + 1)
+            .collect();
+        assert!(self_title.starts_with(" 0  0  0"), "{self_title:?}");
     }
     #[test]
     fn medallion_mark_config_switches_the_band_to_the_medallion() {
@@ -3892,11 +4063,11 @@ mod tests {
         assert_eq!(buffer[(rects[0], parent.rect.y)].style().fg, Some(p.yellow));
         assert_eq!(buffer[(rects[1], parent.rect.y)].style().fg, Some(p.green));
 
-        // The member row renders only its OWN join: a single working rect.
+        // The member row's single-class join dedups into its leading circle
+        // (the rect would only repeat that color) — no rect at all.
         let child = app.view.workspace_card_areas[1];
         let rects = row_glyph_positions(&buffer, child.rect, child.rect.y, "\u{25ae}");
-        assert_eq!(rects.len(), 1, "member row carries its own join");
-        assert_eq!(buffer[(rects[0], child.rect.y)].style().fg, Some(p.yellow));
+        assert!(rects.is_empty(), "single-class member row renders no rect");
     }
 
     /// #33 — two-level highlight: with a member workspace focused, BOTH the
@@ -4000,10 +4171,10 @@ mod tests {
             Some(p.green)
         );
 
-        // The plain member row carries only its own (blocked) join.
+        // The plain member row's own join is a single class (blocked) — it
+        // dedups into the leading circle, so no rect renders.
         let rects = row_glyph_positions(&buffer, cards[2].rect, cards[2].rect.y, "\u{25ae}");
-        assert_eq!(rects.len(), 1);
-        assert_eq!(buffer[(rects[0], cards[2].rect.y)].style().fg, Some(p.red));
+        assert!(rects.is_empty(), "single-class member row renders no rect");
 
         // The group affordances live on the primary alone.
         assert_eq!(
@@ -4035,6 +4206,53 @@ mod tests {
     }
 
     #[test]
+    fn individual_row_drops_the_single_class_rect_but_keeps_aggregates() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("solo");
+        let _second = ws.test_split(ratatui::layout::Direction::Horizontal);
+        app.workspaces = vec![ws];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.mode = crate::app::Mode::Terminal;
+        let panes: Vec<_> = app.workspaces[0].tabs[0].panes.keys().copied().collect();
+        let set_state = |app: &mut crate::app::state::AppState, pane, state| {
+            let tid = app.workspaces[0].terminal_id(pane).unwrap().clone();
+            app.terminals.get_mut(&tid).unwrap().state = state;
+        };
+
+        // A single live agent: the lone rect would only repeat the leading
+        // circle's color — none renders. (The second pane stays Unknown —
+        // no live signal.)
+        set_state(&mut app, panes[0], AgentState::Working);
+        let area = Rect::new(0, 0, 30, 40);
+        let buffer = render_sidebar_to_buffer(&mut app, area);
+        let card = app.view.workspace_card_areas[0];
+        assert!(
+            row_glyph_positions(&buffer, card.rect, card.rect.y, "\u{25ae}").is_empty(),
+            "single-class join renders no rect"
+        );
+        assert!(
+            row_glyph_positions(&buffer, card.rect, card.rect.y, "\u{25af}").is_empty(),
+            "hollow is reserved for the empty join"
+        );
+
+        // A join of more than one element aggregates — the rects come back.
+        set_state(&mut app, panes[1], AgentState::Blocked);
+        let buffer = render_sidebar_to_buffer(&mut app, area);
+        let card = app.view.workspace_card_areas[0];
+        let rects = row_glyph_positions(&buffer, card.rect, card.rect.y, "\u{25ae}");
+        assert_eq!(rects.len(), 2, "mixed join keeps the packed rects");
+        assert_eq!(
+            buffer[(rects[0], card.rect.y)].style().fg,
+            Some(app.palette.red)
+        );
+        assert_eq!(
+            buffer[(rects[1], card.rect.y)].style().fg,
+            Some(app.palette.yellow)
+        );
+    }
+
+    #[test]
     fn workspace_rows_render_cached_pr_state_glyphs() {
         let mut app = space_group_app();
         // Two-line parent row: branch line carries `#12 ⊙` after the branch.
@@ -4058,8 +4276,8 @@ mod tests {
         assert_eq!(parent.rect.height, 2);
         let branch_line = buffer_row_text(&buffer, parent.rect, parent.rect.y + 1);
         assert!(
-            branch_line.contains("feat-x #12 \u{2299}"),
-            "{branch_line:?}"
+            branch_line.contains("\u{e0a0} feat-x #12 \u{2299}"),
+            "branch line leads with the git glyph: {branch_line:?}"
         );
         let glyph = row_glyph_positions(&buffer, parent.rect, parent.rect.y + 1, "\u{2299}");
         assert_eq!(

@@ -820,7 +820,9 @@ mod tests {
 
         assert!(line1.starts_with(" · one"));
         assert!(!line1.contains("1 one"));
-        assert_eq!(line2, "   main");
+        // The branch line leads with the pane-header's git glyph so it
+        // reads as the row's git metadata, not a sibling workspace.
+        assert_eq!(line2, "   \u{e0a0} main");
 
         std::fs::remove_dir_all(repo).ok();
     }
