@@ -128,7 +128,7 @@ impl StateJoin {
 }
 
 /// Full per-class tally of a server's agent states — the data behind the
-/// band's leading count columns (`0 2 1 herdr`, #42): fixed r/y/g columns =
+/// band's count columns (`herdr 0 2 1`, #42): fixed r/y/g columns =
 /// blocked / working / calm (idle + done-unseen fold into the calm column;
 /// the teal distinction stays on workspace rows). Unlike the capped
 /// [`StateJoin`], the tally keeps exact counts.
@@ -173,9 +173,10 @@ impl StateTally {
     }
 }
 
-/// The leading count columns for one band row: three right-aligned counts in
-/// the severity colors (red/yellow/green), zeros muted, every column padded
-/// to the band-global `digit_width`, with a trailing space before the name.
+/// The count columns for one band row (rendered after the padded name
+/// field): three right-aligned counts in the severity colors
+/// (red/yellow/green), zeros muted, every column padded to the band-global
+/// `digit_width`, each with a trailing separator space.
 pub(crate) fn leading_count_spans(
     tally: &StateTally,
     digit_width: usize,
@@ -201,12 +202,6 @@ pub(crate) fn leading_count_spans(
         column(tally.working, p.yellow),
         column(tally.calm, p.green),
     ]
-}
-
-/// Total cell width of the counts lead (incl. its trailing separators) —
-/// rows without counts (home, unreachable) indent by this to stay aligned.
-pub(crate) fn counts_lead_width(digit_width: usize) -> usize {
-    (digit_width + 1) * 3
 }
 
 /// Packed-rect glyphs of the single-line join rendering.

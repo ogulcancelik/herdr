@@ -338,6 +338,20 @@ pub(super) fn battery_style(percent: u8, p: &Palette) -> Style {
     }
 }
 
+/// The servers-band battery color: there the GLYPH is the whole reading
+/// (no percent text), so the color carries the level — red critical (≤15),
+/// peach low (≤40), green otherwise. The status line keeps its percent and
+/// [`battery_style`].
+pub(super) fn band_battery_style(percent: u8, p: &Palette) -> Style {
+    if percent <= 15 {
+        Style::default().fg(p.red)
+    } else if percent <= 40 {
+        Style::default().fg(p.peach)
+    } else {
+        Style::default().fg(p.green)
+    }
+}
+
 /// Memory utilization as a percentage, for [`utilization_style`].
 pub(super) fn mem_percent(used: u64, total: u64) -> f32 {
     if total > 0 {
@@ -489,5 +503,16 @@ mod tests {
         assert_eq!(battery_icon(10, None), "\u{f007a}");
         assert_eq!(battery_icon(50, Some(false)), "\u{f007e}");
         assert_eq!(battery_icon(95, None), "\u{f0079}");
+    }
+
+    #[test]
+    fn band_battery_color_carries_the_level() {
+        let p = crate::app::state::AppState::test_new().palette;
+        assert_eq!(band_battery_style(10, &p).fg, Some(p.red));
+        assert_eq!(band_battery_style(15, &p).fg, Some(p.red));
+        assert_eq!(band_battery_style(16, &p).fg, Some(p.peach));
+        assert_eq!(band_battery_style(40, &p).fg, Some(p.peach));
+        assert_eq!(band_battery_style(41, &p).fg, Some(p.green));
+        assert_eq!(band_battery_style(100, &p).fg, Some(p.green));
     }
 }
