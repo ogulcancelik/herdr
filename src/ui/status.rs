@@ -220,6 +220,32 @@ pub(super) fn agent_icon(
     )
 }
 
+/// Map a federated peer's [`AgentStatus`] onto the shared `(AgentState, seen)`
+/// the icon set is keyed on, so remote member rows render the SAME agent-style
+/// icon as local ones (#62). `Done` = an unseen idle (the green ✓), `Idle` = a
+/// settled seen idle.
+pub(super) fn remote_state(status: crate::api::schema::AgentStatus) -> (AgentState, bool) {
+    use crate::api::schema::AgentStatus;
+    match status {
+        AgentStatus::Blocked => (AgentState::Blocked, true),
+        AgentStatus::Working => (AgentState::Working, true),
+        AgentStatus::Done => (AgentState::Idle, false),
+        AgentStatus::Idle => (AgentState::Idle, true),
+        AgentStatus::Unknown => (AgentState::Unknown, true),
+    }
+}
+
+/// Agent-style icon for a remote member row, funneling through [`agent_icon`]
+/// after [`remote_state`] so local and remote share one icon mapping.
+pub(super) fn remote_agent_icon(
+    status: crate::api::schema::AgentStatus,
+    tick: u32,
+    p: &Palette,
+) -> (&'static str, Style) {
+    let (state, seen) = remote_state(status);
+    agent_icon(state, seen, tick, p)
+}
+
 pub(super) fn state_label(state: AgentState, seen: bool) -> &'static str {
     match (state, seen) {
         (AgentState::Blocked, _) => "blocked",

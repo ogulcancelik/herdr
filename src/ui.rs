@@ -7,6 +7,7 @@ use ratatui::{
 
 mod dialogs;
 mod float;
+mod grammar;
 mod keybind_help;
 mod medallion;
 mod menus;

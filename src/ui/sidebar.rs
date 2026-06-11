@@ -9,10 +9,10 @@ use ratatui::{
 use super::medallion::{ring_medallion, MedallionStyle};
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::state_signal::{
-    join_states, leading_count_spans, medallion_rings, packed_rects, pr_state_glyph, tally_states,
-    StateClass, StateJoin, StateTally,
+    join_states, leading_count_spans, medallion_rings, packed_rects, tally_states, StateClass,
+    StateJoin, StateTally,
 };
-use super::status::{agent_icon, state_dot, state_label, state_label_color};
+use super::status::{agent_icon, remote_agent_icon, state_label, state_label_color};
 use crate::app::state::{AgentPanelScope, Palette, PanelScope};
 use crate::app::{AppState, Mode};
 use crate::detect::AgentState;
@@ -335,12 +335,13 @@ fn format_agent_panel_primary_label(entry: &AgentPanelEntry, max_width: usize) -
     )
 }
 
-fn workspace_row_height(ws: &crate::workspace::Workspace) -> u16 {
-    if ws.branch().is_some() {
-        2
-    } else {
-        1
-    }
+/// Every member row is a single line now (#62): the branch IS the label
+/// (`<server>:<branch>`), ahead/behind and the PR glyph append inline, so the
+/// old two-line name+branch form collapses. Kept as a named function so the
+/// layout passes read intent and any future multi-line member can reinstate
+/// height here in one place.
+fn workspace_row_height(_ws: &crate::workspace::Workspace) -> u16 {
+    1
 }
 
 /// Member workspaces of one project section (#33), by section key.
@@ -827,25 +828,6 @@ fn fold_remote_entries(app: &AppState, entries: &mut Vec<WorkspaceListEntry>) {
     }
 }
 
-/// Status dot for remote rows: the same shape language as the local
-/// `state_dot` (`●` live signal, `○` settled idle, `·` none), colored by
-/// the shared severity mapping.
-fn remote_status_dot(
-    status: crate::api::schema::AgentStatus,
-    p: &crate::app::state::Palette,
-) -> (&'static str, Style) {
-    use crate::api::schema::AgentStatus;
-    let glyph = match status {
-        AgentStatus::Blocked | AgentStatus::Working | AgentStatus::Done => "●",
-        AgentStatus::Idle => "○",
-        AgentStatus::Unknown => "·",
-    };
-    (
-        glyph,
-        Style::default().fg(StateClass::of_remote(status).color(p)),
-    )
-}
-
 /// Display name of the active server filter for the spaces header, if one
 /// is set: the local host name, or the filtered peer's host (ssh target
 /// when the peer no longer resolves — the filter still narrows the list).
@@ -877,12 +859,19 @@ pub(crate) fn remote_entry_label(
         return String::new();
     };
     let host = peer.host.as_deref().unwrap_or(peer.peer.as_str());
-    let target = ws.branch.as_deref().unwrap_or(ws.workspace.as_str());
+    let member = super::grammar::member_label(host, &super::grammar::remote_member_target(ws));
     if indented {
-        format!("{host}:{target}")
+        member
     } else {
-        let project = ws.project_label.as_deref().unwrap_or(ws.workspace.as_str());
-        format!("{project} · {host}:{target}")
+        // A remote-only project group: the leader row carries the project
+        // identity (#27 owner/repo when known) then the member grammar.
+        let project = ws
+            .project_key
+            .as_deref()
+            .map(super::grammar::project_identity_label)
+            .or_else(|| ws.project_label.clone())
+            .unwrap_or_else(|| ws.workspace.clone());
+        format!("{project} · {member}")
     }
 }
 
@@ -1286,7 +1275,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
             break;
         }
         let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
-        let (icon, icon_style) = state_dot(agg_state, agg_seen, p);
+        let (icon, icon_style) = agent_icon(agg_state, agg_seen, app.spinner_tick, p);
         let is_selected = visible_idx == app.selected && is_navigating;
         let is_active = Some(visible_idx) == app.active;
         let row_style = if is_selected {
@@ -2194,8 +2183,14 @@ fn render_workspace_list(
             Style::default().fg(p.subtext0)
         };
 
-        let (icon, icon_style) = state_dot(agg_state, agg_seen, p);
-        let label = ws.display_name_from(&app.terminals, terminal_runtimes);
+        // Agent-style icon REPLACES the circle on member rows (#62): ✓ done /
+        // spinner working / escalation blocked / muted idle, driven by the
+        // member's own join head.
+        let (icon, icon_style) = agent_icon(agg_state, agg_seen, app.spinner_tick, p);
+        // Uniform member grammar: `<server>:<target>` (the branch IS the label
+        // for git checkouts, the workspace name for misc) — local and remote
+        // read the same. The space identity lives in the group header row.
+        let label = super::grammar::local_member_label(app, ws, terminal_runtimes);
         let mut line1 = Vec::new();
         let mut show_workspace_icon = true;
         let mut collapsed_group_key: Option<String> = None;
@@ -2203,17 +2198,15 @@ fn render_workspace_list(
         if card.indented {
             line1.push(Span::styled("   ", Style::default()));
         } else if let Some((key, collapsed)) = workspace_parent_group_state(app, i) {
-            let icon = if collapsed { "▸" } else { "▾" };
-            let (state_icon, state_style) = if collapsed {
-                let (state, seen) = space_aggregate_state(app, &key);
-                state_dot(state, seen, p)
-            } else {
-                (icon, Style::default().fg(p.accent))
-            };
-            line1.push(Span::styled(icon, Style::default().fg(p.accent)));
+            let triangle = if collapsed { "▸" } else { "▾" };
+            line1.push(Span::styled(triangle, Style::default().fg(p.accent)));
             if collapsed {
+                // The collapsed group header shows the GROUP join head as the
+                // agent-style icon (not a circle) over the project identity.
+                let (state, seen) = space_aggregate_state(app, &key);
+                let (group_icon, group_style) = agent_icon(state, seen, app.spinner_tick, p);
                 line1.push(Span::styled(" ", Style::default()));
-                line1.push(Span::styled(state_icon, state_style));
+                line1.push(Span::styled(group_icon, group_style));
                 show_workspace_icon = false;
                 collapsed_group_key = Some(key.clone());
             }
@@ -2226,15 +2219,29 @@ fn render_workspace_list(
             line1.push(Span::styled(icon, icon_style));
             line1.push(Span::styled(" ", Style::default()));
         }
-        if card.indented {
-            let display_label = grouped_child_display_label(
-                &label,
-                ws.branch().as_deref(),
-                ws.custom_name.is_some(),
-            );
-            line1.push(Span::styled(display_label, name_style));
-        } else {
-            line1.push(Span::styled(label, name_style));
+        line1.push(Span::styled(label, name_style));
+        // ahead/behind appends inline (the branch line is gone).
+        if let Some((ahead, behind)) = ws.git_ahead_behind() {
+            if ahead > 0 {
+                line1.push(Span::styled(" ", Style::default()));
+                line1.push(Span::styled(
+                    format!("↑{ahead}"),
+                    Style::default().fg(p.green),
+                ));
+            }
+            if behind > 0 {
+                line1.push(Span::styled(" ", Style::default()));
+                line1.push(Span::styled(
+                    format!("↓{behind}"),
+                    Style::default().fg(p.red),
+                ));
+            }
+        }
+        // PR glyph appends after ahead/behind, sharing the pane-header set.
+        if let Some(pr) = ws.pr_state() {
+            let (text, color) = super::grammar::pr_glyph(pr, p);
+            line1.push(Span::styled(" ", Style::default()));
+            line1.push(Span::styled(text, Style::default().fg(color)));
         }
         // The row's state language as packed rects (#42): the group join on
         // space header rows — even when expanded, the primary row always
@@ -2264,93 +2271,10 @@ fn render_workspace_list(
                 ));
             }
         }
-        // Single-line rows carry the PR glyph inline (their branch IS the
-        // label); two-line rows render it on the branch line below.
-        if row_height == 1 {
-            if let Some(pr) = ws.pr_state() {
-                let (glyph, color) = pr_state_glyph(pr.state, p);
-                line1.push(Span::styled(
-                    format!(" #{} {glyph}", pr.number),
-                    Style::default().fg(color),
-                ));
-            }
-        }
-
         frame.render_widget(
-            Paragraph::new(Line::from(line1)),
+            Paragraph::new(clamp_line(Line::from(line1), card.rect.width)),
             Rect::new(card.rect.x, row_y, card.rect.width, 1),
         );
-
-        if row_height > 1 && row_y + 1 < list_bottom {
-            if let Some(branch) = ws.branch() {
-                // Ahead/behind arrows render only when non-zero: silence
-                // means in sync with upstream (#42, deliberate — a synced
-                // chip on every row would be noise at sidebar density).
-                let upstream_label = ws.git_ahead_behind().and_then(|(ahead, behind)| {
-                    let mut parts = Vec::new();
-                    if ahead > 0 {
-                        parts.push((format!("↑{}", ahead), p.green));
-                    }
-                    if behind > 0 {
-                        parts.push((format!("↓{}", behind), p.red));
-                    }
-                    (!parts.is_empty()).then_some(parts)
-                });
-                // Compact PR state after the ahead/behind arrows (#42): the
-                // same `#N ⊙/◐/✓/✗` language as the pane-header HUD.
-                let pr_label = ws.pr_state().map(|pr| {
-                    let (glyph, color) = pr_state_glyph(pr.state, p);
-                    (format!("#{} {glyph}", pr.number), color)
-                });
-                let reserved = upstream_label
-                    .as_ref()
-                    .map(|parts| {
-                        parts.iter().map(|(label, _)| label.len()).sum::<usize>() + parts.len()
-                    })
-                    .unwrap_or(0)
-                    + pr_label
-                        .as_ref()
-                        .map(|(label, _)| label.chars().count() + 1)
-                        .unwrap_or(0);
-                // The branch glyph (`` — the same one the pane-header HUD
-                // uses) anchors the line as git metadata of the row above,
-                // not a phantom sibling workspace; +2 cells in the budget.
-                let max_branch_len = (card.rect.width as usize).saturating_sub(7 + reserved);
-                let branch_display = if branch.len() > max_branch_len {
-                    format!("{}…", &branch[..max_branch_len.saturating_sub(1)])
-                } else {
-                    branch
-                };
-                let branch_color = if selected || is_active {
-                    p.mauve
-                } else {
-                    p.overlay0
-                };
-                let branch_indent = if card.indented { "     " } else { "   " };
-                let mut spans = vec![
-                    Span::styled(branch_indent, Style::default()),
-                    Span::styled("\u{e0a0} ", Style::default().fg(branch_color)),
-                    Span::styled(branch_display, Style::default().fg(branch_color)),
-                ];
-                if let Some(parts) = upstream_label {
-                    spans.push(Span::styled(" ", Style::default()));
-                    for (idx, (label, color)) in parts.into_iter().enumerate() {
-                        if idx > 0 {
-                            spans.push(Span::styled(" ", Style::default()));
-                        }
-                        spans.push(Span::styled(label, Style::default().fg(color)));
-                    }
-                }
-                if let Some((label, color)) = pr_label {
-                    spans.push(Span::styled(" ", Style::default()));
-                    spans.push(Span::styled(label, Style::default().fg(color)));
-                }
-                frame.render_widget(
-                    Paragraph::new(Line::from(spans)),
-                    Rect::new(card.rect.x, row_y + 1, card.rect.width, 1),
-                );
-            }
-        }
     }
 
     for card in &app.view.remote_card_areas {
@@ -2364,12 +2288,16 @@ fn render_workspace_list(
             continue;
         }
         let stale = peer.is_stale() || peer.error.is_some();
-        let (icon, icon_style) = remote_status_dot(remote_ws.status, p);
+        let (icon, icon_style) = remote_agent_icon(remote_ws.status, app.spinner_tick, p);
         let label = remote_entry_label(app, card.peer, card.ws_idx, card.indented);
         let max_label =
             (card.rect.width as usize).saturating_sub(if card.indented { 5 } else { 3 });
-        let label = if label.len() > max_label {
-            format!("{}…", &label[..max_label.saturating_sub(1)])
+        // Truncate on CHAR boundaries, not bytes: remote-only project leader
+        // labels carry a `·` separator (and the origin rows from #66 are long),
+        // so a byte slice could land mid-`·` and panic the whole render.
+        let label = if label.chars().count() > max_label {
+            let kept: String = label.chars().take(max_label.saturating_sub(1)).collect();
+            format!("{kept}…")
         } else {
             label
         };
@@ -2649,6 +2577,7 @@ fn render_sidebar_toggle(
 
 #[cfg(test)]
 mod tests {
+    use super::super::status::state_dot;
     use super::*;
     use crate::{detect::Agent, workspace::Workspace};
     use ratatui::{backend::TestBackend, Terminal};
@@ -3328,11 +3257,12 @@ mod tests {
                 },
             ]
         );
-        // The leader row carries the project label.
+        // The leader row carries the project identity (#27 owner/repo from the
+        // project key) then the uniform `<server>:<target>` member grammar.
         let config_peer = crate::app::state::RemotePeerRef::Config { peer_idx: 0 };
         assert_eq!(
             remote_entry_label(&app, config_peer, 0, false),
-            "dotfiles · sage:dotfiles"
+            "gerchowl/dotfiles · sage:dotfiles"
         );
         assert_eq!(
             remote_entry_label(&app, config_peer, 1, true),
@@ -3886,6 +3816,40 @@ mod tests {
         terminal.backend().buffer().clone()
     }
 
+    /// A remote-only project leader row labels as `owner/repo · host:branch`,
+    /// which carries the multibyte `·` separator. In a narrow sidebar that
+    /// label truncates — the truncation MUST land on a char boundary, never
+    /// mid-`·`, or the whole render panics and a spoke that carries an origin
+    /// summary (#66) emits no frames at all. Regression for that panic.
+    #[test]
+    fn narrow_remote_only_leader_label_truncates_on_char_boundary() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![workspace_with_project_key(
+            "shared",
+            "github.com/peer-fed-test/shared",
+        )];
+        let mut origin = peer_with_workspaces(
+            "mba22",
+            vec![remote_summary(
+                "alpha",
+                Some("github.com/peer-fed-test/alpha"),
+                Some("alpha"),
+                Some("main"),
+            )],
+        );
+        origin.host = Some("mba22".into());
+        origin.ssh_target = crate::protocol::HOME_SWITCH_TARGET.into();
+        let mut snapshot = snapshot_with_peers("mba22", vec![]);
+        snapshot.origin_summary = Some(origin);
+        app.fleet_snapshot = Some(snapshot);
+        app.mode = Mode::Navigate;
+        // A width tight enough to truncate the `· mba22:main` tail right at the
+        // separator must not panic.
+        for width in 20..30 {
+            let _ = render_sidebar_to_buffer(&mut app, Rect::new(0, 0, width, 45));
+        }
+    }
+
     fn row_glyph_positions(
         buffer: &ratatui::buffer::Buffer,
         rect: Rect,
@@ -4347,13 +4311,14 @@ mod tests {
     #[test]
     fn workspace_rows_render_cached_pr_state_glyphs() {
         let mut app = space_group_app();
-        // Two-line parent row: branch line carries `#12 ⊙` after the branch.
+        // #62 single-row grammar: every member is ONE line and the PR glyph
+        // rides the label line inline (via `grammar::pr_glyph`), no separate
+        // branch line. Both parent and member rows are height 1.
         app.workspaces[0].cached_git_branch = Some("feat-x".into());
         app.workspaces[0].pr_state = Some(crate::worktree::PrStateInfo {
             state: crate::worktree::PrState::Open,
             number: 12,
         });
-        // One-line member row: the glyph rides the label line.
         app.workspaces[1].cached_git_branch = Some("worktree/feat-y".into());
         app.workspaces[1].pr_state = Some(crate::worktree::PrStateInfo {
             state: crate::worktree::PrState::Draft,
@@ -4365,17 +4330,11 @@ mod tests {
         let p = &app.palette;
 
         let parent = app.view.workspace_card_areas[0];
-        assert_eq!(parent.rect.height, 2);
-        let branch_line = buffer_row_text(&buffer, parent.rect, parent.rect.y + 1);
-        assert!(
-            branch_line.contains("\u{e0a0} feat-x #12 \u{2299}"),
-            "branch line leads with the git glyph: {branch_line:?}"
-        );
-        let glyph = row_glyph_positions(&buffer, parent.rect, parent.rect.y + 1, "\u{2299}");
-        assert_eq!(
-            buffer[(glyph[0], parent.rect.y + 1)].style().fg,
-            Some(p.accent)
-        );
+        assert_eq!(parent.rect.height, 1);
+        let parent_row = buffer_row_text(&buffer, parent.rect, parent.rect.y);
+        assert!(parent_row.contains("#12 \u{2299}"), "{parent_row:?}");
+        let glyph = row_glyph_positions(&buffer, parent.rect, parent.rect.y, "\u{2299}");
+        assert_eq!(buffer[(glyph[0], parent.rect.y)].style().fg, Some(p.accent));
 
         let child = app.view.workspace_card_areas[1];
         assert_eq!(child.rect.height, 1);
@@ -4643,22 +4602,6 @@ mod tests {
         let divider = sidebar_section_divider_rect(Rect::new(0, 0, 20, 5), 0.5, 0);
 
         assert_eq!(divider, Rect::default());
-    }
-
-    #[test]
-    fn grouped_child_label_keeps_custom_workspace_name() {
-        assert_eq!(
-            grouped_child_display_label("renamed issue", Some("worktree/issue-137"), true),
-            "renamed issue"
-        );
-    }
-
-    #[test]
-    fn grouped_child_label_uses_short_branch_for_auto_named_workspace() {
-        assert_eq!(
-            grouped_child_display_label("herdr-issue", Some("worktree/issue-137"), false),
-            "issue-137"
-        );
     }
 
     fn workspace_with_worktree_space(
