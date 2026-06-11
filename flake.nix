@@ -75,11 +75,20 @@
               pkg-config
               rustc
               rustfmt
+              sccache
               zig_0_15
             ];
             hook = ''
               export LIBGHOSTTY_VT_OPTIMIZE=Debug
               export LIBGHOSTTY_VT_SIMD=true
+              # Shared compile cache across ALL worktrees: each keeps its own
+              # target/ (parallel builds stay parallel — no cargo build-dir
+              # lock contention), but every rustc invocation hits one cache,
+              # so a fresh worktree's first build drops from minutes to ~link
+              # time. Opt out per-shell with RUSTC_WRAPPER="".
+              export RUSTC_WRAPPER=''${RUSTC_WRAPPER-sccache}
+              export SCCACHE_DIR=''${SCCACHE_DIR:-$HOME/.cache/herdr-sccache}
+              export SCCACHE_CACHE_SIZE=''${SCCACHE_CACHE_SIZE:-20G}
             '';
           };
         }
