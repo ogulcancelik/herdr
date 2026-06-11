@@ -2519,6 +2519,15 @@ impl AppState {
                 .as_ref()
                 != Some(&result.resolved_identity_cwd)
             {
+                // The probe still SETTLES pending-vs-misc (#33): a workspace
+                // whose cwd drifted (or never resolves again) must not hold a
+                // "pending" sidebar position forever — only the cached git
+                // fields are too stale to apply.
+                let ws = &mut self.workspaces[ws_idx];
+                if !ws.git_identity_resolved {
+                    ws.git_identity_resolved = true;
+                    changed = true;
+                }
                 continue;
             }
 
@@ -3711,20 +3720,30 @@ mod tests {
         state.workspaces[0].cached_git_ahead_behind = Some((1, 0));
 
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        let changed = state.apply_workspace_git_statuses(
-            &terminal_runtimes,
+        let stale = |workspace_id: String| {
             vec![WorkspaceGitStatus {
                 workspace_id,
                 resolved_identity_cwd: std::path::PathBuf::from("/definitely/not/current"),
                 branch: Some("main".into()),
                 ahead_behind: Some((0, 1)),
                 space: None,
-            }],
-        );
+            }]
+        };
 
-        assert!(!changed);
+        // First stale probe: cached git fields stay untouched, but the probe
+        // still settles pending-vs-misc (#33) — that transition reports
+        // changed once.
+        let changed =
+            state.apply_workspace_git_statuses(&terminal_runtimes, stale(workspace_id.clone()));
+        assert!(changed, "pending -> settled fires once");
+        assert!(state.workspaces[0].git_identity_resolved);
         assert_eq!(state.workspaces[0].branch().as_deref(), Some("old"));
         assert_eq!(state.workspaces[0].git_ahead_behind(), Some((1, 0)));
+
+        // Subsequent stale probes are pure no-ops.
+        let changed = state.apply_workspace_git_statuses(&terminal_runtimes, stale(workspace_id));
+        assert!(!changed);
+        assert_eq!(state.workspaces[0].branch().as_deref(), Some("old"));
     }
 
     #[test]
