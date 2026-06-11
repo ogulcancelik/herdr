@@ -499,6 +499,30 @@ impl AppState {
         rect_contains(self.view.servers_header_rect, col, row)
     }
 
+    /// The spaces filter a right-clicked servers-band slot stands for
+    /// (#46): the self row narrows to local workspaces, peer rows (config
+    /// or snapshot) to their remote rows. The home row maps to nothing —
+    /// the origin's own workspaces are never in this list.
+    pub(super) fn server_filter_for_band_slot(
+        &self,
+        slot: Option<crate::app::state::PeerSwitchRequest>,
+    ) -> Option<crate::app::state::ServerFilter> {
+        use crate::app::state::{PeerSwitchRequest, ServerFilter};
+        let peer = match slot {
+            None => return Some(ServerFilter::Local),
+            Some(PeerSwitchRequest::Home) => return None,
+            Some(PeerSwitchRequest::ConfigPeer { peer_idx, .. }) => {
+                self.remote_peer(crate::app::state::RemotePeerRef::Config { peer_idx })
+            }
+            Some(PeerSwitchRequest::SnapshotPeer { entry_idx }) => {
+                self.remote_peer(crate::app::state::RemotePeerRef::Snapshot { entry_idx })
+            }
+        };
+        peer.map(|peer| ServerFilter::Peer {
+            ssh_target: peer.ssh_target.clone(),
+        })
+    }
+
     /// The spaces header's scope toggle hit-area: the whole header row (#41).
     pub(super) fn on_spaces_panel_scope_toggle(&self, col: u16, row: u16) -> bool {
         let area = self.workspace_list_rect();

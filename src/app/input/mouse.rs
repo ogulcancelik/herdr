@@ -528,6 +528,10 @@ impl AppState {
                     // focused space group.
                     if self.on_spaces_panel_scope_toggle(mouse.column, mouse.row) {
                         self.spaces_panel_scope = self.spaces_panel_scope.toggled();
+                        // Toggling the scope also resets the per-server
+                        // narrowing (#46): the toggle is the always-visible
+                        // escape hatch out of a filtered list.
+                        self.server_filter = None;
                         self.workspace_scroll = 0;
                         self.mark_session_dirty();
                         return None;
@@ -566,17 +570,16 @@ impl AppState {
                     }
 
                     // Remote (federated peer) rows: request a server switch.
+                    // Config-peer rows carry the workspace for the remote
+                    // pre-focus; snapshot rows reuse the band's pass-through
+                    // switch with the carried ssh address (#46).
                     if let Some(card) = self
                         .view
                         .remote_card_areas
                         .iter()
                         .find(|card| mouse.row == card.rect.y)
                     {
-                        self.request_peer_switch =
-                            Some(crate::app::state::PeerSwitchRequest::ConfigPeer {
-                                peer_idx: card.peer_idx,
-                                ws_idx: card.ws_idx,
-                            });
+                        self.request_peer_switch = Some(card.peer.switch_request(card.ws_idx));
                         return None;
                     }
 
@@ -959,6 +962,32 @@ impl AppState {
                     .workspace_list_scrollbar_target_at(mouse.column, mouse.row)
                     .is_some()
                 {
+                    return None;
+                }
+                // Servers-band rows: offer the per-server spaces filter
+                // (#46). The home row gets no menu — the origin's own
+                // workspaces are never in this list, so "only this server"
+                // would always show nothing.
+                if let Some(slot) = crate::ui::server_band_slot_at(
+                    self,
+                    self.view.sidebar_rect,
+                    mouse.column,
+                    mouse.row,
+                ) {
+                    if let Some(filter) = self.server_filter_for_band_slot(slot) {
+                        let is_filtered = self.server_filter.as_ref() == Some(&filter);
+                        self.context_menu = Some(ContextMenuState {
+                            kind: ContextMenuKind::Server {
+                                filter,
+                                is_filtered,
+                                any_filter: self.server_filter.is_some(),
+                            },
+                            x: mouse.column,
+                            y: mouse.row,
+                            list: MenuListState::new(0),
+                        });
+                        self.mode = Mode::ContextMenu;
+                    }
                     return None;
                 }
                 if let Some(idx) = self.workspace_at_row(mouse.row) {
@@ -1889,6 +1918,220 @@ mod tests {
                 ws_idx: 0,
             })
         );
+    }
+
+    fn federated_peer(
+        name: &str,
+        ssh: &str,
+        rows: Vec<crate::api::schema::PeerWorkspaceSummary>,
+    ) -> crate::peers::PeerSummaryState {
+        let mut peer = crate::peers::PeerSummaryState::new(&crate::config::PeerConfig {
+            name: name.into(),
+            ssh: ssh.into(),
+            ..Default::default()
+        });
+        peer.last_ok = Some(std::time::Instant::now());
+        peer.workspaces = rows;
+        peer
+    }
+
+    fn remote_row(project_key: &str, branch: &str) -> crate::api::schema::PeerWorkspaceSummary {
+        crate::api::schema::PeerWorkspaceSummary {
+            id: "ws_1".into(),
+            workspace: "herdr".into(),
+            project_key: Some(project_key.into()),
+            project_label: Some("herdr".into()),
+            branch: Some(branch.into()),
+            is_linked_worktree: true,
+            agent: Some("cc".into()),
+            status: crate::api::schema::AgentStatus::Working,
+            status_age_secs: Some(10),
+            activity: None,
+        }
+    }
+
+    fn workspace_with_project(name: &str, project_key: &str) -> Workspace {
+        let mut ws = Workspace::test_new(name);
+        ws.cached_git_space = Some(crate::workspace::GitSpaceMetadata {
+            key: format!("/repo/{name}/.git"),
+            checkout_key: format!("/repo/{name}"),
+            label: name.into(),
+            repo_root: std::path::PathBuf::from(format!("/repo/{name}")),
+            is_linked_worktree: false,
+            project_key: project_key.into(),
+        });
+        ws
+    }
+
+    /// Issue #46: a snapshot-fed remote row in the spaces list reuses the
+    /// band's pass-through switch — carried ssh address, fleet attached.
+    #[tokio::test]
+    async fn snapshot_remote_row_click_requests_switch_with_carried_address() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![workspace_with_project("herdr", "github.com/gerchowl/herdr")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.fleet_snapshot = Some(crate::peers::FleetSnapshotState {
+            origin: "mba22".into(),
+            peers: vec![federated_peer(
+                "anvil",
+                "lars@anvil",
+                vec![remote_row("github.com/gerchowl/herdr", "fix/pty")],
+            )],
+            received_at: std::time::Instant::now(),
+        });
+        // Tall enough that the band, the local card, and the folded remote
+        // row all fit the spaces list.
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 40));
+
+        let card = app.state.view.remote_card_areas[0].clone();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            card.rect.x + 2,
+            card.rect.y,
+        ));
+        assert_eq!(
+            app.state.request_peer_switch,
+            Some(crate::app::state::PeerSwitchRequest::SnapshotPeer { entry_idx: 0 })
+        );
+
+        // The shared switch path resolves the carried address and keeps the
+        // fleet riding along (pass-through, original origin).
+        let prepared = app
+            .prepare_switch_server(app.state.request_peer_switch.clone().unwrap())
+            .expect("snapshot row resolves");
+        assert_eq!(prepared.ssh_target, "lars@anvil");
+        let fleet = prepared.fleet.expect("pass-through fleet rides the leap");
+        assert_eq!(fleet.origin, "mba22");
+    }
+
+    #[tokio::test]
+    async fn right_click_server_row_filters_spaces_and_same_menu_clears() {
+        use crate::app::state::ServerFilter;
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![workspace_with_project("herdr", "github.com/gerchowl/herdr")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.peer_summaries = vec![federated_peer(
+            "anvil",
+            "lars@anvil",
+            vec![remote_row("github.com/gerchowl/herdr", "fix/pty")],
+        )];
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 30));
+
+        // Right-click the peer's band row: the menu offers the narrowing.
+        let card = app.state.view.server_card_areas[0].clone();
+        let (col, row) = (card.rect.x + 2, card.rect.y);
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Right), col, row));
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        let menu = app.state.context_menu.as_ref().expect("server menu opens");
+        assert_eq!(menu.items(), &["Show only this server"]);
+
+        handle_context_menu_key(
+            &mut app.state,
+            &mut app.terminal_runtimes,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert_eq!(
+            app.state.server_filter,
+            Some(ServerFilter::Peer {
+                ssh_target: "lars@anvil".into()
+            })
+        );
+        let entries = crate::ui::workspace_list_entries(&app.state);
+        assert!(!entries.is_empty());
+        assert!(
+            entries
+                .iter()
+                .all(|entry| matches!(entry, crate::ui::WorkspaceListEntry::Remote { .. })),
+            "only the filtered server's rows stay: {entries:?}"
+        );
+
+        // The same row's menu now offers only the clear.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Right), col, row));
+        let menu = app.state.context_menu.as_ref().expect("server menu opens");
+        assert_eq!(menu.items(), &["Show all servers"]);
+        handle_context_menu_key(
+            &mut app.state,
+            &mut app.terminal_runtimes,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert_eq!(app.state.server_filter, None);
+    }
+
+    #[tokio::test]
+    async fn right_click_self_row_filters_local_and_scope_toggle_clears() {
+        use crate::app::state::{PanelScope, ServerFilter};
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![workspace_with_project("herdr", "github.com/gerchowl/herdr")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.peer_summaries = vec![federated_peer(
+            "anvil",
+            "lars@anvil",
+            vec![remote_row("github.com/gerchowl/herdr", "fix/pty")],
+        )];
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 30));
+
+        // Right-click the self row (the two lines under the band header).
+        let header = app.state.view.servers_header_rect;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            header.x + 2,
+            header.y + 1,
+        ));
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        handle_context_menu_key(
+            &mut app.state,
+            &mut app.terminal_runtimes,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert_eq!(app.state.server_filter, Some(ServerFilter::Local));
+        assert!(!crate::ui::workspace_list_entries(&app.state)
+            .iter()
+            .any(|entry| matches!(entry, crate::ui::WorkspaceListEntry::Remote { .. })));
+
+        // Toggling the spaces scope (header click) clears the filter too.
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 30));
+        let list_rect = app.state.workspace_list_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            list_rect.x + 2,
+            list_rect.y,
+        ));
+        assert_eq!(app.state.spaces_panel_scope, PanelScope::Current);
+        assert_eq!(app.state.server_filter, None);
+    }
+
+    #[tokio::test]
+    async fn right_click_home_row_opens_no_menu() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.fleet_snapshot = Some(crate::peers::FleetSnapshotState {
+            origin: "mba22".into(),
+            peers: vec![federated_peer("anvil", "lars@anvil", vec![])],
+            received_at: std::time::Instant::now(),
+        });
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 30));
+
+        // The home row is the first card with a snapshot present. Its
+        // origin's workspaces are never in the spaces list, so "only this
+        // server" would always show nothing — no menu.
+        let card = app.state.view.server_card_areas[0].clone();
+        assert_eq!(card.target, crate::app::state::PeerSwitchRequest::Home);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            card.rect.x + 2,
+            card.rect.y,
+        ));
+        assert!(app.state.context_menu.is_none());
+        assert_eq!(app.state.mode, Mode::Terminal);
     }
 
     #[tokio::test]

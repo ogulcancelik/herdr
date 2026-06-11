@@ -672,12 +672,50 @@ pub struct ServerCardArea {
     pub rect: Rect,
 }
 
+/// Which cache a federated remote row in the spaces list reads from: a
+/// config-owned peer (live-polled `peer_summaries`) or a carried
+/// fleet-snapshot entry (render-only, freshness just decays). Selecting a
+/// row maps back onto the matching [`PeerSwitchRequest`] variant so both
+/// reuse the same switch path as the servers band.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemotePeerRef {
+    /// Index into `state.peer_summaries`.
+    Config { peer_idx: usize },
+    /// Index into `state.fleet_snapshot.peers`.
+    Snapshot { entry_idx: usize },
+}
+
+impl RemotePeerRef {
+    /// The switch request selecting this peer's row emits. Config peers
+    /// carry the workspace index for the best-effort remote pre-focus;
+    /// snapshot rows reuse the band's plain pass-through switch.
+    pub(crate) fn switch_request(self, ws_idx: usize) -> PeerSwitchRequest {
+        match self {
+            Self::Config { peer_idx } => PeerSwitchRequest::ConfigPeer { peer_idx, ws_idx },
+            Self::Snapshot { entry_idx } => PeerSwitchRequest::SnapshotPeer { entry_idx },
+        }
+    }
+}
+
+/// Spaces-list narrowing to a single server's workspaces (right-click a
+/// servers-band row, issue #46). Render/selection state only — never
+/// persisted; cleared via the same context menu or by toggling the
+/// spaces scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerFilter {
+    /// Only the local server's workspaces: every remote row hides.
+    Local,
+    /// Only this peer's remote rows. Matched by ssh target so the filter
+    /// stays pinned to the server across config-peer/snapshot re-indexing.
+    Peer { ssh_target: String },
+}
+
 /// Hit area of a federated remote workspace row in the spaces list.
 /// Clicking one requests a server switch instead of a workspace focus.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteCardArea {
-    /// Index into `state.peer_summaries`.
-    pub peer_idx: usize,
+    /// The peer cache entry this row reads from.
+    pub peer: RemotePeerRef,
     /// Index into that peer's `workspaces` summary vec.
     pub ws_idx: usize,
     pub rect: Rect,
@@ -1264,6 +1302,17 @@ pub enum ContextMenuKind {
         pane_id: PaneId,
         has_manual_label: bool,
     },
+    /// A servers-band row (#46): offers the per-server spaces filter.
+    Server {
+        /// The filter this row stands for (local server or one peer).
+        filter: ServerFilter,
+        /// This row's filter is the active one: the menu only offers the
+        /// clear.
+        is_filtered: bool,
+        /// Some server filter is active (possibly another row's): the menu
+        /// adds the clear entry alongside the narrowing.
+        any_filter: bool,
+    },
 }
 
 /// Right-click context menu state.
@@ -1338,6 +1387,13 @@ impl ContextMenuState {
                 "Zoom",
                 "Close pane",
             ],
+            ContextMenuKind::Server {
+                is_filtered: true, ..
+            } => &["Show all servers"],
+            ContextMenuKind::Server {
+                any_filter: true, ..
+            } => &["Show only this server", "Show all servers"],
+            ContextMenuKind::Server { .. } => &["Show only this server"],
         }
     }
 }
@@ -1459,6 +1515,10 @@ pub struct AppState {
     /// Scope of the `spaces` sidebar section: the full workspace list, or
     /// only the focused workspace's space group.
     pub spaces_panel_scope: PanelScope,
+    /// Spaces list narrowed to one server (right-click a servers-band
+    /// row). Never persisted — cleared via the same context menu or by
+    /// toggling the spaces scope.
+    pub server_filter: Option<ServerFilter>,
     pub request_open_existing_worktree: Option<usize>,
     pub request_new_workspace_cwd: Option<std::path::PathBuf>,
     pub request_remove_linked_worktree: Option<usize>,
@@ -1617,11 +1677,56 @@ impl AppState {
     }
 
     /// The sidebar section scopes, bundled for session-snapshot capture.
+    /// The server filter deliberately stays out: it is transient view
+    /// state, never persisted.
     pub(crate) fn panel_scopes(&self) -> PanelScopes {
         PanelScopes {
             agent: self.agent_panel_scope,
             servers: self.servers_panel_scope,
             spaces: self.spaces_panel_scope,
+        }
+    }
+
+    /// Federated peers feeding the spaces list's remote rows: every config
+    /// peer (live-polled), then carried fleet-snapshot entries not shadowed
+    /// by a config peer — dedup by ssh target, the polled entry wins. A
+    /// spoke has no config peers, so its whole carried fleet folds in;
+    /// render-only either way, snapshot freshness just decays (#46).
+    pub(crate) fn remote_peers(&self) -> Vec<(RemotePeerRef, &crate::peers::PeerSummaryState)> {
+        let mut peers: Vec<(RemotePeerRef, &crate::peers::PeerSummaryState)> = self
+            .peer_summaries
+            .iter()
+            .enumerate()
+            .map(|(peer_idx, peer)| (RemotePeerRef::Config { peer_idx }, peer))
+            .collect();
+        if let Some(snapshot) = self.fleet_snapshot.as_ref() {
+            peers.extend(
+                snapshot
+                    .peers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, entry)| {
+                        !self
+                            .peer_summaries
+                            .iter()
+                            .any(|config| config.ssh_target == entry.ssh_target)
+                    })
+                    .map(|(entry_idx, entry)| (RemotePeerRef::Snapshot { entry_idx }, entry)),
+            );
+        }
+        peers
+    }
+
+    /// Resolve a remote-row peer reference back to its cached summary.
+    pub(crate) fn remote_peer(
+        &self,
+        peer: RemotePeerRef,
+    ) -> Option<&crate::peers::PeerSummaryState> {
+        match peer {
+            RemotePeerRef::Config { peer_idx } => self.peer_summaries.get(peer_idx),
+            RemotePeerRef::Snapshot { entry_idx } => {
+                self.fleet_snapshot.as_ref()?.peers.get(entry_idx)
+            }
         }
     }
 
@@ -1847,6 +1952,7 @@ impl AppState {
             request_peer_switch: None,
             servers_panel_scope: PanelScope::All,
             spaces_panel_scope: PanelScope::All,
+            server_filter: None,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
             request_remove_linked_worktree: None,

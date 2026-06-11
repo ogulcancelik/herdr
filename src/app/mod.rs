@@ -481,6 +481,7 @@ impl App {
             request_peer_switch: None,
             servers_panel_scope: panel_scope_from_config(config.ui.servers_panel_scope),
             spaces_panel_scope: panel_scope_from_config(config.ui.spaces_panel_scope),
+            server_filter: None,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
             request_remove_linked_worktree: None,

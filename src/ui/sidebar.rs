@@ -440,9 +440,10 @@ pub(crate) enum WorkspaceListEntry {
     },
     /// A workspace on a federated peer server, folded into the project group
     /// it shares with local checkouts (indented) or trailing the list as its
-    /// own project (unindented). Selecting one switches servers.
+    /// own project (unindented). Selecting one switches servers. Fed from
+    /// config-peer summaries AND carried fleet-snapshot entries (#46).
     Remote {
-        peer_idx: usize,
+        peer: crate::app::state::RemotePeerRef,
         ws_idx: usize,
         indented: bool,
     },
@@ -572,7 +573,57 @@ pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> 
             &grouped_keys,
         );
     }
-    fold_remote_entries(app, &mut entries);
+    // The per-server filter (#46) has the final say, in this single source
+    // of the rendered list so hit-areas, scroll, and selection clamp stay
+    // consistent. `Local` keeps the local entries and folds no remote rows.
+    // `Peer` replaces the list with that one peer's rows. Without a filter
+    // every federated peer folds in as usual.
+    match app.server_filter.as_ref() {
+        Some(crate::app::state::ServerFilter::Local) => {}
+        Some(crate::app::state::ServerFilter::Peer { ssh_target }) => {
+            entries = single_peer_entries(app, ssh_target);
+        }
+        None => fold_remote_entries(app, &mut entries),
+    }
+    entries
+}
+
+/// Server filter `only <peer>`: the spaces list becomes that peer's remote
+/// rows alone, grouped by project — leader row unindented (carries the
+/// project label), members indented — exactly like remote-only trailing
+/// groups. An unresolvable target (peer dropped from config, snapshot
+/// replaced) renders an empty list rather than silently un-filtering; the
+/// scope toggle or the context menu clears the filter.
+fn single_peer_entries(app: &AppState, ssh_target: &str) -> Vec<WorkspaceListEntry> {
+    let Some((peer_ref, peer)) = app
+        .remote_peers()
+        .into_iter()
+        .find(|(_, peer)| peer.ssh_target == ssh_target)
+    else {
+        return Vec::new();
+    };
+
+    let mut by_project: Vec<(&str, Vec<usize>)> = Vec::new();
+    for (ws_idx, ws) in peer.workspaces.iter().enumerate() {
+        let Some(project_key) = ws.project_key.as_deref() else {
+            continue;
+        };
+        match by_project.iter_mut().find(|(key, _)| *key == project_key) {
+            Some((_, rows)) => rows.push(ws_idx),
+            None => by_project.push((project_key, vec![ws_idx])),
+        }
+    }
+
+    let mut entries = Vec::new();
+    for (_, rows) in by_project {
+        for (offset, ws_idx) in rows.into_iter().enumerate() {
+            entries.push(WorkspaceListEntry::Remote {
+                peer: peer_ref,
+                ws_idx,
+                indented: offset > 0,
+            });
+        }
+    }
     entries
 }
 
@@ -610,12 +661,16 @@ fn retain_focused_space_group(
 /// Fold federated peer workspaces into the spaces list: rows whose
 /// project_key matches a local checkout splice in (indented) after that
 /// project's block; remote-only projects trail the list grouped together.
-/// Remote rows of a collapsed local group stay hidden with it.
+/// Remote rows of a collapsed local group stay hidden with it. Peers come
+/// from [`AppState::remote_peers`]: config-peer summaries first, then any
+/// carried fleet-snapshot entries a config peer does not shadow (#46).
 fn fold_remote_entries(app: &AppState, entries: &mut Vec<WorkspaceListEntry>) {
-    // project_key -> remote rows, in (config peer order, summary order).
-    let mut remotes_by_project = std::collections::HashMap::<&str, Vec<(usize, usize)>>::new();
+    use crate::app::state::RemotePeerRef;
+    // project_key -> remote rows, in (peer order, summary order).
+    let mut remotes_by_project =
+        std::collections::HashMap::<&str, Vec<(RemotePeerRef, usize)>>::new();
     let mut project_order = Vec::<&str>::new();
-    for (peer_idx, peer) in app.peer_summaries.iter().enumerate() {
+    for (peer_ref, peer) in app.remote_peers() {
         for (ws_idx, ws) in peer.workspaces.iter().enumerate() {
             let Some(project_key) = ws.project_key.as_deref() else {
                 continue;
@@ -624,7 +679,7 @@ fn fold_remote_entries(app: &AppState, entries: &mut Vec<WorkspaceListEntry>) {
                 project_order.push(project_key);
                 Vec::new()
             });
-            rows.push((peer_idx, ws_idx));
+            rows.push((peer_ref, ws_idx));
         }
     }
     if remotes_by_project.is_empty() {
@@ -665,11 +720,11 @@ fn fold_remote_entries(app: &AppState, entries: &mut Vec<WorkspaceListEntry>) {
             continue;
         }
         let rows = &remotes_by_project[project_key];
-        for (offset, (peer_idx, ws_idx)) in rows.iter().enumerate() {
+        for (offset, (peer_ref, ws_idx)) in rows.iter().enumerate() {
             entries.insert(
                 end + 1 + offset,
                 WorkspaceListEntry::Remote {
-                    peer_idx: *peer_idx,
+                    peer: *peer_ref,
                     ws_idx: *ws_idx,
                     indented: true,
                 },
@@ -689,9 +744,9 @@ fn fold_remote_entries(app: &AppState, entries: &mut Vec<WorkspaceListEntry>) {
         if block_end.contains_key(project_key) {
             continue;
         }
-        for (offset, (peer_idx, ws_idx)) in remotes_by_project[project_key].iter().enumerate() {
+        for (offset, (peer_ref, ws_idx)) in remotes_by_project[project_key].iter().enumerate() {
             entries.push(WorkspaceListEntry::Remote {
-                peer_idx: *peer_idx,
+                peer: *peer_ref,
                 ws_idx: *ws_idx,
                 indented: offset > 0,
             });
@@ -715,15 +770,31 @@ fn remote_status_dot(
     }
 }
 
+/// Display name of the active server filter for the spaces header, if one
+/// is set: the local host name, or the filtered peer's host (ssh target
+/// when the peer no longer resolves — the filter still narrows the list).
+fn server_filter_label(app: &AppState) -> Option<String> {
+    match app.server_filter.as_ref()? {
+        crate::app::state::ServerFilter::Local => Some(crate::app::short_host_name()),
+        crate::app::state::ServerFilter::Peer { ssh_target } => Some(
+            app.remote_peers()
+                .into_iter()
+                .find(|(_, peer)| peer.ssh_target == *ssh_target)
+                .map(|(_, peer)| peer.host.clone().unwrap_or_else(|| peer.peer.clone()))
+                .unwrap_or_else(|| ssh_target.clone()),
+        ),
+    }
+}
+
 /// Display label for a remote row: `host:branch` (matched/indented rows) or
 /// `project · host:branch` for rows that lead a remote-only project group.
 pub(crate) fn remote_entry_label(
     app: &AppState,
-    peer_idx: usize,
+    peer_ref: crate::app::state::RemotePeerRef,
     ws_idx: usize,
     indented: bool,
 ) -> String {
-    let Some(peer) = app.peer_summaries.get(peer_idx) else {
+    let Some(peer) = app.remote_peer(peer_ref) else {
         return String::new();
     };
     let Some(ws) = peer.workspaces.get(ws_idx) else {
@@ -1048,7 +1119,7 @@ pub(crate) fn compute_workspace_list_areas(
                 row_y = row_y.saturating_add(row_height + gap);
             }
             WorkspaceListEntry::Remote {
-                peer_idx,
+                peer,
                 ws_idx,
                 indented,
             } => {
@@ -1061,7 +1132,7 @@ pub(crate) fn compute_workspace_list_areas(
                     break;
                 }
                 remote_cards.push(crate::app::state::RemoteCardArea {
-                    peer_idx: *peer_idx,
+                    peer: *peer,
                     ws_idx: *ws_idx,
                     rect: Rect::new(body.x, row_y, body.width, 1),
                     indented: *indented,
@@ -1329,6 +1400,37 @@ pub(crate) fn compute_server_section_areas(
         cards.push(crate::app::state::ServerCardArea { target, rect });
     }
     (header_rect, cards)
+}
+
+/// The servers-band row under (col, row): `Some(None)` is the local self
+/// row, `Some(Some(target))` a switchable row. Right-click uses this for
+/// the per-server spaces filter (#46) — unlike the left-click cards, the
+/// self row matters here, so it cannot reuse `compute_server_section_areas`
+/// (which deliberately gives self no hit-area).
+pub(crate) fn server_band_slot_at(
+    app: &AppState,
+    area: Rect,
+    col: u16,
+    row: u16,
+) -> Option<Option<crate::app::state::PeerSwitchRequest>> {
+    let (servers_area, _) = carve_servers_band(
+        workspace_list_rect(area, app.sidebar_section_split, app.sidebar_pane_gap, 0),
+        servers_section_height(app),
+    );
+    if servers_area == Rect::default() || servers_area.height == 0 {
+        return None;
+    }
+    let rows_area = server_band_rows_area(servers_area);
+    for (slot, target) in visible_server_band_slots(app).into_iter().enumerate() {
+        let Some(rect) = server_slot_rect(rows_area, slot as u16) else {
+            break;
+        };
+        if col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
+        {
+            return Some(target);
+        }
+    }
+    None
 }
 
 fn render_servers_section(app: &AppState, frame: &mut Frame, area: Rect, is_navigating: bool) {
@@ -1775,11 +1877,20 @@ fn render_workspace_list(
     let list_bottom = (area.y + area.height).saturating_sub(u16::from(has_footer));
     if area.height > 0 {
         let header_rect = Rect::new(area.x, area.y, area.width, 1);
+        // An active server filter (#46) announces itself in the header so a
+        // narrowed list never reads like the full fleet.
+        let header_label = match server_filter_label(app) {
+            Some(server) => format!(" spaces · only {server}"),
+            None => " spaces".to_string(),
+        };
         frame.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                " spaces",
-                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
-            )])),
+            Paragraph::new(clamp_line(
+                Line::from(vec![Span::styled(
+                    header_label,
+                    Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+                )]),
+                area.width,
+            )),
             header_rect,
         );
         let toggle_rect = panel_scope_toggle_rect(header_rect, app.spaces_panel_scope);
@@ -1944,7 +2055,7 @@ fn render_workspace_list(
     }
 
     for card in &app.view.remote_card_areas {
-        let Some(peer) = app.peer_summaries.get(card.peer_idx) else {
+        let Some(peer) = app.remote_peer(card.peer) else {
             continue;
         };
         let Some(remote_ws) = peer.workspaces.get(card.ws_idx) else {
@@ -1955,7 +2066,7 @@ fn render_workspace_list(
         }
         let stale = peer.is_stale() || peer.error.is_some();
         let (icon, icon_style) = remote_status_dot(remote_ws.status, p);
-        let label = remote_entry_label(app, card.peer_idx, card.ws_idx, card.indented);
+        let label = remote_entry_label(app, card.peer, card.ws_idx, card.indented);
         let max_label =
             (card.rect.width as usize).saturating_sub(if card.indented { 5 } else { 3 });
         let label = if label.len() > max_label {
@@ -2759,7 +2870,7 @@ mod tests {
                     indented: false
                 },
                 WorkspaceListEntry::Remote {
-                    peer_idx: 0,
+                    peer: crate::app::state::RemotePeerRef::Config { peer_idx: 0 },
                     ws_idx: 0,
                     indented: true
                 },
@@ -2769,7 +2880,15 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(remote_entry_label(&app, 0, 0, true), "anvil:fix/pty");
+        assert_eq!(
+            remote_entry_label(
+                &app,
+                crate::app::state::RemotePeerRef::Config { peer_idx: 0 },
+                0,
+                true
+            ),
+            "anvil:fix/pty"
+        );
     }
 
     #[test]
@@ -2806,23 +2925,27 @@ mod tests {
                     indented: false
                 },
                 WorkspaceListEntry::Remote {
-                    peer_idx: 0,
+                    peer: crate::app::state::RemotePeerRef::Config { peer_idx: 0 },
                     ws_idx: 0,
                     indented: false
                 },
                 WorkspaceListEntry::Remote {
-                    peer_idx: 0,
+                    peer: crate::app::state::RemotePeerRef::Config { peer_idx: 0 },
                     ws_idx: 1,
                     indented: true
                 },
             ]
         );
         // The leader row carries the project label.
+        let config_peer = crate::app::state::RemotePeerRef::Config { peer_idx: 0 };
         assert_eq!(
-            remote_entry_label(&app, 0, 0, false),
+            remote_entry_label(&app, config_peer, 0, false),
             "dotfiles · sage:dotfiles"
         );
-        assert_eq!(remote_entry_label(&app, 0, 1, true), "sage:vm-dev");
+        assert_eq!(
+            remote_entry_label(&app, config_peer, 1, true),
+            "sage:vm-dev"
+        );
     }
 
     #[test]
@@ -2864,6 +2987,345 @@ mod tests {
         assert!(!collapsed
             .iter()
             .any(|entry| matches!(entry, WorkspaceListEntry::Remote { .. })));
+    }
+
+    fn snapshot_with_peers(
+        origin: &str,
+        peers: Vec<crate::peers::PeerSummaryState>,
+    ) -> crate::peers::FleetSnapshotState {
+        crate::peers::FleetSnapshotState {
+            origin: origin.to_string(),
+            peers,
+            received_at: std::time::Instant::now(),
+        }
+    }
+
+    #[test]
+    fn snapshot_peer_workspaces_fold_into_spaces_list_only_while_snapshot_present() {
+        use crate::app::state::RemotePeerRef;
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![workspace_with_project_key(
+            "herdr",
+            "github.com/gerchowl/herdr",
+        )];
+        // The spoke case: zero config peers, a carried snapshot whose peer
+        // has a row matching the local project plus a remote-only project.
+        app.fleet_snapshot = Some(snapshot_with_peers(
+            "mba22",
+            vec![peer_with_workspaces(
+                "anvil",
+                vec![
+                    remote_summary(
+                        "herdr",
+                        Some("github.com/gerchowl/herdr"),
+                        Some("herdr"),
+                        Some("fix/pty"),
+                    ),
+                    remote_summary(
+                        "dotfiles",
+                        Some("github.com/gerchowl/dotfiles"),
+                        Some("dotfiles"),
+                        None,
+                    ),
+                ],
+            )],
+        ));
+
+        let entries = workspace_list_entries(&app);
+        assert_eq!(
+            entries,
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false
+                },
+                WorkspaceListEntry::Remote {
+                    peer: RemotePeerRef::Snapshot { entry_idx: 0 },
+                    ws_idx: 0,
+                    indented: true
+                },
+                WorkspaceListEntry::Remote {
+                    peer: RemotePeerRef::Snapshot { entry_idx: 0 },
+                    ws_idx: 1,
+                    indented: false
+                },
+            ]
+        );
+        // Snapshot rows label like config-peer rows: carried host + branch.
+        assert_eq!(
+            remote_entry_label(&app, RemotePeerRef::Snapshot { entry_idx: 0 }, 0, true),
+            "anvil:fix/pty"
+        );
+
+        // No snapshot, no config peers: nothing remote folds in.
+        app.fleet_snapshot = None;
+        assert!(!workspace_list_entries(&app)
+            .iter()
+            .any(|entry| matches!(entry, WorkspaceListEntry::Remote { .. })));
+    }
+
+    #[test]
+    fn config_peer_shadows_matching_snapshot_entry() {
+        use crate::app::state::RemotePeerRef;
+        let mut app = crate::app::state::AppState::test_new();
+        let herdr_row = || {
+            remote_summary(
+                "herdr",
+                Some("github.com/gerchowl/herdr"),
+                Some("herdr"),
+                Some("fix/pty"),
+            )
+        };
+        // Defensive hub-meets-snapshot case: "anvil" is both a live-polled
+        // config peer and a carried snapshot entry (same ssh target). The
+        // polled entry wins; the snapshot-only "sage" still folds in after.
+        app.peer_summaries = vec![peer_with_workspaces("anvil", vec![herdr_row()])];
+        app.fleet_snapshot = Some(snapshot_with_peers(
+            "mba22",
+            vec![
+                peer_with_workspaces("anvil", vec![herdr_row()]),
+                peer_with_workspaces(
+                    "sage",
+                    vec![remote_summary(
+                        "dotfiles",
+                        Some("github.com/gerchowl/dotfiles"),
+                        Some("dotfiles"),
+                        None,
+                    )],
+                ),
+            ],
+        ));
+
+        let remote_peers: Vec<RemotePeerRef> = workspace_list_entries(&app)
+            .into_iter()
+            .filter_map(|entry| match entry {
+                WorkspaceListEntry::Remote { peer, .. } => Some(peer),
+                WorkspaceListEntry::Workspace { .. } => None,
+            })
+            .collect();
+        assert_eq!(
+            remote_peers,
+            vec![
+                RemotePeerRef::Config { peer_idx: 0 },
+                RemotePeerRef::Snapshot { entry_idx: 1 },
+            ],
+            "the duplicated anvil renders once, from the polled config entry"
+        );
+    }
+
+    #[test]
+    fn server_filter_local_hides_every_remote_row() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![workspace_with_project_key(
+            "herdr",
+            "github.com/gerchowl/herdr",
+        )];
+        app.peer_summaries = vec![peer_with_workspaces(
+            "anvil",
+            vec![remote_summary(
+                "herdr",
+                Some("github.com/gerchowl/herdr"),
+                Some("herdr"),
+                Some("fix/pty"),
+            )],
+        )];
+        app.fleet_snapshot = Some(snapshot_with_peers(
+            "mba22",
+            vec![peer_with_workspaces(
+                "sage",
+                vec![remote_summary(
+                    "dotfiles",
+                    Some("github.com/gerchowl/dotfiles"),
+                    Some("dotfiles"),
+                    None,
+                )],
+            )],
+        ));
+
+        app.server_filter = Some(crate::app::state::ServerFilter::Local);
+        assert_eq!(
+            workspace_list_entries(&app),
+            vec![WorkspaceListEntry::Workspace {
+                ws_idx: 0,
+                indented: false
+            }],
+            "local filter keeps local workspaces and folds no remote rows"
+        );
+    }
+
+    #[test]
+    fn server_filter_peer_shows_only_that_peers_rows_grouped_by_project() {
+        use crate::app::state::RemotePeerRef;
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![workspace_with_project_key(
+            "herdr",
+            "github.com/gerchowl/herdr",
+        )];
+        app.peer_summaries = vec![peer_with_workspaces(
+            "anvil",
+            vec![remote_summary(
+                "herdr",
+                Some("github.com/gerchowl/herdr"),
+                Some("herdr"),
+                Some("fix/pty"),
+            )],
+        )];
+        // Interleaved projects (a, b, a) regroup under their leaders.
+        app.fleet_snapshot = Some(snapshot_with_peers(
+            "mba22",
+            vec![peer_with_workspaces(
+                "sage",
+                vec![
+                    remote_summary(
+                        "dotfiles",
+                        Some("github.com/gerchowl/dotfiles"),
+                        Some("dotfiles"),
+                        None,
+                    ),
+                    remote_summary(
+                        "herdr",
+                        Some("github.com/gerchowl/herdr"),
+                        Some("herdr"),
+                        Some("main"),
+                    ),
+                    remote_summary(
+                        "dotfiles-wt",
+                        Some("github.com/gerchowl/dotfiles"),
+                        Some("dotfiles"),
+                        Some("vm-dev"),
+                    ),
+                ],
+            )],
+        ));
+
+        app.server_filter = Some(crate::app::state::ServerFilter::Peer {
+            ssh_target: "sage".into(),
+        });
+        let sage = RemotePeerRef::Snapshot { entry_idx: 0 };
+        assert_eq!(
+            workspace_list_entries(&app),
+            vec![
+                WorkspaceListEntry::Remote {
+                    peer: sage,
+                    ws_idx: 0,
+                    indented: false
+                },
+                WorkspaceListEntry::Remote {
+                    peer: sage,
+                    ws_idx: 2,
+                    indented: true
+                },
+                WorkspaceListEntry::Remote {
+                    peer: sage,
+                    ws_idx: 1,
+                    indented: false
+                },
+            ],
+            "only sage's rows, projects regrouped with unindented leaders"
+        );
+
+        // A filter whose server no longer resolves narrows to nothing
+        // rather than silently un-filtering.
+        app.server_filter = Some(crate::app::state::ServerFilter::Peer {
+            ssh_target: "gone".into(),
+        });
+        assert!(workspace_list_entries(&app).is_empty());
+    }
+
+    #[test]
+    fn server_filter_clamps_scroll_and_hit_areas_to_filtered_entries() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![
+            workspace_with_project_key("herdr", "github.com/gerchowl/herdr"),
+            workspace_with_project_key("other", "github.com/gerchowl/other"),
+        ];
+        app.peer_summaries = vec![peer_with_workspaces(
+            "anvil",
+            vec![remote_summary(
+                "herdr",
+                Some("github.com/gerchowl/herdr"),
+                Some("herdr"),
+                Some("fix/pty"),
+            )],
+        )];
+        let area = Rect::new(0, 0, 30, 40);
+
+        // Peer filter: one remote entry — scroll clamps to it, and the hit
+        // areas (same single source) carry only that remote card.
+        app.server_filter = Some(crate::app::state::ServerFilter::Peer {
+            ssh_target: "anvil".into(),
+        });
+        assert_eq!(workspace_list_entries(&app).len(), 1);
+        assert_eq!(normalized_workspace_scroll(&app, area, 99), 0);
+        let (cards, remote_cards) = compute_workspace_list_areas(&app, area);
+        assert!(cards.is_empty());
+        assert_eq!(remote_cards.len(), 1);
+
+        // Local filter: both local cards, no remote ones.
+        app.server_filter = Some(crate::app::state::ServerFilter::Local);
+        assert_eq!(normalized_workspace_scroll(&app, area, 99), 1);
+        let (cards, remote_cards) = compute_workspace_list_areas(&app, area);
+        assert_eq!(cards.len(), 2);
+        assert!(remote_cards.is_empty());
+    }
+
+    #[test]
+    fn server_band_slot_at_resolves_self_and_peer_rows() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.peer_summaries = vec![peer_with_workspaces("anvil", vec![])];
+        let area = Rect::new(0, 0, 30, 40);
+
+        let (header, cards) = compute_server_section_areas(&app, area);
+        // The self row spans the two lines under the header.
+        assert_eq!(
+            server_band_slot_at(&app, area, header.x + 2, header.y + 1),
+            Some(None)
+        );
+        // The peer row resolves to its switch target.
+        assert_eq!(
+            server_band_slot_at(&app, area, cards[0].rect.x + 2, cards[0].rect.y),
+            Some(Some(crate::app::state::PeerSwitchRequest::ConfigPeer {
+                peer_idx: 0,
+                ws_idx: 0,
+            }))
+        );
+        // The header row itself is no server row.
+        assert_eq!(server_band_slot_at(&app, area, header.x, header.y), None);
+    }
+
+    #[test]
+    fn spaces_header_announces_active_server_filter() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = crate::app::Mode::Terminal;
+        app.peer_summaries = vec![peer_with_workspaces("anvil", vec![])];
+        app.server_filter = Some(crate::app::state::ServerFilter::Peer {
+            ssh_target: "anvil".into(),
+        });
+
+        let area = Rect::new(0, 0, 30, 40);
+        let mut terminal =
+            Terminal::new(TestBackend::new(30, 40)).expect("test terminal should initialize");
+        let runtimes = TerminalRuntimeRegistry::new();
+        terminal
+            .draw(|frame| render_sidebar(&app, &runtimes, frame, area))
+            .expect("sidebar should render");
+
+        let (ws_area, _) =
+            expanded_sidebar_sections(area, app.sidebar_section_split, app.sidebar_pane_gap);
+        let (_, list_area) = carve_servers_band(ws_area, servers_section_height(&app));
+        let buffer = terminal.backend().buffer();
+        let header_text: String = (list_area.x..list_area.x + list_area.width)
+            .map(|x| buffer[(x, list_area.y)].symbol().to_string())
+            .collect();
+        assert!(
+            header_text.starts_with(" spaces · only anvil"),
+            "{header_text:?}"
+        );
     }
 
     #[test]
@@ -3518,7 +3980,7 @@ mod tests {
                     indented: false,
                 },
                 WorkspaceListEntry::Remote {
-                    peer_idx: 0,
+                    peer: crate::app::state::RemotePeerRef::Config { peer_idx: 0 },
                     ws_idx: 0,
                     indented: true,
                 },
