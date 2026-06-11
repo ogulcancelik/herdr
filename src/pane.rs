@@ -263,6 +263,14 @@ fn foreground_group_changed(
         && (foreground_pgid.is_some() || last_foreground_pgid.is_some())
 }
 
+fn should_skip_process_probe_for_lifecycle_authority(
+    full_lifecycle_authority_active: bool,
+    process_exit_pending: bool,
+    release_pending: bool,
+) -> bool {
+    full_lifecycle_authority_active && !process_exit_pending && !release_pending
+}
+
 fn should_probe_foreground_job(input: ProcessProbeInput) -> bool {
     if input.pending_foreground_shell_clear || input.pending_restore_probe {
         return true;
@@ -457,14 +465,24 @@ fn spawn_basic_detection_task(
             let pid = child_pid.load(Ordering::Acquire);
             let mut agent_changed = false;
             let mut agent = agent_presence.current_agent();
+            let process_exit_pending = pending_foreground_shell_clear
+                && agent.is_some()
+                && !foreground_shell_exit_reported;
+            let lifecycle_authority_active =
+                full_lifecycle_authority_active.load(Ordering::Acquire);
             let foreground_pgid = (pid > 0)
                 .then(|| crate::detect::foreground_process_group_id(pid))
                 .flatten();
             let process_group_changed =
                 foreground_group_changed(foreground_pgid, last_foreground_pgid);
             let should_check_process = pid > 0
+                && !should_skip_process_probe_for_lifecycle_authority(
+                    lifecycle_authority_active,
+                    process_exit_pending,
+                    suppressed_agent.is_some(),
+                )
                 && should_probe_foreground_job(ProcessProbeInput {
-                    current_agent: agent_presence.current_agent(),
+                    current_agent: agent,
                     suppressed_agent,
                     foreground_pgid,
                     last_foreground_pgid,
@@ -563,7 +581,7 @@ fn spawn_basic_detection_task(
                 && agent.is_some()
                 && !foreground_shell_exit_reported;
 
-            if full_lifecycle_authority_active.load(Ordering::Acquire) && !process_exited {
+            if lifecycle_authority_active && !process_exited {
                 pending_idle.clear();
                 continue;
             }
@@ -1796,14 +1814,25 @@ impl PaneRuntime {
                     }
                     release_was_active = suppressed_agent.is_some();
                     let pid = child_pid.load(Ordering::Acquire);
+                    let mut agent = agent_presence.current_agent();
+                    let process_exit_pending = pending_foreground_shell_clear
+                        && agent.is_some()
+                        && !foreground_shell_exit_reported;
+                    let lifecycle_authority_active =
+                        full_lifecycle_authority_active_for_task.load(Ordering::Acquire);
                     let foreground_pgid = (pid > 0)
                         .then(|| detect::foreground_process_group_id(pid))
                         .flatten();
                     let process_group_changed =
                         foreground_group_changed(foreground_pgid, last_foreground_pgid);
                     let should_check_process = pid > 0
+                        && !should_skip_process_probe_for_lifecycle_authority(
+                            lifecycle_authority_active,
+                            process_exit_pending,
+                            suppressed_agent.is_some(),
+                        )
                         && should_probe_foreground_job(ProcessProbeInput {
-                            current_agent: agent_presence.current_agent(),
+                            current_agent: agent,
                             suppressed_agent,
                             foreground_pgid,
                             last_foreground_pgid,
@@ -1816,7 +1845,6 @@ impl PaneRuntime {
                         });
 
                     let mut agent_changed = false;
-                    let mut agent = agent_presence.current_agent();
                     if should_check_process {
                         last_process_check = now;
                         let had_process_probe = has_process_probe;
@@ -1941,9 +1969,7 @@ impl PaneRuntime {
                         && agent.is_some()
                         && !foreground_shell_exit_reported;
 
-                    if full_lifecycle_authority_active_for_task.load(Ordering::Acquire)
-                        && !process_exited
-                    {
+                    if lifecycle_authority_active && !process_exited {
                         pending_idle.clear();
                         continue;
                     }
@@ -2099,9 +2125,10 @@ impl PaneRuntime {
     }
 
     pub fn set_full_lifecycle_authority_active(&self, active: bool) {
-        self.full_lifecycle_authority_active
-            .store(active, Ordering::Release);
-        if active {
+        let previous = self
+            .full_lifecycle_authority_active
+            .swap(active, Ordering::AcqRel);
+        if active && !previous {
             self.detect_reset_notify.notify_one();
         }
     }
@@ -3017,6 +3044,26 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_authority_skips_normal_process_probe() {
+        assert!(should_skip_process_probe_for_lifecycle_authority(
+            true, false, false
+        ));
+        assert!(!should_skip_process_probe_for_lifecycle_authority(
+            false, false, false
+        ));
+    }
+
+    #[test]
+    fn lifecycle_authority_preserves_process_exit_and_release_probes() {
+        assert!(!should_skip_process_probe_for_lifecycle_authority(
+            true, true, false
+        ));
+        assert!(!should_skip_process_probe_for_lifecycle_authority(
+            true, false, true
+        ));
+    }
+
+    #[test]
     fn pending_release_forces_initial_process_probe() {
         assert!(should_probe_foreground_job(ProcessProbeInput {
             current_agent: Some(Agent::Codex),
@@ -3292,6 +3339,50 @@ mod tests {
         let changed = presence.observe_process_probe(None);
         assert!(changed, "last confirmation miss should clear the agent");
         assert_eq!(presence.current_agent(), None);
+    }
+
+    #[tokio::test]
+    async fn set_full_lifecycle_authority_active_notifies_only_on_activation_transitions() {
+        let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
+        let reset_notify = runtime.agent_detection_reset_notify_for_test();
+
+        runtime.set_full_lifecycle_authority_active(true);
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            reset_notify.notified(),
+        )
+        .await
+        .expect("false-to-true transition should notify detection reset");
+
+        runtime.set_full_lifecycle_authority_active(true);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                reset_notify.notified()
+            )
+            .await
+            .is_err(),
+            "repeated true-to-true sync should not notify detection reset"
+        );
+
+        runtime.set_full_lifecycle_authority_active(false);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                reset_notify.notified()
+            )
+            .await
+            .is_err(),
+            "true-to-false transition should not notify detection reset"
+        );
+
+        runtime.set_full_lifecycle_authority_active(true);
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            reset_notify.notified(),
+        )
+        .await
+        .expect("re-entering active authority should notify detection reset");
     }
 
     #[tokio::test]
