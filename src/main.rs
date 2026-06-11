@@ -342,6 +342,7 @@ fn exit_if_nested_disabled(config: &config::Config) {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum AttachLeg {
     /// Local server/client attach (auto-detect launch).
     Local,
@@ -366,33 +367,153 @@ fn run_attach_legs(first: AttachLeg) -> io::Result<()> {
     std::env::set_var(client::SWITCH_FILE_ENV_VAR, &switch_file);
 
     let mut leg = first;
+    // The leg to bounce back to if the NEXT one fails to establish (#63): the
+    // server the user switched away from. While set, a leg that dies before
+    // its client attaches re-attaches `previous` with a failure notice instead
+    // of stranding the user at a raw shell.
+    let mut previous: Option<(AttachLeg, String)> = None;
+    // Whether some leg held the alternate screen for a seamless swap (#63).
+    // Once a switch fires, a dying chain must reclaim the host terminal.
+    let mut handoff_held = false;
     loop {
         let result = match &leg {
             AttachLeg::Local => server::autodetect::auto_detect_launch(),
             AttachLeg::Remote(launch) => remote::run_remote(launch.clone()),
         };
+        // The notice (if any) was a one-shot for this leg's attach; consume it
+        // so a later switch off this leg does not re-show it.
+        std::env::remove_var(client::SWITCH_NOTICE_ENV_VAR);
 
-        match client::take_switch_target(&switch_file) {
-            // The reserved home target re-attaches locally: the way home
-            // from a spoke is client knowledge, not server-side ssh config.
-            Some(switch) if switch.target == protocol::HOME_SWITCH_TARGET => {
-                leg = AttachLeg::Local;
+        let switch = client::take_switch_target(&switch_file);
+        match decide_next_leg(&leg, switch, result, previous.take(), handoff_held) {
+            LegStep::Switch {
+                next,
+                previous: prev,
+            } => {
+                handoff_held = true;
+                previous = Some(prev);
+                leg = next;
             }
-            Some(switch) => {
-                let keybindings = match &leg {
-                    AttachLeg::Remote(launch) => launch.keybindings,
-                    // Match the CLI's --remote-keybindings default.
-                    AttachLeg::Local => remote::RemoteKeybindings::Local,
-                };
-                leg = AttachLeg::Remote(remote::RemoteLaunch {
-                    target: switch.target,
-                    keybindings,
-                    live_handoff: false,
-                    fleet: switch.fleet,
-                });
+            LegStep::FallBack {
+                to,
+                notice,
+                previous: prev,
+            } => {
+                std::env::set_var(client::SWITCH_NOTICE_ENV_VAR, notice);
+                previous = prev;
+                leg = to;
             }
-            None => return result,
+            LegStep::Finish {
+                result,
+                restore_terminal,
+            } => {
+                // A switch may have held the alternate screen for the seamless
+                // swap (#63). If the chain dies with nothing left to reclaim
+                // the screen, restore the host terminal so the user is not
+                // stranded in a frozen alt-screen with raw mode on.
+                if restore_terminal {
+                    client::force_restore_host_terminal();
+                }
+                return result;
+            }
         }
+    }
+}
+
+/// What the leg loop does after one leg ends. Pure decision — no I/O — so the
+/// switch / fall-back / finish branching (#63) is unit-testable.
+enum LegStep {
+    /// The leg requested a switch: run `next`, remembering `previous` to fall
+    /// back to if `next` fails to establish.
+    Switch {
+        next: AttachLeg,
+        previous: (AttachLeg, String),
+    },
+    /// The switch leg failed to establish: re-attach `to` (the previous
+    /// server) with `notice` so the user lands back, told why.
+    FallBack {
+        to: AttachLeg,
+        notice: String,
+        previous: Option<(AttachLeg, String)>,
+    },
+    /// The chain is done (clean exit, or a failure with nowhere to fall back).
+    Finish {
+        result: io::Result<()>,
+        restore_terminal: bool,
+    },
+}
+
+fn decide_next_leg(
+    current: &AttachLeg,
+    switch: Option<client::RecordedSwitch>,
+    result: io::Result<()>,
+    previous: Option<(AttachLeg, String)>,
+    handoff_held: bool,
+) -> LegStep {
+    match switch {
+        // The reserved home target re-attaches locally: the way home from a
+        // spoke is client knowledge, not server-side ssh config.
+        Some(switch) if switch.target == protocol::HOME_SWITCH_TARGET => LegStep::Switch {
+            previous: (current.clone(), switch_failure_label(&AttachLeg::Local)),
+            next: AttachLeg::Local,
+        },
+        Some(switch) => {
+            let keybindings = match current {
+                AttachLeg::Remote(launch) => launch.keybindings,
+                // Match the CLI's --remote-keybindings default.
+                AttachLeg::Local => remote::RemoteKeybindings::Local,
+            };
+            let next = AttachLeg::Remote(remote::RemoteLaunch {
+                target: switch.target,
+                keybindings,
+                live_handoff: false,
+                fleet: switch.fleet,
+            });
+            LegStep::Switch {
+                previous: (current.clone(), switch_failure_label(&next)),
+                next,
+            }
+        }
+        // No switch requested: the leg exited cleanly or FAILED to establish.
+        // A failure with a previous leg on hand is a failed switch — bounce
+        // back with the reason as a top-right notice (#63), never strand at a
+        // shell. A clean exit, or a failure with nowhere to fall back, ends.
+        None => match (result, previous) {
+            (Err(err), Some((fallback, target_label))) => LegStep::FallBack {
+                notice: format!(
+                    "switch to {target_label} failed: {}",
+                    switch_failure_reason(&err)
+                ),
+                to: fallback,
+                previous: None,
+            },
+            (result, _) => LegStep::Finish {
+                // A held alt-screen (a switch fired earlier in the chain) that
+                // ends on an error has no leg left to reclaim the screen.
+                restore_terminal: result.is_err() && handoff_held,
+                result,
+            },
+        },
+    }
+}
+
+/// Display name of a switch target for the failure notice (#63): the remote
+/// ssh target, or "home" for the reserved local re-attach.
+fn switch_failure_label(leg: &AttachLeg) -> String {
+    match leg {
+        AttachLeg::Local => "home".to_string(),
+        AttachLeg::Remote(launch) => launch.target.clone(),
+    }
+}
+
+/// A concise, single-line reason from a failed leg launch for the notice.
+fn switch_failure_reason(err: &io::Error) -> String {
+    let text = err.to_string();
+    let line = text.lines().next().unwrap_or(&text).trim();
+    if line.is_empty() {
+        "connection failed".to_string()
+    } else {
+        line.to_string()
     }
 }
 
@@ -780,6 +901,120 @@ mod tests {
     fn nested_herdr_blocks_when_env_is_set() {
         let config = config::Config::default();
         assert!(should_block_nested_for_env(&config, Some(HERDR_ENV_VALUE)));
+    }
+
+    #[test]
+    fn switch_failure_label_names_the_target() {
+        assert_eq!(switch_failure_label(&AttachLeg::Local), "home");
+        let leg = AttachLeg::Remote(remote::RemoteLaunch {
+            target: "lars@sage".to_string(),
+            keybindings: remote::RemoteKeybindings::Local,
+            live_handoff: false,
+            fleet: None,
+        });
+        assert_eq!(switch_failure_label(&leg), "lars@sage");
+    }
+
+    #[test]
+    fn switch_failure_reason_is_a_single_trimmed_line() {
+        let err = io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            "connection refused\nIs herdr server running?",
+        );
+        assert_eq!(switch_failure_reason(&err), "connection refused");
+
+        let empty = io::Error::other("");
+        assert_eq!(switch_failure_reason(&empty), "connection failed");
+    }
+
+    fn remote_leg(target: &str) -> AttachLeg {
+        AttachLeg::Remote(remote::RemoteLaunch {
+            target: target.to_string(),
+            keybindings: remote::RemoteKeybindings::Local,
+            live_handoff: false,
+            fleet: None,
+        })
+    }
+
+    #[test]
+    fn decide_next_leg_chains_into_requested_switch() {
+        let switch = Some(client::RecordedSwitch {
+            target: "lars@sage".to_string(),
+            fleet: None,
+        });
+        match decide_next_leg(&AttachLeg::Local, switch, Ok(()), None, false) {
+            LegStep::Switch { next, previous } => {
+                assert_eq!(next, remote_leg("lars@sage"));
+                // Falls back to where we came from, labeled by the target.
+                assert_eq!(previous.0, AttachLeg::Local);
+                assert_eq!(previous.1, "lars@sage");
+            }
+            _ => panic!("expected Switch"),
+        }
+    }
+
+    #[test]
+    fn decide_next_leg_falls_back_with_notice_on_failed_switch() {
+        // The switch leg (sage) died before its client attached: no switch
+        // recorded, an error, and a previous leg to bounce back to.
+        let err = io::Error::other("connection refused\nis herdr running?");
+        let previous = Some((AttachLeg::Local, "lars@sage".to_string()));
+        match decide_next_leg(&remote_leg("lars@sage"), None, Err(err), previous, true) {
+            LegStep::FallBack { to, notice, .. } => {
+                assert_eq!(to, AttachLeg::Local);
+                assert_eq!(notice, "switch to lars@sage failed: connection refused");
+            }
+            _ => panic!("expected FallBack"),
+        }
+    }
+
+    #[test]
+    fn decide_next_leg_clean_exit_finishes_without_restore() {
+        match decide_next_leg(&AttachLeg::Local, None, Ok(()), None, false) {
+            LegStep::Finish {
+                result,
+                restore_terminal,
+            } => {
+                assert!(result.is_ok());
+                assert!(!restore_terminal);
+            }
+            _ => panic!("expected Finish"),
+        }
+    }
+
+    #[test]
+    fn decide_next_leg_failed_initial_leg_finishes_without_restore() {
+        // First leg failed to launch, no switch ever fired: plain error, no
+        // held alt-screen to reclaim.
+        let err = io::Error::other("no server");
+        match decide_next_leg(&AttachLeg::Local, None, Err(err), None, false) {
+            LegStep::Finish {
+                result,
+                restore_terminal,
+            } => {
+                assert!(result.is_err());
+                assert!(!restore_terminal, "nothing was held; no restore");
+            }
+            _ => panic!("expected Finish"),
+        }
+    }
+
+    #[test]
+    fn decide_next_leg_failed_fallback_restores_terminal() {
+        // The fall-back leg ALSO failed: `previous` was already consumed
+        // (None), but a switch fired earlier (handoff_held), so the chain must
+        // reclaim the alt-screen instead of stranding the user.
+        let err = io::Error::other("still unreachable");
+        match decide_next_leg(&AttachLeg::Local, None, Err(err), None, true) {
+            LegStep::Finish {
+                result,
+                restore_terminal,
+            } => {
+                assert!(result.is_err());
+                assert!(restore_terminal, "a held alt-screen must be reclaimed");
+            }
+            _ => panic!("expected Finish"),
+        }
     }
 
     #[test]

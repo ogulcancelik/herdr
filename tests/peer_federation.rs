@@ -198,6 +198,36 @@ fn frame_rows(frame: &FrameWire) -> Vec<String> {
 }
 
 /// Read frames until one contains `needle`; return its 0-based row index.
+/// Like `wait_for_frame_row` but only matches a row whose `needle` is
+/// preceded by leading whitespace — i.e. an INDENTED spaces-list member row,
+/// not the flush-left servers-band row.
+fn wait_for_indented_peer_row(
+    stream: &mut UnixStream,
+    needle: &str,
+    timeout: Duration,
+) -> Result<usize, String> {
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+    let deadline = Instant::now() + timeout;
+    let mut last_screen = String::new();
+    while Instant::now() < deadline {
+        if let Ok((VARIANT_FRAME, payload)) = read_server_message(stream) {
+            if let Some(frame) = decode_frame_payload(&payload) {
+                let rows = frame_rows(&frame);
+                last_screen = rows.join("\n");
+                if let Some(row) = rows
+                    .iter()
+                    .position(|r| r.contains(needle) && r.starts_with(char::is_whitespace))
+                {
+                    return Ok(row);
+                }
+            }
+        }
+    }
+    Err(format!(
+        "timed out waiting for indented \"{needle}\"; last screen:\n{last_screen}"
+    ))
+}
+
 fn wait_for_frame_row(
     stream: &mut UnixStream,
     needle: &str,
@@ -351,7 +381,7 @@ fn peer_summary_folds_into_sidebar_and_click_switches_server() {
 
     // --- Attach a protocol client to A and wait for the folded remote row.
     let mut stream = UnixStream::connect(&client_socket_a).expect("client socket should connect");
-    let (_, error) = client_handshake(&mut stream, 15, 90, 30).expect("handshake should complete");
+    let (_, error) = client_handshake(&mut stream, 16, 90, 30).expect("handshake should complete");
     assert!(error.is_none(), "handshake rejected: {error:?}");
 
     // The first poll fires ~3s after A starts; allow generous slack. The
@@ -374,6 +404,105 @@ fn peer_summary_folds_into_sidebar_and_click_switches_server() {
     assert_eq!(target, "peerb");
     // The switch carries a fleet snapshot (down-gossip): Some(...) tag.
     assert_eq!(fleet_bytes.first(), Some(&1u8));
+
+    drop(stream);
+    drop(server_a);
+    drop(server_b);
+    cleanup_test_base(&base);
+}
+
+/// E2E (issue #63, the live bug): when the peer's workspace shares a
+/// project with a LOCAL checkout, its remote row folds INTO that project
+/// block as an INDENTED member (not a trailing `proj ·` leader row).
+/// Clicking that folded row must emit the same SwitchServer the band does —
+/// the live report was that folded rows silently no-op'd.
+#[test]
+fn folded_remote_member_row_click_switches_server() {
+    let base = unique_test_dir();
+    let bin_dir = PathBuf::from(env!("CARGO_BIN_EXE_herdr"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+
+    // Shared origin: A and B both host a checkout of the SAME repo, so B's
+    // workspace folds under A's local project block as an indented member.
+    let shared_origin = "git@github.com:peer-fed-test/shared.git";
+
+    // --- Server B: the peer, checkout of the shared repo.
+    let repo_b = base.join("shared-b");
+    init_repo_with_origin(&repo_b, shared_origin);
+    let config_home_b = base.join("config-b");
+    let runtime_b = base.join("runtime-b");
+    let socket_b = base.join("herdr-b.sock");
+    write_config(&config_home_b, "onboarding = false\n");
+    let server_b = spawn_server(&config_home_b, &runtime_b, &socket_b, &repo_b, None);
+    wait_for_socket(&socket_b, Duration::from_secs(10));
+    create_workspace(&socket_b, &repo_b);
+
+    // --- Fake ssh: ignores the target, runs the summary command against B.
+    let shim_dir = base.join("bin");
+    fs::create_dir_all(&shim_dir).unwrap();
+    let shim = shim_dir.join("ssh");
+    fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\nfor last; do :; done\nHERDR_SOCKET_PATH='{}' XDG_CONFIG_HOME='{}' PATH='{}':\"$PATH\" exec sh -c \"$last\"\n",
+            socket_b.display(),
+            config_home_b.display(),
+            bin_dir.display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // --- Server A: a LOCAL checkout of the shared repo, federates with B.
+    let repo_a = base.join("shared-a");
+    init_repo_with_origin(&repo_a, shared_origin);
+    let config_home_a = base.join("config-a");
+    let runtime_a = base.join("runtime-a");
+    let socket_a = base.join("herdr-a.sock");
+    write_config(
+        &config_home_a,
+        "onboarding = false\n\n[[peers]]\nname = \"peerb\"\n",
+    );
+    let server_a = spawn_server(
+        &config_home_a,
+        &runtime_a,
+        &socket_a,
+        &repo_a,
+        Some(&shim_dir),
+    );
+    wait_for_socket(&socket_a, Duration::from_secs(10));
+    create_workspace(&socket_a, &repo_a);
+    let client_socket_a = base.join("herdr-a-client.sock");
+    wait_for_file(&client_socket_a, Duration::from_secs(10));
+
+    let mut stream = UnixStream::connect(&client_socket_a).expect("client socket should connect");
+    let (_, error) = client_handshake(&mut stream, 16, 90, 30).expect("handshake should complete");
+    assert!(error.is_none(), "handshake rejected: {error:?}");
+
+    wait_for_frame_row(&mut stream, "servers", Duration::from_secs(45))
+        .expect("servers section should appear once the peer is polled");
+    // The folded member row reads `   · <host>:<branch>` — INDENTED under
+    // the local `shared` block (leading spaces, `host:branch` shape),
+    // distinct from the band row (`<host>   0 0 0…`, no indent) and the local
+    // member row (`   ⟨git⟩ main`, no colon). It appears once the peer's
+    // workspace summary lands (second poll). NOTE: in this single-host test
+    // harness the peer reports the same `mba22` hostname as the local server,
+    // so we key on the indented `host:branch` shape, not the literal name.
+    let row = wait_for_indented_peer_row(&mut stream, ":main", Duration::from_secs(60))
+        .expect("peer workspace should fold into the local project block as an indented row");
+
+    let col = 4u16;
+    let sgr_row = (row as u16) + 1;
+    send_input(&mut stream, format!("\x1b[<0;{col};{sgr_row}M").as_bytes())
+        .expect("mouse press should send");
+    send_input(&mut stream, format!("\x1b[<0;{col};{sgr_row}m").as_bytes())
+        .expect("mouse release should send");
+
+    let (target, _fleet) = wait_for_switch_server(&mut stream, Duration::from_secs(10))
+        .expect("click on folded remote member row should yield SwitchServer (#63)");
+    assert_eq!(target, "peerb");
 
     drop(stream);
     drop(server_a);
@@ -451,7 +580,7 @@ fn switch_snapshot_renders_home_row_on_spoke_and_home_switches_back() {
     // below the fold and only a scrollbar shows. Taller frame keeps the
     // whole list on screen; the folding itself is covered by unit tests.
     let mut stream = UnixStream::connect(&client_socket_a).expect("client socket should connect");
-    let (_, error) = client_handshake(&mut stream, 15, 90, 45).expect("handshake should complete");
+    let (_, error) = client_handshake(&mut stream, 16, 90, 45).expect("handshake should complete");
     assert!(error.is_none(), "handshake rejected: {error:?}");
     let row = wait_for_frame_row(&mut stream, "proj · ", Duration::from_secs(45))
         .expect("peer workspace should fold into the sidebar");
@@ -481,7 +610,7 @@ fn switch_snapshot_renders_home_row_on_spoke_and_home_switches_back() {
     wait_for_file(&client_socket_b, Duration::from_secs(10));
     let mut stream_b =
         UnixStream::connect(&client_socket_b).expect("spoke client socket should connect");
-    let (_, error) = client_handshake_with_fleet(&mut stream_b, 15, 90, 45, &fleet_bytes)
+    let (_, error) = client_handshake_with_fleet(&mut stream_b, 16, 90, 45, &fleet_bytes)
         .expect("spoke handshake should complete");
     assert!(error.is_none(), "spoke handshake rejected: {error:?}");
 

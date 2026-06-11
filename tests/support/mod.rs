@@ -288,6 +288,7 @@ pub fn client_handshake_with_fleet_and_theme(
             &encode_varint_u32(0),  // ClientLaunchMode::App
             fleet_option_bytes,
             theme_option_bytes,
+            &[0], // notice: Option<String> = None (single 0 byte)
         ],
     );
     let framed = frame_message(&hello_payload);

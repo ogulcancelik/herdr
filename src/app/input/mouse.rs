@@ -2025,6 +2025,56 @@ mod tests {
         assert_eq!(fleet.origin, "mba22");
     }
 
+    /// Issue #63 (the live bug): a CONFIG-peer remote row folded under a
+    /// local project block (indented, sharing the project key) must emit
+    /// the same switch the servers band does — clicking `sage:main` under a
+    /// local `herdr` checkout requests ConfigPeer carrying the target ws.
+    #[tokio::test]
+    async fn folded_config_peer_row_click_requests_switch() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![workspace_with_project("herdr", "github.com/gerchowl/herdr")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        // A config peer (live-polled, not a snapshot) whose workspace shares
+        // the local project key, so its row folds INTO the local block.
+        app.state.peer_summaries = vec![federated_peer(
+            "sage",
+            "lars@sage",
+            vec![remote_row("github.com/gerchowl/herdr", "main")],
+        )];
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 40));
+
+        // The folded remote row exists and is indented under the local block.
+        let card = app
+            .state
+            .view
+            .remote_card_areas
+            .first()
+            .cloned()
+            .expect("config-peer row should fold into the spaces list");
+        assert!(card.indented, "row folds under the local project block");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            card.rect.x + 2,
+            card.rect.y,
+        ));
+        assert_eq!(
+            app.state.request_peer_switch,
+            Some(crate::app::state::PeerSwitchRequest::ConfigPeer {
+                peer_idx: 0,
+                ws_idx: 0,
+            }),
+            "folded config-peer row must request the switch (issue #63)"
+        );
+
+        let prepared = app
+            .prepare_switch_server(app.state.request_peer_switch.clone().unwrap())
+            .expect("config-peer row resolves to a switch");
+        assert_eq!(prepared.ssh_target, "lars@sage");
+    }
+
     #[tokio::test]
     async fn right_click_server_row_filters_spaces_and_same_menu_clears() {
         use crate::app::state::ServerFilter;

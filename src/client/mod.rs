@@ -199,6 +199,25 @@ impl ClientState {
 /// and the launcher chains into `herdr --remote <target>`.
 pub const SWITCH_FILE_ENV_VAR: &str = "HERDR_SWITCH_FILE";
 
+/// Env var the launcher sets on the leg it re-attaches after a FAILED server
+/// switch (#63). The client lifts it into the Hello `notice` so the server
+/// renders `switch to <name> failed: <reason>` top-right — the user lands
+/// back on the previous server, told why, never stranded at a shell. Cleared
+/// (unset) once consumed so it shows on the first attach only.
+pub const SWITCH_NOTICE_ENV_VAR: &str = "HERDR_SWITCH_NOTICE";
+
+/// Take the launcher's one-shot attach notice, if set, clearing it so a later
+/// in-leg handshake retry (#38 live-handoff) does not repeat it.
+fn take_attach_notice() -> Option<String> {
+    let notice = std::env::var(SWITCH_NOTICE_ENV_VAR)
+        .ok()
+        .filter(|n| !n.is_empty());
+    if notice.is_some() {
+        std::env::remove_var(SWITCH_NOTICE_ENV_VAR);
+    }
+    notice
+}
+
 /// Payload the client records in the launcher's switch file: the next attach
 /// target plus the fleet snapshot the next leg carries into its handshake
 /// (hub-and-spoke down-gossip). Same-binary launcher and client share the
@@ -212,6 +231,14 @@ pub struct RecordedSwitch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fleet: Option<protocol::FleetSnapshot>,
 }
+
+/// Set while this client is exiting to hand off to a pre-connected next leg
+/// (a sidebar server switch). The terminal teardown reads it to KEEP the
+/// alternate screen — the last rendered frame stays frozen on screen while
+/// the launcher establishes the next leg, instead of flashing the host
+/// shell ("blip to the terminal", #63). The next leg's `ratatui::init()`
+/// re-enters the alt-screen (idempotent) and paints over the frozen frame.
+static SWITCH_HANDOFF_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Record a server-switch target for the launcher. Returns false when no
 /// launcher registered a switch file (nothing to chain into).
@@ -431,7 +458,38 @@ fn restore_terminal_state(reset_modify_other_keys: bool) {
         DisableBracketedPaste,
         DisableMouseCapture
     );
+
+    // Seamless server switch (#63): keep the alternate screen and raw mode so
+    // the last frame stays frozen while the launcher brings up the next leg —
+    // the host shell never flashes. `ratatui::restore()` would leave the
+    // alt-screen and drop raw mode; skip it. The next leg's `ratatui::init()`
+    // re-enters both and paints over the frozen frame. A real exit (detach,
+    // error, quit) clears the flag and restores fully as before.
+    if SWITCH_HANDOFF_PENDING.load(Ordering::Acquire) {
+        let _ = io::stdout().flush();
+        return;
+    }
+
     ratatui::restore();
+    let _ = write_terminal_restore_postlude(&mut io::stdout());
+}
+
+/// Best-effort full terminal restore for the launcher (#63). A leg that
+/// switched away held the alternate screen + raw mode so the swap was
+/// seamless; if the chain ultimately dies with no leg left to reclaim the
+/// screen, the launcher calls this so the user is not left in a frozen
+/// alt-screen with raw mode on. Idempotent and safe to call when nothing
+/// was held.
+pub fn force_restore_host_terminal() {
+    SWITCH_HANDOFF_PENDING.store(false, Ordering::Release);
+    let _ = crossterm::terminal::disable_raw_mode();
+    let _ = execute!(
+        io::stdout(),
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        DisableFocusChange,
+        crossterm::terminal::LeaveAlternateScreen,
+    );
     let _ = write_terminal_restore_postlude(&mut io::stdout());
 }
 
@@ -513,6 +571,7 @@ fn do_handshake(
         },
         fleet: carried_fleet_snapshot(),
         host_theme,
+        notice: take_attach_notice(),
     };
     protocol::write_message(stream, &hello)
         .map_err(|e| ClientError::ConnectionFailed(io::Error::other(e.to_string())))?;
@@ -894,6 +953,11 @@ fn run_client_with_mode(
 ) -> io::Result<()> {
     init_logging();
 
+    // Each leg starts with no pending handoff: clear the flag a previous
+    // in-process leg may have left set (#63) so a clean exit of THIS leg
+    // restores the host terminal fully.
+    SWITCH_HANDOFF_PENDING.store(false, Ordering::Release);
+
     let loaded_config = crate::config::Config::load();
     let mouse_scroll_lines = loaded_config.config.ui.mouse_scroll_lines();
     let redraw_on_focus_gained = loaded_config.config.ui.redraw_on_focus_gained;
@@ -1247,6 +1311,9 @@ async fn run_client_loop(
                     // exit exactly like a detach. The outermost herdr process
                     // reads the file and starts the next leg.
                     if record_switch_target(&ssh_target, fleet.as_ref()) {
+                        // Hold the alternate screen across the handoff so the
+                        // host shell never flashes between legs (#63).
+                        SWITCH_HANDOFF_PENDING.store(true, Ordering::Release);
                         return Err(ClientError::ServerShutdown {
                             reason: Some("switching".to_string()),
                         });
@@ -1838,6 +1905,29 @@ mod tests {
         assert!(taken.fleet.is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #63 part 3: the launcher's one-shot failed-switch notice is
+    /// lifted into the Hello and cleared so a later handshake retry (#38) in
+    /// the same leg does not repeat it.
+    #[test]
+    fn take_attach_notice_is_one_shot() {
+        let _guard = env_lock().lock().unwrap();
+        let _notice = EnvVarGuard::set(SWITCH_NOTICE_ENV_VAR, "switch to sage failed: boom");
+
+        assert_eq!(
+            take_attach_notice().as_deref(),
+            Some("switch to sage failed: boom")
+        );
+        // Consumed: a second read (a handshake retry) sees nothing.
+        assert!(take_attach_notice().is_none());
+    }
+
+    #[test]
+    fn take_attach_notice_ignores_empty() {
+        let _guard = env_lock().lock().unwrap();
+        let _notice = EnvVarGuard::set(SWITCH_NOTICE_ENV_VAR, "");
+        assert!(take_attach_notice().is_none());
     }
 
     fn env_lock() -> &'static Mutex<()> {

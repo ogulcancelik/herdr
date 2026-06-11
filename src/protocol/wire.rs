@@ -22,7 +22,12 @@ use serde::{Deserialize, Serialize};
 /// (`host_theme`) so remote/spoke servers adopt the client's default colors
 /// at attach time. Additive field on a positional wire — deliberate bump
 /// (single-owner fleet, all peers deploy in lockstep).
-pub const PROTOCOL_VERSION: u32 = 15;
+///
+/// v16: `Hello` carries an optional `notice` — a top-right action notice the
+/// launcher injects when a server switch fails and it re-attaches the
+/// previous leg (#63: "switch to <name> failed: <reason>", never strand at a
+/// shell). Additive field on a positional wire — deliberate bump.
+pub const PROTOCOL_VERSION: u32 = 16;
 
 /// Refusal notice sent to clients while a live update handoff is in
 /// progress. Clients recognize this exact string (in a rejection `Welcome`
@@ -237,6 +242,11 @@ pub enum ClientMessage {
         /// adopts a non-empty theme as `host_terminal_theme` (last attach
         /// wins) and pushes it into existing pane PTYs.
         host_theme: Option<crate::terminal_theme::TerminalTheme>,
+        /// Top-right action notice the launcher asks the server to surface on
+        /// attach (#63). Set only when re-attaching the PREVIOUS leg after a
+        /// failed server switch — carries `switch to <name> failed: <reason>`
+        /// so the user lands back where they were, told why. `None` normally.
+        notice: Option<String>,
     },
 
     /// Raw input bytes read from the client's stdin.
@@ -834,6 +844,7 @@ mod tests {
             launch_mode: ClientLaunchMode::App,
             fleet: None,
             host_theme: None,
+            notice: None,
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ClientMessage, _) =
@@ -981,6 +992,7 @@ mod tests {
             launch_mode: ClientLaunchMode::App,
             fleet: Some(sample_fleet_snapshot()),
             host_theme: None,
+            notice: None,
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ClientMessage, _) =
@@ -1012,6 +1024,7 @@ mod tests {
                     b: 0x2e,
                 }),
             }),
+            notice: None,
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ClientMessage, _) =
@@ -1237,6 +1250,7 @@ mod tests {
             launch_mode: ClientLaunchMode::App,
             fleet: None,
             host_theme: None,
+            notice: None,
         };
         let mut buf = Vec::new();
         write_message(&mut buf, &msg).unwrap();
@@ -1313,6 +1327,7 @@ mod tests {
                     launch_mode: ClientLaunchMode::App,
                     fleet: None,
                     host_theme: None,
+                    notice: None,
                 },
                 1 => ClientMessage::Input {
                     data: vec![(i % 256) as u8; (i as usize % 50) + 1],
@@ -1751,6 +1766,7 @@ mod tests {
             launch_mode: ClientLaunchMode::App,
             fleet: None,
             host_theme: None,
+            notice: None,
         };
         let mut buf = Vec::new();
         write_message(&mut buf, &msg).unwrap();
@@ -1788,6 +1804,7 @@ mod tests {
                 launch_mode: ClientLaunchMode::App,
                 fleet: None,
                 host_theme: None,
+                notice: None,
             },
             ClientMessage::Input {
                 data: b"hello world".to_vec(),

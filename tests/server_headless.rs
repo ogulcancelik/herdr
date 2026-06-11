@@ -183,6 +183,7 @@ fn client_handshake(
             &encode_varint_u32(0),  // ClientLaunchMode::App
             &[0u8],                 // fleet: Option<FleetSnapshot> = None
             &[0u8],                 // host_theme: Option<TerminalTheme> = None
+            &[0u8],                 // notice: Option<String> = None
         ],
     );
     let framed = frame_message(&hello_payload);
@@ -597,9 +598,9 @@ fn client_handshake_succeeds() {
 
     // Send Hello with the current protocol version, 80 cols, 24 rows.
     let (version, error) =
-        client_handshake(&mut stream, 15, 80, 24).expect("handshake should succeed");
+        client_handshake(&mut stream, 16, 80, 24).expect("handshake should succeed");
 
-    assert_eq!(version, 15, "server should report protocol version 15");
+    assert_eq!(version, 16, "server should report protocol version 16");
     assert!(
         error.is_none(),
         "handshake should not have an error: {:?}",
@@ -628,7 +629,7 @@ fn client_handshake_rejects_incompatible_version() {
     let (version, error) = client_handshake(&mut stream, 0, 80, 24)
         .expect("should read Welcome response even on rejection");
 
-    assert_eq!(version, 15, "server should report its version");
+    assert_eq!(version, 16, "server should report its version");
     assert!(
         error.is_some(),
         "version 0 should be rejected with an error"
@@ -653,10 +654,10 @@ fn client_handshake_clamps_small_terminal_size() {
     // Send Hello with 0x0 terminal size — should be clamped.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
 
-    let (version, error) = client_handshake(&mut stream, 15, 0, 0)
+    let (version, error) = client_handshake(&mut stream, 16, 0, 0)
         .expect("handshake with 0x0 should succeed (server clamps)");
 
-    assert_eq!(version, 15);
+    assert_eq!(version, 16);
     assert!(
         error.is_none(),
         "0x0 size should be accepted (clamped): {:?}",
@@ -685,10 +686,10 @@ fn client_handshake_with_host_theme_succeeds() {
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
     let theme_bytes = support::encode_host_theme_option((0xcc, 0xcc, 0xcc), (0x1e, 0x1e, 0x2e));
     let (version, error) =
-        support::client_handshake_with_theme(&mut stream, 15, 80, 24, &theme_bytes)
+        support::client_handshake_with_theme(&mut stream, 16, 80, 24, &theme_bytes)
             .expect("themed handshake should succeed");
 
-    assert_eq!(version, 15);
+    assert_eq!(version, 16);
     assert!(
         error.is_none(),
         "themed Hello should be accepted: {:?}",
@@ -748,9 +749,9 @@ fn no_hello_client_closed_within_five_seconds() {
     // Verify the server is still healthy — a proper client can still connect.
     let mut good_stream =
         UnixStream::connect(&client_socket).expect("should connect after no-hello client");
-    let (version, error) = client_handshake(&mut good_stream, 15, 80, 24)
+    let (version, error) = client_handshake(&mut good_stream, 16, 80, 24)
         .expect("proper handshake should still work after no-hello client");
-    assert_eq!(version, 15);
+    assert_eq!(version, 16);
     assert!(error.is_none());
 
     // API should still work.

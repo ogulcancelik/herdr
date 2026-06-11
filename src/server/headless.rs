@@ -1864,6 +1864,7 @@ impl HeadlessServer {
                 direct_attach_requested,
                 fleet,
                 host_theme,
+                notice,
             } => {
                 if self.handoff_in_progress {
                     if let Ok(message) =
@@ -1922,6 +1923,15 @@ impl HeadlessServer {
                 }
                 if first_app_client {
                     self.app.mark_git_status_refresh_due(Instant::now());
+                }
+                // A failed server switch re-attached the previous leg and
+                // carried the reason in the Hello (#63): surface it as the
+                // top-right action notice so the user lands back here, told
+                // why, instead of stranding at a shell.
+                if !direct_attach_requested {
+                    if let Some(notice) = notice.filter(|n| !n.is_empty()) {
+                        self.app.show_action_notice(notice);
+                    }
                 }
                 self.sync_foreground_client_state();
                 self.resize_shared_runtime_to_effective_size();
@@ -3638,6 +3648,7 @@ mod tests {
             direct_attach_requested: false,
             fleet: Some(fleet),
             host_theme: None,
+            notice: None,
             writer: writer_a,
         }));
         let snapshot = server
@@ -3662,6 +3673,7 @@ mod tests {
             direct_attach_requested: false,
             fleet: None,
             host_theme: None,
+            notice: None,
             writer: writer_b,
         }));
         assert!(server.app.state.fleet_snapshot.is_none());
@@ -3688,6 +3700,7 @@ mod tests {
             direct_attach_requested: true,
             fleet: None,
             host_theme: None,
+            notice: None,
             writer: writer_a,
         }));
         assert!(
@@ -3738,6 +3751,7 @@ mod tests {
             direct_attach_requested: false,
             fleet: None,
             host_theme: Some(theme),
+            notice: None,
             writer,
         }));
 
@@ -3770,6 +3784,7 @@ mod tests {
             direct_attach_requested: false,
             fleet: None,
             host_theme: None,
+            notice: None,
             writer,
         }));
 
@@ -3777,6 +3792,62 @@ mod tests {
             server.app.state.host_terminal_theme, existing,
             "a theme-less client must not clear the adopted theme"
         );
+    }
+
+    /// Issue #63 part 3: a failed server switch re-attaches the previous leg
+    /// with the reason in the Hello `notice`; the server surfaces it as the
+    /// top-right action notice so the user lands back where they were, told
+    /// why, instead of stranding at a shell.
+    #[test]
+    fn app_client_attach_notice_surfaces_as_action_notice() {
+        let mut server = test_headless_server();
+        let (writer, _control, _render) = test_client_writer();
+
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 1,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            fleet: None,
+            host_theme: None,
+            notice: Some("switch to sage failed: connection refused".to_string()),
+            writer,
+        }));
+
+        assert_eq!(
+            server.app.state.action_notice.as_deref(),
+            Some("switch to sage failed: connection refused"),
+            "the launcher's failed-switch notice must render top-right"
+        );
+    }
+
+    /// A direct terminal attach is not an app leg — it must never raise the
+    /// switch-failure action notice (only the foreground app client does).
+    #[test]
+    fn terminal_attach_client_ignores_notice() {
+        let mut server = test_headless_server();
+        let (writer, _control, _render) = test_client_writer();
+
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 9,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::TerminalAnsi,
+            keybindings: None,
+            direct_attach_requested: true,
+            fleet: None,
+            host_theme: None,
+            notice: Some("switch to sage failed: boom".to_string()),
+            writer,
+        }));
+
+        assert!(server.app.state.action_notice.is_none());
     }
 
     #[test]
@@ -3795,6 +3866,7 @@ mod tests {
             direct_attach_requested: true,
             fleet: None,
             host_theme: Some(sample_host_theme()),
+            notice: None,
             writer,
         }));
 
@@ -3830,6 +3902,7 @@ new_tab = "prefix+t"
             direct_attach_requested: false,
             fleet: None,
             host_theme: None,
+            notice: None,
             writer: writer_a,
         }));
         assert_eq!(
@@ -3856,6 +3929,7 @@ new_tab = "prefix+t"
             direct_attach_requested: false,
             fleet: None,
             host_theme: None,
+            notice: None,
             writer: writer_b,
         }));
         assert_eq!(
@@ -3898,6 +3972,7 @@ new_tab = "prefix+t"
             direct_attach_requested: false,
             fleet: None,
             host_theme: None,
+            notice: None,
             writer: writer_a,
         }));
         assert_eq!(server.app.state.config_diagnostic, without_keybindings);
@@ -3913,6 +3988,7 @@ new_tab = "prefix+t"
             direct_attach_requested: false,
             fleet: None,
             host_theme: None,
+            notice: None,
             writer: writer_b,
         }));
         assert_eq!(
@@ -3958,6 +4034,7 @@ next_tab = ""
             direct_attach_requested: false,
             fleet: None,
             host_theme: None,
+            notice: None,
             writer,
         }));
         server.app.state.mode = crate::app::Mode::Settings;
@@ -4034,6 +4111,7 @@ next_tab = ""
             direct_attach_requested: false,
             fleet: None,
             host_theme: None,
+            notice: None,
             writer: writer_a,
         }));
         server.app.state.mode = crate::app::Mode::Settings;
@@ -4056,6 +4134,7 @@ next_tab = ""
             direct_attach_requested: false,
             fleet: None,
             host_theme: None,
+            notice: None,
             writer: writer_b,
         }));
         assert_eq!(
@@ -4091,6 +4170,7 @@ next_tab = ""
             direct_attach_requested: true,
             fleet: None,
             host_theme: None,
+            notice: None,
             writer,
         }));
         assert!(server.clients.contains_key(&7));
@@ -4132,6 +4212,7 @@ next_tab = ""
             direct_attach_requested: false,
             fleet: None,
             host_theme: None,
+            notice: None,
             writer,
         }));
 
@@ -4168,6 +4249,7 @@ next_tab = ""
             direct_attach_requested: true,
             fleet: None,
             host_theme: None,
+            notice: None,
             writer,
         }));
 
@@ -4203,6 +4285,7 @@ next_tab = ""
             direct_attach_requested: false,
             fleet: None,
             host_theme: None,
+            notice: None,
             writer,
         }));
         assert!(server.has_app_client());
@@ -4250,6 +4333,7 @@ next_tab = ""
             direct_attach_requested: true,
             fleet: None,
             host_theme: None,
+            notice: None,
             writer,
         }));
         assert!(
@@ -5548,6 +5632,7 @@ next_tab = ""
             direct_attach_requested: true,
             fleet: None,
             host_theme: None,
+            notice: None,
             writer,
         }));
         assert!(

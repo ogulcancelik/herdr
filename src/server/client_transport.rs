@@ -64,6 +64,9 @@ pub(crate) enum ServerEvent {
         /// Host terminal theme captured by the client before the handshake;
         /// `None` when the client could not capture one.
         host_theme: Option<crate::terminal_theme::TerminalTheme>,
+        /// One-shot top-right action notice the launcher asked us to surface
+        /// (#63: a failed server switch landing back here). `None` normally.
+        notice: Option<String>,
         writer: ClientWriter,
     },
     /// A client sent an input message.
@@ -176,6 +179,7 @@ pub(crate) fn handle_client_handshake(
         direct_attach_requested,
         fleet,
         host_theme,
+        notice,
     ) = match hello {
         ClientMessage::Hello {
             version,
@@ -188,6 +192,7 @@ pub(crate) fn handle_client_handshake(
             launch_mode,
             fleet,
             host_theme,
+            notice,
         } => {
             // Version check.
             match protocol::check_client_version(version) {
@@ -229,6 +234,7 @@ pub(crate) fn handle_client_handshake(
                 launch_mode == ClientLaunchMode::TerminalAttach,
                 fleet,
                 host_theme,
+                notice,
             )
         }
         _ => {
@@ -275,6 +281,7 @@ pub(crate) fn handle_client_handshake(
         direct_attach_requested,
         fleet,
         host_theme,
+        notice,
         writer,
     });
 
@@ -604,6 +611,7 @@ new_tab = "ctrl+notakey"
                 launch_mode: ClientLaunchMode::App,
                 fleet: None,
                 host_theme: None,
+                notice: None,
             },
         )
         .expect("write hello");
@@ -638,6 +646,7 @@ new_tab = "ctrl+notakey"
                 direct_attach_requested,
                 fleet,
                 host_theme,
+                notice,
                 writer,
             } => {
                 assert_eq!(client_id, 42);
@@ -648,6 +657,7 @@ new_tab = "ctrl+notakey"
                 assert!(!direct_attach_requested);
                 assert!(fleet.is_none());
                 assert!(host_theme.is_none());
+                assert!(notice.is_none());
                 drop(writer);
             }
             other => panic!("expected ClientConnected, got {other:?}"),
@@ -684,6 +694,7 @@ new_tab = "ctrl+notakey"
                 launch_mode: ClientLaunchMode::TerminalAttach,
                 fleet: None,
                 host_theme: None,
+                notice: None,
             },
         )
         .expect("write hello");
@@ -761,6 +772,7 @@ new_tab = "ctrl+notakey"
                 launch_mode: ClientLaunchMode::App,
                 fleet: None,
                 host_theme: Some(theme),
+                notice: None,
             },
         )
         .expect("write hello");
