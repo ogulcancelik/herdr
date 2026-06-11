@@ -395,6 +395,14 @@ fn run_attach_legs(first: AttachLeg) -> io::Result<()> {
         std::env::remove_var(client::SWITCH_NOTICE_ENV_VAR);
 
         let switch = client::take_switch_target(&switch_file);
+        // An origin-workspace row going home (#66) carries the workspace to
+        // focus once the home leg attaches. The next leg's server is the
+        // local one (it may still be starting up), so fire a detached helper
+        // that retries `workspace focus` against the local socket — the same
+        // post-attach focus a config-peer leap does via ssh, but home-bound.
+        if let Some(focus) = switch.as_ref().and_then(|s| s.focus_workspace.clone()) {
+            spawn_home_focus(focus);
+        }
         match decide_next_leg(&leg, switch, result, previous.take(), handoff_held) {
             LegStep::Switch {
                 next,
@@ -514,6 +522,38 @@ fn switch_failure_label(leg: &AttachLeg) -> String {
         AttachLeg::Local => "home".to_string(),
         AttachLeg::Remote(launch) => launch.target.clone(),
     }
+}
+
+/// Focus a workspace on the local server once it comes up after a home
+/// re-attach from an origin-workspace row (#66). The home leg is about to
+/// (re)start the local server, so a detached thread retries the focus over
+/// the local API socket until it lands or the budget runs out — the spoke
+/// has no route to drive the hub, so the focus must fire here. Best-effort:
+/// a failure just lands home on whatever workspace was last focused.
+fn spawn_home_focus(workspace_id: String) {
+    use crate::api::schema::{Method, Request, WorkspaceTarget};
+    std::thread::spawn(move || {
+        // ~10s budget: covers a cold local-server start; cheap if already up.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let request = Request {
+            id: "launcher:home-focus".to_string(),
+            method: Method::WorkspaceFocus(WorkspaceTarget {
+                workspace_id: workspace_id.clone(),
+            }),
+        };
+        loop {
+            if crate::api::client::ApiClient::local()
+                .request(request.clone())
+                .is_ok()
+            {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    });
 }
 
 /// A concise, single-line reason from a failed leg launch for the notice.
@@ -951,6 +991,7 @@ mod tests {
         let switch = Some(client::RecordedSwitch {
             target: "lars@sage".to_string(),
             fleet: None,
+            focus_workspace: None,
         });
         match decide_next_leg(&AttachLeg::Local, switch, Ok(()), None, false) {
             LegStep::Switch { next, previous } => {

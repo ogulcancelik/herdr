@@ -500,6 +500,7 @@ impl HeadlessServer {
                         self.send_to_foreground_client(ServerMessage::SwitchServer {
                             ssh_target: prepared.ssh_target,
                             fleet: prepared.fleet,
+                            focus_workspace: prepared.focus_workspace,
                         });
                     }
                     // switch_home with no carried origin: already home.
@@ -3636,6 +3637,7 @@ mod tests {
                 age_secs: Some(4),
                 error: None,
             }],
+            origin_summary: None,
         };
         assert!(server.handle_server_event(ServerEvent::ClientConnected {
             client_id: 1,
@@ -3686,6 +3688,7 @@ mod tests {
         server.app.state.fleet_snapshot = Some(crate::peers::FleetSnapshotState {
             origin: "mba22".to_string(),
             peers: Vec::new(),
+            origin_summary: None,
             received_at: Instant::now(),
         });
 

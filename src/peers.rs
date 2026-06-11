@@ -92,6 +92,12 @@ pub struct FleetSnapshotState {
     /// Carried peer summaries, converted into the poller's cache shape so
     /// the sidebar reuses the existing peer-row machinery.
     pub peers: Vec<PeerSummaryState>,
+    /// The origin (hub) server's OWN summary (#66): its workspaces fold into
+    /// the spaces list and its health populates the home row. The hub is not
+    /// its own peer, so without this the hub's spaces are invisible on a
+    /// spoke. Its `ssh_target` is the reserved home sentinel — origin rows
+    /// switch home, never ssh.
+    pub origin_summary: Option<PeerSummaryState>,
     /// When this snapshot arrived (home-row staleness display).
     pub received_at: Instant,
 }
@@ -101,6 +107,7 @@ impl FleetSnapshotState {
         Self {
             origin: snapshot.origin,
             peers: snapshot.peers.into_iter().map(peer_from_wire).collect(),
+            origin_summary: snapshot.origin_summary.map(|p| peer_from_wire(*p)),
             received_at: Instant::now(),
         }
     }
@@ -122,6 +129,12 @@ impl FleetSnapshotState {
                 .take(FLEET_SNAPSHOT_MAX_PEERS)
                 .map(peer_to_wire)
                 .collect(),
+            // Pass-through: a nested leap keeps the ORIGINAL hub's own
+            // summary so the way-home spaces stay visible the whole chain.
+            origin_summary: self
+                .origin_summary
+                .as_ref()
+                .map(|p| Box::new(peer_to_wire(p))),
         }
     }
 }
@@ -299,6 +312,7 @@ mod tests {
         let snapshot = FleetSnapshotState {
             origin: "mba22".into(),
             peers,
+            origin_summary: None,
             received_at: Instant::now(),
         };
 
@@ -394,6 +408,7 @@ mod tests {
                 summary_state("anvil", "lars@anvil", Some(3)),
                 summary_state("sage", "lars@sage", Some(9)),
             ],
+            origin_summary: None,
             received_at: Instant::now(),
         };
 
@@ -403,6 +418,30 @@ mod tests {
         // The hop target becomes the self row on the receiving end.
         assert_eq!(wire.peers.len(), 1);
         assert_eq!(wire.peers[0].ssh_target, "lars@anvil");
+    }
+
+    #[test]
+    fn origin_summary_survives_wire_roundtrip_and_passthrough() {
+        let mut origin = summary_state("mba22", crate::protocol::HOME_SWITCH_TARGET, Some(0));
+        origin.workspaces[0].workspace = "herdr".to_string();
+        let snapshot = FleetSnapshotState {
+            origin: "mba22".to_string(),
+            peers: vec![summary_state("anvil", "lars@anvil", Some(3))],
+            origin_summary: Some(origin),
+            received_at: Instant::now(),
+        };
+
+        // Round-trip carries the hub's own workspaces home-targeted.
+        let back = FleetSnapshotState::from_wire(snapshot.to_wire("lars@anvil"));
+        let carried = back
+            .origin_summary
+            .clone()
+            .expect("origin summary survives");
+        assert_eq!(carried.ssh_target, crate::protocol::HOME_SWITCH_TARGET);
+        assert_eq!(carried.workspaces[0].workspace, "herdr");
+        // A nested leap (pass-through) keeps the hub's own summary too.
+        let nested = FleetSnapshotState::from_wire(back.to_wire("lars@anvil"));
+        assert!(nested.origin_summary.is_some());
     }
 
     #[test]

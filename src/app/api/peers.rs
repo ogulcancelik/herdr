@@ -8,21 +8,55 @@ impl App {
     /// project identity + attention-leading agent status. Peers poll this
     /// over SSH to fold our workspaces into their sidebars.
     pub(super) fn handle_peers_summary(&mut self, id: String) -> String {
-        let workspaces = self
-            .state
-            .workspaces
-            .iter()
-            .map(|ws| workspace_peer_summary(ws, &self.state.terminals))
-            .collect();
         encode_success(
             id,
             ResponseResult::PeersSummary {
                 host: short_host_name(),
                 version: Some(crate::build_info::version()),
                 system: self.state.system_stats.as_ref().map(system_summary),
-                workspaces,
+                workspaces: self.self_workspace_summaries(),
             },
         )
+    }
+
+    /// This server's own workspaces in the federated summary shape — the same
+    /// rollup `peers.summary` serves, reused so the origin entry a hub stamps
+    /// into its down-gossip snapshot (#66) is byte-identical to what a peer
+    /// would poll.
+    fn self_workspace_summaries(&self) -> Vec<PeerWorkspaceSummary> {
+        self.state
+            .workspaces
+            .iter()
+            .map(|ws| workspace_peer_summary(ws, &self.state.terminals))
+            .collect()
+    }
+
+    /// This server's OWN entry for a down-gossip snapshot (#66): the self
+    /// summary as a wire `FleetPeer`, targeted at the reserved home sentinel
+    /// so a spoke selecting one of these workspace rows lands HOME (a spoke
+    /// has no ssh route to the hub), with the workspace carried as the
+    /// post-attach focus target. `age_secs = 0`: stamped fresh at switch.
+    fn origin_self_summary(&self) -> crate::protocol::FleetPeer {
+        crate::protocol::FleetPeer {
+            name: short_host_name(),
+            ssh_target: crate::protocol::HOME_SWITCH_TARGET.to_string(),
+            host: Some(short_host_name()),
+            version: Some(crate::build_info::version()),
+            system: self
+                .state
+                .system_stats
+                .as_ref()
+                .map(system_summary)
+                .map(Into::into),
+            latency_ms: None,
+            workspaces: self
+                .self_workspace_summaries()
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            age_secs: Some(0),
+            error: None,
+        }
     }
 }
 
@@ -45,6 +79,11 @@ pub(crate) struct PreparedServerSwitch {
     pub(crate) ssh_target: String,
     pub(crate) label: String,
     pub(crate) fleet: Option<crate::protocol::FleetSnapshot>,
+    /// Workspace id to focus once the next leg attaches (#66). Set only for
+    /// origin-workspace rows: a spoke selecting one of the hub's spaces lands
+    /// home with that space focused. The launcher carries it through the
+    /// switch file and fires `workspace focus` against the local server.
+    pub(crate) focus_workspace: Option<String>,
 }
 
 impl App {
@@ -64,6 +103,7 @@ impl App {
                     ssh_target,
                     label,
                     fleet,
+                    focus_workspace: None,
                 })
             }
             PeerSwitchRequest::SnapshotPeer { entry_idx } => {
@@ -75,6 +115,22 @@ impl App {
                     ssh_target,
                     label,
                     fleet,
+                    focus_workspace: None,
+                })
+            }
+            PeerSwitchRequest::OriginWorkspace { ws_idx } => {
+                // Land home (the spoke has no ssh route to the hub) with the
+                // selected origin workspace as the post-attach focus target.
+                let snapshot = self.state.fleet_snapshot.as_ref()?;
+                let origin = snapshot.origin.clone();
+                let ws = snapshot.origin_summary.as_ref()?.workspaces.get(ws_idx)?;
+                let focus_workspace = (!ws.id.is_empty()).then(|| ws.id.clone());
+                let label = format!("{origin}:{}", ws.workspace);
+                Some(PreparedServerSwitch {
+                    ssh_target: crate::protocol::HOME_SWITCH_TARGET.to_string(),
+                    label,
+                    fleet: None,
+                    focus_workspace,
                 })
             }
             PeerSwitchRequest::Home => {
@@ -83,6 +139,7 @@ impl App {
                     ssh_target: crate::protocol::HOME_SWITCH_TARGET.to_string(),
                     label: format!("{origin} (home)"),
                     fleet: None,
+                    focus_workspace: None,
                 })
             }
         }
@@ -106,6 +163,9 @@ impl App {
                     .filter(|peer| peer.ssh_target != exclude_ssh_target)
                     .map(crate::peers::peer_to_wire)
                     .collect(),
+                // The hub is not its own peer; embed its own workspaces so
+                // the spoke can see the way-home spaces, not just peers (#66).
+                origin_summary: Some(Box::new(self.origin_self_summary())),
             },
         }
     }
@@ -285,6 +345,7 @@ mod tests {
         crate::peers::FleetSnapshotState {
             origin: "mba22".to_string(),
             peers: vec![summary("anvil", "lars@anvil"), summary("ksb", "lars@ksb")],
+            origin_summary: None,
             received_at: std::time::Instant::now(),
         }
     }
@@ -344,6 +405,45 @@ mod tests {
         // The hop target is excluded from its own snapshot.
         assert_eq!(fleet.peers.len(), 1);
         assert_eq!(fleet.peers[0].ssh_target, "lars@anvil");
+        // The hub stamps its OWN summary so a spoke sees the way-home spaces
+        // (#66): home-targeted, never an ssh dial.
+        let origin = fleet.origin_summary.expect("hub stamps its own summary");
+        assert_eq!(origin.ssh_target, crate::protocol::HOME_SWITCH_TARGET);
+        assert_eq!(
+            origin.host.as_deref(),
+            Some(crate::app::short_host_name()).as_deref()
+        );
+    }
+
+    #[tokio::test]
+    async fn origin_workspace_switch_lands_home_with_focus_target() {
+        let mut app = test_app();
+        let mut origin = summary("mba22", crate::protocol::HOME_SWITCH_TARGET);
+        origin.workspaces = vec![crate::api::schema::PeerWorkspaceSummary {
+            id: "ws_7".to_string(),
+            workspace: "keyboard-shorcuts".to_string(),
+            project_key: Some("github.com/gerchowl/herdr".to_string()),
+            project_label: Some("herdr".to_string()),
+            branch: Some("keyboard-shorcuts".to_string()),
+            is_linked_worktree: true,
+            agent: Some("cc".to_string()),
+            status: crate::api::schema::AgentStatus::Working,
+            status_age_secs: Some(4),
+            activity: None,
+        }];
+        let mut snapshot = carried_snapshot();
+        snapshot.origin_summary = Some(origin);
+        app.state.fleet_snapshot = Some(snapshot);
+
+        let prepared = app
+            .prepare_switch_server(PeerSwitchRequest::OriginWorkspace { ws_idx: 0 })
+            .expect("origin workspace resolves");
+        // The way home is the sentinel, never an ssh dial (a spoke has no
+        // route to the hub), and the chosen workspace rides along to focus.
+        assert_eq!(prepared.ssh_target, crate::protocol::HOME_SWITCH_TARGET);
+        assert!(prepared.fleet.is_none());
+        assert_eq!(prepared.focus_workspace.as_deref(), Some("ws_7"));
+        assert!(prepared.label.contains("keyboard-shorcuts"));
     }
 
     #[tokio::test]

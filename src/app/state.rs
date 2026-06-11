@@ -656,6 +656,10 @@ pub enum PeerSwitchRequest {
     ConfigPeer { peer_idx: usize, ws_idx: usize },
     /// A carried fleet-snapshot row: index into `fleet_snapshot.peers`.
     SnapshotPeer { entry_idx: usize },
+    /// A row from the origin (hub) server's OWN summary (#66): re-attach home
+    /// via the reserved target, carrying the selected workspace as the
+    /// post-attach focus target so the hub lands on that space.
+    OriginWorkspace { ws_idx: usize },
     /// The origin row / switch_home keybind: re-attach to the client's
     /// local server via the reserved home target.
     Home,
@@ -683,16 +687,22 @@ pub enum RemotePeerRef {
     Config { peer_idx: usize },
     /// Index into `state.fleet_snapshot.peers`.
     Snapshot { entry_idx: usize },
+    /// The carried origin (hub) server's OWN summary (#66): its workspaces
+    /// fold into the spaces list like any peer, but selecting one switches
+    /// HOME with that workspace focused, never an ssh dial.
+    Origin,
 }
 
 impl RemotePeerRef {
     /// The switch request selecting this peer's row emits. Config peers
     /// carry the workspace index for the best-effort remote pre-focus;
-    /// snapshot rows reuse the band's plain pass-through switch.
+    /// snapshot rows reuse the band's plain pass-through switch; origin rows
+    /// land home with the workspace as the post-attach focus target.
     pub(crate) fn switch_request(self, ws_idx: usize) -> PeerSwitchRequest {
         match self {
             Self::Config { peer_idx } => PeerSwitchRequest::ConfigPeer { peer_idx, ws_idx },
             Self::Snapshot { entry_idx } => PeerSwitchRequest::SnapshotPeer { entry_idx },
+            Self::Origin => PeerSwitchRequest::OriginWorkspace { ws_idx },
         }
     }
 }
@@ -1702,6 +1712,11 @@ impl AppState {
             .map(|(peer_idx, peer)| (RemotePeerRef::Config { peer_idx }, peer))
             .collect();
         if let Some(snapshot) = self.fleet_snapshot.as_ref() {
+            // The hub's OWN workspaces (#66) fold first, ahead of carried
+            // peers — the home spaces are the most relevant on a spoke.
+            if let Some(origin) = snapshot.origin_summary.as_ref() {
+                peers.push((RemotePeerRef::Origin, origin));
+            }
             peers.extend(
                 snapshot
                     .peers
@@ -1729,6 +1744,7 @@ impl AppState {
             RemotePeerRef::Snapshot { entry_idx } => {
                 self.fleet_snapshot.as_ref()?.peers.get(entry_idx)
             }
+            RemotePeerRef::Origin => self.fleet_snapshot.as_ref()?.origin_summary.as_ref(),
         }
     }
 

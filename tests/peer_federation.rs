@@ -320,6 +320,26 @@ fn wait_for_switch_server(
     Err("timed out waiting for SwitchServer".into())
 }
 
+/// Splits the focus_workspace option (always the FINAL SwitchServer field)
+/// off a captured payload tail, returning just the fleet option bytes —
+/// what the launcher hands the next leg's Hello. None = one 0x00 byte;
+/// Some = 0x01 + len + utf8 id (ids are short; single-byte varint).
+fn strip_focus_suffix(tail: &[u8]) -> &[u8] {
+    if tail.last() == Some(&0) {
+        return &tail[..tail.len() - 1];
+    }
+    for n in 3..=tail.len().min(48) {
+        let suffix = &tail[tail.len() - n..];
+        if suffix[0] == 1
+            && suffix[1] as usize == n - 2
+            && std::str::from_utf8(&suffix[2..]).is_ok()
+        {
+            return &tail[..tail.len() - n];
+        }
+    }
+    tail
+}
+
 #[test]
 fn peer_summary_folds_into_sidebar_and_click_switches_server() {
     let base = unique_test_dir();
@@ -381,7 +401,7 @@ fn peer_summary_folds_into_sidebar_and_click_switches_server() {
 
     // --- Attach a protocol client to A and wait for the folded remote row.
     let mut stream = UnixStream::connect(&client_socket_a).expect("client socket should connect");
-    let (_, error) = client_handshake(&mut stream, 16, 90, 30).expect("handshake should complete");
+    let (_, error) = client_handshake(&mut stream, 17, 90, 30).expect("handshake should complete");
     assert!(error.is_none(), "handshake rejected: {error:?}");
 
     // The first poll fires ~3s after A starts; allow generous slack. The
@@ -478,7 +498,7 @@ fn folded_remote_member_row_click_switches_server() {
     wait_for_file(&client_socket_a, Duration::from_secs(10));
 
     let mut stream = UnixStream::connect(&client_socket_a).expect("client socket should connect");
-    let (_, error) = client_handshake(&mut stream, 16, 90, 30).expect("handshake should complete");
+    let (_, error) = client_handshake(&mut stream, 17, 90, 30).expect("handshake should complete");
     assert!(error.is_none(), "handshake rejected: {error:?}");
 
     wait_for_frame_row(&mut stream, "servers", Duration::from_secs(45))
@@ -580,7 +600,7 @@ fn switch_snapshot_renders_home_row_on_spoke_and_home_switches_back() {
     // below the fold and only a scrollbar shows. Taller frame keeps the
     // whole list on screen; the folding itself is covered by unit tests.
     let mut stream = UnixStream::connect(&client_socket_a).expect("client socket should connect");
-    let (_, error) = client_handshake(&mut stream, 16, 90, 45).expect("handshake should complete");
+    let (_, error) = client_handshake(&mut stream, 17, 90, 45).expect("handshake should complete");
     assert!(error.is_none(), "handshake rejected: {error:?}");
     let row = wait_for_frame_row(&mut stream, "proj · ", Duration::from_secs(45))
         .expect("peer workspace should fold into the sidebar");
@@ -602,6 +622,13 @@ fn switch_snapshot_renders_home_row_on_spoke_and_home_switches_back() {
         !fleet_bytes.windows(5).any(|w| w == b"peerb"),
         "snapshot must exclude the hop target"
     );
+    // #66: the hub stamps its OWN workspaces into the snapshot (origin
+    // summary), so the spoke can see the way-home spaces. The hub's workspace
+    // lives in the "alpha" repo.
+    assert!(
+        fleet_bytes.windows(5).any(|w| w == b"alpha"),
+        "snapshot should carry the hub's own (origin) workspace"
+    );
     drop(stream);
 
     // --- Re-attach to the spoke carrying the snapshot bytes verbatim —
@@ -610,7 +637,8 @@ fn switch_snapshot_renders_home_row_on_spoke_and_home_switches_back() {
     wait_for_file(&client_socket_b, Duration::from_secs(10));
     let mut stream_b =
         UnixStream::connect(&client_socket_b).expect("spoke client socket should connect");
-    let (_, error) = client_handshake_with_fleet(&mut stream_b, 16, 90, 45, &fleet_bytes)
+    let fleet_only = strip_focus_suffix(&fleet_bytes);
+    let (_, error) = client_handshake_with_fleet(&mut stream_b, 17, 90, 45, fleet_only)
         .expect("spoke handshake should complete");
     assert!(error.is_none(), "spoke handshake rejected: {error:?}");
 
@@ -628,16 +656,39 @@ fn switch_snapshot_renders_home_row_on_spoke_and_home_switches_back() {
         rows[home_row]
     );
 
-    // --- Select home: the spoke answers with the reserved home target and
-    // no fleet — the client re-attaches locally.
+    // --- #66: the hub's OWN workspace (alpha) folds into the spoke's spaces
+    // list as a remote-only project row. Clicking it lands HOME (the spoke
+    // has no ssh route to the hub) carrying the workspace as a focus target.
+    let alpha_row = wait_for_frame_row(&mut stream_b, "alpha", Duration::from_secs(30))
+        .expect("hub's own workspace should fold into the spoke's spaces list (#66)");
+    let sgr_row = (alpha_row as u16) + 1;
+    send_input(&mut stream_b, format!("\x1b[<0;4;{sgr_row}M").as_bytes()).expect("mouse press");
+    send_input(&mut stream_b, format!("\x1b[<0;4;{sgr_row}m").as_bytes()).expect("mouse release");
+
+    let (target, trailing) = wait_for_switch_server(&mut stream_b, Duration::from_secs(10))
+        .expect("clicking the origin workspace row should yield SwitchServer");
+    assert_eq!(target, "<home>", "origin workspace lands home, never ssh");
+    // Trailing bytes = fleet (None: 0u8) then focus_workspace (Some + id).
+    assert_eq!(trailing.first(), Some(&0u8), "home carries no fleet");
+    // Structure: fleet None (0), then focus Some (1, len, utf8 workspace id).
+    assert_eq!(trailing.get(1), Some(&1u8), "focus target present");
+    let focus_len = *trailing.get(2).expect("focus length") as usize;
+    let focus_id = std::str::from_utf8(&trailing[3..3 + focus_len]).expect("utf8 focus id");
+    assert!(
+        !focus_id.is_empty(),
+        "origin workspace click carries a focus target ({trailing:?})"
+    );
+
+    // --- Select home directly: the spoke answers with the reserved home
+    // target, no fleet, and no focus target — the client re-attaches locally.
     let sgr_row = (home_row as u16) + 1;
     send_input(&mut stream_b, format!("\x1b[<0;4;{sgr_row}M").as_bytes()).expect("mouse press");
     send_input(&mut stream_b, format!("\x1b[<0;4;{sgr_row}m").as_bytes()).expect("mouse release");
 
-    let (target, fleet_bytes) = wait_for_switch_server(&mut stream_b, Duration::from_secs(10))
+    let (target, trailing) = wait_for_switch_server(&mut stream_b, Duration::from_secs(10))
         .expect("selecting home should yield SwitchServer");
     assert_eq!(target, "<home>"); // protocol::HOME_SWITCH_TARGET
-    assert_eq!(fleet_bytes.first(), Some(&0u8), "home carries no fleet");
+    assert_eq!(trailing.first(), Some(&0u8), "home carries no fleet");
 
     drop(stream_b);
     drop(server_a);

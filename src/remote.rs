@@ -206,6 +206,10 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
         .unwrap_or_else(|| crate::protocol::FleetSnapshot {
             origin: crate::app::short_host_name(),
             peers: Vec::new(),
+            // A CLI-launched leg has no App to enumerate workspaces; the home
+            // label is enough. A hub-stamped snapshot (the common path) does
+            // carry the origin's own workspaces (#66).
+            origin_summary: None,
         });
 
     run_client_process(&local_socket, &reattach_command, remote.keybindings, &fleet)

@@ -515,6 +515,9 @@ impl AppState {
             Some(PeerSwitchRequest::SnapshotPeer { entry_idx }) => {
                 self.remote_peer(crate::app::state::RemotePeerRef::Snapshot { entry_idx })
             }
+            // Origin-workspace rows are spaces-list folds, never band slots,
+            // so there's no server filter to derive for one.
+            Some(PeerSwitchRequest::OriginWorkspace { .. }) => return None,
         };
         peer.map(|peer| ServerFilter::Peer {
             ssh_target: peer.ssh_target.clone(),

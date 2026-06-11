@@ -241,6 +241,11 @@ pub struct RecordedSwitch {
     /// Fleet snapshot from the server the client is leaving.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fleet: Option<protocol::FleetSnapshot>,
+    /// Workspace id to focus once the next leg attaches (#66). Set only when
+    /// going home from an origin-workspace row: the launcher fires
+    /// `workspace focus` against the local server post-attach.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus_workspace: Option<String>,
 }
 
 /// Set while this client is exiting to hand off to a pre-connected next leg
@@ -271,7 +276,11 @@ fn host_terminal_is_held() -> bool {
 
 /// Record a server-switch target for the launcher. Returns false when no
 /// launcher registered a switch file (nothing to chain into).
-fn record_switch_target(ssh_target: &str, fleet: Option<&protocol::FleetSnapshot>) -> bool {
+fn record_switch_target(
+    ssh_target: &str,
+    fleet: Option<&protocol::FleetSnapshot>,
+    focus_workspace: Option<&str>,
+) -> bool {
     let Ok(path) = std::env::var(SWITCH_FILE_ENV_VAR) else {
         return false;
     };
@@ -281,6 +290,7 @@ fn record_switch_target(ssh_target: &str, fleet: Option<&protocol::FleetSnapshot
     let payload = RecordedSwitch {
         target: ssh_target.to_string(),
         fleet: fleet.cloned(),
+        focus_workspace: focus_workspace.map(str::to_string),
     };
     let Ok(json) = serde_json::to_string(&payload) else {
         return false;
@@ -300,6 +310,7 @@ pub fn take_switch_target(path: &std::path::Path) -> Option<RecordedSwitch> {
     (!target.is_empty()).then_some(RecordedSwitch {
         target,
         fleet: None,
+        focus_workspace: None,
     })
 }
 
@@ -1486,11 +1497,16 @@ async fn run_client_loop(
                 ServerMessage::ServerShutdown { reason } => {
                     return Err(ClientError::ServerShutdown { reason });
                 }
-                ServerMessage::SwitchServer { ssh_target, fleet } => {
+                ServerMessage::SwitchServer {
+                    ssh_target,
+                    fleet,
+                    focus_workspace,
+                } => {
                     // Record the target for the launcher's attach loop, then
                     // exit exactly like a detach. The outermost herdr process
                     // reads the file and starts the next leg.
-                    if record_switch_target(&ssh_target, fleet.as_ref()) {
+                    if record_switch_target(&ssh_target, fleet.as_ref(), focus_workspace.as_deref())
+                    {
                         // Hold the alternate screen across the handoff so the
                         // host shell never flashes between legs (#63).
                         SWITCH_HANDOFF_PENDING.store(true, Ordering::Release);
@@ -2148,10 +2164,12 @@ mod tests {
                 age_secs: Some(7),
                 error: None,
             }],
+            origin_summary: None,
         };
         let recorded = RecordedSwitch {
             target: "lars@sage".to_string(),
             fleet: Some(fleet),
+            focus_workspace: None,
         };
         std::fs::write(&path, serde_json::to_string(&recorded).unwrap()).unwrap();
         let taken = take_switch_target(&path).expect("switch recorded");
@@ -2163,6 +2181,7 @@ mod tests {
         let home = RecordedSwitch {
             target: protocol::HOME_SWITCH_TARGET.to_string(),
             fleet: None,
+            focus_workspace: None,
         };
         std::fs::write(&path, serde_json::to_string(&home).unwrap()).unwrap();
         let taken = take_switch_target(&path).expect("home switch recorded");

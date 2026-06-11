@@ -1998,6 +1998,7 @@ mod tests {
                 "lars@anvil",
                 vec![remote_row("github.com/gerchowl/herdr", "fix/pty")],
             )],
+            origin_summary: None,
             received_at: std::time::Instant::now(),
         });
         // Tall enough that the band, the local card, and the folded remote
@@ -2185,6 +2186,7 @@ mod tests {
         app.state.fleet_snapshot = Some(crate::peers::FleetSnapshotState {
             origin: "mba22".into(),
             peers: vec![federated_peer("anvil", "lars@anvil", vec![])],
+            origin_summary: None,
             received_at: std::time::Instant::now(),
         });
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 30));

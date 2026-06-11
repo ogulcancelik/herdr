@@ -27,7 +27,12 @@ use serde::{Deserialize, Serialize};
 /// launcher injects when a server switch fails and it re-attaches the
 /// previous leg (#63: "switch to <name> failed: <reason>", never strand at a
 /// shell). Additive field on a positional wire — deliberate bump.
-pub const PROTOCOL_VERSION: u32 = 16;
+///
+/// v17: `FleetSnapshot` carries an optional `origin_summary` — the hub's OWN
+/// `FleetPeer` (its workspaces + system + version), so a spoke can render the
+/// hub's spaces, not just the hub's peers (#66). Additive field on a
+/// positional wire — deliberate bump.
+pub const PROTOCOL_VERSION: u32 = 17;
 
 /// Refusal notice sent to clients while a live update handoff is in
 /// progress. Clients recognize this exact string (in a rejection `Welcome`
@@ -101,6 +106,15 @@ pub struct FleetSnapshot {
     pub origin: String,
     /// Peer summaries captured from the server the client is leaving.
     pub peers: Vec<FleetPeer>,
+    /// The origin (hub) server's OWN summary — its workspaces + system +
+    /// version (#66). The hub is not its own peer, so without this entry a
+    /// spoke renders the hub's PEERS but not the hub's spaces. Carries the
+    /// reserved [`HOME_SWITCH_TARGET`] as its `ssh_target`: selecting an
+    /// origin workspace row lands home, never an ssh dial (a spoke has no
+    /// route home). `None` for snapshots stamped before v17 has no effect —
+    /// version equality rejects cross-version handshakes outright.
+    #[serde(default)]
+    pub origin_summary: Option<Box<FleetPeer>>,
 }
 
 /// One peer entry of a [`FleetSnapshot`]: the wire shape of the hub's cached
@@ -567,6 +581,12 @@ pub enum ServerMessage {
         /// fresh stamp of its own peer summaries (leap from the hub).
         /// `None` when switching home.
         fleet: Option<FleetSnapshot>,
+        /// Workspace id to focus once the next leg attaches (#66). Set only
+        /// for an origin-workspace row going home: the spoke selected one of
+        /// the hub's spaces, so the home leg focuses it post-attach. `None`
+        /// for plain switches.
+        #[serde(default)]
+        focus_workspace: Option<String>,
     },
 }
 
@@ -976,6 +996,33 @@ mod tests {
                 age_secs: Some(5),
                 error: None,
             }],
+            origin_summary: Some(Box::new(FleetPeer {
+                name: "mba22".to_owned(),
+                ssh_target: HOME_SWITCH_TARGET.to_owned(),
+                host: Some("mba22".to_owned()),
+                version: Some("0.9.0".to_owned()),
+                system: Some(FleetSystem {
+                    cpu_percent: Some(7),
+                    mem_used: Some(8 << 30),
+                    mem_total: Some(16 << 30),
+                    disk_free: Some(200 << 30),
+                }),
+                latency_ms: None,
+                workspaces: vec![FleetWorkspace {
+                    id: "ws_1".to_owned(),
+                    workspace: "herdr".to_owned(),
+                    project_key: Some("git:github.com/gerchowl/herdr".to_owned()),
+                    project_label: Some("herdr".to_owned()),
+                    branch: Some("keyboard-shorcuts".to_owned()),
+                    is_linked_worktree: true,
+                    agent: Some("cc".to_owned()),
+                    status: crate::api::schema::AgentStatus::Working,
+                    status_age_secs: Some(3),
+                    activity: None,
+                }],
+                age_secs: Some(0),
+                error: None,
+            })),
         }
     }
 
@@ -1037,6 +1084,7 @@ mod tests {
         let msg = ServerMessage::SwitchServer {
             ssh_target: "lars@sage".to_owned(),
             fleet: Some(sample_fleet_snapshot()),
+            focus_workspace: Some("ws_3".to_owned()),
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ServerMessage, _) =

@@ -1594,6 +1594,9 @@ fn render_servers_section(app: &AppState, frame: &mut Frame, area: Rect, is_navi
                 };
                 peer_server_rows(peer, p)
             }
+            // Origin-workspace rows fold into the spaces list rather than the band —
+            // the home row already stands for the origin server here.
+            Some(crate::app::state::PeerSwitchRequest::OriginWorkspace { .. }) => continue,
         };
         prepared.push((rect, is_current, build));
     }
@@ -1817,18 +1820,52 @@ fn home_server_rows(
         ),
         Span::styled(" home", Style::default().fg(p.accent)),
     ];
-    let health = Line::from(vec![Span::styled(
-        format!(
-            "snapshot {} old",
-            format_age(snapshot.received_at.elapsed().as_secs())
+    // The carried origin summary (#66) makes the home row live like a peer
+    // row: the hub's own machine health below, its workspace tally in the
+    // count columns. Falls back to the bare snapshot-age line when no origin
+    // summary rode along (pre-#66 hub, or a CLI-stamped origin-only leg).
+    let (health, tally) = match snapshot.origin_summary.as_ref() {
+        Some(origin) => {
+            let mut spans = origin
+                .system
+                .as_ref()
+                .map(|system| {
+                    server_health_spans(
+                        system.cpu_percent.map(f32::from),
+                        system.mem_used,
+                        system.mem_total,
+                        system.disk_free,
+                        None,
+                        p,
+                    )
+                })
+                .unwrap_or_default();
+            let sep = if spans.is_empty() { "" } else { "  " };
+            spans.push(Span::styled(
+                format!(
+                    "{sep}snapshot {} old",
+                    format_age(snapshot.received_at.elapsed().as_secs())
+                ),
+                Style::default().fg(p.overlay0),
+            ));
+            (Line::from(spans), Some(peer_tally(origin)))
+        }
+        None => (
+            Line::from(vec![Span::styled(
+                format!(
+                    "snapshot {} old",
+                    format_age(snapshot.received_at.elapsed().as_secs())
+                ),
+                Style::default().fg(p.overlay0),
+            )]),
+            None,
         ),
-        Style::default().fg(p.overlay0),
-    )]);
+    };
     ServerRowBuild {
         name,
         title_rest: Vec::new(),
         health,
-        tally: None,
+        tally,
         ghosted: false,
     }
 }
@@ -2728,6 +2765,7 @@ mod tests {
                 .into_iter()
                 .map(|name| peer_with_workspaces(name, vec![]))
                 .collect(),
+            origin_summary: None,
             received_at: std::time::Instant::now(),
         }
     }
@@ -3350,6 +3388,7 @@ mod tests {
         crate::peers::FleetSnapshotState {
             origin: origin.to_string(),
             peers,
+            origin_summary: None,
             received_at: std::time::Instant::now(),
         }
     }
@@ -3416,6 +3455,59 @@ mod tests {
         assert!(!workspace_list_entries(&app)
             .iter()
             .any(|entry| matches!(entry, WorkspaceListEntry::Remote { .. })));
+    }
+
+    #[test]
+    fn origin_workspaces_fold_into_spaces_list_and_label_by_origin_host() {
+        use crate::app::state::RemotePeerRef;
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![workspace_with_project_key(
+            "herdr",
+            "github.com/gerchowl/herdr",
+        )];
+        // The spoke standing on sage: the hub (mba22) carries its OWN
+        // workspaces as the origin summary (#66) — home-targeted, not ssh.
+        let mut origin = peer_with_workspaces(
+            "mba22",
+            vec![remote_summary(
+                "herdr",
+                Some("github.com/gerchowl/herdr"),
+                Some("herdr"),
+                Some("keyboard-shorcuts"),
+            )],
+        );
+        origin.host = Some("mba22".into());
+        origin.ssh_target = crate::protocol::HOME_SWITCH_TARGET.into();
+        let mut snapshot = snapshot_with_peers("mba22", vec![]);
+        snapshot.origin_summary = Some(origin);
+        app.fleet_snapshot = Some(snapshot);
+
+        let entries = workspace_list_entries(&app);
+        // The hub's own workspace folds under the matching local project.
+        assert_eq!(
+            entries,
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false
+                },
+                WorkspaceListEntry::Remote {
+                    peer: RemotePeerRef::Origin,
+                    ws_idx: 0,
+                    indented: true
+                },
+            ]
+        );
+        // Labels by the origin host (#62 grammar): `mba22:<branch>`.
+        assert_eq!(
+            remote_entry_label(&app, RemotePeerRef::Origin, 0, true),
+            "mba22:keyboard-shorcuts"
+        );
+        // Clicking it emits a home-bound switch with the workspace focus.
+        assert_eq!(
+            RemotePeerRef::Origin.switch_request(0),
+            crate::app::state::PeerSwitchRequest::OriginWorkspace { ws_idx: 0 }
+        );
     }
 
     #[test]
