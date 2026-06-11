@@ -788,16 +788,98 @@ impl AppState {
             .is_some_and(|tab_idx| tab_idx == self.workspaces[ws_idx].active_tab)
     }
 
-    /// Keys of every worktree-space family rendered as a collapsible sidebar
-    /// group: at least two member workspaces, one of them the non-linked
-    /// parent checkout. Canonical source for collapse-all and auto-collapse.
-    pub(crate) fn collapsible_space_keys(&self) -> std::collections::HashSet<String> {
-        let mut members = std::collections::HashMap::<&str, (usize, bool)>::new();
+    /// One project-section key per workspace — THE local grouping notion of
+    /// the git-first sidebar (#33), converging the issue's key duality:
+    ///
+    /// - Rows group by `project_key` (normalized origin URL — the identity
+    ///   remote rows carry) whenever any member of the repo family has
+    ///   resolved one, so linked worktrees, plain same-repo checkouts, and
+    ///   federated rows all land in one section. The `dir:<name>` fallback
+    ///   for origin-less repos deliberately does NOT merge across repo
+    ///   families — it would conflate unrelated same-named repos.
+    /// - The section's canonical KEY string prefers the first worktree-space
+    ///   membership key among its members: memberships restore from the
+    ///   snapshot before async git metadata lands, so collapse state keyed
+    ///   on it stays stable across restarts AND across the moment metadata
+    ///   resolves mid-session.
+    /// - `None` = no git identity (pending probe or resolved non-git).
+    pub(crate) fn project_section_keys(&self) -> Vec<Option<String>> {
+        // Machine-local repo family per workspace: membership key first,
+        // then the cached git common dir (`repo_group_key`).
+        let families: Vec<Option<&str>> = self
+            .workspaces
+            .iter()
+            .map(|ws| ws.repo_group_key())
+            .collect();
+
+        // family key -> machine-independent project key, where resolvable.
+        let mut project_of_family = std::collections::HashMap::<&str, &str>::new();
         for ws in &self.workspaces {
-            if let Some(space) = ws.worktree_space() {
-                let entry = members.entry(space.key.as_str()).or_insert((0, false));
+            let Some(space) = ws.git_space() else {
+                continue;
+            };
+            if space.project_key.starts_with("dir:") {
+                continue;
+            }
+            project_of_family
+                .entry(space.key.as_str())
+                .or_insert(space.project_key.as_str());
+            if let Some(membership) = ws.worktree_space() {
+                project_of_family
+                    .entry(membership.key.as_str())
+                    .or_insert(space.project_key.as_str());
+            }
+        }
+
+        // Group id per workspace: project key when resolvable, else family.
+        let group_ids: Vec<Option<&str>> = families
+            .iter()
+            .map(|family| {
+                family.map(|family| project_of_family.get(family).copied().unwrap_or(family))
+            })
+            .collect();
+
+        // Canonical key per group: the first membership key in storage
+        // order, else the group id itself.
+        let mut canonical = std::collections::HashMap::<&str, &str>::new();
+        for (ws_idx, group_id) in group_ids.iter().enumerate() {
+            if let (Some(group_id), Some(membership)) =
+                (group_id, self.workspaces[ws_idx].worktree_space())
+            {
+                canonical.entry(group_id).or_insert(membership.key.as_str());
+            }
+        }
+
+        group_ids
+            .into_iter()
+            .map(|group_id| {
+                group_id.map(|group_id| {
+                    canonical
+                        .get(group_id)
+                        .copied()
+                        .unwrap_or(group_id)
+                        .to_string()
+                })
+            })
+            .collect()
+    }
+
+    /// The section key of one workspace's project group, if it has one.
+    pub(crate) fn project_section_key(&self, ws_idx: usize) -> Option<String> {
+        self.project_section_keys().into_iter().nth(ws_idx)?
+    }
+
+    /// Keys of every project section rendered as a collapsible sidebar
+    /// group: at least two member workspaces, one of them the non-linked
+    /// main checkout. Canonical source for collapse-all and auto-collapse.
+    pub(crate) fn collapsible_space_keys(&self) -> std::collections::HashSet<String> {
+        let keys = self.project_section_keys();
+        let mut members = std::collections::HashMap::<&str, (usize, bool)>::new();
+        for (ws, key) in self.workspaces.iter().zip(keys.iter()) {
+            if let Some(key) = key.as_deref() {
+                let entry = members.entry(key).or_insert((0, false));
                 entry.0 += 1;
-                entry.1 |= !space.is_linked_worktree;
+                entry.1 |= !ws.is_linked_checkout();
             }
         }
         members
@@ -840,13 +922,12 @@ impl AppState {
         }
     }
 
-    /// Collapse every worktree group except the focused workspace's own.
+    /// Collapse every project group except the focused workspace's own.
     fn auto_collapse_inactive_groups(&mut self) {
         let focused_key = self
             .active
-            .and_then(|idx| self.workspaces.get(idx))
-            .and_then(|ws| ws.worktree_space())
-            .map(|space| space.key.clone());
+            .filter(|idx| *idx < self.workspaces.len())
+            .and_then(|idx| self.project_section_key(idx));
         let mut changed = false;
         for key in self.collapsible_space_keys() {
             if focused_key.as_deref() == Some(key.as_str()) {
@@ -858,6 +939,91 @@ impl AppState {
         if changed {
             self.mark_session_dirty();
         }
+    }
+
+    /// Whether the tab bar is the session-member switcher (#33): workspace
+    /// tab-mode with an active workspace. In tabs mode the strip — and every
+    /// key acting on it — behaves exactly as upstream.
+    pub(crate) fn tab_strip_shows_members(&self) -> bool {
+        self.tab_mode == crate::config::TabModeConfig::Workspace && self.active.is_some()
+    }
+
+    /// The member tab-strip content (#33): the active workspace's project
+    /// section in sidebar visual order — primary first, then the remaining
+    /// members in storage order. Local rows only (selecting a remote row is
+    /// a server switch, not a member switch) and collapse state is ignored:
+    /// the strip always shows the whole session. Sectionless workspaces
+    /// (pending probe, misc) get a single-member strip.
+    pub(crate) fn workspace_strip_members(&self) -> Vec<usize> {
+        let Some(active) = self.active.filter(|idx| *idx < self.workspaces.len()) else {
+            return Vec::new();
+        };
+        let keys = self.project_section_keys();
+        let Some(key) = keys.get(active).cloned().flatten() else {
+            return vec![active];
+        };
+        let members: Vec<usize> = (0..self.workspaces.len())
+            .filter(|idx| keys[*idx].as_deref() == Some(key.as_str()))
+            .collect();
+        let Some(primary) = members
+            .iter()
+            .copied()
+            .find(|idx| !self.workspaces[*idx].is_linked_checkout())
+        else {
+            return members;
+        };
+        std::iter::once(primary)
+            .chain(members.into_iter().filter(|idx| *idx != primary))
+            .collect()
+    }
+
+    /// The primary row (main checkout) of the ACTIVE workspace's project
+    /// section — the sidebar's second highlight level (#33): the session
+    /// stays marked on the primary row while any member is focused, the
+    /// same always-on currency idiom as the current-server row.
+    pub(crate) fn active_section_primary(&self) -> Option<usize> {
+        let active = self.active.filter(|idx| *idx < self.workspaces.len())?;
+        let keys = self.project_section_keys();
+        let key = keys.get(active).cloned().flatten()?;
+        (0..self.workspaces.len()).find(|idx| {
+            keys[*idx].as_deref() == Some(key.as_str())
+                && !self.workspaces[*idx].is_linked_checkout()
+        })
+    }
+
+    /// Switch to the strip member at `idx` (0-based strip position, i.e.
+    /// the rendered `<ID>` minus one). Returns false when the strip is not
+    /// the member switcher or the member doesn't exist, so keyboard callers
+    /// can mirror upstream's "missing tab is a kept-mode no-op".
+    pub(crate) fn switch_strip_member(&mut self, idx: usize) -> bool {
+        if !self.tab_strip_shows_members() {
+            return false;
+        }
+        let Some(ws_idx) = self.workspace_strip_members().get(idx).copied() else {
+            return false;
+        };
+        self.switch_workspace(ws_idx);
+        true
+    }
+
+    /// Cycle the strip's members by `delta` (#33). Returns true when the
+    /// member strip consumed the action — including the single-member
+    /// no-op, so workspace mode never falls back to cycling invisible tabs.
+    fn cycle_strip_member(&mut self, delta: isize) -> bool {
+        if !self.tab_strip_shows_members() {
+            return false;
+        }
+        let members = self.workspace_strip_members();
+        if members.len() < 2 {
+            return true;
+        }
+        let current = self
+            .active
+            .and_then(|active| members.iter().position(|idx| *idx == active))
+            .unwrap_or(0);
+        let target = (current as isize + delta).rem_euclid(members.len() as isize) as usize;
+        self.switch_workspace(members[target]);
+        true
     }
 
     pub fn switch_workspace(&mut self, idx: usize) {
@@ -1012,6 +1178,14 @@ impl AppState {
     }
 
     pub fn switch_tab(&mut self, idx: usize) {
+        // #33: in workspace tab-mode the strip's tabs ARE the active
+        // project's member workspaces — one branch point serves strip
+        // clicks and the prefix+N keys alike (the #29 resolution: the
+        // mode split lives in this fork-owned body, never in dispatch).
+        if self.tab_strip_shows_members() {
+            self.switch_strip_member(idx);
+            return;
+        }
         if let Some(ws_idx) = self.active {
             let previous_focus = self.current_pane_focus_target();
             self.selection = None;
@@ -1171,6 +1345,10 @@ impl AppState {
     }
 
     pub fn next_tab(&mut self) {
+        // #33: workspace tab-mode cycles the member strip instead.
+        if self.cycle_strip_member(1) {
+            return;
+        }
         if let Some(ws) = self.active.and_then(|i| self.workspaces.get(i)) {
             if !ws.tabs.is_empty() {
                 let next = (ws.active_tab + 1) % ws.tabs.len();
@@ -1180,6 +1358,10 @@ impl AppState {
     }
 
     pub fn previous_tab(&mut self) {
+        // #33: workspace tab-mode cycles the member strip instead.
+        if self.cycle_strip_member(-1) {
+            return;
+        }
         if let Some(ws) = self.active.and_then(|i| self.workspaces.get(i)) {
             if !ws.tabs.is_empty() {
                 let prev = if ws.active_tab == 0 {
@@ -1570,7 +1752,7 @@ impl AppState {
 
     fn refresh_tab_bar_view(&mut self) {
         let area = self.view.tab_bar_rect;
-        let Some(ws) = self.active.and_then(|idx| self.workspaces.get(idx)) else {
+        let Some(active_idx) = self.active.filter(|idx| *idx < self.workspaces.len()) else {
             self.tab_scroll = 0;
             self.view.tab_hit_areas.clear();
             self.view.tab_scroll_left_hit_area = ratatui::layout::Rect::default();
@@ -1579,13 +1761,25 @@ impl AppState {
             return;
         };
 
-        let layout = crate::ui::compute_tab_bar_view(
-            ws,
-            area,
-            self.tab_scroll,
-            self.tab_scroll_follow_active,
-            self.mouse_capture,
-        );
+        // #33: workspace tab-mode lays the strip out over the session's
+        // members, not the workspace's tabs.
+        let layout = if self.tab_strip_shows_members() {
+            crate::ui::compute_member_strip_view(
+                self,
+                area,
+                self.tab_scroll,
+                self.tab_scroll_follow_active,
+                self.mouse_capture,
+            )
+        } else {
+            crate::ui::compute_tab_bar_view(
+                &self.workspaces[active_idx],
+                area,
+                self.tab_scroll,
+                self.tab_scroll_follow_active,
+                self.mouse_capture,
+            )
+        };
         self.tab_scroll = layout.scroll;
         self.view.tab_hit_areas = layout.tab_hit_areas;
         self.view.tab_scroll_left_hit_area = layout.scroll_left_hit_area;
@@ -2325,6 +2519,15 @@ impl AppState {
                 .as_ref()
                 != Some(&result.resolved_identity_cwd)
             {
+                // The probe still SETTLES pending-vs-misc (#33): a workspace
+                // whose cwd drifted (or never resolves again) must not hold a
+                // "pending" sidebar position forever — only the cached git
+                // fields are too stale to apply.
+                let ws = &mut self.workspaces[ws_idx];
+                if !ws.git_identity_resolved {
+                    ws.git_identity_resolved = true;
+                    changed = true;
+                }
                 continue;
             }
 
@@ -2339,6 +2542,12 @@ impl AppState {
             }
             if ws.cached_git_space != result.space {
                 ws.cached_git_space = result.space;
+                changed = true;
+            }
+            // A completed probe settles the pending-vs-misc question for
+            // the sidebar's sectioning (#33), even when nothing changed.
+            if !ws.git_identity_resolved {
+                ws.git_identity_resolved = true;
                 changed = true;
             }
         }
@@ -3511,20 +3720,30 @@ mod tests {
         state.workspaces[0].cached_git_ahead_behind = Some((1, 0));
 
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        let changed = state.apply_workspace_git_statuses(
-            &terminal_runtimes,
+        let stale = |workspace_id: String| {
             vec![WorkspaceGitStatus {
                 workspace_id,
                 resolved_identity_cwd: std::path::PathBuf::from("/definitely/not/current"),
                 branch: Some("main".into()),
                 ahead_behind: Some((0, 1)),
                 space: None,
-            }],
-        );
+            }]
+        };
 
-        assert!(!changed);
+        // First stale probe: cached git fields stay untouched, but the probe
+        // still settles pending-vs-misc (#33) — that transition reports
+        // changed once.
+        let changed =
+            state.apply_workspace_git_statuses(&terminal_runtimes, stale(workspace_id.clone()));
+        assert!(changed, "pending -> settled fires once");
+        assert!(state.workspaces[0].git_identity_resolved);
         assert_eq!(state.workspaces[0].branch().as_deref(), Some("old"));
         assert_eq!(state.workspaces[0].git_ahead_behind(), Some((1, 0)));
+
+        // Subsequent stale probes are pure no-ops.
+        let changed = state.apply_workspace_git_statuses(&terminal_runtimes, stale(workspace_id));
+        assert!(!changed);
+        assert_eq!(state.workspaces[0].branch().as_deref(), Some("old"));
     }
 
     #[test]
@@ -3748,6 +3967,87 @@ mod tests {
         state.switch_workspace(2);
         assert_eq!(state.active, Some(2));
         assert_eq!(state.selected, 2);
+    }
+
+    /// A three-member project section (#33): main checkout first, then two
+    /// linked worktrees, plus an unrelated flat workspace.
+    fn app_with_member_strip() -> AppState {
+        let mut state = app_with_workspaces(&["main", "wt-one", "wt-two", "other"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree(&mut state, 1);
+        mark_linked_worktree(&mut state, 2);
+        state.tab_mode = crate::config::TabModeConfig::Workspace;
+        state
+    }
+
+    #[test]
+    fn workspace_strip_members_run_primary_first_in_sidebar_order() {
+        let mut state = app_with_member_strip();
+        state.switch_workspace(1);
+        assert_eq!(state.workspace_strip_members(), vec![0, 1, 2]);
+
+        // A sectionless workspace gets a single-member strip.
+        state.switch_workspace(3);
+        assert_eq!(state.workspace_strip_members(), vec![3]);
+
+        // Collapse does not hide strip members: the strip always shows the
+        // whole session.
+        state.switch_workspace(1);
+        state.collapsed_space_keys.insert("repo-key".into());
+        assert_eq!(state.workspace_strip_members(), vec![0, 1, 2]);
+    }
+
+    /// #33/#29 — in workspace tab-mode, switch_tab acts on the strip's
+    /// members (the mouse-click path), even though every workspace has a
+    /// single real tab; out-of-range indices no-op.
+    #[test]
+    fn workspace_mode_switch_tab_switches_strip_members() {
+        let mut state = app_with_member_strip();
+        state.switch_tab(2);
+        assert_eq!(state.active, Some(2));
+        state.switch_tab(0);
+        assert_eq!(state.active, Some(0));
+        state.switch_tab(9);
+        assert_eq!(state.active, Some(0));
+    }
+
+    /// Tabs mode stays byte-identical: switch_tab keeps acting on tabs.
+    #[test]
+    fn tabs_mode_switch_tab_still_acts_on_tabs() {
+        let mut state = app_with_member_strip();
+        state.tab_mode = crate::config::TabModeConfig::Tabs;
+        let second_tab = state.workspaces[0].test_add_tab(Some("logs"));
+        state.switch_tab(second_tab);
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.workspaces[0].active_tab, second_tab);
+    }
+
+    /// #33/#29 — next_tab/previous_tab cycle the member strip in sidebar
+    /// visual order in workspace tab-mode.
+    #[test]
+    fn workspace_mode_next_tab_cycles_strip_members() {
+        let mut state = app_with_member_strip();
+        state.next_tab();
+        assert_eq!(state.active, Some(1));
+        state.next_tab();
+        assert_eq!(state.active, Some(2));
+        state.next_tab();
+        assert_eq!(state.active, Some(0), "cycling wraps to the primary");
+        state.previous_tab();
+        assert_eq!(state.active, Some(2));
+    }
+
+    /// #33 — a single-member strip consumes the cycle keys: workspace mode
+    /// never falls back to cycling tabs the strip doesn't show.
+    #[test]
+    fn workspace_mode_single_member_strip_consumes_tab_cycling() {
+        let mut state = app_with_member_strip();
+        let hidden_tab = state.workspaces[3].test_add_tab(Some("logs"));
+        state.workspaces[3].switch_tab(0);
+        state.switch_workspace(3);
+        state.next_tab();
+        assert_eq!(state.active, Some(3));
+        assert_ne!(state.workspaces[3].active_tab, hidden_tab);
     }
 
     #[test]

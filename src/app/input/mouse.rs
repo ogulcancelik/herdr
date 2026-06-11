@@ -705,7 +705,11 @@ impl AppState {
                     } else if let Some(press) = &self.tab_press {
                         let delta_col = mouse.column.abs_diff(press.start_col);
                         let delta_row = mouse.row.abs_diff(press.start_row);
-                        if delta_col.max(delta_row) >= TAB_DRAG_THRESHOLD {
+                        // #33: the workspace-mode member strip has no tab
+                        // reorder — its order is the sidebar's section order.
+                        if delta_col.max(delta_row) >= TAB_DRAG_THRESHOLD
+                            && !self.tab_strip_shows_members()
+                        {
                             self.drag = Some(DragState {
                                 target: DragTarget::TabReorder {
                                     ws_idx: press.ws_idx,
@@ -1041,8 +1045,18 @@ impl AppState {
                     (self.active, self.tab_at(mouse.column, mouse.row))
                 {
                     self.switch_tab(tab_idx);
+                    // #33: in workspace tab-mode the strip rows are member
+                    // workspaces — a tab menu doesn't apply; offer the
+                    // workspace menu for the (now focused) member instead.
+                    let kind = if self.tab_strip_shows_members() {
+                        ContextMenuKind::Workspace {
+                            ws_idx: self.active.unwrap_or(ws_idx),
+                        }
+                    } else {
+                        ContextMenuKind::Tab { ws_idx, tab_idx }
+                    };
                     self.context_menu = Some(ContextMenuState {
-                        kind: ContextMenuKind::Tab { ws_idx, tab_idx },
+                        kind,
                         x: mouse.column,
                         y: mouse.row,
                         list: MenuListState::new(0),
@@ -1128,7 +1142,12 @@ impl AppState {
                 open_new_tab_dialog(self);
             }
             Some(crate::ui::MobileSwitcherTarget::Tab(tab_idx)) => {
-                self.switch_tab(tab_idx);
+                // The mobile switcher lists real tabs; route around the
+                // workspace-mode member-strip semantics of switch_tab (#33)
+                // so taps keep their meaning in both tab modes.
+                if let Some(ws_idx) = self.active {
+                    self.switch_workspace_tab(ws_idx, tab_idx);
+                }
                 self.mode = Mode::Terminal;
             }
             Some(crate::ui::MobileSwitcherTarget::Agent {

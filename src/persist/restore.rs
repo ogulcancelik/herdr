@@ -347,6 +347,9 @@ fn restore_workspace(
             cached_git_branch: crate::workspace::git_branch(&snap.identity_cwd),
             cached_git_ahead_behind: None,
             cached_git_space: crate::workspace::git_space_metadata(&snap.identity_cwd),
+            // The synchronous restore-time probe above IS a completed git
+            // identity check: a None space here is genuinely non-git (#33).
+            git_identity_resolved: true,
             worktree_space,
             public_pane_numbers,
             next_public_pane_number,

@@ -650,11 +650,11 @@ pub(super) fn apply_context_menu_action(
             },
             Some("Collapse" | "Expand"),
         ) => {
-            if let Some(key) = state
-                .workspaces
-                .get(ws_idx)
-                .and_then(|ws| ws.worktree_space())
-                .map(|space| space.key.clone())
+            // Collapse operates on the project-section key (#33) — the same
+            // identity the sidebar groups and persists by.
+            if let Some(key) = (ws_idx < state.workspaces.len())
+                .then(|| state.project_section_key(ws_idx))
+                .flatten()
             {
                 if collapsed {
                     state.collapsed_space_keys.remove(&key);
