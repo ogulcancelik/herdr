@@ -788,16 +788,98 @@ impl AppState {
             .is_some_and(|tab_idx| tab_idx == self.workspaces[ws_idx].active_tab)
     }
 
-    /// Keys of every worktree-space family rendered as a collapsible sidebar
-    /// group: at least two member workspaces, one of them the non-linked
-    /// parent checkout. Canonical source for collapse-all and auto-collapse.
-    pub(crate) fn collapsible_space_keys(&self) -> std::collections::HashSet<String> {
-        let mut members = std::collections::HashMap::<&str, (usize, bool)>::new();
+    /// One project-section key per workspace — THE local grouping notion of
+    /// the git-first sidebar (#33), converging the issue's key duality:
+    ///
+    /// - Rows group by `project_key` (normalized origin URL — the identity
+    ///   remote rows carry) whenever any member of the repo family has
+    ///   resolved one, so linked worktrees, plain same-repo checkouts, and
+    ///   federated rows all land in one section. The `dir:<name>` fallback
+    ///   for origin-less repos deliberately does NOT merge across repo
+    ///   families — it would conflate unrelated same-named repos.
+    /// - The section's canonical KEY string prefers the first worktree-space
+    ///   membership key among its members: memberships restore from the
+    ///   snapshot before async git metadata lands, so collapse state keyed
+    ///   on it stays stable across restarts AND across the moment metadata
+    ///   resolves mid-session.
+    /// - `None` = no git identity (pending probe or resolved non-git).
+    pub(crate) fn project_section_keys(&self) -> Vec<Option<String>> {
+        // Machine-local repo family per workspace: membership key first,
+        // then the cached git common dir (`repo_group_key`).
+        let families: Vec<Option<&str>> = self
+            .workspaces
+            .iter()
+            .map(|ws| ws.repo_group_key())
+            .collect();
+
+        // family key -> machine-independent project key, where resolvable.
+        let mut project_of_family = std::collections::HashMap::<&str, &str>::new();
         for ws in &self.workspaces {
-            if let Some(space) = ws.worktree_space() {
-                let entry = members.entry(space.key.as_str()).or_insert((0, false));
+            let Some(space) = ws.git_space() else {
+                continue;
+            };
+            if space.project_key.starts_with("dir:") {
+                continue;
+            }
+            project_of_family
+                .entry(space.key.as_str())
+                .or_insert(space.project_key.as_str());
+            if let Some(membership) = ws.worktree_space() {
+                project_of_family
+                    .entry(membership.key.as_str())
+                    .or_insert(space.project_key.as_str());
+            }
+        }
+
+        // Group id per workspace: project key when resolvable, else family.
+        let group_ids: Vec<Option<&str>> = families
+            .iter()
+            .map(|family| {
+                family.map(|family| project_of_family.get(family).copied().unwrap_or(family))
+            })
+            .collect();
+
+        // Canonical key per group: the first membership key in storage
+        // order, else the group id itself.
+        let mut canonical = std::collections::HashMap::<&str, &str>::new();
+        for (ws_idx, group_id) in group_ids.iter().enumerate() {
+            if let (Some(group_id), Some(membership)) =
+                (group_id, self.workspaces[ws_idx].worktree_space())
+            {
+                canonical.entry(group_id).or_insert(membership.key.as_str());
+            }
+        }
+
+        group_ids
+            .into_iter()
+            .map(|group_id| {
+                group_id.map(|group_id| {
+                    canonical
+                        .get(group_id)
+                        .copied()
+                        .unwrap_or(group_id)
+                        .to_string()
+                })
+            })
+            .collect()
+    }
+
+    /// The section key of one workspace's project group, if it has one.
+    pub(crate) fn project_section_key(&self, ws_idx: usize) -> Option<String> {
+        self.project_section_keys().into_iter().nth(ws_idx)?
+    }
+
+    /// Keys of every project section rendered as a collapsible sidebar
+    /// group: at least two member workspaces, one of them the non-linked
+    /// main checkout. Canonical source for collapse-all and auto-collapse.
+    pub(crate) fn collapsible_space_keys(&self) -> std::collections::HashSet<String> {
+        let keys = self.project_section_keys();
+        let mut members = std::collections::HashMap::<&str, (usize, bool)>::new();
+        for (ws, key) in self.workspaces.iter().zip(keys.iter()) {
+            if let Some(key) = key.as_deref() {
+                let entry = members.entry(key).or_insert((0, false));
                 entry.0 += 1;
-                entry.1 |= !space.is_linked_worktree;
+                entry.1 |= !ws.is_linked_checkout();
             }
         }
         members
@@ -840,13 +922,12 @@ impl AppState {
         }
     }
 
-    /// Collapse every worktree group except the focused workspace's own.
+    /// Collapse every project group except the focused workspace's own.
     fn auto_collapse_inactive_groups(&mut self) {
         let focused_key = self
             .active
-            .and_then(|idx| self.workspaces.get(idx))
-            .and_then(|ws| ws.worktree_space())
-            .map(|space| space.key.clone());
+            .filter(|idx| *idx < self.workspaces.len())
+            .and_then(|idx| self.project_section_key(idx));
         let mut changed = false;
         for key in self.collapsible_space_keys() {
             if focused_key.as_deref() == Some(key.as_str()) {
@@ -2339,6 +2420,12 @@ impl AppState {
             }
             if ws.cached_git_space != result.space {
                 ws.cached_git_space = result.space;
+                changed = true;
+            }
+            // A completed probe settles the pending-vs-misc question for
+            // the sidebar's sectioning (#33), even when nothing changed.
+            if !ws.git_identity_resolved {
+                ws.git_identity_resolved = true;
                 changed = true;
             }
         }

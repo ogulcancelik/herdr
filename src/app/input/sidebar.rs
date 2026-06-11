@@ -427,18 +427,16 @@ impl AppState {
             return Some(0);
         }
 
+        let section_keys = self.project_section_keys();
         let mut insert_indices = Vec::with_capacity(cards.len() + 1);
         for (idx, card) in cards.iter().enumerate() {
-            let card_group = self
-                .workspaces
+            let card_group = section_keys
                 .get(card.ws_idx)
-                .and_then(|ws| ws.worktree_space())
-                .map(|space| space.key.as_str());
+                .and_then(|section| section.as_deref());
             let previous_group = idx.checked_sub(1).and_then(|prev_idx| {
-                self.workspaces
+                section_keys
                     .get(cards[prev_idx].ws_idx)
-                    .and_then(|ws| ws.worktree_space())
-                    .map(|space| space.key.as_str())
+                    .and_then(|section| section.as_deref())
             });
             let inside_group_gap = card_group.is_some() && card_group == previous_group;
             if !inside_group_gap {

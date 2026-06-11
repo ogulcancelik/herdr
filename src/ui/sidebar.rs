@@ -342,10 +342,20 @@ fn workspace_row_height(ws: &crate::workspace::Workspace) -> u16 {
     }
 }
 
+/// Member workspaces of one project section (#33), by section key.
+fn section_member_indices(app: &AppState, key: &str) -> Vec<usize> {
+    app.project_section_keys()
+        .into_iter()
+        .enumerate()
+        .filter(|(_, section)| section.as_deref() == Some(key))
+        .map(|(ws_idx, _)| ws_idx)
+        .collect()
+}
+
 fn space_aggregate_state(app: &AppState, key: &str) -> (AgentState, bool) {
-    app.workspaces
-        .iter()
-        .filter(|ws| ws.worktree_space().is_some_and(|space| space.key == key))
+    section_member_indices(app, key)
+        .into_iter()
+        .filter_map(|ws_idx| app.workspaces.get(ws_idx))
         .map(|ws| ws.aggregate_state(&app.terminals))
         .max_by_key(|(state, seen)| StateClass::of(*state, *seen))
         .unwrap_or((AgentState::Unknown, true))
@@ -359,12 +369,12 @@ fn workspace_join(app: &AppState, ws: &crate::workspace::Workspace) -> StateJoin
     )
 }
 
-/// The join across every member workspace of a worktree space.
+/// The join across every member workspace of a project section.
 fn space_join(app: &AppState, key: &str) -> StateJoin {
     join_states(
-        app.workspaces
-            .iter()
-            .filter(|ws| ws.worktree_space().is_some_and(|space| space.key == key))
+        section_member_indices(app, key)
+            .into_iter()
+            .filter_map(|ws_idx| app.workspaces.get(ws_idx))
             .flat_map(|ws| ws.pane_states(&app.terminals))
             .map(|(state, seen)| StateClass::of(state, seen)),
     )
@@ -390,17 +400,16 @@ fn peer_join(peer: &crate::peers::PeerSummaryState) -> StateJoin {
     )
 }
 
-/// Pane counts per state bucket across a worktree space's members, in
+/// Pane counts per state bucket across a project section's members, in
 /// attention-priority order: blocked, done (unseen idle), working, idle.
 fn space_state_counts(app: &AppState, key: &str) -> Vec<(AgentState, bool, usize)> {
     let mut blocked = 0usize;
     let mut done = 0usize;
     let mut working = 0usize;
     let mut idle = 0usize;
-    for ws in app
-        .workspaces
-        .iter()
-        .filter(|ws| ws.worktree_space().is_some_and(|space| space.key == key))
+    for ws in section_member_indices(app, key)
+        .into_iter()
+        .filter_map(|ws_idx| app.workspaces.get(ws_idx))
     {
         for (state, seen) in ws.pane_states(&app.terminals) {
             match (state, seen) {
@@ -423,28 +432,21 @@ fn space_state_counts(app: &AppState, key: &str) -> Vec<(AgentState, bool, usize
     .collect()
 }
 
+/// The group affordances (key + collapsed flag) a workspace row carries —
+/// only the section's PRIMARY row (the first non-linked member, i.e. the
+/// main checkout) of a multi-member project section gets them (#33).
 pub(crate) fn workspace_parent_group_state(
     app: &AppState,
     ws_idx: usize,
 ) -> Option<(String, bool)> {
-    let space = app.workspaces.get(ws_idx)?.worktree_space()?;
-    if space.is_linked_worktree {
-        return None;
-    }
-    let member_count = app
-        .workspaces
+    let key = app.project_section_key(ws_idx)?;
+    let members = section_member_indices(app, &key);
+    let primary = members
         .iter()
-        .filter(|ws| {
-            ws.worktree_space()
-                .is_some_and(|member| member.key == space.key)
-        })
-        .count();
-    (member_count >= 2).then(|| {
-        (
-            space.key.clone(),
-            app.collapsed_space_keys.contains(&space.key),
-        )
-    })
+        .copied()
+        .find(|idx| !app.workspaces[*idx].is_linked_checkout())?;
+    (primary == ws_idx && members.len() >= 2)
+        .then(|| (key.clone(), app.collapsed_space_keys.contains(&key)))
 }
 
 fn grouped_child_display_label(label: &str, branch: Option<&str>, has_custom_name: bool) -> String {
@@ -507,14 +509,24 @@ pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested:
     }
 }
 
+/// The spaces list, sectioned git-first by project (#33):
+///
+/// - Git workspaces group into project sections ([`AppState::project_section_keys`]):
+///   the main checkout is the section's primary row, every other member
+///   (linked worktrees AND plain same-repo checkouts) indents under it.
+///   Sections appear in workspace storage order of their first member.
+/// - Workspaces whose git identity probe hasn't finished yet ("pending")
+///   hold their storage position as plain rows — they never flash into
+///   `misc` only to jump into a project section a sweep later.
+/// - Resolved non-git workspaces collect at the tail as the positional
+///   `misc` section (after remote-only project groups). No synthetic header
+///   row: like the project sections themselves, the section is its rows.
 pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> {
-    let mut members_by_key = std::collections::HashMap::<String, Vec<usize>>::new();
-    for (ws_idx, ws) in app.workspaces.iter().enumerate() {
-        if let Some(space) = ws.worktree_space() {
-            members_by_key
-                .entry(space.key.clone())
-                .or_default()
-                .push(ws_idx);
+    let section_keys = app.project_section_keys();
+    let mut members_by_key = std::collections::HashMap::<&str, Vec<usize>>::new();
+    for (ws_idx, key) in section_keys.iter().enumerate() {
+        if let Some(key) = key.as_deref() {
+            members_by_key.entry(key).or_default().push(ws_idx);
         }
     }
     let grouped_keys = app.collapsible_space_keys();
@@ -524,19 +536,43 @@ pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> 
     } else {
         app.active
     };
-    let active_group = visible_group_idx.and_then(|idx| {
-        app.workspaces
-            .get(idx)
-            .and_then(|ws| ws.worktree_space())
-            .map(|space| space.key.clone())
-    });
+    let active_group = visible_group_idx.and_then(|idx| section_keys.get(idx).cloned().flatten());
 
-    let mut emitted_groups = std::collections::HashSet::<String>::new();
+    let mut emitted_groups = std::collections::HashSet::<&str>::new();
     let mut entries = Vec::new();
+    let mut misc = Vec::new();
     for (ws_idx, ws) in app.workspaces.iter().enumerate() {
-        let Some(space) = ws
-            .worktree_space()
-            .filter(|space| grouped_keys.contains(&space.key))
+        let Some(key) = section_keys[ws_idx].as_deref() else {
+            if ws.git_identity_pending() {
+                // Pending probe: hold position among the git sections.
+                entries.push(WorkspaceListEntry::Workspace {
+                    ws_idx,
+                    indented: false,
+                });
+            } else {
+                misc.push(ws_idx);
+            }
+            continue;
+        };
+        if !grouped_keys.contains(key) {
+            entries.push(WorkspaceListEntry::Workspace {
+                ws_idx,
+                indented: false,
+            });
+            continue;
+        }
+
+        if !emitted_groups.insert(key) {
+            continue;
+        }
+
+        let Some(members) = members_by_key.get(key) else {
+            continue;
+        };
+        let Some(parent_idx) = members
+            .iter()
+            .copied()
+            .find(|idx| !app.workspaces[*idx].is_linked_checkout())
         else {
             entries.push(WorkspaceListEntry::Workspace {
                 ws_idx,
@@ -544,27 +580,7 @@ pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> 
             });
             continue;
         };
-
-        if !emitted_groups.insert(space.key.clone()) {
-            continue;
-        }
-
-        let Some(members) = members_by_key.get(&space.key) else {
-            continue;
-        };
-        let Some(parent_idx) = members.iter().copied().find(|idx| {
-            app.workspaces
-                .get(*idx)
-                .and_then(|member| member.worktree_space())
-                .is_some_and(|member_space| !member_space.is_linked_worktree)
-        }) else {
-            entries.push(WorkspaceListEntry::Workspace {
-                ws_idx,
-                indented: false,
-            });
-            continue;
-        };
-        let collapsed = app.collapsed_space_keys.contains(&space.key);
+        let collapsed = app.collapsed_space_keys.contains(key);
         entries.push(WorkspaceListEntry::Workspace {
             ws_idx: parent_idx,
             indented: false,
@@ -573,7 +589,7 @@ pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> 
         if collapsed {
             if let Some(active_idx) = visible_group_idx
                 .filter(|idx| *idx != parent_idx)
-                .filter(|_| active_group.as_deref() == Some(space.key.as_str()))
+                .filter(|_| active_group.as_deref() == Some(key))
             {
                 entries.push(WorkspaceListEntry::Workspace {
                     ws_idx: active_idx,
@@ -595,6 +611,7 @@ pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> 
     if matches!(app.spaces_panel_scope, PanelScope::Current) {
         retain_focused_space_group(
             app,
+            &section_keys,
             &mut entries,
             visible_group_idx,
             active_group.as_deref(),
@@ -606,12 +623,33 @@ pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> 
     // consistent. `Local` keeps the local entries and folds no remote rows.
     // `Peer` replaces the list with that one peer's rows. Without a filter
     // every federated peer folds in as usual.
-    match app.server_filter.as_ref() {
-        Some(crate::app::state::ServerFilter::Local) => {}
+    let peer_filtered = match app.server_filter.as_ref() {
+        Some(crate::app::state::ServerFilter::Local) => false,
         Some(crate::app::state::ServerFilter::Peer { ssh_target }) => {
             entries = single_peer_entries(app, ssh_target);
+            true
         }
-        None => fold_remote_entries(app, &mut entries),
+        None => {
+            fold_remote_entries(app, &mut entries);
+            false
+        }
+    };
+    // The trailing `misc` section: resolved non-git workspaces, after every
+    // git project (local AND remote-only) — git projects first, misc last.
+    // A peer filter replaces the whole list; scope current pins the list to
+    // the focused row, so misc only renders when it IS the focused row.
+    if !peer_filtered {
+        for ws_idx in misc {
+            if matches!(app.spaces_panel_scope, PanelScope::Current)
+                && visible_group_idx != Some(ws_idx)
+            {
+                continue;
+            }
+            entries.push(WorkspaceListEntry::Workspace {
+                ws_idx,
+                indented: false,
+            });
+        }
     }
     entries
 }
@@ -663,6 +701,7 @@ fn single_peer_entries(app: &AppState, ssh_target: &str) -> Vec<WorkspaceListEnt
 /// list stays (nothing to pin to).
 fn retain_focused_space_group(
     app: &AppState,
+    section_keys: &[Option<String>],
     entries: &mut Vec<WorkspaceListEntry>,
     focused_idx: Option<usize>,
     active_group: Option<&str>,
@@ -674,11 +713,9 @@ fn retain_focused_space_group(
     let focused_key = active_group.filter(|key| grouped_keys.contains(*key));
     entries.retain(|entry| match entry {
         WorkspaceListEntry::Workspace { ws_idx, .. } => match focused_key {
-            Some(key) => app
-                .workspaces
+            Some(key) => section_keys
                 .get(*ws_idx)
-                .and_then(|ws| ws.worktree_space())
-                .is_some_and(|space| space.key == key),
+                .is_some_and(|section| section.as_deref() == Some(key)),
             None => *ws_idx == focused_idx,
         },
         // Remote rows are folded in after this filter runs.
@@ -715,7 +752,8 @@ fn fold_remote_entries(app: &AppState, entries: &mut Vec<WorkspaceListEntry>) {
     }
 
     // Last entry index of each local project's block, and whether that block
-    // is a collapsed worktree group (remote rows hide with it).
+    // is a collapsed project group (remote rows hide with it).
+    let section_keys = app.project_section_keys();
     let mut block_end = std::collections::HashMap::<&str, usize>::new();
     let mut collapsed_projects = std::collections::HashSet::<&str>::new();
     for (entry_idx, entry) in entries.iter().enumerate() {
@@ -729,9 +767,10 @@ fn fold_remote_entries(app: &AppState, entries: &mut Vec<WorkspaceListEntry>) {
             continue;
         };
         block_end.insert(project_key, entry_idx);
-        if ws
-            .worktree_space()
-            .is_some_and(|space| app.collapsed_space_keys.contains(&space.key))
+        if section_keys
+            .get(*ws_idx)
+            .and_then(|section| section.as_deref())
+            .is_some_and(|section| app.collapsed_space_keys.contains(section))
         {
             collapsed_projects.insert(project_key);
         }
@@ -4459,8 +4498,10 @@ mod tests {
         );
     }
 
+    /// #33 — git-first sections: plain same-repo workspaces group into one
+    /// project section; the first non-linked checkout is the primary row.
     #[test]
-    fn workspace_list_entries_do_not_group_normal_git_workspaces() {
+    fn plain_same_repo_workspaces_group_into_one_project_section() {
         let mut app = AppState::test_new();
         app.workspaces = vec![
             workspace_with_git_space("one", "repo-key"),
@@ -4476,14 +4517,16 @@ mod tests {
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
-                    indented: false,
+                    indented: true,
                 },
             ]
         );
     }
 
+    /// #33 — a plain same-repo workspace becomes a member of the existing
+    /// worktree-space section (members in storage order under the primary).
     #[test]
-    fn workspace_list_entries_do_not_auto_attach_normal_git_workspace_to_group() {
+    fn plain_same_repo_workspace_attaches_to_its_project_section() {
         let mut app = AppState::test_new();
         app.workspaces = vec![
             workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr"),
@@ -4499,11 +4542,179 @@ mod tests {
                     indented: false,
                 },
                 WorkspaceListEntry::Workspace {
-                    ws_idx: 2,
+                    ws_idx: 1,
                     indented: true,
                 },
                 WorkspaceListEntry::Workspace {
+                    ws_idx: 2,
+                    indented: true,
+                },
+            ]
+        );
+    }
+
+    /// #33 — two checkouts of the same project with DIFFERENT git common
+    /// dirs (separate clones / a plain clone next to a worktree family)
+    /// converge into one section via the machine-independent project_key;
+    /// the section's canonical key stays the membership key, so collapse
+    /// state keyed on it survives metadata resolution.
+    #[test]
+    fn same_origin_checkouts_merge_into_one_section_keyed_by_membership() {
+        let mut app = AppState::test_new();
+        let mut main = workspace_with_project_key("herdr", "github.com/gerchowl/herdr");
+        main.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "family-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr".into(),
+            is_linked_worktree: false,
+        });
+        // A separate clone of the same origin: different common dir, no
+        // membership.
+        let clone = workspace_with_project_key("herdr-clone", "github.com/gerchowl/herdr");
+        app.workspaces = vec![main, clone];
+
+        assert_eq!(
+            workspace_list_entries(&app),
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false,
+                },
+                WorkspaceListEntry::Workspace {
                     ws_idx: 1,
+                    indented: true,
+                },
+            ]
+        );
+        assert_eq!(
+            workspace_parent_group_state(&app, 0),
+            Some(("family-key".into(), false))
+        );
+        // Collapsing by the membership key folds the whole merged section.
+        app.collapsed_space_keys.insert("family-key".into());
+        app.active = None;
+        app.mode = Mode::Terminal;
+        assert_eq!(
+            workspace_list_entries(&app),
+            vec![WorkspaceListEntry::Workspace {
+                ws_idx: 0,
+                indented: false,
+            }]
+        );
+    }
+
+    /// #33 — resolved non-git workspaces collect under the trailing `misc`
+    /// section: git projects first, misc last, regardless of storage order.
+    #[test]
+    fn resolved_non_git_workspaces_collect_in_trailing_misc_section() {
+        let mut app = AppState::test_new();
+        let mut notes = Workspace::test_new("notes");
+        notes.cached_git_branch = None;
+        notes.git_identity_resolved = true;
+        app.workspaces = vec![
+            notes,
+            workspace_with_git_space("one", "repo-key"),
+            workspace_with_git_space("other", "elsewhere"),
+        ];
+
+        assert_eq!(
+            workspace_list_entries(&app),
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 1,
+                    indented: false,
+                },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 2,
+                    indented: false,
+                },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false,
+                },
+            ]
+        );
+    }
+
+    /// #33 — a workspace whose git probe hasn't finished must NOT flash
+    /// into misc: it holds its storage position until the identity lands.
+    #[test]
+    fn pending_git_identity_holds_position_not_misc() {
+        let mut app = AppState::test_new();
+        let mut pending = Workspace::test_new("fresh");
+        pending.cached_git_branch = None;
+        assert!(pending.git_identity_pending());
+        app.workspaces = vec![pending, workspace_with_git_space("one", "repo-key")];
+
+        assert_eq!(
+            workspace_list_entries(&app),
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false,
+                },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 1,
+                    indented: false,
+                },
+            ]
+        );
+
+        // The probe resolves non-git: the row moves to the trailing misc
+        // section.
+        app.workspaces[0].git_identity_resolved = true;
+        assert_eq!(
+            workspace_list_entries(&app),
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 1,
+                    indented: false,
+                },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false,
+                },
+            ]
+        );
+    }
+
+    /// #33 — remote-only project groups still count as git projects: they
+    /// trail the local sections but render BEFORE the misc section.
+    #[test]
+    fn remote_only_projects_render_before_misc() {
+        let mut app = AppState::test_new();
+        let mut notes = Workspace::test_new("notes");
+        notes.cached_git_branch = None;
+        notes.git_identity_resolved = true;
+        app.workspaces = vec![
+            notes,
+            workspace_with_project_key("herdr", "github.com/gerchowl/herdr"),
+        ];
+        app.peer_summaries = vec![peer_with_workspaces(
+            "sage",
+            vec![remote_summary(
+                "dotfiles",
+                Some("github.com/gerchowl/dotfiles"),
+                Some("dotfiles"),
+                None,
+            )],
+        )];
+
+        assert_eq!(
+            workspace_list_entries(&app),
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 1,
+                    indented: false,
+                },
+                WorkspaceListEntry::Remote {
+                    peer: crate::app::state::RemotePeerRef::Config { peer_idx: 0 },
+                    ws_idx: 0,
+                    indented: false,
+                },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
                     indented: false,
                 },
             ]
