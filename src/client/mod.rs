@@ -206,6 +206,17 @@ pub const SWITCH_FILE_ENV_VAR: &str = "HERDR_SWITCH_FILE";
 /// (unset) once consumed so it shows on the first attach only.
 pub const SWITCH_NOTICE_ENV_VAR: &str = "HERDR_SWITCH_NOTICE";
 
+/// Env var the launcher sets on a leg it chains into AFTER a seamless switch
+/// held the host terminal (#63/#69). The previous leg's process exited holding
+/// the alt-screen + raw mode (a frozen frame) so the swap had no blip; this
+/// next leg therefore INHERITS a held terminal even though its own
+/// [`SWITCH_HANDOFF_PENDING`] flag starts clear (it is a different process for
+/// remote legs, and explicitly cleared for local ones). The value tells this
+/// leg to arm its held-terminal restore guard, so if it dies in the #52 retry
+/// window — ctrl-c, signal, error, panic — before it repaints, it reclaims the
+/// host terminal instead of leaving the user stranded behind the frozen frame.
+pub const HELD_TERMINAL_ENV_VAR: &str = "HERDR_TERMINAL_HELD";
+
 /// Take the launcher's one-shot attach notice, if set, clearing it so a later
 /// in-leg handshake retry (#38 live-handoff) does not repeat it.
 fn take_attach_notice() -> Option<String> {
@@ -239,6 +250,24 @@ pub struct RecordedSwitch {
 /// shell ("blip to the terminal", #63). The next leg's `ratatui::init()`
 /// re-enters the alt-screen (idempotent) and paints over the frozen frame.
 static SWITCH_HANDOFF_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// True while the host terminal is INHERITED-held by a previous leg (#69): the
+/// launcher chained this leg in after a seamless switch, so the OS terminal is
+/// in alt-screen + raw mode showing a frozen frame, but no live guard in THIS
+/// process owns it yet (the previous leg's process is gone). Set at leg start
+/// from [`HELD_TERMINAL_ENV_VAR`]; cleared the moment any full terminal restore
+/// runs ([`restore_terminal_state`]'s real-exit branch) or a handoff is
+/// re-armed. While true, an abnormal exit must reclaim the terminal.
+static INHERITED_TERMINAL_HOLD: AtomicBool = AtomicBool::new(false);
+
+/// Whether the host terminal is currently held with nothing live to reclaim
+/// it: either this leg set the switch-handoff hold, or it inherited one from a
+/// previous leg. Used by [`HeldRestoreGuard`] to decide whether an abnormal
+/// exit must force a restore.
+fn host_terminal_is_held() -> bool {
+    SWITCH_HANDOFF_PENDING.load(Ordering::Acquire)
+        || INHERITED_TERMINAL_HOLD.load(Ordering::Acquire)
+}
 
 /// Record a server-switch target for the launcher. Returns false when no
 /// launcher registered a switch file (nothing to chain into).
@@ -470,21 +499,74 @@ fn restore_terminal_state(reset_modify_other_keys: bool) {
         return;
     }
 
+    // A real exit reclaims the terminal: this leg now owns the restore, so any
+    // inherited hold from a previous leg (#69) is superseded and must not
+    // trigger a second force-restore on the way out.
+    INHERITED_TERMINAL_HOLD.store(false, Ordering::Release);
     ratatui::restore();
     let _ = write_terminal_restore_postlude(&mut io::stdout());
 }
 
-/// Best-effort full terminal restore for the launcher (#63). A leg that
-/// switched away held the alternate screen + raw mode so the swap was
-/// seamless; if the chain ultimately dies with no leg left to reclaim the
-/// screen, the launcher calls this so the user is not left in a frozen
-/// alt-screen with raw mode on. Idempotent and safe to call when nothing
-/// was held.
+/// Guard covering the held-terminal window of one client leg (#69). The
+/// alt-screen + raw mode may be HELD across this leg in two ways: this leg's
+/// own SwitchServer sets [`SWITCH_HANDOFF_PENDING`], or a PREVIOUS leg's
+/// subprocess exited holding the terminal and this leg inherited it before its
+/// first paint. Either way, if the leg unwinds, errors, or is signalled
+/// (ctrl-c / SIGTERM) before it hands off to a real next leg — including the
+/// `std::process::exit` paths that skip [`TerminalGuard::drop`] — this guard
+/// reclaims the host terminal so the user is never left at a frozen frame with
+/// raw mode on. A clean handoff into the next leg disarms it via
+/// [`HeldRestoreGuard::into_handoff`] so the hold survives exactly where it is
+/// meant to: into the next leg's repaint.
+struct HeldRestoreGuard {
+    armed: bool,
+}
+
+impl HeldRestoreGuard {
+    fn new() -> Self {
+        Self { armed: true }
+    }
+
+    /// Disarm: this leg is exiting by handing the held terminal to the next
+    /// leg (a recorded SwitchServer). The hold must survive process exit.
+    fn into_handoff(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for HeldRestoreGuard {
+    fn drop(&mut self) {
+        // Restore only if the terminal is actually still held — by this leg's
+        // own pending switch-handoff or an inherited hold from a previous leg
+        // (#69). A leg that exited cleanly already restored (both flags clear),
+        // so the common path is a no-op.
+        if self.armed && host_terminal_is_held() {
+            force_restore_host_terminal();
+        }
+    }
+}
+
+/// Best-effort full terminal restore for the launcher (#63) and for any
+/// client exit that leaves the host terminal HELD (#69). A leg that switched
+/// away held the alternate screen + raw mode so the swap was seamless; if the
+/// chain ultimately dies with no leg left to reclaim the screen — the launcher
+/// finishing, a held leg crashing/ctrl-c'ing before it repaints, a panic or
+/// signal — the user must not be stranded in a frozen alt-screen with raw mode
+/// on. Emits the full recovery sequence (pop kitty keyboard flags, reset
+/// modifyOtherKeys, disable mouse/paste/focus, leave alt-screen, raw off,
+/// cursor on) so a held terminal is always reclaimable. Idempotent and safe to
+/// call when nothing was held.
 pub fn force_restore_host_terminal() {
     SWITCH_HANDOFF_PENDING.store(false, Ordering::Release);
+    INHERITED_TERMINAL_HOLD.store(false, Ordering::Release);
     let _ = crossterm::terminal::disable_raw_mode();
+    // Reset xterm modifyOtherKeys unconditionally: a held leg may have enabled
+    // it (tmux/host-specific) and exited without resetting. Harmless on hosts
+    // that never set it.
+    let _ = io::stdout().write_all(b"\x1b[>4;0m");
     let _ = execute!(
         io::stdout(),
+        PopKeyboardEnhancementFlags,
         DisableMouseCapture,
         DisableBracketedPaste,
         DisableFocusChange,
@@ -581,9 +663,12 @@ fn do_handshake(
         .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(ClientError::ConnectionFailed)?;
     let welcome: ServerMessage = protocol::read_message(stream, MAX_FRAME_SIZE)?;
-    stream
-        .set_read_timeout(None)
-        .map_err(ClientError::ConnectionFailed)?;
+    // Clearing the read timeout can fail with EINVAL on a peer that already
+    // half-closed the socket right after the Welcome (a dying mid-handoff
+    // server). The Welcome is already in hand, so a failure here must not mask
+    // a live-handoff refusal as a bare connection error — ignore it and let the
+    // refusal classification below drive the retry (#69).
+    let _ = stream.set_read_timeout(None);
 
     match welcome {
         ServerMessage::Welcome {
@@ -791,6 +876,13 @@ struct HandoffRetry {
     deadline: Option<Instant>,
     status_line_shown: bool,
     spinner_frame: usize,
+    /// When the first refusal opened the window — drives the elapsed-seconds
+    /// counter shown to the user so a reconnect reads as live progress, not a
+    /// frozen hang (#69).
+    started: Option<Instant>,
+    /// Whether the status was painted directly onto a held alt-screen (a
+    /// frozen frame from a previous leg). Governs how it is cleared.
+    painted_held: bool,
 }
 
 impl HandoffRetry {
@@ -809,6 +901,7 @@ impl HandoffRetry {
         }
         if err.is_live_handoff_refusal() && self.deadline.is_none() {
             self.deadline = Some(now + HANDOFF_RETRY_WINDOW);
+            self.started = Some(now);
             return true;
         }
         let Some(deadline) = self.deadline else {
@@ -837,24 +930,58 @@ impl HandoffRetry {
         std::thread::sleep(HANDOFF_RETRY_INTERVAL);
     }
 
-    /// Single status line on stderr while reconnecting; rewritten in place
-    /// (with a spinner) when stderr is a terminal, printed once otherwise.
+    /// The reconnect message shown to the user, with a live elapsed-seconds
+    /// counter so the wait reads as progress rather than a frozen hang (#69).
+    fn status_text(&self) -> String {
+        let secs = self.started.map(|s| s.elapsed().as_secs()).unwrap_or(0);
+        format!("herdr: handoff in progress, reconnecting… ({secs}s)")
+    }
+
+    /// Paint the reconnect status while waiting. When a previous leg left the
+    /// host terminal HELD (a frozen frame in the alt-screen, #63/#69), the bare
+    /// `\r` stderr line lands at an unknown cursor position behind the frame
+    /// and is effectively invisible — the user sees a dead client. So overlay a
+    /// styled status bar on the bottom row of the held screen with absolute
+    /// positioning, saving/restoring the cursor around it. Otherwise (a plain
+    /// in-leg reconnect on the host shell) keep the in-place stderr line.
     fn show_status_line(&mut self) {
         use std::io::IsTerminal;
+        let frame = HANDOFF_SPINNER[self.spinner_frame % HANDOFF_SPINNER.len()];
+        self.spinner_frame = self.spinner_frame.wrapping_add(1);
+        let text = self.status_text();
+
+        if host_terminal_is_held() {
+            // Bottom row, reverse-video bar, cursor parked then restored so the
+            // overlay never disturbs the frozen frame underneath.
+            let mut out = io::stdout();
+            let _ = write!(
+                out,
+                "\x1b7\x1b[9999;1H\x1b[K\x1b[7m {frame} {text} \x1b[0m\x1b8"
+            );
+            let _ = out.flush();
+            self.painted_held = true;
+            self.status_line_shown = true;
+            return;
+        }
+
         if io::stderr().is_terminal() {
-            let frame = HANDOFF_SPINNER[self.spinner_frame % HANDOFF_SPINNER.len()];
-            self.spinner_frame = self.spinner_frame.wrapping_add(1);
-            eprint!("\r\x1b[K{frame} herdr: handoff in progress, reconnecting…");
+            eprint!("\r\x1b[K{frame} {text}");
             let _ = io::stderr().flush();
         } else if !self.status_line_shown {
-            eprintln!("herdr: handoff in progress, reconnecting…");
+            eprintln!("{text}");
         }
         self.status_line_shown = true;
     }
 
     fn clear_status_line(&mut self) {
         use std::io::IsTerminal;
-        if self.status_line_shown && io::stderr().is_terminal() {
+        if self.painted_held {
+            // Erase the bottom-row overlay we painted on the held screen.
+            let mut out = io::stdout();
+            let _ = write!(out, "\x1b7\x1b[9999;1H\x1b[K\x1b8");
+            let _ = out.flush();
+            self.painted_held = false;
+        } else if self.status_line_shown && io::stderr().is_terminal() {
             eprint!("\r\x1b[K");
             let _ = io::stderr().flush();
         }
@@ -958,6 +1085,21 @@ fn run_client_with_mode(
     // restores the host terminal fully.
     SWITCH_HANDOFF_PENDING.store(false, Ordering::Release);
 
+    // If the launcher chained this leg in after a seamless switch, the host
+    // terminal is INHERITED-held (frozen frame, raw mode) until this leg
+    // repaints (#69). Record it so an abnormal exit in the retry window
+    // reclaims the terminal instead of stranding the user behind the frame.
+    if std::env::var(HELD_TERMINAL_ENV_VAR).is_ok() {
+        INHERITED_TERMINAL_HOLD.store(true, Ordering::Release);
+        // One-shot: only this immediate next leg inherits the hold.
+        std::env::remove_var(HELD_TERMINAL_ENV_VAR);
+    }
+    // Reclaim the host terminal on ANY abnormal exit of this leg while it is
+    // still held — ctrl-c/signal, error return, or the `std::process::exit`
+    // paths below that skip TerminalGuard::drop (#69). Disarmed only when this
+    // leg hands the held terminal off to a real next leg.
+    let held_restore = HeldRestoreGuard::new();
+
     let loaded_config = crate::config::Config::load();
     let mouse_scroll_lines = loaded_config.config.ui.mouse_scroll_lines();
     let redraw_on_focus_gained = loaded_config.config.ui.redraw_on_focus_gained;
@@ -991,11 +1133,18 @@ fn run_client_with_mode(
         input::stdin_reader_loop(stdin_tx, &stdin_quit);
     });
 
-    // Install a panic hook to restore the terminal on panic (same as monolithic).
+    // Install a panic hook to restore the terminal on panic. A panic is always
+    // a real exit, so it must NEVER honor the switch-handoff hold — force a
+    // full restore (leave alt-screen, raw off, pop kitty flags) so a panic
+    // mid-held-handoff cannot strand the shell (#69).
     let in_tmux = std::env::var("TMUX").is_ok();
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        restore_terminal_state(in_tmux);
+        if host_terminal_is_held() {
+            force_restore_host_terminal();
+        } else {
+            restore_terminal_state(in_tmux);
+        }
         original_hook(info);
     }));
 
@@ -1005,7 +1154,11 @@ fn run_client_with_mode(
         .build()
         .map_err(io::Error::other)?;
 
-    // Install Ctrl+C handler.
+    // Install a termination handler (SIGINT/SIGTERM/SIGHUP via ctrlc's
+    // `termination` feature). It runs on ctrlc's own thread — signal-safe — and
+    // only flips `should_quit`; the attach/retry loop observes it and exits
+    // through the held-restore path so a signal mid-held-handoff cannot strand
+    // the shell (#69).
     let quit_flag = should_quit.clone();
     let _ = ctrlc::set_handler(move || {
         quit_flag.store(true, Ordering::Release);
@@ -1049,12 +1202,36 @@ fn run_client_with_mode(
         let err = match attempt_err.into_client_error() {
             Ok(client_err) => client_err,
             Err(setup_err) => {
+                // Terminal setup failed: nothing of ours owns the screen, but a
+                // previous leg may still be holding it. Reclaim before we leave
+                // (the guard would also catch this return, but be explicit).
+                if host_terminal_is_held() {
+                    force_restore_host_terminal();
+                }
+                held_restore.into_handoff();
                 eprintln!("herdr: failed to set up terminal: {setup_err}");
                 rt.shutdown_timeout(Duration::from_millis(100));
                 crate::logging::shutdown("client");
                 return Err(setup_err);
             }
         };
+
+        // A clean switch hands the held terminal to the next leg: keep the
+        // hold (disarm the restore) so the swap stays blip-free (#63). Any
+        // other exit must reclaim the terminal if it is still held (#69).
+        let switching = matches!(
+            &err,
+            ClientError::ServerShutdown { reason: Some(reason) } if reason == "switching"
+        );
+        if switching {
+            held_restore.into_handoff();
+        } else if host_terminal_is_held() {
+            // ctrl-c in the retry window, a dropped/refused connection, or any
+            // error while a previous leg's frozen frame is still up: the
+            // process::exit below skips Drop, so reclaim the terminal now.
+            force_restore_host_terminal();
+            held_restore.into_handoff();
+        }
 
         eprintln!("herdr: {err}");
         rt.shutdown_timeout(Duration::from_millis(100));
@@ -1072,6 +1249,9 @@ fn run_client_with_mode(
         std::process::exit(1);
     }
 
+    // Clean leg exit: the terminal is already fully restored. Disarm so the
+    // guard does not second-guess it.
+    held_restore.into_handoff();
     rt.shutdown_timeout(Duration::from_millis(100));
     crate::logging::shutdown("client");
     Ok(())
@@ -1825,6 +2005,97 @@ mod tests {
         // The session ran for real before this refusal (a later, separate
         // handoff): a fresh retry window opens.
         assert!(retry.should_retry(&refusal_session_error(), HANDOFF_SESSION_RESET_THRESHOLD));
+    }
+
+    /// Serializes tests that mutate the process-global hold flags.
+    fn hold_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    #[test]
+    fn status_text_counts_elapsed_seconds_for_visible_progress() {
+        // No window open yet: 0s, never silent.
+        let fresh = HandoffRetry::default();
+        assert_eq!(
+            fresh.status_text(),
+            "herdr: handoff in progress, reconnecting… (0s)"
+        );
+
+        // Once the window opens, the counter ticks up.
+        let retry = HandoffRetry {
+            started: Some(Instant::now() - Duration::from_secs(3)),
+            ..HandoffRetry::default()
+        };
+        assert_eq!(
+            retry.status_text(),
+            "herdr: handoff in progress, reconnecting… (3s)"
+        );
+    }
+
+    #[test]
+    fn opening_the_window_starts_the_elapsed_counter() {
+        let mut retry = HandoffRetry::default();
+        assert!(retry.started.is_none());
+        assert!(retry.should_retry(&refusal_session_error(), Duration::ZERO));
+        assert!(
+            retry.started.is_some(),
+            "the elapsed-seconds clock starts when the retry window opens"
+        );
+    }
+
+    #[test]
+    fn host_terminal_is_held_tracks_both_hold_sources() {
+        let _guard = hold_test_lock();
+        SWITCH_HANDOFF_PENDING.store(false, Ordering::Release);
+        INHERITED_TERMINAL_HOLD.store(false, Ordering::Release);
+        assert!(!host_terminal_is_held());
+
+        SWITCH_HANDOFF_PENDING.store(true, Ordering::Release);
+        assert!(host_terminal_is_held(), "own switch-handoff hold counts");
+        SWITCH_HANDOFF_PENDING.store(false, Ordering::Release);
+
+        INHERITED_TERMINAL_HOLD.store(true, Ordering::Release);
+        assert!(host_terminal_is_held(), "inherited hold counts");
+        INHERITED_TERMINAL_HOLD.store(false, Ordering::Release);
+    }
+
+    #[test]
+    fn held_restore_guard_clears_an_inherited_hold_on_drop() {
+        let _guard = hold_test_lock();
+        SWITCH_HANDOFF_PENDING.store(false, Ordering::Release);
+        INHERITED_TERMINAL_HOLD.store(true, Ordering::Release);
+
+        // An armed guard dropping while the terminal is held reclaims it:
+        // force_restore_host_terminal clears every hold flag.
+        {
+            let _held = HeldRestoreGuard::new();
+        }
+        assert!(
+            !host_terminal_is_held(),
+            "an abnormal exit from a held leg must reclaim the terminal"
+        );
+    }
+
+    #[test]
+    fn held_restore_guard_disarmed_keeps_the_hold_for_the_next_leg() {
+        let _guard = hold_test_lock();
+        SWITCH_HANDOFF_PENDING.store(true, Ordering::Release);
+        INHERITED_TERMINAL_HOLD.store(false, Ordering::Release);
+
+        // A clean handoff disarms the guard: the hold must survive into the
+        // next leg's repaint (the no-blip switch, #63).
+        {
+            let held = HeldRestoreGuard::new();
+            held.into_handoff();
+        }
+        assert!(
+            SWITCH_HANDOFF_PENDING.load(Ordering::Acquire),
+            "a disarmed guard leaves the hold in place for the next leg"
+        );
+        SWITCH_HANDOFF_PENDING.store(false, Ordering::Release);
     }
 
     #[test]

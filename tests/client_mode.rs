@@ -13,10 +13,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Deserialize;
 use support::{
-    cleanup_test_base, client_handshake, encode_varint_u16, encode_varint_u32, frame_message,
-    read_server_message, register_runtime_dir, register_spawned_herdr_pid,
-    unregister_spawned_herdr_pid, wait_for_file, wait_for_message_variant, wait_for_socket,
-    wait_until,
+    cleanup_test_base, client_handshake, encode_live_handoff_refusal, encode_varint_u16,
+    encode_varint_u32, frame_message, read_server_message, register_runtime_dir,
+    register_spawned_herdr_pid, unregister_spawned_herdr_pid, wait_for_file,
+    wait_for_message_variant, wait_for_socket, wait_until,
 };
 
 fn unique_test_dir() -> PathBuf {
@@ -1175,5 +1175,201 @@ fn client_receives_notify_on_agent_state_change() {
         "client should receive a Sound Notify with 'agent done' when background pane transitions Working→Idle"
     );
 
+    cleanup_spawned_herdr(spawned, base);
+}
+
+// ---------------------------------------------------------------------------
+// Held-handoff restore + visible retry progress (#69)
+// ---------------------------------------------------------------------------
+
+/// A stand-in server that refuses every connecting client with the
+/// live-handoff notice, keeping the real `herdr client` spinning in its #52
+/// retry window. Returns a flag the caller can flip to stop the accept loop.
+fn spawn_refusing_server(client_socket: PathBuf) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    use std::os::unix::net::UnixListener;
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_thread = stop.clone();
+    let listener = UnixListener::bind(&client_socket).expect("bind refusing client socket");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    thread::spawn(move || {
+        // Connections we have refused but keep open. A real mid-handoff server
+        // does not slam the socket shut the instant it writes the refusal
+        // Welcome; if we did, the client's post-read `set_read_timeout(None)`
+        // would hit EINVAL on the half-closed fd and mis-report the refusal as
+        // a bare connection failure. Holding each refused stream open keeps the
+        // client in its live-handoff retry loop, which is what #69 exercises.
+        let mut held: Vec<std::os::unix::net::UnixStream> = Vec::new();
+        while !stop_thread.load(std::sync::atomic::Ordering::Acquire) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    // Drain the client's Hello frame, then refuse.
+                    stream
+                        .set_read_timeout(Some(Duration::from_millis(500)))
+                        .ok();
+                    let mut len = [0u8; 4];
+                    if stream.read_exact(&mut len).is_ok() {
+                        let n = u32::from_le_bytes(len) as usize;
+                        if n <= 64 * 1024 {
+                            let mut payload = vec![0u8; n];
+                            let _ = stream.read_exact(&mut payload);
+                        }
+                    }
+                    let _ = stream.write_all(&encode_live_handoff_refusal(16));
+                    let _ = stream.flush();
+                    held.push(stream);
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Err(_) => break,
+            }
+        }
+        drop(held);
+    });
+    stop
+}
+
+/// Reads from the PTY master into a shared buffer until `stop` is set. Lets the
+/// test poll the cumulative client output for restore sequences.
+fn drain_master_into(
+    mut reader: Box<dyn Read + Send>,
+    sink: std::sync::Arc<Mutex<Vec<u8>>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while !stop.load(std::sync::atomic::Ordering::Acquire) {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    sink.lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .extend_from_slice(&buf[..n]);
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+#[test]
+fn killing_a_client_mid_held_handoff_restores_the_terminal() {
+    // Repro of #69: a leg chained in after a seamless switch INHERITS a held
+    // host terminal (frozen frame, raw mode). It then lands on a server still
+    // mid-live-handoff and spins in the #52 retry window. The user ctrl-c's the
+    // "hung" client. The terminal MUST be reclaimed — leave alt-screen, raw
+    // off, pop kitty flags — not left unusable.
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    fs::create_dir_all(config_home.join("herdr")).unwrap();
+    fs::create_dir_all(&runtime_dir).unwrap();
+    register_runtime_dir(&runtime_dir);
+    fs::write(
+        config_home.join("herdr/config.toml"),
+        "onboarding = false\n",
+    )
+    .unwrap();
+
+    let server_stop = spawn_refusing_server(client_socket.clone());
+
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    cmd.arg("client");
+    cmd.env("HERDR_DISABLE_SOUND", "1");
+    cmd.env("XDG_CONFIG_HOME", &config_home);
+    cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
+    cmd.env("HERDR_SOCKET_PATH", &api_socket);
+    cmd.env("HERDR_CLIENT_SOCKET_PATH", &client_socket);
+    // Pretend a previous leg handed us a held terminal (the switch-handoff case).
+    cmd.env("HERDR_TERMINAL_HELD", "1");
+    cmd.env("SHELL", "/bin/sh");
+    cmd.env_remove("HERDR_ENV");
+    cmd.env_remove("TMUX");
+
+    let reader = pair.master.try_clone_reader().unwrap();
+    let child = pair.slave.spawn_command(cmd).unwrap();
+    let pid = child.process_id();
+    register_spawned_herdr_pid(pid);
+    drop(pair.slave);
+    let mut spawned = SpawnedHerdr {
+        _master: Some(pair.master),
+        child,
+    };
+
+    let output = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
+    let drain_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    drain_master_into(reader, output.clone(), drain_stop.clone());
+
+    // The client should paint a VISIBLE reconnect status on the held screen —
+    // not sit silent behind the frozen frame.
+    let saw_status = wait_until(Duration::from_secs(10), Duration::from_millis(50), || {
+        let buf = output.lock().unwrap_or_else(|p| p.into_inner());
+        let text = String::from_utf8_lossy(&buf);
+        text.contains("reconnecting")
+    });
+    let status_text =
+        String::from_utf8_lossy(&output.lock().unwrap_or_else(|p| p.into_inner())).into_owned();
+    assert!(
+        saw_status,
+        "a held-handoff reconnect must paint visible progress, got: {status_text:?}"
+    );
+    // The progress must be painted ON the held screen, not flushed to a stderr
+    // line that lands invisibly behind the frozen frame (#69 outcome 1): the
+    // overlay parks the cursor (DECSC `\x1b7`) at an absolute bottom row
+    // (`\x1b[9999;1H`) before drawing, and carries a live elapsed-seconds
+    // counter so the wait reads as progress rather than a frozen hang.
+    assert!(
+        status_text.contains("\x1b7\x1b[9999;1H"),
+        "held-handoff progress must be overlaid on the held screen (cursor-parked bottom row); output: {status_text:?}"
+    );
+    assert!(
+        status_text.contains("reconnecting… (") && status_text.contains("s)"),
+        "held-handoff progress must show a live elapsed-seconds counter; output: {status_text:?}"
+    );
+
+    // ctrl-c the "hung" client.
+    if let Some(pid) = pid {
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGINT);
+        }
+    }
+
+    // After the kill, the restore sequence must hit the wire: leave alt-screen,
+    // show cursor, pop kitty keyboard flags.
+    let restored = wait_until(Duration::from_secs(10), Duration::from_millis(50), || {
+        let buf = output.lock().unwrap_or_else(|p| p.into_inner());
+        let text = String::from_utf8_lossy(&buf);
+        text.contains("\x1b[?1049l") && text.contains("\x1b[?25h")
+    });
+    let final_text =
+        String::from_utf8_lossy(&output.lock().unwrap_or_else(|p| p.into_inner())).into_owned();
+    assert!(
+        restored,
+        "killing a held-handoff client must leave the alt-screen and show the cursor; output: {final_text:?}"
+    );
+    // crossterm's PopKeyboardEnhancementFlags emits CSI < <n> u (n = pop count).
+    assert!(
+        final_text.contains("\x1b[<1u") || final_text.contains("\x1b[<u"),
+        "the restore must pop kitty keyboard enhancement flags (kitty-flags pop); output: {final_text:?}"
+    );
+
+    drain_stop.store(true, std::sync::atomic::Ordering::Release);
+    server_stop.store(true, std::sync::atomic::Ordering::Release);
+    spawned.close_master();
+    let _ = spawned.child.wait();
     cleanup_spawned_herdr(spawned, base);
 }

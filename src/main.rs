@@ -376,6 +376,16 @@ fn run_attach_legs(first: AttachLeg) -> io::Result<()> {
     // Once a switch fires, a dying chain must reclaim the host terminal.
     let mut handoff_held = false;
     loop {
+        // A leg chained in after a seamless switch inherits the previous leg's
+        // held terminal (frozen frame, raw mode) until it repaints (#69). Tell
+        // it so an abnormal exit in its retry window reclaims the terminal
+        // instead of stranding the user behind the frame. Cleared otherwise so
+        // a first/clean leg never thinks it inherited a hold.
+        if handoff_held {
+            std::env::set_var(client::HELD_TERMINAL_ENV_VAR, "1");
+        } else {
+            std::env::remove_var(client::HELD_TERMINAL_ENV_VAR);
+        }
         let result = match &leg {
             AttachLeg::Local => server::autodetect::auto_detect_launch(),
             AttachLeg::Remote(launch) => remote::run_remote(launch.clone()),

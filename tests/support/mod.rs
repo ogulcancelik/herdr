@@ -138,6 +138,33 @@ pub fn frame_message(payload: &[u8]) -> Vec<u8> {
     framed
 }
 
+/// The live-handoff refusal notice a server sends a connecting client while a
+/// live update is in flight (#38). A client that reads it opens its retry
+/// window. Mirror of `protocol::LIVE_HANDOFF_ATTACH_NOTICE`.
+pub const LIVE_HANDOFF_ATTACH_NOTICE: &str =
+    "live update in progress; reconnect after handoff completes";
+
+/// A framed `Welcome { version, encoding: SemanticFrame, error: Some(notice) }`
+/// rejecting the client with the live-handoff notice — the exact bytes a
+/// mid-handoff server writes to a pending client. Used to drive a real `herdr
+/// client` into its #52 retry window from a test stand-in server.
+pub fn encode_live_handoff_refusal(version: u32) -> Vec<u8> {
+    let notice = LIVE_HANDOFF_ATTACH_NOTICE.as_bytes();
+    let mut error_field = vec![1u8]; // Option::Some tag
+    error_field.extend_from_slice(&encode_varint_u32(notice.len() as u32));
+    error_field.extend_from_slice(notice);
+
+    let payload = encode_varint_enum(
+        0, // ServerMessage::Welcome
+        &[
+            &encode_varint_u32(version),
+            &encode_varint_u32(0), // RenderEncoding::SemanticFrame
+            &error_field,
+        ],
+    );
+    frame_message(&payload)
+}
+
 pub fn decode_varint_u32(payload: &[u8], offset: usize) -> Result<(u32, usize), String> {
     if offset >= payload.len() {
         return Err("payload too short for varint".into());
