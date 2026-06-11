@@ -32,7 +32,15 @@ use serde::{Deserialize, Serialize};
 /// `FleetPeer` (its workspaces + system + version), so a spoke can render the
 /// hub's spaces, not just the hub's peers (#66). Additive field on a
 /// positional wire — deliberate bump.
-pub const PROTOCOL_VERSION: u32 = 17;
+///
+/// v18: connection slots (#65). A new `ClientMessage::SetFrameSubscription`
+/// lets a warm (background-held) slot tell its server to stop streaming frames
+/// while it is not the active slot, and to resume with a full redraw when it
+/// becomes active again. Additive enum variant appended at the END of
+/// `ClientMessage` (existing variant indices unchanged on the positional wire),
+/// but the new message is a wire-format change — deliberate bump. Single-owner
+/// fleet, lockstep deploys.
+pub const PROTOCOL_VERSION: u32 = 18;
 
 /// Refusal notice sent to clients while a live update handoff is in
 /// progress. Clients recognize this exact string (in a rejection `Welcome`
@@ -314,6 +322,19 @@ pub enum ClientMessage {
         row: Option<u16>,
         /// Crossterm-compatible modifier bits for forwarded mouse wheel events.
         modifiers: u8,
+    },
+
+    /// Connection-slots frame subscription toggle (#65, proto 18). A
+    /// multi-connection client holds one framed connection per fleet server;
+    /// only the ACTIVE slot drives the painter. A warm (background) slot sends
+    /// `SetFrameSubscription { enabled: false }` so its server stops streaming
+    /// frames to it instead of relying on transport backpressure; flipping it
+    /// active sends `{ enabled: true }`, and the server resumes with a full
+    /// redraw so the slot repaints from a clean baseline. Appended at the end
+    /// of the enum so existing positional variant indices are unchanged.
+    SetFrameSubscription {
+        /// True to (re)subscribe and trigger a full redraw; false to pause.
+        enabled: bool,
     },
 }
 
@@ -881,6 +902,17 @@ mod tests {
         let (decoded, _): (ClientMessage, _) =
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn client_set_frame_subscription_roundtrip() {
+        for enabled in [true, false] {
+            let msg = ClientMessage::SetFrameSubscription { enabled };
+            let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+            let (decoded, _): (ClientMessage, _) =
+                bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+            assert_eq!(msg, decoded);
+        }
     }
 
     #[test]

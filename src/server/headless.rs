@@ -2124,6 +2124,26 @@ impl HeadlessServer {
                 self.resize_shared_runtime_to_effective_size();
                 true
             }
+            ServerEvent::ClientSetFrameSubscription { client_id, enabled } => {
+                let Some(client) = self.clients.get_mut(&client_id) else {
+                    return false;
+                };
+                if client.frame_subscription == enabled {
+                    return false;
+                }
+                client.frame_subscription = enabled;
+                info!(client_id, enabled, "client frame subscription changed");
+                if enabled {
+                    // Resuming a paused slot: drop the render baseline so the
+                    // next frame is a full redraw, since the client missed
+                    // every frame while paused (#65).
+                    client.request_full_redraw();
+                    true
+                } else {
+                    // Pausing: no frame work to do; just stop targeting it.
+                    false
+                }
+            }
             ServerEvent::ClientDetach { client_id } => {
                 info!(client_id, "client detached");
                 self.remove_client_and_resize_if_needed(client_id);

@@ -47,6 +47,12 @@ pub(crate) struct ClientConnection {
     pub(crate) graphics_surface_reset_pending: bool,
     /// Whether a render was skipped because the render channel was full.
     pub(crate) render_pending: bool,
+    /// Whether this client currently wants frames streamed to it (connection
+    /// slots, #65). A warm (background) slot pauses frames with
+    /// `SetFrameSubscription { enabled: false }`; the server then skips it in
+    /// [`render_targets`] until it resumes. Defaults to true — a normal single
+    /// connection is always subscribed.
+    pub(crate) frame_subscription: bool,
     /// Last host mouse capture mode sent to this client.
     pub(crate) host_mouse_capture_active: Option<bool>,
     /// Temporary files staged from this client's local clipboard image pastes.
@@ -106,6 +112,7 @@ impl ClientConnection {
             graphics_cache: crate::kitty_graphics::HostGraphicsCache::default(),
             graphics_surface_reset_pending: false,
             render_pending: false,
+            frame_subscription: true,
             host_mouse_capture_active: None,
             staged_clipboard_files: Vec::new(),
             writer,
@@ -205,6 +212,7 @@ pub(crate) fn render_targets(
         .iter()
         .filter(|(_, client)| {
             client.writer.is_some()
+                && client.frame_subscription
                 && (client.is_full_app_client()
                     || matches!(client.mode, ClientConnectionMode::TerminalAttach { .. }))
         })
@@ -221,4 +229,43 @@ pub(crate) fn render_targets(
 
     targets.sort_by_key(|(client_id, _, _, is_foreground, _)| (*is_foreground, *client_id));
     targets
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::client_transport::ClientWriter;
+
+    fn app_client_with_writer() -> ClientConnection {
+        let (control, _c) = std::sync::mpsc::channel();
+        let (render, _r) = std::sync::mpsc::sync_channel(1);
+        ClientConnection::new(
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            0,
+            RenderEncoding::SemanticFrame,
+            Some(ClientWriter { control, render }),
+        )
+    }
+
+    #[test]
+    fn paused_client_is_excluded_from_render_targets() {
+        let mut clients = HashMap::new();
+        clients.insert(1, app_client_with_writer());
+        clients.insert(2, app_client_with_writer());
+        // Both subscribed by default, so both are targeted.
+        assert_eq!(render_targets(&clients, Some(1)).len(), 2);
+
+        // Pause client 2 (a warm slot): only the active client is targeted.
+        clients.get_mut(&2).unwrap().frame_subscription = false;
+        let targets = render_targets(&clients, Some(1));
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].0, 1);
+
+        // Resume client 2: targeted again.
+        clients.get_mut(&2).unwrap().frame_subscription = true;
+        assert_eq!(render_targets(&clients, Some(1)).len(), 2);
+    }
 }

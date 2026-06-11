@@ -101,6 +101,10 @@ pub(crate) enum ServerEvent {
         cell_width_px: u32,
         cell_height_px: u32,
     },
+    /// A client toggled its frame subscription (connection slots, #65). A warm
+    /// slot pauses frames with `enabled: false`; flipping active resumes with
+    /// `enabled: true` and a full redraw.
+    ClientSetFrameSubscription { client_id: u64, enabled: bool },
     /// A client detached gracefully.
     ClientDetach { client_id: u64 },
     /// A client connection was lost.
@@ -464,6 +468,9 @@ fn client_read_loop(
                     cell_width_px,
                     cell_height_px,
                 }
+            }
+            ClientMessage::SetFrameSubscription { enabled } => {
+                ServerEvent::ClientSetFrameSubscription { client_id, enabled }
             }
             ClientMessage::Detach => ServerEvent::ClientDetach { client_id },
             ClientMessage::AttachTerminal {

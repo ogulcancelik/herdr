@@ -407,7 +407,7 @@ fn peer_summary_folds_into_sidebar_and_click_switches_server() {
 
     // --- Attach a protocol client to A and wait for the folded remote row.
     let mut stream = UnixStream::connect(&client_socket_a).expect("client socket should connect");
-    let (_, error) = client_handshake(&mut stream, 17, 90, 30).expect("handshake should complete");
+    let (_, error) = client_handshake(&mut stream, 18, 90, 30).expect("handshake should complete");
     assert!(error.is_none(), "handshake rejected: {error:?}");
 
     // The first poll fires ~3s after A starts; allow generous slack. The
@@ -506,7 +506,7 @@ fn folded_remote_member_row_click_switches_server() {
     wait_for_file(&client_socket_a, Duration::from_secs(10));
 
     let mut stream = UnixStream::connect(&client_socket_a).expect("client socket should connect");
-    let (_, error) = client_handshake(&mut stream, 17, 90, 30).expect("handshake should complete");
+    let (_, error) = client_handshake(&mut stream, 18, 90, 30).expect("handshake should complete");
     assert!(error.is_none(), "handshake rejected: {error:?}");
 
     wait_for_frame_row(&mut stream, "servers", Duration::from_secs(45))
@@ -609,7 +609,7 @@ fn switch_snapshot_renders_home_row_on_spoke_and_home_switches_back() {
     // below the fold and only a scrollbar shows. Taller frame keeps the
     // whole list on screen; the folding itself is covered by unit tests.
     let mut stream = UnixStream::connect(&client_socket_a).expect("client socket should connect");
-    let (_, error) = client_handshake(&mut stream, 17, 90, 45).expect("handshake should complete");
+    let (_, error) = client_handshake(&mut stream, 18, 90, 45).expect("handshake should complete");
     assert!(error.is_none(), "handshake rejected: {error:?}");
     // Owner/repo identity on the remote-only project leader (#62/#27).
     let row = wait_for_frame_row(&mut stream, "peer-fed-home/proj", Duration::from_secs(45))
@@ -648,7 +648,7 @@ fn switch_snapshot_renders_home_row_on_spoke_and_home_switches_back() {
     let mut stream_b =
         UnixStream::connect(&client_socket_b).expect("spoke client socket should connect");
     let fleet_only = strip_focus_suffix(&fleet_bytes);
-    let (_, error) = client_handshake_with_fleet(&mut stream_b, 17, 90, 45, fleet_only)
+    let (_, error) = client_handshake_with_fleet(&mut stream_b, 18, 90, 45, fleet_only)
         .expect("spoke handshake should complete");
     assert!(error.is_none(), "spoke handshake rejected: {error:?}");
 
