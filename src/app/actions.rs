@@ -977,6 +977,20 @@ impl AppState {
             .collect()
     }
 
+    /// The primary row (main checkout) of the ACTIVE workspace's project
+    /// section — the sidebar's second highlight level (#33): the session
+    /// stays marked on the primary row while any member is focused, the
+    /// same always-on currency idiom as the current-server row.
+    pub(crate) fn active_section_primary(&self) -> Option<usize> {
+        let active = self.active.filter(|idx| *idx < self.workspaces.len())?;
+        let keys = self.project_section_keys();
+        let key = keys.get(active).cloned().flatten()?;
+        (0..self.workspaces.len()).find(|idx| {
+            keys[*idx].as_deref() == Some(key.as_str())
+                && !self.workspaces[*idx].is_linked_checkout()
+        })
+    }
+
     /// Switch to the strip member at `idx` (0-based strip position, i.e.
     /// the rendered `<ID>` minus one). Returns false when the strip is not
     /// the member switcher or the member doesn't exist, so keyboard callers

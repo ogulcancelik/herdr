@@ -1981,6 +1981,12 @@ fn render_workspace_list(
     let scrollbar_rect = workspace_list_scrollbar_rect(app, area);
     let cards = &app.view.workspace_card_areas;
 
+    // #33 two-level highlight: while any member of a project is focused,
+    // the section's primary row carries the same always-on surface_dim
+    // currency fill as the active row (and the current-server row) — one
+    // "where am I" idiom from server to session to workspace.
+    let active_section_primary = app.active_section_primary();
+
     for card in cards {
         let i = card.ws_idx;
         let ws = &app.workspaces[i];
@@ -1989,7 +1995,8 @@ fn render_workspace_list(
         let selected = i == app.selected && is_navigating;
         let is_active = Some(i) == app.active;
         let is_dragged = dragged_ws_idx == Some(i);
-        let highlighted = selected || is_active || is_dragged;
+        let is_session_primary = !card.indented && !is_active && active_section_primary == Some(i);
+        let highlighted = selected || is_active || is_dragged || is_session_primary;
         let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
 
         if highlighted {
@@ -3751,6 +3758,60 @@ mod tests {
         let rects = row_glyph_positions(&buffer, child.rect, child.rect.y, "\u{25ae}");
         assert_eq!(rects.len(), 1, "member row carries its own join");
         assert_eq!(buffer[(rects[0], child.rect.y)].style().fg, Some(p.yellow));
+    }
+
+    /// #33 — two-level highlight: with a member workspace focused, BOTH the
+    /// member's row (the standard active fill) and the section's primary
+    /// row (the always-on session-currency marker) carry surface_dim; bold
+    /// text stays on the active row alone.
+    #[test]
+    fn two_level_highlight_marks_active_member_and_its_primary() {
+        let mut app = space_group_app();
+        app.active = Some(1);
+
+        let area = Rect::new(0, 0, 30, 40);
+        let surface_dim = app.palette.surface_dim;
+        let buffer = render_sidebar_to_buffer(&mut app, area);
+        let cards = app.view.workspace_card_areas.clone();
+        assert_eq!((cards[0].ws_idx, cards[1].ws_idx), (0, 1));
+
+        // Both levels carry the currency fill…
+        assert_eq!(
+            buffer[(cards[0].rect.x, cards[0].rect.y)].style().bg,
+            Some(surface_dim),
+            "primary row marks session currency"
+        );
+        assert_eq!(
+            buffer[(cards[1].rect.x, cards[1].rect.y)].style().bg,
+            Some(surface_dim),
+            "active member row carries the standard fill"
+        );
+
+        // …but the focus emphasis (bold name) stays on the active row.
+        let member_name_cell = &buffer[(cards[1].rect.x + 5, cards[1].rect.y)];
+        assert!(member_name_cell
+            .style()
+            .add_modifier
+            .contains(Modifier::BOLD));
+        let primary_name_cell = &buffer[(cards[0].rect.x + 4, cards[0].rect.y)];
+        assert!(!primary_name_cell
+            .style()
+            .add_modifier
+            .contains(Modifier::BOLD));
+
+        // With the primary itself active there is exactly one marked row.
+        app.active = Some(0);
+        let buffer = render_sidebar_to_buffer(&mut app, area);
+        let cards = app.view.workspace_card_areas.clone();
+        assert_eq!(
+            buffer[(cards[0].rect.x, cards[0].rect.y)].style().bg,
+            Some(surface_dim)
+        );
+        assert_ne!(
+            buffer[(cards[1].rect.x, cards[1].rect.y)].style().bg,
+            Some(surface_dim),
+            "inactive member rows carry no fill"
+        );
     }
 
     /// #33 — the primary row IS the section's selectable row (no synthetic
