@@ -174,15 +174,18 @@ pub enum TabModeConfig {
     Workspace,
 }
 
-/// Sub-cell raster of the servers-band state medallion (#42): `sextant`
-/// (2x3 sub-blocks via Symbols for Legacy Computing — the default) or
-/// `quadrant` (2x2 half blocks) for fonts without sextant coverage.
+/// Leading state mark on servers-band rows (#42): `counts` (the default —
+/// fixed r/y/g count columns, `0 2 1 herdr`, zeros muted, band-global digit
+/// width) or the rectangular state medallion in `medallion_sextant`
+/// (2x3 sub-blocks via Symbols for Legacy Computing) / `medallion_quadrant`
+/// (2x2 half blocks for fonts without sextant coverage).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MedallionStyleConfig {
+pub enum ServerStateMarkConfig {
     #[default]
-    Sextant,
-    Quadrant,
+    Counts,
+    MedallionSextant,
+    MedallionQuadrant,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -532,9 +535,9 @@ pub struct UiConfig {
     /// Spaces sidebar scope: "all" shows the full workspace list, "current"
     /// only the focused workspace's space group. Default: "all".
     pub spaces_panel_scope: PanelScopeConfig,
-    /// Servers-band state-medallion raster: "sextant" (default) or
-    /// "quadrant" for fonts without Symbols for Legacy Computing coverage.
-    pub medallion_style: MedallionStyleConfig,
+    /// Servers-band leading state mark: "counts" (default), or
+    /// "medallion_sextant" / "medallion_quadrant".
+    pub server_state_mark: ServerStateMarkConfig,
     /// Display alias overrides for agent labels in the sidebar, e.g.
     /// `agent_aliases = { claude = "CC" }`. Built-in short codes apply
     /// when no override is set (claude -> cc, codex -> cd, ...).
@@ -739,7 +742,7 @@ impl Default for UiConfig {
             agent_panel_scope: PanelScopeConfig::All,
             servers_panel_scope: PanelScopeConfig::All,
             spaces_panel_scope: PanelScopeConfig::All,
-            medallion_style: MedallionStyleConfig::default(),
+            server_state_mark: ServerStateMarkConfig::default(),
             agent_aliases: std::collections::HashMap::new(),
             accent: "cyan".into(),
             toast: ToastConfig::default(),

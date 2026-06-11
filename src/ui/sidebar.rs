@@ -9,7 +9,8 @@ use ratatui::{
 use super::medallion::{ring_medallion, MedallionStyle};
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::state_signal::{
-    join_states, medallion_rings, packed_rects, pr_state_glyph, StateClass, StateJoin,
+    counts_lead_width, join_states, leading_count_spans, medallion_rings, packed_rects,
+    pr_state_glyph, tally_states, StateClass, StateJoin, StateTally,
 };
 use super::status::{agent_icon, state_dot, state_label, state_label_color};
 use crate::app::state::{AgentPanelScope, Palette, PanelScope};
@@ -380,9 +381,10 @@ fn space_join(app: &AppState, key: &str) -> StateJoin {
     )
 }
 
-/// The join across every local workspace — the self server-row medallion.
-fn local_server_join(app: &AppState) -> StateJoin {
-    join_states(
+/// The full state tally across every local workspace — the self server-row
+/// leading counts (#42: `0 2 1 herdr`).
+fn local_server_tally(app: &AppState) -> StateTally {
+    tally_states(
         app.workspaces
             .iter()
             .flat_map(|ws| ws.pane_states(&app.terminals))
@@ -390,10 +392,10 @@ fn local_server_join(app: &AppState) -> StateJoin {
     )
 }
 
-/// The join across a peer's workspace summaries (one status per workspace —
+/// The tally across a peer's workspace summaries (one status per workspace —
 /// the granularity the peer protocol carries).
-fn peer_join(peer: &crate::peers::PeerSummaryState) -> StateJoin {
-    join_states(
+fn peer_tally(peer: &crate::peers::PeerSummaryState) -> StateTally {
+    tally_states(
         peer.workspaces
             .iter()
             .map(|ws| StateClass::of_remote(ws.status)),
@@ -1554,6 +1556,10 @@ fn render_servers_section(app: &AppState, frame: &mut Frame, area: Rect, is_navi
     }
 
     let rows_area = server_band_rows_area(area);
+    // Two phases: build every visible row first so the count columns share a
+    // band-GLOBAL digit width (one server hitting 10 widens every row), then
+    // paint.
+    let mut prepared = Vec::new();
     for (slot, target) in visible_server_band_slots(app).into_iter().enumerate() {
         let Some(rect) = server_slot_rect(rows_area, slot as u16) else {
             break;
@@ -1562,14 +1568,14 @@ fn render_servers_section(app: &AppState, frame: &mut Frame, area: Rect, is_navi
         // the standard highlight fill, one visual language for "current"
         // across workspaces, agents, and servers.
         let is_current = target.is_none();
-        let (rows, join) = match target {
+        let (rows, tally, ghosted) = match target {
             // The local server: no hit-area, anchors the band.
             None => self_server_rows(app),
             Some(crate::app::state::PeerSwitchRequest::Home) => {
                 let Some(snapshot) = app.fleet_snapshot.as_ref() else {
                     continue;
                 };
-                (home_server_rows(snapshot, p), None)
+                (home_server_rows(snapshot, p), None, false)
             }
             Some(crate::app::state::PeerSwitchRequest::SnapshotPeer { entry_idx }) => {
                 let Some(peer) = app
@@ -1588,6 +1594,15 @@ fn render_servers_section(app: &AppState, frame: &mut Frame, area: Rect, is_navi
                 peer_server_rows(peer, p)
             }
         };
+        prepared.push((rect, is_current, rows, tally, ghosted));
+    }
+    let digit_width = prepared
+        .iter()
+        .filter_map(|(_, _, _, tally, _)| tally.as_ref())
+        .map(StateTally::digit_width)
+        .max()
+        .unwrap_or(1);
+    for (rect, is_current, rows, tally, ghosted) in prepared {
         if is_current {
             let buf = frame.buffer_mut();
             let fill = Style::default().bg(p.surface_dim);
@@ -1597,15 +1612,18 @@ fn render_servers_section(app: &AppState, frame: &mut Frame, area: Rect, is_navi
                 }
             }
         }
-        // The medallion's base_bg must be the row's ACTUAL fill so the
-        // rounded corners compose with the current-row highlight.
+        // The medallion's base_bg must be the row's ACTUAL fill so it
+        // composes with the current-row highlight.
         let base_bg = if is_current {
             p.surface_dim
         } else {
             ratatui::style::Color::Reset
         };
-        let rows = match join {
-            Some(join) => with_leading_medallion(rows, &join, base_bg, app, p),
+        let rows = match tally {
+            Some(tally) => match configured_medallion_style(app) {
+                None => with_leading_counts(rows, &tally, digit_width, ghosted, p),
+                Some(style) => with_leading_medallion(rows, &tally.join(), base_bg, style, p),
+            },
             None => rows,
         };
         render_server_rows(frame, rect, rows);
@@ -1614,10 +1632,11 @@ fn render_servers_section(app: &AppState, frame: &mut Frame, area: Rect, is_navi
 
 /// The configured medallion raster: `[ui] medallion_style` ("sextant"
 /// default, "quadrant" for fonts without sextant coverage).
-fn configured_medallion_style(app: &AppState) -> MedallionStyle {
-    match app.medallion_style {
-        crate::config::MedallionStyleConfig::Sextant => MedallionStyle::Sextant,
-        crate::config::MedallionStyleConfig::Quadrant => MedallionStyle::Quadrant,
+fn configured_medallion_style(app: &AppState) -> Option<MedallionStyle> {
+    match app.server_state_mark {
+        crate::config::ServerStateMarkConfig::Counts => None,
+        crate::config::ServerStateMarkConfig::MedallionSextant => Some(MedallionStyle::Sextant),
+        crate::config::ServerStateMarkConfig::MedallionQuadrant => Some(MedallionStyle::Quadrant),
     }
 }
 
@@ -1629,17 +1648,42 @@ fn with_leading_medallion(
     [title, health]: [Line<'static>; 2],
     join: &StateJoin,
     base_bg: ratatui::style::Color,
-    app: &AppState,
+    style: MedallionStyle,
     p: &Palette,
 ) -> [Line<'static>; 2] {
     let rings = medallion_rings(join, p);
-    let [top, bottom] = ring_medallion(&rings, base_bg, configured_medallion_style(app));
+    let [top, bottom] = ring_medallion(&rings, base_bg, style);
     let lead = |mut mark: Vec<Span<'static>>, rest: Line<'static>| {
         mark.push(Span::styled(" ", Style::default()));
         mark.extend(rest.spans);
         Line::from(mark)
     };
     [lead(top, title), lead(bottom, health)]
+}
+
+/// One band row as built by the slot builders: the two lines, the state
+/// tally feeding the leading counts (None = no counts: home row), and
+/// whether the row is a ghost (unreachable — counts grey out with it).
+type ServerRowBuild = ([Line<'static>; 2], Option<StateTally>, bool);
+
+/// Prepend the leading count columns (#42 final form: `0 2 1 herdr`) to a
+/// two-line server row: title gets the counts, the health line indents by
+/// the same width so both stay aligned across the band.
+fn with_leading_counts(
+    [title, health]: [Line<'static>; 2],
+    tally: &StateTally,
+    digit_width: usize,
+    ghosted: bool,
+    p: &Palette,
+) -> [Line<'static>; 2] {
+    let mut lead = leading_count_spans(tally, digit_width, ghosted, p);
+    lead.extend(title.spans);
+    let mut indent = vec![Span::styled(
+        " ".repeat(counts_lead_width(digit_width)),
+        Style::default(),
+    )];
+    indent.extend(health.spans);
+    [Line::from(lead), Line::from(indent)]
 }
 
 /// Paint a two-line server row into its slot rect, clamping each line.
@@ -1664,7 +1708,7 @@ const SERVER_HEALTH_INDENT: &str = "    ";
 /// on the title line (#41 — peers don't carry those), over the shared
 /// fixed-width metric line, all fed from the same local `SystemStats`
 /// sample the HUD shows.
-fn self_server_rows(app: &AppState) -> ([Line<'static>; 2], Option<StateJoin>) {
+fn self_server_rows(app: &AppState) -> ServerRowBuild {
     use super::status::{battery_icon, battery_style, format_net_io, push_band_metric};
     let p = &app.palette;
     let mut title = vec![
@@ -1706,7 +1750,8 @@ fn self_server_rows(app: &AppState) -> ([Line<'static>; 2], Option<StateJoin>) {
     }
     (
         [Line::from(title), Line::from(health)],
-        Some(local_server_join(app)),
+        Some(local_server_tally(app)),
+        false,
     )
 }
 
@@ -1745,9 +1790,9 @@ fn home_server_rows(
 fn snapshot_server_rows(
     peer: &crate::peers::PeerSummaryState,
     p: &crate::app::state::Palette,
-) -> ([Line<'static>; 2], Option<StateJoin>) {
-    let ([mut title, health], join) = peer_server_rows(peer, p);
-    // The down form already renders `unreachable {age}` on the health line.
+) -> ServerRowBuild {
+    let ([mut title, health], tally, ghosted) = peer_server_rows(peer, p);
+    // The down (ghost) form already carries the broken-link icon + age.
     if peer.reachability() != crate::peers::PeerReachability::Down {
         if let Some(at) = peer.last_ok {
             title.spans.push(Span::styled(
@@ -1756,7 +1801,7 @@ fn snapshot_server_rows(
             ));
         }
     }
-    ([title, health], join)
+    ([title, health], tally, ghosted)
 }
 
 /// One peer's two `servers` lines: the leading state medallion (the join of
@@ -1766,27 +1811,60 @@ fn snapshot_server_rows(
 fn peer_server_rows(
     peer: &crate::peers::PeerSummaryState,
     p: &crate::app::state::Palette,
-) -> ([Line<'static>; 2], Option<StateJoin>) {
+) -> ServerRowBuild {
     use crate::peers::PeerReachability;
     let reach = peer.reachability();
     let host = peer.host.clone().unwrap_or_else(|| peer.peer.clone());
 
     if reach == PeerReachability::Down {
-        let title = Line::from(vec![
-            Span::styled(" ", Style::default()),
-            Span::styled("○", Style::default().fg(p.overlay0)),
-            Span::styled(" ", Style::default()),
-            Span::styled(host, Style::default().fg(p.subtext0)),
-        ]);
-        let detail = match peer.last_ok {
-            Some(at) => format!("unreachable {}", format_age(at.elapsed().as_secs())),
-            None => "unreachable".to_string(),
+        // Unreachable = the GHOST of the normal row (#42 refinement): the
+        // hollow no-conn dot, then the name and the LAST-KNOWN stats — all
+        // greyed out and italic, the title struck through, the age where
+        // latency would sit. The stale data stays visible; its styling says
+        // "as of {age}".
+        // nf-md-link_off in the latency slot says no-conn; the age says how
+        // stale the ghosted stats are.
+        let age = match peer.last_ok {
+            Some(at) => format!("  \u{f0337} {}", format_age(at.elapsed().as_secs())),
+            None => "  \u{f0337}".to_string(),
         };
-        let health = Line::from(vec![
-            Span::styled(SERVER_HEALTH_INDENT, Style::default()),
-            Span::styled(detail, Style::default().fg(p.overlay0)),
+        let title = Line::from(vec![
+            Span::styled(
+                "○ ",
+                Style::default()
+                    .fg(p.overlay0)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+            Span::styled(
+                host,
+                Style::default()
+                    .fg(p.overlay0)
+                    .add_modifier(Modifier::ITALIC | Modifier::CROSSED_OUT),
+            ),
+            Span::styled(
+                age,
+                Style::default()
+                    .fg(p.overlay0)
+                    .add_modifier(Modifier::ITALIC),
+            ),
         ]);
-        return ([title, health], None);
+        let mut health: Vec<Span<'static>> = Vec::new();
+        if let Some(system) = peer.system.as_ref() {
+            health = server_health_spans(
+                system.cpu_percent.map(f32::from),
+                system.mem_used,
+                system.mem_total,
+                system.disk_free,
+                None,
+                p,
+            );
+            for span in &mut health {
+                span.style = Style::default()
+                    .fg(p.overlay0)
+                    .add_modifier(Modifier::ITALIC);
+            }
+        }
+        return ([title, Line::from(health)], Some(peer_tally(peer)), true);
     }
 
     let mut title = vec![Span::styled(host, Style::default().fg(p.subtext0))];
@@ -1817,7 +1895,8 @@ fn peer_server_rows(
     }
     (
         [Line::from(title), Line::from(health)],
-        Some(peer_join(peer)),
+        Some(peer_tally(peer)),
+        false,
     )
 }
 
@@ -2828,7 +2907,7 @@ mod tests {
         let app = crate::app::state::AppState::test_new();
         let mut peer = peer_with_workspaces("anvil", vec![]);
         peer.last_ok = Some(std::time::Instant::now() - std::time::Duration::from_secs(30));
-        let ([title, _], join) = snapshot_server_rows(&peer, &app.palette);
+        let ([title, _], join, _ghosted) = snapshot_server_rows(&peer, &app.palette);
         let title = line_text(&title);
         assert!(title.contains("30s old"), "{title}");
         // Reachable snapshot rows carry a join for the leading medallion.
@@ -2851,9 +2930,9 @@ mod tests {
             gpu_percent: Some(8),
             ..Default::default()
         });
-        let ([title, health], join) = self_server_rows(&app);
+        let ([title, health], join, _ghosted) = self_server_rows(&app);
         // The self row always joins the local agent states (none here).
-        assert_eq!(join, Some(join_states([])));
+        assert_eq!(join, Some(tally_states([])));
         let title = line_text(&title);
         let health = line_text(&health);
         assert!(title.contains(&crate::app::short_host_name()), "{title}");
@@ -2885,7 +2964,7 @@ mod tests {
             cpu_percent: Some(42.0),
             ..Default::default()
         });
-        let ([title, health], _) = self_server_rows(&app);
+        let ([title, health], _, _ghosted) = self_server_rows(&app);
         let title = line_text(&title);
         let health = line_text(&health);
         assert!(!title.contains("\u{f06f3}"), "{title}");
@@ -2913,7 +2992,7 @@ mod tests {
             mem_total: Some(64 * 1024 * 1024 * 1024),
             disk_free: None,
         });
-        let ([title, health], join) = peer_server_rows(&peer, &p);
+        let ([title, health], join, _ghosted) = peer_server_rows(&peer, &p);
         let title = line_text(&title);
         let health = line_text(&health);
         assert!(title.contains("anvil"), "{title}");
@@ -2925,7 +3004,7 @@ mod tests {
         assert!(health.contains("\u{f035b} 48G/64G"), "{health}");
         assert!(!health.contains('\u{b7}'), "{health}");
         assert!(!health.contains('\u{2776}'), "{health}");
-        assert_eq!(join, Some(join_states([StateClass::Working])));
+        assert_eq!(join, Some(tally_states([StateClass::Working])));
         assert!(!health.contains("anvil"), "{health}");
     }
 
@@ -2941,7 +3020,7 @@ mod tests {
             mem_total: Some(512 * G),
             disk_free: None,
         });
-        let ([_, health], _) = peer_server_rows(&peer, &p);
+        let ([_, health], _, _ghosted) = peer_server_rows(&peer, &p);
         let health = line_text(&health);
         // 100% fills the width-3 column exactly; mem used pads to the
         // width of total so the slash column never jitters.
@@ -2950,28 +3029,55 @@ mod tests {
     }
 
     #[test]
-    fn peer_server_rows_mark_unreachable_peer_compactly() {
+    fn peer_server_rows_ghost_unreachable_peers() {
+        use ratatui::style::Modifier;
         let p = crate::app::state::AppState::test_new().palette;
         let mut peer = peer_with_workspaces("ksb", vec![]);
         peer.last_ok = None;
         peer.error = Some("connect timed out".into());
-        let ([title, health], join) = peer_server_rows(&peer, &p);
-        assert!(line_text(&title).contains("ksb"));
-        assert!(line_text(&health).trim_start().starts_with("unreachable"));
-        // Unreachable peers keep the compact form: a muted hollow dot
-        // instead of the medallion (shape = reachability), no join.
-        assert!(join.is_none());
-        let hollow_dot = title
+        peer.system = Some(crate::api::schema::PeerSystemSummary {
+            cpu_percent: Some(42),
+            mem_used: Some(8 * 1024 * 1024 * 1024),
+            mem_total: Some(16 * 1024 * 1024 * 1024),
+            disk_free: Some(100 * 1024 * 1024 * 1024),
+        });
+        let ([title, health], tally, _ghosted) = peer_server_rows(&peer, &p);
+        // Ghost of the normal row (#42): hollow no-conn dot, struck name,
+        // broken-link glyph in the latency slot, everything muted + italic —
+        // including the LAST-KNOWN stats, which stay visible.
+        let text = line_text(&title);
+        assert!(text.contains("ksb"), "{text:?}");
+        assert!(text.contains('\u{f0337}'), "broken-link icon: {text:?}");
+        for span in title.spans.iter().filter(|s| !s.content.trim().is_empty()) {
+            assert_eq!(span.style.fg, Some(p.overlay0), "muted: {:?}", span.content);
+            assert!(
+                span.style.add_modifier.contains(Modifier::ITALIC),
+                "italic: {:?}",
+                span.content
+            );
+        }
+        let name = title
             .spans
             .iter()
-            .find(|span| span.content == "○")
-            .expect("unreachable row should lead with a hollow dot");
-        assert_eq!(hollow_dot.style.fg, Some(p.overlay0));
+            .find(|span| span.content.contains("ksb"))
+            .expect("name span");
+        assert!(name.style.add_modifier.contains(Modifier::CROSSED_OUT));
+        let health_text = line_text(&health);
+        assert!(
+            health_text.contains("42%"),
+            "last-known stats: {health_text:?}"
+        );
+        for span in health.spans.iter().filter(|s| !s.content.trim().is_empty()) {
+            assert_eq!(span.style.fg, Some(p.overlay0));
+            assert!(span.style.add_modifier.contains(Modifier::ITALIC));
+        }
+        // The ghosted tally still feeds the (greyed) count columns.
+        assert!(tally.is_some());
 
-        // A peer that was reachable once shows the outage age.
+        // A peer that was reachable once shows the outage age by the icon.
         peer.last_ok = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(300));
-        let ([_, health], _) = peer_server_rows(&peer, &p);
-        assert!(line_text(&health).contains("unreachable 5m"));
+        let ([title, _], _, _ghosted) = peer_server_rows(&peer, &p);
+        assert!(line_text(&title).contains("5m"), "{:?}", line_text(&title));
     }
 
     fn workspace_with_project_key(name: &str, project_key: &str) -> Workspace {
@@ -3611,7 +3717,7 @@ mod tests {
     }
 
     #[test]
-    fn servers_band_rows_lead_with_the_join_medallion() {
+    fn servers_band_rows_lead_with_counts() {
         use crate::api::schema::AgentStatus;
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("one");
@@ -3620,7 +3726,7 @@ mod tests {
         app.ensure_test_terminals();
         app.active = Some(0);
         app.mode = crate::app::Mode::Terminal;
-        // Local join: one blocked + one working pane.
+        // Local tally: one blocked + one working pane -> `1 1 0`.
         let panes: Vec<_> = app.workspaces[0].tabs[0].panes.keys().copied().collect();
         for (pane, state) in panes
             .into_iter()
@@ -3629,7 +3735,7 @@ mod tests {
             let tid = app.workspaces[0].terminal_id(pane).unwrap().clone();
             app.terminals.get_mut(&tid).unwrap().state = state;
         }
-        // Peer join: blocked + working workspace statuses.
+        // Peer tally: blocked + working workspace statuses -> `1 1 0`.
         let mut blocked = remote_summary("a", None, None, None);
         blocked.status = AgentStatus::Blocked;
         let mut working = remote_summary("b", None, None, None);
@@ -3647,50 +3753,83 @@ mod tests {
         let self_rect = server_slot_rect(rows_area, 0).expect("self slot");
         let peer_rect = server_slot_rect(rows_area, 1).expect("peer slot");
 
-        // Self row: the medallion IS the leading mark. Two rings (r·y) →
-        // the top cells elect the outer (blocked) color, the bottom cells
-        // the inner (working) color; default sextant glyphs leave the
-        // grid-corner sub-blocks to the row fill (bg = surface_dim, the
-        // current-server highlight).
-        // Rectangular medallion v2: a two-ring join renders the inner color's
-        // sub-blocks as fg over the outer (worst) color as bg in EVERY cell —
-        // the medallion is opaque, so the row fill never bleeds through it.
-        for dx in 0..3u16 {
-            for dy in 0..2u16 {
-                let cell = &buffer[(self_rect.x + dx, self_rect.y + dy)];
-                assert_eq!(cell.style().fg, Some(p.yellow), "self cell {dx},{dy}");
-                assert_eq!(cell.style().bg, Some(p.red), "self cell {dx},{dy}");
-                assert_ne!(cell.symbol(), " ", "self cell {dx},{dy}");
-            }
+        // Default mark = leading counts `1 1 0 <name>`: fixed r/y/g columns,
+        // zeros muted, single-digit width band-wide.
+        for rect in [self_rect, peer_rect] {
+            assert_eq!(buffer[(rect.x, rect.y)].symbol(), "1");
+            assert_eq!(buffer[(rect.x, rect.y)].style().fg, Some(p.red));
+            assert_eq!(buffer[(rect.x + 2, rect.y)].symbol(), "1");
+            assert_eq!(buffer[(rect.x + 2, rect.y)].style().fg, Some(p.yellow));
+            assert_eq!(buffer[(rect.x + 4, rect.y)].symbol(), "0");
+            assert_eq!(
+                buffer[(rect.x + 4, rect.y)].style().fg,
+                Some(p.overlay0),
+                "zero column is muted"
+            );
         }
-        // The host name follows the medallion + gap column.
+        // The host name follows the counts lead.
         let title: String = buffer_row_text(&buffer, self_rect, self_rect.y)
             .chars()
-            .skip(4)
+            .skip(6)
             .collect();
         assert!(
             title.starts_with(&crate::app::short_host_name()),
             "{title:?}"
         );
 
-        // Peer row: same join language — opaque rectangle, outer ring as bg.
-        let tl = &buffer[(peer_rect.x, peer_rect.y)];
-        assert_eq!(tl.style().fg, Some(p.yellow));
-        assert_eq!(tl.style().bg, Some(p.red), "outer ring carries the bg");
-
         // The rollup chips are gone: no circled-digit dingbats anywhere.
         assert_no_circled_digit_dingbats(&buffer);
     }
 
     #[test]
-    fn medallion_style_config_switches_the_band_to_quadrant_glyphs() {
+    fn band_counts_share_a_global_digit_width() {
+        use crate::api::schema::AgentStatus;
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.mode = crate::app::Mode::Terminal;
+        // One peer with 10 working workspaces: every row pads to two digits.
+        let workspaces: Vec<_> = (0..10)
+            .map(|i| {
+                let mut ws = remote_summary(&format!("w{i}"), None, None, None);
+                ws.status = AgentStatus::Working;
+                ws
+            })
+            .collect();
+        app.peer_summaries = vec![peer_with_workspaces("anvil", workspaces)];
+
+        let area = Rect::new(0, 0, 30, 40);
+        let buffer = render_sidebar_to_buffer(&mut app, area);
+        let p = &app.palette;
+
+        let (ws_area, _) =
+            expanded_sidebar_sections(area, app.sidebar_section_split, app.sidebar_pane_gap);
+        let (servers_area, _) = carve_servers_band(ws_area, servers_section_height(&app));
+        let rows_area = server_band_rows_area(servers_area);
+        let self_rect = server_slot_rect(rows_area, 0).expect("self slot");
+        let peer_rect = server_slot_rect(rows_area, 1).expect("peer slot");
+
+        // Peer: ` 0 10  0` — the working column hits two digits.
+        let peer_title = buffer_row_text(&buffer, peer_rect, peer_rect.y);
+        assert!(peer_title.starts_with(" 0 10  0 "), "{peer_title:?}");
+        assert_eq!(
+            buffer[(peer_rect.x + 3, peer_rect.y)].style().fg,
+            Some(p.yellow)
+        );
+        // Self (no agents): every column widens to match — ` 0  0  0 <host>`.
+        let self_title = buffer_row_text(&buffer, self_rect, self_rect.y);
+        assert!(self_title.starts_with(" 0  0  0 "), "{self_title:?}");
+    }
+    #[test]
+    fn medallion_mark_config_switches_the_band_to_the_medallion() {
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![Workspace::test_new("one")];
         app.ensure_test_terminals();
         app.active = Some(0);
         app.mode = crate::app::Mode::Terminal;
         app.peer_summaries = vec![peer_with_workspaces("anvil", vec![])];
-        app.medallion_style = crate::config::MedallionStyleConfig::Quadrant;
+        app.server_state_mark = crate::config::ServerStateMarkConfig::MedallionQuadrant;
 
         let area = Rect::new(0, 0, 30, 40);
         let buffer = render_sidebar_to_buffer(&mut app, area);

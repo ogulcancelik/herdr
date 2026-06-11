@@ -15,7 +15,7 @@
 //!   two-line renderings. The leading-circle color is simply the join head
 //!   (== the existing aggregate state) through the same mapping.
 
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 
 use crate::app::state::Palette;
@@ -125,6 +125,88 @@ impl StateJoin {
     pub(crate) fn colors(&self, p: &Palette) -> Vec<Color> {
         self.0.iter().map(|class| class.color(p)).collect()
     }
+}
+
+/// Full per-class tally of a server's agent states — the data behind the
+/// band's leading count columns (`0 2 1 herdr`, #42): fixed r/y/g columns =
+/// blocked / working / calm (idle + done-unseen fold into the calm column;
+/// the teal distinction stays on workspace rows). Unlike the capped
+/// [`StateJoin`], the tally keeps exact counts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct StateTally {
+    pub(crate) blocked: usize,
+    pub(crate) working: usize,
+    pub(crate) calm: usize,
+}
+
+pub(crate) fn tally_states(states: impl IntoIterator<Item = StateClass>) -> StateTally {
+    let mut tally = StateTally::default();
+    for class in states {
+        match class {
+            StateClass::Blocked => tally.blocked += 1,
+            StateClass::Working => tally.working += 1,
+            StateClass::Done | StateClass::Idle => tally.calm += 1,
+            StateClass::None => {}
+        }
+    }
+    tally
+}
+
+impl StateTally {
+    /// Width in digits of the widest column — feeds the band-global digit
+    /// alignment (one server hitting 10 widens every row to two digits).
+    pub(crate) fn digit_width(&self) -> usize {
+        [self.blocked, self.working, self.calm]
+            .into_iter()
+            .map(|n| n.max(1).ilog10() as usize + 1)
+            .max()
+            .unwrap_or(1)
+    }
+
+    /// The capped severity join equivalent to this tally (medallion mode).
+    pub(crate) fn join(&self) -> StateJoin {
+        join_states(
+            std::iter::repeat_n(StateClass::Blocked, self.blocked)
+                .chain(std::iter::repeat_n(StateClass::Working, self.working))
+                .chain(std::iter::repeat_n(StateClass::Idle, self.calm)),
+        )
+    }
+}
+
+/// The leading count columns for one band row: three right-aligned counts in
+/// the severity colors (red/yellow/green), zeros muted, every column padded
+/// to the band-global `digit_width`, with a trailing space before the name.
+pub(crate) fn leading_count_spans(
+    tally: &StateTally,
+    digit_width: usize,
+    ghosted: bool,
+    p: &Palette,
+) -> Vec<Span<'static>> {
+    let column = |count: usize, color: Color| {
+        let style = if ghosted {
+            // Unreachable rows ghost their last-known counts with the rest
+            // of the line: muted + italic, no state colors.
+            Style::default()
+                .fg(p.overlay0)
+                .add_modifier(Modifier::ITALIC)
+        } else if count == 0 {
+            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
+        } else {
+            Style::default().fg(color)
+        };
+        Span::styled(format!("{count:>digit_width$} "), style)
+    };
+    vec![
+        column(tally.blocked, p.red),
+        column(tally.working, p.yellow),
+        column(tally.calm, p.green),
+    ]
+}
+
+/// Total cell width of the counts lead (incl. its trailing separators) —
+/// rows without counts (home, unreachable) indent by this to stay aligned.
+pub(crate) fn counts_lead_width(digit_width: usize) -> usize {
+    (digit_width + 1) * 3
 }
 
 /// Packed-rect glyphs of the single-line join rendering.

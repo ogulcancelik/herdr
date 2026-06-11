@@ -276,7 +276,7 @@ show_agent_labels_on_pane_borders = false
 agent_panel_scope = "all"
 servers_panel_scope = "all"
 spaces_panel_scope = "all"
-medallion_style = "sextant"
+server_state_mark = "counts"
 accent = "cyan"
 ```
 
@@ -290,7 +290,7 @@ accent = "cyan"
 
 `servers_panel_scope` can be `all` or `current`. With `current`, the servers section shows only the machine you are attached to (plus the way-home row when you are attached to a remote server). `spaces_panel_scope` can be `all` or `current`. With `current`, the spaces list shows only the focused workspace's space group. Both default to `all`, and clicking the `all`/`current` label in each section header toggles and saves the setting — exactly like the agents panel.
 
-`medallion_style` controls the sub-cell raster of the state medallion that leads each server row (the concentric rings showing the worst three agent states on that machine). The default `sextant` uses Unicode Symbols for Legacy Computing for a finer 4x6 grid; set `quadrant` if your terminal font lacks those glyphs.
+`server_state_mark` controls the leading state mark on each server row. The default `counts` renders fixed red/yellow/green agent-count columns (`0 2 1 mba22` — blocked, working, calm), zeros muted, with a band-global digit width so one busy server aligns every row. `medallion_sextant` / `medallion_quadrant` render the rectangular state medallion instead (nested bands of the worst three states; quadrant for fonts without Symbols for Legacy Computing). Unreachable servers ghost their row: greyed italic name (struck through), a broken-link icon with the outage age, and the last-known stats greyed in place.
 
 `confirm_close` controls whether closing a workspace asks for confirmation. `prompt_new_tab_name` controls whether new tabs ask for a label first.
 

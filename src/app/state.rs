@@ -1591,7 +1591,7 @@ pub struct AppState {
     /// What `new_tab` creates: a tab, or a sibling workspace (spike #25).
     pub tab_mode: crate::config::TabModeConfig,
     /// Servers-band state-medallion raster (#42): sextant or quadrant.
-    pub medallion_style: crate::config::MedallionStyleConfig,
+    pub server_state_mark: crate::config::ServerStateMarkConfig,
     /// Reserve the agent pane header strip.
     pub pane_header: bool,
     /// Show the global machine status line.
@@ -2031,7 +2031,7 @@ impl AppState {
             prompt_float_lines: crate::config::DEFAULT_PROMPT_FLOAT_LINES,
             auto_collapse_groups: false,
             tab_mode: crate::config::TabModeConfig::Tabs,
-            medallion_style: crate::config::MedallionStyleConfig::Sextant,
+            server_state_mark: crate::config::ServerStateMarkConfig::Counts,
             pane_header: true,
             status_line: true,
             system_stats: None,
