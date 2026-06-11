@@ -94,12 +94,16 @@ impl AppState {
                     | Mode::GlobalMenu
                     | Mode::KeybindHelp
             );
+        // The whole pinned menu row launches the global menu — except the
+        // sidebar collapse toggle's cell, which keeps priority when the
+        // pane gap is 0 and the two share the bottom row.
         let launcher = self.global_launcher_rect();
         let launcher_hit = launcher_enabled
             && mouse.column >= launcher.x
             && mouse.column < launcher.x + launcher.width
             && mouse.row >= launcher.y
-            && mouse.row < launcher.y + launcher.height;
+            && mouse.row < launcher.y + launcher.height
+            && !self.on_sidebar_toggle(mouse.column, mouse.row);
 
         if matches!(mouse.kind, MouseEventKind::Moved) && self.mode == Mode::GlobalMenu {
             let actions = global_menu_actions(self);

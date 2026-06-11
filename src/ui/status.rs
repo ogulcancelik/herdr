@@ -241,10 +241,11 @@ pub(super) fn utilization_style(percent: f32, p: &Palette) -> Style {
     }
 }
 
-/// Append one `label value` metric, `·`-separated from any prior spans.
+/// Append one `label value` metric, separated from any prior spans by `sep`.
 /// The label renders dim; the value carries the caller's style.
-pub(super) fn push_metric(
+fn push_metric_with_sep(
     spans: &mut Vec<Span<'static>>,
+    sep: &str,
     label: &str,
     value: String,
     style: Style,
@@ -252,10 +253,83 @@ pub(super) fn push_metric(
 ) {
     let dim = Style::default().fg(p.overlay0);
     if !spans.is_empty() {
-        spans.push(Span::styled(" \u{b7} ".to_string(), dim));
+        spans.push(Span::styled(sep.to_string(), dim));
     }
     spans.push(Span::styled(format!("{label} "), dim));
     spans.push(Span::styled(value, style));
+}
+
+/// Append one `label value` metric, `·`-separated from any prior spans —
+/// the status line's roomy form.
+pub(super) fn push_metric(
+    spans: &mut Vec<Span<'static>>,
+    label: &str,
+    value: String,
+    style: Style,
+    p: &Palette,
+) {
+    push_metric_with_sep(spans, " \u{b7} ", label, value, style, p);
+}
+
+/// The servers-band variant of [`push_metric`]: single-space separated —
+/// the dots cost width for nothing at the band's density (#41).
+pub(super) fn push_band_metric(
+    spans: &mut Vec<Span<'static>>,
+    label: &str,
+    value: String,
+    style: Style,
+    p: &Palette,
+) {
+    push_metric_with_sep(spans, " ", label, value, style, p);
+}
+
+/// CPU/GPU value in the band's fixed-width discipline: right-aligned
+/// width-3 (`  8%`, ` 42%`, `100%`) so the columns hold still across
+/// refreshes.
+pub(super) fn format_percent3(percent: f32) -> String {
+    format!("{percent:>3.0}%")
+}
+
+/// `used/total` memory with used padded to the width of total
+/// (` 92G/512G`) so the slash column does not jitter.
+pub(super) fn format_mem_ratio(used: u64, total: u64) -> String {
+    let used = crate::system_stats::human_bytes(used);
+    let total = crate::system_stats::human_bytes(total);
+    format!("{used:>width$}/{total}", width = total.len())
+}
+
+/// `▼rx ▲tx` network throughput, bytes/sec.
+pub(super) fn format_net_io(rx: u64, tx: u64) -> String {
+    format!(
+        "\u{25bc}{} \u{25b2}{}",
+        crate::system_stats::human_bytes(rx),
+        crate::system_stats::human_bytes(tx)
+    )
+}
+
+/// Battery glyph: the charging bolt when on AC, else the level glyph by
+/// quintile.
+pub(super) fn battery_icon(percent: u8, charging: Option<bool>) -> &'static str {
+    // nf-md-battery_charging, else level glyph by quintile
+    match charging {
+        Some(true) => "\u{f0084}",
+        _ => match percent {
+            0..=20 => "\u{f007a}",
+            21..=40 => "\u{f007c}",
+            41..=60 => "\u{f007e}",
+            61..=80 => "\u{f0080}",
+            _ => "\u{f0079}",
+        },
+    }
+}
+
+/// Battery value color: red once the charge gets critical.
+pub(super) fn battery_style(percent: u8, p: &Palette) -> Style {
+    if percent <= 15 {
+        Style::default().fg(p.red)
+    } else {
+        Style::default().fg(p.text)
+    }
 }
 
 /// Memory utilization as a percentage, for [`utilization_style`].
@@ -323,33 +397,19 @@ pub(super) fn render_status_line(app: &crate::app::AppState, frame: &mut Frame, 
         );
     }
     if let Some(percent) = stats.battery_percent {
-        // nf-md-battery_charging, else level glyph by quintile
-        let icon = match stats.battery_charging {
-            Some(true) => "\u{f0084}",
-            _ => match percent {
-                0..=20 => "\u{f007a}",
-                21..=40 => "\u{f007c}",
-                41..=60 => "\u{f007e}",
-                61..=80 => "\u{f0080}",
-                _ => "\u{f0079}",
-            },
-        };
-        let style = if percent <= 15 {
-            Style::default().fg(p.red)
-        } else {
-            Style::default().fg(p.text)
-        };
-        push_metric(&mut spans, icon, format!("{percent}%"), style, p);
+        push_metric(
+            &mut spans,
+            battery_icon(percent, stats.battery_charging),
+            format!("{percent}%"),
+            battery_style(percent, p),
+            p,
+        );
     }
     if let (Some(rx), Some(tx)) = (stats.net_rx_per_sec, stats.net_tx_per_sec) {
         push_metric(
             &mut spans,
             "\u{f06f3}", // nf-md-network
-            format!(
-                "\u{25bc}{} \u{25b2}{}",
-                crate::system_stats::human_bytes(rx),
-                crate::system_stats::human_bytes(tx)
-            ),
+            format_net_io(rx, tx),
             Style::default().fg(p.teal),
             p,
         );
@@ -372,4 +432,56 @@ pub(super) fn render_status_line(app: &crate::app::AppState, frame: &mut Frame, 
         Paragraph::new(Line::from(spans)).alignment(Alignment::Left),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_percent3_right_aligns_to_three_digits() {
+        assert_eq!(format_percent3(8.0), "  8%");
+        assert_eq!(format_percent3(42.0), " 42%");
+        assert_eq!(format_percent3(100.0), "100%");
+        // Rounded, not truncated — 99.6 reads as full.
+        assert_eq!(format_percent3(99.6), "100%");
+    }
+
+    #[test]
+    fn format_mem_ratio_pads_used_to_total_width() {
+        const G: u64 = 1024 * 1024 * 1024;
+        // Used padded to the width of total so the slash column is stable.
+        assert_eq!(format_mem_ratio(92 * G, 512 * G), " 92G/512G");
+        assert_eq!(format_mem_ratio(110 * G, 512 * G), "110G/512G");
+        // Equal widths need no padding; `human_bytes` keeps one decimal
+        // under 10, so a small used value is already at total's width.
+        assert_eq!(format_mem_ratio(13 * G, 16 * G), "13G/16G");
+        assert_eq!(format_mem_ratio(8 * G, 17 * G), "8.0G/17G");
+    }
+
+    #[test]
+    fn band_metrics_join_with_spaces_status_metrics_with_dots() {
+        let p = crate::app::state::AppState::test_new().palette;
+        let style = Style::default();
+
+        let mut band: Vec<Span<'static>> = Vec::new();
+        push_band_metric(&mut band, "a", "1".into(), style, &p);
+        push_band_metric(&mut band, "b", "2".into(), style, &p);
+        let band: String = band.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(band, "a 1 b 2");
+
+        let mut status: Vec<Span<'static>> = Vec::new();
+        push_metric(&mut status, "a", "1".into(), style, &p);
+        push_metric(&mut status, "b", "2".into(), style, &p);
+        let status: String = status.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(status, "a 1 \u{b7} b 2");
+    }
+
+    #[test]
+    fn battery_icon_picks_quintile_or_charging_bolt() {
+        assert_eq!(battery_icon(50, Some(true)), "\u{f0084}");
+        assert_eq!(battery_icon(10, None), "\u{f007a}");
+        assert_eq!(battery_icon(50, Some(false)), "\u{f007e}");
+        assert_eq!(battery_icon(95, None), "\u{f0079}");
+    }
 }

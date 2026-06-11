@@ -69,14 +69,19 @@ pub(crate) use self::{
     settings::{settings_button_rects, settings_show_primary_action},
     sidebar::{
         agent_panel_body_rect, agent_panel_entries, agent_panel_scroll_metrics,
-        agent_panel_scrollbar_rect, agent_panel_toggle_rect, collapsed_sidebar_sections,
-        collapsed_sidebar_toggle_rect, compute_workspace_card_areas, expanded_sidebar_sections,
-        expanded_sidebar_toggle_rect, normalized_workspace_scroll, panel_scope_toggle_rect,
-        servers_section_height, sidebar_section_divider_rect, workspace_drop_indicator_row,
+        agent_panel_scrollbar_rect, collapsed_sidebar_sections, collapsed_sidebar_toggle_rect,
+        compute_workspace_card_areas, expanded_sidebar_sections, expanded_sidebar_toggle_rect,
+        normalized_workspace_scroll, servers_section_height, sidebar_menu_row_rect,
+        sidebar_section_divider_rect, workspace_drop_indicator_row, workspace_list_body_rect,
         workspace_list_entries, workspace_list_rect, workspace_list_scroll_metrics,
         workspace_list_scrollbar_rect, workspace_parent_group_state, WorkspaceListEntry,
+        SIDEBAR_MENU_BAND_ROWS,
     },
 };
+// The scope-label rects are only consulted by hit-area tests now that the
+// whole header row toggles (#41); rendering uses them inside `ui::sidebar`.
+#[cfg(test)]
+pub(crate) use self::sidebar::{agent_panel_toggle_rect, panel_scope_toggle_rect};
 pub(crate) use self::{
     keybind_help::keybind_help_lines,
     mobile::{
@@ -759,7 +764,7 @@ mod tests {
         );
         assert!(self_title.contains('\u{2726}'), "{self_title}"); // ✦
         let self_health = buffer_row_text(buffer, header, header.y + 2);
-        assert!(self_health.contains("\u{f0ee0} 42%"), "{self_health}");
+        assert!(self_health.contains("\u{f0ee0}  42%"), "{self_health}");
 
         // The peer renders below on its two-line hit-area; the self rows
         // above it carry no card, so clicking them stays a no-op.

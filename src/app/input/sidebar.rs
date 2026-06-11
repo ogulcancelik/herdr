@@ -181,7 +181,12 @@ impl AppState {
         }
     }
 
+    /// The spaces section's footer row hosting the `new` entry. Gone (no
+    /// row reserved, no hit-area) in workspace tab-mode (#41).
     pub(crate) fn sidebar_footer_rect(&self) -> Rect {
+        if !self.sidebar_new_entry_visible() {
+            return Rect::default();
+        }
         let ws_area = self.workspace_list_rect();
         if ws_area == Rect::default() {
             return Rect::default();
@@ -192,24 +197,24 @@ impl AppState {
 
     pub(crate) fn sidebar_new_button_rect(&self) -> Rect {
         let footer = self.sidebar_footer_rect();
+        if footer == Rect::default() {
+            return Rect::default();
+        }
         let width = 5u16.min(footer.width.max(1));
         Rect::new(footer.x, footer.y, width, footer.height)
     }
 
+    /// The global-menu launcher's hit-area: the standalone `menu` row
+    /// pinned to the sidebar's last row (#41). The whole row is the click
+    /// target.
     pub(crate) fn global_launcher_rect(&self) -> Rect {
         if self.view.layout == ViewLayout::Mobile {
             return self.view.mobile_menu_hit_area;
         }
-
-        let footer = self.sidebar_footer_rect();
-        let width = if self.global_menu_attention_badge_visible() {
-            8
-        } else {
-            6
+        if self.sidebar_collapsed {
+            return Rect::default();
         }
-        .min(footer.width.max(1));
-        let x = footer.x + footer.width.saturating_sub(width);
-        Rect::new(x, footer.y, width, footer.height)
+        crate::ui::sidebar_menu_row_rect(self.view.sidebar_rect, self.sidebar_pane_gap)
     }
 
     pub(crate) fn global_menu_labels(&self) -> Vec<&'static str> {
@@ -309,7 +314,10 @@ impl AppState {
 
     pub(super) fn set_sidebar_section_split(&mut self, row: u16) {
         let sidebar = self.view.sidebar_rect;
-        let content_height = sidebar.height;
+        // The split divides the rows above the pinned menu band.
+        let content_height = sidebar
+            .height
+            .saturating_sub(crate::ui::SIDEBAR_MENU_BAND_ROWS);
         if content_height < 6 {
             return;
         }
@@ -320,8 +328,7 @@ impl AppState {
     }
 
     pub(super) fn workspace_at_row(&self, row: u16) -> Option<usize> {
-        let footer = self.sidebar_footer_rect();
-        if footer == Rect::default() {
+        if self.workspace_list_rect() == Rect::default() {
             return None;
         }
 
@@ -402,8 +409,12 @@ impl AppState {
 
     pub(super) fn workspace_drop_index_at_row(&self, row: u16) -> Option<usize> {
         let area = self.workspace_list_rect();
-        let footer = self.sidebar_footer_rect();
-        if area == Rect::default() || row < area.y || row >= footer.y {
+        if area == Rect::default() {
+            return None;
+        }
+        let body =
+            crate::ui::workspace_list_body_rect(area, false, self.sidebar_new_entry_visible());
+        if row < area.y || row >= body.y + body.height {
             return None;
         }
 
@@ -438,8 +449,12 @@ impl AppState {
 
         let mut best: Option<(usize, u16)> = None;
         for insert_idx in insert_indices {
-            let Some(slot_row) = crate::ui::workspace_drop_indicator_row(&cards, area, insert_idx)
-            else {
+            let Some(slot_row) = crate::ui::workspace_drop_indicator_row(
+                &cards,
+                area,
+                insert_idx,
+                self.sidebar_new_entry_visible(),
+            ) else {
                 continue;
             };
             let distance = row.abs_diff(slot_row);
@@ -454,6 +469,8 @@ impl AppState {
         best.map(|(insert_idx, _)| insert_idx)
     }
 
+    /// The agents header's scope toggle hit-area: the entire header row
+    /// (title word included), not just the right-aligned scope label (#41).
     pub(super) fn on_agent_panel_scope_toggle(&self, col: u16, row: u16) -> bool {
         if self.sidebar_collapsed {
             return false;
@@ -464,30 +481,32 @@ impl AppState {
             self.sidebar_section_split,
             self.sidebar_pane_gap,
         );
-        let rect = crate::ui::agent_panel_toggle_rect(detail_area, self.agent_panel_scope);
-        rect_contains(rect, col, row)
+        // Row 0 is the section divider; the ` agents` header sits below it.
+        if detail_area.width == 0 || detail_area.height < 2 {
+            return false;
+        }
+        let header = Rect::new(detail_area.x, detail_area.y + 1, detail_area.width, 1);
+        rect_contains(header, col, row)
     }
 
+    /// The servers header's scope toggle hit-area: the whole header row —
+    /// clicking ` servers` toggles just like clicking the scope label (#41).
     pub(super) fn on_servers_panel_scope_toggle(&self, col: u16, row: u16) -> bool {
         if self.sidebar_collapsed {
             return false;
         }
 
-        let rect = crate::ui::panel_scope_toggle_rect(
-            self.view.servers_header_rect,
-            self.servers_panel_scope,
-        );
-        rect_contains(rect, col, row)
+        rect_contains(self.view.servers_header_rect, col, row)
     }
 
+    /// The spaces header's scope toggle hit-area: the whole header row (#41).
     pub(super) fn on_spaces_panel_scope_toggle(&self, col: u16, row: u16) -> bool {
         let area = self.workspace_list_rect();
         if area == Rect::default() || area.height == 0 {
             return false;
         }
         let header = Rect::new(area.x, area.y, area.width, 1);
-        let rect = crate::ui::panel_scope_toggle_rect(header, self.spaces_panel_scope);
-        rect_contains(rect, col, row)
+        rect_contains(header, col, row)
     }
 
     pub(super) fn agent_detail_target_at(
@@ -545,15 +564,40 @@ mod tests {
     #[test]
     fn clicking_launcher_opens_global_menu() {
         let mut app = app_for_mouse_test();
+
+        // The pinned menu row is the sidebar's very last row and the whole
+        // row is the launcher's hit-area (#41).
         let rect = app.state.global_launcher_rect();
+        let sidebar = app.state.view.sidebar_rect;
+        assert_eq!(rect.y, sidebar.y + sidebar.height - 1);
+        assert_eq!(rect.x, sidebar.x);
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            rect.x + rect.width.saturating_sub(1),
+            rect.x,
             rect.y,
         ));
 
         assert_eq!(app.state.mode, Mode::GlobalMenu);
+    }
+
+    #[test]
+    fn sidebar_collapse_toggle_wins_over_menu_row() {
+        // With pane gap 0 the collapse toggle's cell sits inside the menu
+        // row — clicking it must still collapse, not open the menu.
+        let mut app = app_for_mouse_test();
+        let toggle = crate::ui::expanded_sidebar_toggle_rect(app.state.view.sidebar_rect);
+        let launcher = app.state.global_launcher_rect();
+        assert_eq!(toggle.y, launcher.y);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+
+        assert!(app.state.sidebar_collapsed);
+        assert_ne!(app.state.mode, Mode::GlobalMenu);
     }
 
     #[test]
@@ -827,6 +871,24 @@ mod tests {
             snapshot.agent_panel_scope,
             AgentPanelScope::CurrentWorkspace
         );
+
+        // The whole ` agents` header row toggles too (#41) — the title word
+        // sits one row below the section divider.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            detail_area.x + 1,
+            detail_area.y + 1,
+        ));
+        assert_eq!(app.state.agent_panel_scope, AgentPanelScope::AllWorkspaces);
+
+        // The divider row above the header is the section-split drag
+        // handle, not the toggle.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            detail_area.x + 1,
+            detail_area.y,
+        ));
+        assert_eq!(app.state.agent_panel_scope, AgentPanelScope::AllWorkspaces);
     }
 
     #[test]
@@ -847,32 +909,31 @@ mod tests {
         let header = app.state.view.servers_header_rect;
         assert_ne!(header, Rect::default());
 
-        // Clicking the header outside the all/current label is a no-op (the
-        // old collapse-on-header-click behavior is gone).
+        // The whole header row is the toggle's hit-area (#41): clicking the
+        // ` servers` title word flips the scope and persists it.
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             header.x + 1,
             header.y,
         ));
-        assert_eq!(app.state.servers_panel_scope, PanelScope::All);
+        assert_eq!(app.state.servers_panel_scope, PanelScope::Current);
+        let snapshot = capture_snapshot(&app.state);
+        assert_eq!(snapshot.servers_panel_scope, PanelScope::Current);
 
-        // Clicking the label flips the scope and persists it.
+        // Clicking the right-aligned label keeps working and returns to all.
         let toggle = crate::ui::panel_scope_toggle_rect(header, app.state.servers_panel_scope);
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             toggle.x,
             toggle.y,
         ));
-        assert_eq!(app.state.servers_panel_scope, PanelScope::Current);
-        let snapshot = capture_snapshot(&app.state);
-        assert_eq!(snapshot.servers_panel_scope, PanelScope::Current);
+        assert_eq!(app.state.servers_panel_scope, PanelScope::All);
 
-        // Toggling again returns to all.
-        let toggle = crate::ui::panel_scope_toggle_rect(header, app.state.servers_panel_scope);
+        // The row below the header is a server row, not the toggle.
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            toggle.x,
-            toggle.y,
+            header.x + 1,
+            header.y + 1,
         ));
         assert_eq!(app.state.servers_panel_scope, PanelScope::All);
     }
@@ -901,14 +962,46 @@ mod tests {
         let snapshot = capture_snapshot(&app.state);
         assert_eq!(snapshot.spaces_panel_scope, PanelScope::Current);
 
-        // Toggling again returns to all.
-        let toggle = crate::ui::panel_scope_toggle_rect(header, app.state.spaces_panel_scope);
+        // The whole header row toggles (#41): clicking the ` spaces` title
+        // word returns to all.
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            toggle.x,
-            toggle.y,
+            header.x + 1,
+            header.y,
         ));
         assert_eq!(app.state.spaces_panel_scope, PanelScope::All);
+    }
+
+    #[test]
+    fn workspace_tab_mode_removes_the_new_entry_hit_area() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        // Default tabs mode: the footer hosts the `new` button.
+        let new_button = app.state.sidebar_new_button_rect();
+        assert_ne!(new_button, Rect::default());
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            new_button.x,
+            new_button.y,
+        ));
+        assert!(app.state.request_new_workspace);
+
+        // Workspace mode (#41): the entry does not exist — no rect, no
+        // footer slot, and the old click position is a no-op.
+        app.state.request_new_workspace = false;
+        app.state.tab_mode = crate::config::TabModeConfig::Workspace;
+        assert_eq!(app.state.sidebar_new_button_rect(), Rect::default());
+        assert_eq!(app.state.sidebar_footer_rect(), Rect::default());
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            new_button.x,
+            new_button.y,
+        ));
+        assert!(!app.state.request_new_workspace);
     }
 
     #[test]
@@ -1315,6 +1408,7 @@ mod tests {
             &app.state.view.workspace_card_areas,
             app.state.workspace_list_rect(),
             0,
+            true,
         )
         .unwrap();
 
@@ -1562,12 +1656,13 @@ mod tests {
             cards,
             app.state.workspace_list_rect(),
             cards.len(),
+            true,
         )
         .unwrap();
 
         let last = cards.last().unwrap().rect;
         assert_eq!(bottom_slot, last.y + last.height);
-        assert!(bottom_slot < app.state.sidebar_footer_rect().y.saturating_sub(1));
+        assert!(bottom_slot < app.state.sidebar_footer_rect().y);
     }
 
     #[test]
@@ -1590,7 +1685,12 @@ mod tests {
 
         assert_eq!(app.state.workspace_drop_index_at_row(issue.rect.y), Some(1));
         assert_eq!(
-            crate::ui::workspace_drop_indicator_row(cards, app.state.workspace_list_rect(), 2),
+            crate::ui::workspace_drop_indicator_row(
+                cards,
+                app.state.workspace_list_rect(),
+                2,
+                true
+            ),
             Some(normal.rect.y + normal.rect.height)
         );
     }
@@ -1619,6 +1719,7 @@ mod tests {
             &app.state.view.workspace_card_areas,
             app.state.workspace_list_rect(),
             0,
+            true,
         )
         .unwrap();
 

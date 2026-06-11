@@ -1608,6 +1608,14 @@ impl AppState {
         self.session_dirty = true;
     }
 
+    /// Whether the sidebar reserves its `new` footer entry. Hidden in
+    /// workspace tab-mode (#41) where it is redundant by construction —
+    /// creation flows through prefix+c siblings / branch_session — so the
+    /// footer slot returns to the spaces list. Default tabs mode keeps it.
+    pub(crate) fn sidebar_new_entry_visible(&self) -> bool {
+        self.tab_mode == crate::config::TabModeConfig::Tabs
+    }
+
     /// The sidebar section scopes, bundled for session-snapshot capture.
     pub(crate) fn panel_scopes(&self) -> PanelScopes {
         PanelScopes {
