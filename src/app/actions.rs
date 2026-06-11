@@ -1247,6 +1247,68 @@ impl AppState {
         self.visible_workspace_order().get(position).copied()
     }
 
+    /// The unindented section heads of the spaces list, in render order (#62):
+    /// one per project group (its primary/anchor row) plus each ungrouped
+    /// standalone workspace. This is the index space `switch_space` jumps over.
+    pub(crate) fn space_section_heads(&self) -> Vec<usize> {
+        crate::ui::workspace_list_entries(self)
+            .into_iter()
+            .filter_map(|entry| match entry {
+                crate::ui::WorkspaceListEntry::Workspace {
+                    ws_idx,
+                    indented: false,
+                } => Some(ws_idx),
+                // Skip indented members and remote rows — keyboard
+                // space-switching cycles local project sections only
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Resolve `switch_space(position)` to the workspace to focus: the Nth
+    /// project section's active member when one is live, else the section's
+    /// primary head (the local main checkout when present — already what
+    /// `workspace_list_entries` emits as the unindented head — else its
+    /// most-recent / first member). Returns `None` when there is no Nth
+    /// section.
+    pub(crate) fn space_switch_target(&self, position: usize) -> Option<usize> {
+        let heads = self.space_section_heads();
+        let head_idx = heads.get(position).copied()?;
+
+        // The project key this section groups on (None for an ungrouped
+        // standalone, which is its own single-member section).
+        let Some(section_key) = self
+            .workspaces
+            .get(head_idx)
+            .and_then(|ws| ws.worktree_space())
+            .map(|space| space.key.clone())
+        else {
+            return Some(head_idx);
+        };
+
+        // Members of this section, in workspace order.
+        let members: Vec<usize> = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .filter(|(_, ws)| {
+                ws.worktree_space()
+                    .is_some_and(|space| space.key == section_key)
+            })
+            .map(|(idx, _)| idx)
+            .collect();
+
+        // Preserve muscle memory: if the active workspace already belongs to
+        // this section, keep it focused (re-pressing the section index is a
+        // no-op rather than yanking focus to main).
+        if let Some(active) = self.active.filter(|idx| members.contains(idx)) {
+            return Some(active);
+        }
+        // Otherwise the section head — main when present, else its first
+        // member — exactly the row the sidebar draws as the section.
+        Some(head_idx)
+    }
+
     pub(crate) fn move_selected_workspace_by_visible_delta(&mut self, delta: isize) {
         if self.workspaces.is_empty() {
             return;

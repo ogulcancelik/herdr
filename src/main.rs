@@ -141,6 +141,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # next_tab = "prefix+n"
 # switch_tab = "prefix+1..9"
 # switch_workspace = ""   # optional indexed binding, e.g. "prefix+shift+1..9"
+# switch_space = ""        # optional: jump to the Nth project section, e.g. "ctrl+1..9"
 # close_tab = "prefix+shift+x"
 # rename_pane = "prefix+shift+p"
 # edit_scrollback = "prefix+e"

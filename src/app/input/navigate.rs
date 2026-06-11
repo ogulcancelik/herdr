@@ -501,6 +501,7 @@ pub(crate) enum NavigateAction {
     RenameWorkspace,
     CloseWorkspace,
     SwitchWorkspace(usize),
+    SwitchSpace(usize),
     SwitchTab(usize),
     FocusAgent(usize),
     WorkspacePicker,
@@ -563,6 +564,13 @@ fn indexed_navigation_action(
         if trigger_matches(binding) {
             if let Some(idx) = binding.matched_index(key) {
                 return Some(NavigateAction::SwitchWorkspace(idx));
+            }
+        }
+    }
+    for binding in &kb.switch_space {
+        if trigger_matches(binding) {
+            if let Some(idx) = binding.matched_index(key) {
+                return Some(NavigateAction::SwitchSpace(idx));
             }
         }
     }
@@ -774,6 +782,16 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::SwitchWorkspace(idx) => {
             if let Some(ws_idx) = state.workspace_at_visible_position(idx) {
+                state.switch_workspace(ws_idx);
+                leave_navigate_mode(state);
+            }
+        }
+        NavigateAction::SwitchSpace(idx) => {
+            // The Nth project SECTION (#62): focus its active member when one
+            // is live, else the section's primary (local main, else its first
+            // member). The fallback lives in the state method so this dispatch
+            // arm stays a thin shell like its siblings.
+            if let Some(ws_idx) = state.space_switch_target(idx) {
                 state.switch_workspace(ws_idx);
                 leave_navigate_mode(state);
             }
@@ -1379,6 +1397,93 @@ mod tests {
 
         assert_eq!(state.active, Some(2));
         assert_eq!(state.selected, 2);
+    }
+
+    #[test]
+    fn switch_space_jumps_to_nth_project_section_head() {
+        // Sections: [0]=grouped repo (main idx0 + worktree idx2), [1]=standalone
+        // "solo" (idx1). switch_space(1) targets the second SECTION → idx1, not
+        // the second visible WORKSPACE (which would be the worktree).
+        let mut state = state_with_workspaces(&["main", "solo", "issue"]);
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        mark_worktree_space_member(&mut state, 0, "repo-key");
+        mark_worktree_space_member(&mut state, 2, "repo-key");
+        state.mode = Mode::Prefix;
+        state.active = Some(0);
+        state.selected = 0;
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::SwitchSpace(1),
+            ActionContext::Prefix,
+        );
+
+        assert_eq!(state.active, Some(1));
+        assert_eq!(state.selected, 1);
+    }
+
+    #[test]
+    fn switch_space_focuses_section_head_when_no_member_active() {
+        // Section 0 = grouped repo (main idx0 + worktree idx2); active is on a
+        // different section. switch_space(0) lands on the head (main, idx0).
+        let mut state = state_with_workspaces(&["main", "solo", "issue"]);
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        mark_worktree_space_member(&mut state, 0, "repo-key");
+        mark_worktree_space_member(&mut state, 2, "repo-key");
+        state.mode = Mode::Prefix;
+        state.active = Some(1);
+        state.selected = 1;
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::SwitchSpace(0),
+            ActionContext::Prefix,
+        );
+
+        assert_eq!(state.active, Some(0));
+    }
+
+    #[test]
+    fn switch_space_keeps_active_member_within_the_section() {
+        // Active is the worktree (idx2) of the grouped repo (section 0).
+        // Re-selecting section 0 must not yank focus to main — muscle memory.
+        let mut state = state_with_workspaces(&["main", "solo", "issue"]);
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        mark_worktree_space_member(&mut state, 0, "repo-key");
+        mark_worktree_space_member(&mut state, 2, "repo-key");
+        state.mode = Mode::Prefix;
+        state.active = Some(2);
+        state.selected = 2;
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::SwitchSpace(0),
+            ActionContext::Prefix,
+        );
+
+        assert_eq!(state.active, Some(2));
+    }
+
+    #[test]
+    fn switch_space_out_of_bounds_is_noop() {
+        let mut state = state_with_workspaces(&["main"]);
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        state.mode = Mode::Prefix;
+        state.active = Some(0);
+        state.selected = 0;
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::SwitchSpace(5),
+            ActionContext::Prefix,
+        );
+
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.selected, 0);
     }
 
     #[test]

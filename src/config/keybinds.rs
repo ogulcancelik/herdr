@@ -293,6 +293,9 @@ pub struct Keybinds {
     pub next_tab: ActionKeybinds,
     pub switch_tab: Vec<IndexedKeybind>,
     pub switch_workspace: Vec<IndexedKeybind>,
+    /// Indexed jump to the Nth project SECTION of the spaces list (#62).
+    /// No default binding (`BindingConfig::empty`); opt-in via `keys.switch_space`.
+    pub switch_space: Vec<IndexedKeybind>,
     pub close_tab: ActionKeybinds,
     pub rename_pane: ActionKeybinds,
     pub edit_scrollback: ActionKeybinds,
@@ -497,6 +500,7 @@ impl Config {
             next_tab: action!("keys.next_tab", &self.keys.next_tab),
             switch_tab: indexed!("keys.switch_tab", &self.keys.switch_tab),
             switch_workspace: indexed!("keys.switch_workspace", &self.keys.switch_workspace),
+            switch_space: indexed!("keys.switch_space", &self.keys.switch_space),
             close_tab: action!("keys.close_tab", &self.keys.close_tab),
             rename_pane: action!("keys.rename_pane", &self.keys.rename_pane),
             edit_scrollback: action!("keys.edit_scrollback", &self.keys.edit_scrollback),
@@ -1761,6 +1765,17 @@ switch_workspace = "prefix+shift+1..9"
             BindingTrigger::Prefix((KeyCode::Char('1'), KeyModifiers::SHIFT))
         );
         assert_eq!(kb.switch_workspace[0].label, "prefix+shift+1");
+    }
+
+    #[test]
+    fn switch_space_is_unbound_by_default_and_parses_indexed() {
+        // No default binding (#62): opt-in only.
+        assert!(Config::default().keybinds().switch_space.is_empty());
+
+        let config: Config = toml::from_str("[keys]\nswitch_space = \"ctrl+1..9\"\n").unwrap();
+        let kb = config.keybinds();
+        assert_eq!(kb.switch_space.len(), 9);
+        assert_eq!(kb.switch_space[0].label, "ctrl+1");
     }
 
     #[test]

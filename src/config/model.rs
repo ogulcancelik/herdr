@@ -377,6 +377,9 @@ pub struct KeysConfig {
     pub switch_tab: BindingConfig,
     /// Switch to workspace 1-9 from prefix mode. Unset by default.
     pub switch_workspace: BindingConfig,
+    /// Switch to the Nth project SECTION (1-9) of the spaces list (#62).
+    /// Unset by default.
+    pub switch_space: BindingConfig,
     /// Close the active tab. Default: "prefix+shift+x".
     pub close_tab: BindingConfig,
     /// Rename the focused pane. Default: "prefix+shift+p".
@@ -686,6 +689,7 @@ impl Default for KeysConfig {
             next_tab: BindingConfig::one("prefix+n"),
             switch_tab: BindingConfig::one("prefix+1..9"),
             switch_workspace: BindingConfig::empty(),
+            switch_space: BindingConfig::empty(),
             close_tab: BindingConfig::one("prefix+shift+x"),
             rename_pane: BindingConfig::one("prefix+shift+p"),
             edit_scrollback: BindingConfig::one("prefix+e"),

@@ -124,6 +124,7 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.previous_workspace), "previous workspace"),
         help_entry(keybind_label(&kb.next_workspace), "next workspace"),
         help_entry(indexed_label(&kb.switch_workspace), "switch workspace 1-9"),
+        help_entry(indexed_label(&kb.switch_space), "switch space 1-9"),
         help_entry(keybind_label(&kb.previous_agent), "previous agent"),
         help_entry(keybind_label(&kb.next_agent), "next agent"),
         help_entry(

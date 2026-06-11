@@ -2166,6 +2166,20 @@ fn render_workspace_list(
     // currency fill as the active row (and the current-server row) — one
     // "where am I" idiom from server to session to workspace.
     let active_section_primary = app.active_section_primary();
+    // Section indices for switch_space discoverability (#62): the Nth project
+    // section (unindented head row) shows its 1-based index, exactly like the
+    // collapsed sidebar numbers workspaces — but only when `switch_space` is
+    // bound, so the unbound default stays uncluttered. ws_idx -> 1-based index.
+    let section_indices: std::collections::HashMap<usize, usize> =
+        if app.keybinds.switch_space.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            app.space_section_heads()
+                .into_iter()
+                .enumerate()
+                .map(|(pos, ws_idx)| (ws_idx, pos + 1))
+                .collect()
+        };
 
     for card in cards {
         let i = card.ws_idx;
@@ -2216,6 +2230,15 @@ fn render_workspace_list(
         let mut show_workspace_icon = true;
         let mut collapsed_group_key: Option<String> = None;
         let mut group_key: Option<String> = None;
+        // Section index prefix (#62) on the section-head row, when bound.
+        if let Some(index) = section_indices.get(&i).filter(|_| !card.indented) {
+            let idx_style = if highlighted {
+                Style::default().fg(p.overlay1)
+            } else {
+                Style::default().fg(p.overlay0)
+            };
+            line1.push(Span::styled(format!("{index} "), idx_style));
+        }
         if card.indented {
             line1.push(Span::styled("   ", Style::default()));
         } else if let Some((key, collapsed)) = workspace_parent_group_state(app, i) {
