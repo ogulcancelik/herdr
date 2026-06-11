@@ -92,6 +92,10 @@ pub enum Method {
     PaneReportPrompt(PaneReportPromptParams),
     #[serde(rename = "pane.report_metadata")]
     PaneReportMetadata(PaneReportMetadataParams),
+    #[serde(rename = "pane.set_header_field")]
+    PaneSetHeaderField(PaneSetHeaderFieldParams),
+    #[serde(rename = "pane.clear_header_field")]
+    PaneClearHeaderField(PaneClearHeaderFieldParams),
     #[serde(rename = "pane.clear_agent_authority")]
     PaneClearAgentAuthority(PaneClearAgentAuthorityParams),
     #[serde(rename = "pane.release_agent")]
@@ -411,6 +415,23 @@ pub struct PaneReportMetadataParams {
     pub seq: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneSetHeaderFieldParams {
+    pub pane_id: String,
+    pub key: String,
+    pub value: String,
+    /// Auto-expire the field after this many seconds (progress that stops
+    /// updating shouldn't lie).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneClearHeaderFieldParams {
+    pub pane_id: String,
+    pub key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

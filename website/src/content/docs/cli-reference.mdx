@@ -162,6 +162,25 @@ herdr pane report-metadata <pane_id> \
 
 `STATUS` is one of `idle`, `working`, `blocked`, `done`, or `unknown`. `--agent` is a guard for the authoritative agent label. `--applies-to-source` is a guard for the active lifecycle authority source. Use `--display-agent` to change the visible name.
 
+Promote session-specific fields (containers, progress, custom KV) into the calling pane's header:
+
+```bash
+herdr pane set-field <key> <value> [--ttl <secs>] [--pane <pane_id>]
+herdr pane clear-field <key> [--pane <pane_id>]
+```
+
+Fields render as compact `key value` chips on the pane header context line (after the branch/PR segments) and on the navigation surfaces — sidebar agent panel rows, navigator pane lists, mobile pane lists. The pane defaults to the calling pane (`$HERDR_PANE_ID`, healed by process ancestry), so hooks and wrapper scripts inside a pane need no bookkeeping:
+
+```bash
+# a podman wrapper registering a dev container
+herdr pane set-field pg "● up"
+# a build script publishing progress that auto-expires if it stalls
+herdr pane set-field build 73% --ttl 120
+herdr pane clear-field build
+```
+
+Fields are display-only and ephemeral — never persisted into session snapshots. Caps: 6 fields per pane, key up to 16 characters, value up to 48 characters; over-cap requests fail. Setting an existing key updates it in place.
+
 ## Agents
 
 ```bash
@@ -244,4 +263,5 @@ herdr integration status [--outdated-only]
 | `HERDR_SESSION` | Select a named session for CLI commands. |
 | `HERDR_SOCKET_PATH` | Low-level socket path override. |
 | `HERDR_LOG` | Set log filter, for example `HERDR_LOG=herdr=debug`. |
+| `HERDR_PANE_ID` | Baked into every pane's environment; the default pane for `pane set-field`/`clear-field`. Stale values are healed by process ancestry. |
 | `HERDR_DISABLE_SOUND` | Disable sound playback even when sound notifications are enabled. |

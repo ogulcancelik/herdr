@@ -19,6 +19,8 @@ pub struct PaneDetail {
     pub seen: bool,
     pub custom_status: Option<String>,
     pub state_labels: HashMap<String, String>,
+    /// Session-promoted header fields (chips), non-expired, insertion order.
+    pub header_fields: Vec<(String, String)>,
     /// Live status-line activity while Working (e.g. "Implementing the parser").
     pub live_activity: Option<String>,
     /// When the effective agent state last transitioned.
@@ -61,6 +63,7 @@ impl Tab {
                     seen: pane.seen,
                     custom_status: presentation.custom_status,
                     state_labels: presentation.state_labels,
+                    header_fields: terminal.active_header_fields(),
                     live_activity: (terminal.state == AgentState::Working)
                         .then(|| terminal.live_activity.clone())
                         .flatten(),
@@ -217,6 +220,33 @@ mod tests {
         assert_eq!(
             labels,
             vec![("planner".into(), "planner".into(), Some(Agent::Pi))]
+        );
+    }
+
+    #[test]
+    fn pane_details_carry_active_header_fields_in_insertion_order() {
+        let ws = Workspace::test_new("test");
+        let root_pane = ws.tabs[0].root_pane;
+        let mut terminals = HashMap::new();
+        let mut terminal = terminal_for_pane(&ws, root_pane);
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_header_field("build", "73%", None).unwrap();
+        terminal.set_header_field("pg", "up", None).unwrap();
+        // An already-expired field (zero TTL) must not ride PaneDetail.
+        terminal
+            .set_header_field("stale", "gone", Some(std::time::Duration::ZERO))
+            .unwrap();
+        terminals.insert(terminal.id.clone(), terminal);
+
+        let details = ws.pane_details(&terminals);
+
+        assert_eq!(details.len(), 1);
+        assert_eq!(
+            details[0].header_fields,
+            vec![
+                ("build".to_string(), "73%".to_string()),
+                ("pg".to_string(), "up".to_string()),
+            ]
         );
     }
 

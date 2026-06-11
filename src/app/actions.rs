@@ -215,6 +215,11 @@ impl AppState {
         self.ensure_navigator_selection_visible();
     }
 
+    /// Per-surface width budget for promoted header field values: the pane
+    /// header gets the full cap, the agent panel less, the navigator list
+    /// the least (header > agent panel > nav list).
+    pub(crate) const NAVIGATOR_HEADER_FIELD_VALUE_COLS: usize = 16;
+
     pub(crate) fn navigator_rows(&self) -> Vec<NavigatorRow> {
         let query = self.navigator.query.trim().to_lowercase();
         let query_kind = navigator_query_kind(&query, self.navigator.state_filter);
@@ -386,11 +391,22 @@ impl AppState {
             let status = custom_status
                 .or(status_label)
                 .or_else(|| agent_label.map(|_| state_label_text(state, pane.seen).to_string()));
-            let meta = match (agent_label, status.as_deref()) {
+            let mut meta = match (agent_label, status.as_deref()) {
                 (Some(agent_label), Some(status)) => format!("{agent_label} · {status}"),
                 (Some(agent_label), None) => agent_label.to_string(),
                 (None, _) => "shell".to_string(),
             };
+            // Promoted header fields make "which pane has the build at 73%?"
+            // answerable (and searchable) from the navigator list. Narrowest
+            // surface, tightest value budget.
+            if let Some(fields) = terminal.map(|terminal| terminal.active_header_fields()) {
+                if let Some(summary) = crate::terminal::compact_header_fields(
+                    &fields,
+                    Self::NAVIGATOR_HEADER_FIELD_VALUE_COLS,
+                ) {
+                    meta = format!("{meta} · {summary}");
+                }
+            }
             let is_current = self.is_active_pane(ws_idx, tab_idx, pane_id);
             let search_text = format!("{label} {meta}").to_lowercase();
             rows.push(NavigatorRow {
@@ -689,10 +705,18 @@ fn activity_summary_for_panes<'a>(
 // ---------------------------------------------------------------------------
 
 impl AppState {
+    /// Earliest deadline the shared scheduled tick must fire at: agent
+    /// metadata TTLs and session-promoted header field TTLs ride the same
+    /// timer in both event loops.
     pub(crate) fn next_agent_metadata_expiry(&self) -> Option<std::time::Instant> {
         self.terminals
             .values()
             .filter_map(|terminal| terminal.next_agent_metadata_expiry())
+            .chain(
+                self.terminals
+                    .values()
+                    .filter_map(|terminal| terminal.next_header_field_expiry()),
+            )
             .min()
     }
 
@@ -701,6 +725,12 @@ impl AppState {
         scheduled_deadline: std::time::Instant,
         now: std::time::Instant,
     ) -> Vec<PaneStateUpdate> {
+        // Header field chips expire on the same sweep. They carry no agent
+        // state, so they produce no PaneStateUpdate — the caller already
+        // marks the frame dirty whenever the deadline fires.
+        for terminal in self.terminals.values_mut() {
+            terminal.expire_header_fields_at(now);
+        }
         let pane_terminals: Vec<_> = self
             .workspaces
             .iter()
@@ -2385,6 +2415,28 @@ impl AppState {
                 })
                 .into_iter()
                 .collect(),
+            AppEvent::PaneHeaderFieldSet {
+                pane_id,
+                key,
+                value,
+                ttl,
+            } => self
+                .update_terminal_state(pane_id, |terminal| {
+                    // Validation and the cap were already checked by the RPC
+                    // handler (same thread, same tick); enforce again
+                    // silently so the invariant holds for every caller.
+                    let _ = terminal.set_header_field(&key, &value, ttl);
+                    None
+                })
+                .into_iter()
+                .collect(),
+            AppEvent::PaneHeaderFieldCleared { pane_id, key } => self
+                .update_terminal_state(pane_id, |terminal| {
+                    terminal.clear_header_field(&key);
+                    None
+                })
+                .into_iter()
+                .collect(),
             AppEvent::HookStateReported {
                 pane_id,
                 source,
@@ -3221,6 +3273,46 @@ mod tests {
             row.target,
             crate::app::state::NavigatorTarget::Pane { pane_id, .. } if pane_id == agent
         ) && row.meta.contains("claude")));
+    }
+
+    /// "Which pane has the build at 73%?" must be answerable — and
+    /// searchable — from the navigator pane list.
+    #[test]
+    fn navigator_pane_rows_surface_promoted_header_fields() {
+        let mut state = app_with_workspaces(&["one"]);
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+
+        let terminal_id = state.workspaces[0].terminal_id(pane).cloned().unwrap();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_header_field("build", "73%", None).unwrap();
+
+        state.open_navigator();
+        let rows = state.navigator_rows();
+        let pane_row = rows
+            .iter()
+            .find(|row| {
+                matches!(
+                    row.target,
+                    crate::app::state::NavigatorTarget::Pane { pane_id, .. } if pane_id == pane
+                )
+            })
+            .expect("pane row");
+
+        assert!(
+            pane_row.meta.contains("build 73%"),
+            "meta: {}",
+            pane_row.meta
+        );
+        assert!(pane_row.search_text.contains("build 73%"));
+
+        // The text filter finds the pane by its promoted field.
+        state.navigator.query = "73%".into();
+        assert!(state.navigator_rows().iter().any(|row| matches!(
+            row.target,
+            crate::app::state::NavigatorTarget::Pane { pane_id, .. } if pane_id == pane
+        )));
     }
 
     #[test]

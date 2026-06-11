@@ -357,6 +357,8 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PaneReportAgentSession(_) => "pane.report_agent_session",
         Method::PaneReportPrompt(_) => "pane.report_prompt",
         Method::PaneReportMetadata(_) => "pane.report_metadata",
+        Method::PaneSetHeaderField(_) => "pane.set_header_field",
+        Method::PaneClearHeaderField(_) => "pane.clear_header_field",
         Method::PaneClearAgentAuthority(_) => "pane.clear_agent_authority",
         Method::PaneReleaseAgent(_) => "pane.release_agent",
         Method::PaneClose(_) => "pane.close",

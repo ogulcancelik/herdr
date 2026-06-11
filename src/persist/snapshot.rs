@@ -1229,6 +1229,31 @@ mod tests {
         assert_eq!(agent_session.value, "opencode-session");
     }
 
+    /// Promoted header fields are ephemeral by design (a restored session's
+    /// containers and progress are unknown): they must never leak into the
+    /// session snapshot.
+    #[test]
+    fn capture_contract_excludes_session_header_fields() {
+        let mut state = state_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_header_field("snap-probe-key", "snapshot-probe-value", None)
+            .unwrap();
+
+        let snapshot = capture_from_state(&state);
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+
+        assert!(!encoded.contains("snap-probe-key"));
+        assert!(!encoded.contains("snapshot-probe-value"));
+    }
+
     #[test]
     fn old_unversioned_snapshot_loads_as_version_0() {
         let json = r#"{"workspaces":[],"active":null,"selected":0}"#;

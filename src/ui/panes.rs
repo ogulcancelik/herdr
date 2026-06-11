@@ -464,6 +464,24 @@ fn render_pane_header(
             ));
         }
     }
+    // Session-promoted header field chips, AFTER branch/PR: the project and
+    // branch segments win the width fight; chips fit into what remains, in
+    // insertion order, middle-truncating the value under pressure.
+    if let Some(terminal) = terminal {
+        let chips = terminal.active_header_fields();
+        if !chips.is_empty() {
+            let base_width: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+            let avail = (header.width as usize).saturating_sub(base_width);
+            for (key, value) in fit_header_field_chips(&chips, avail) {
+                spans.push(Span::styled(" \u{b7} ", Style::default().fg(p.overlay0)));
+                spans.push(Span::styled(
+                    format!("{key} "),
+                    Style::default().fg(p.overlay0),
+                ));
+                spans.push(Span::styled(value, Style::default().fg(p.text)));
+            }
+        }
+    }
     buf.set_line(header.x, header.y, &Line::from(spans), header.width);
 
     // Prompt section. Reserve BOTH the context row above and the hairline
@@ -582,6 +600,38 @@ fn owner_qualified_project(key: Option<&str>, label: &str) -> String {
         return label.to_string();
     }
     format!("{owner}/{label}")
+}
+
+/// Minimum columns a chip value must get before the chip is dropped instead
+/// of truncated to nothing.
+const MIN_HEADER_CHIP_VALUE_COLS: usize = 4;
+/// Columns of the " · " separator that precedes every chip.
+const HEADER_CHIP_SEPARATOR_COLS: usize = 3;
+
+/// Fit `key value` chips into `avail` columns. Chips are taken in insertion
+/// order (earlier chips have priority); the first chip that no longer fits
+/// at full width is middle-truncated into the remaining budget when at least
+/// [`MIN_HEADER_CHIP_VALUE_COLS`] columns are left for its value, and
+/// everything after it is dropped. Each returned chip costs
+/// `separator + key + space + value` columns.
+fn fit_header_field_chips(chips: &[(String, String)], avail: usize) -> Vec<(String, String)> {
+    let mut remaining = avail;
+    let mut fitted = Vec::new();
+    for (key, value) in chips {
+        let fixed = HEADER_CHIP_SEPARATOR_COLS + key.chars().count() + 1;
+        let full = fixed + value.chars().count();
+        if full <= remaining {
+            fitted.push((key.clone(), value.clone()));
+            remaining -= full;
+            continue;
+        }
+        if fixed + MIN_HEADER_CHIP_VALUE_COLS <= remaining {
+            let value_budget = remaining - fixed;
+            fitted.push((key.clone(), middle_truncate(value, value_budget)));
+        }
+        break;
+    }
+    fitted
 }
 
 struct PromptFloatLine {
@@ -866,6 +916,42 @@ mod tests {
     use crate::selection::Selection;
     use crate::terminal::TerminalRuntime;
     use crate::workspace::Workspace;
+
+    fn chips(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn header_chips_fit_in_insertion_order_within_budget() {
+        let chips = chips(&[("build", "73%"), ("pg", "up")]);
+        // " · build 73%" (12) + " · pg up" (8) = 20 columns.
+        assert_eq!(
+            fit_header_field_chips(&chips, 20),
+            vec![
+                ("build".to_string(), "73%".to_string()),
+                ("pg".to_string(), "up".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn header_chips_truncate_the_overflowing_value_and_drop_the_rest() {
+        let chips = chips(&[("model", "claude-fable-5-20260120"), ("pg", "up")]);
+        // fixed cost for "model" chip: 3 (sep) + 5 (key) + 1 = 9; budget 19
+        // leaves 10 columns for the value -> middle-truncated.
+        assert_eq!(
+            fit_header_field_chips(&chips, 19),
+            vec![("model".to_string(), "claud\u{2026}0120".to_string())]
+        );
+        // Earlier chips have priority: when the first chip cannot get even
+        // its minimum value columns, later chips never jump the queue.
+        assert_eq!(fit_header_field_chips(&chips, 10), Vec::new());
+        // No budget at all -> no chips.
+        assert_eq!(fit_header_field_chips(&chips, 0), Vec::new());
+    }
 
     #[test]
     fn owner_qualified_project_parses_origin_keys() {

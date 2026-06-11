@@ -71,6 +71,18 @@ pub enum AppEvent {
         pane_id: PaneId,
         prompt: String,
     },
+    /// A session promoted (or refreshed) a header field for its own pane.
+    PaneHeaderFieldSet {
+        pane_id: PaneId,
+        key: String,
+        value: String,
+        ttl: Option<std::time::Duration>,
+    },
+    /// A session cleared one of its pane's promoted header fields.
+    PaneHeaderFieldCleared {
+        pane_id: PaneId,
+        key: String,
+    },
     /// Hook-authoritative agent state was reported for a pane.
     HookStateReported {
         pane_id: PaneId,

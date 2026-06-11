@@ -15,6 +15,13 @@ use crate::terminal::TerminalId;
 mod metadata;
 pub use metadata::{AgentMetadata, AgentMetadataReport, EffectivePresentation};
 
+#[path = "header_fields.rs"]
+mod header_fields;
+pub use header_fields::{
+    compact_header_fields, middle_truncate_chars, validate_header_field, HeaderField,
+    HeaderFieldError,
+};
+
 const CLAUDE_WORKING_HOLD: Duration = Duration::from_millis(1200);
 const STALE_HOOK_IDLE_GRACE: Duration = Duration::from_secs(2);
 
@@ -68,6 +75,10 @@ pub struct TerminalState {
     /// The last user prompt submitted to this pane's agent, reported by the
     /// integration hook (Claude's UserPromptSubmit). Shown in the pane header.
     pub last_prompt: Option<String>,
+    /// Session-promoted header fields ("chips": containers, progress, custom
+    /// KV), insertion-ordered, optionally TTL-expiring. Ephemeral by design —
+    /// never persisted into session snapshots.
+    pub header_fields: Vec<HeaderField>,
     /// Latched once an agent is ever seen in this pane: keeps the pane header
     /// reservation stable so the PTY doesn't resize on detection flaps.
     pub header_reserved: bool,
@@ -105,6 +116,7 @@ impl TerminalState {
             fallback_visible_working: false,
             fallback_observed_at: None,
             last_prompt: None,
+            header_fields: Vec::new(),
             header_reserved: false,
             state_changed_at: None,
             live_activity: None,

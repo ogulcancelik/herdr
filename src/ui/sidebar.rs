@@ -31,8 +31,14 @@ pub(crate) struct AgentPanelEntry {
     pub seen: bool,
     pub custom_status: Option<String>,
     pub state_labels: std::collections::HashMap<String, String>,
+    /// Session-promoted header fields (chips), non-expired, insertion order.
+    pub header_fields: Vec<(String, String)>,
     pub live_activity: Option<String>,
 }
+
+/// Agent-panel width budget for a promoted field value (header > agent
+/// panel > nav list).
+const AGENT_PANEL_HEADER_FIELD_VALUE_COLS: usize = 24;
 
 fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
     if total_h == 0 {
@@ -222,6 +228,7 @@ fn agent_panel_entries_with_runtimes(
                     seen: detail.seen,
                     custom_status: detail.custom_status,
                     state_labels: detail.state_labels,
+                    header_fields: detail.header_fields,
                     live_activity: detail.live_activity,
                 })
                 .collect()
@@ -246,6 +253,7 @@ fn agent_panel_entries_with_runtimes(
                         seen: detail.seen,
                         custom_status: detail.custom_status,
                         state_labels: detail.state_labels,
+                        header_fields: detail.header_fields,
                         live_activity: detail.live_activity,
                     })
             })
@@ -2164,6 +2172,17 @@ fn render_agent_detail(
             status_spans.push(Span::styled(" · ", agent_style));
             status_spans.push(Span::styled(custom_status.clone(), agent_style));
         }
+        // Promoted header fields, compact: muted key, readable value. The
+        // row is clipped at the panel edge; values get the agent-panel
+        // budget (header > agent panel > nav list).
+        for (key, value) in &detail.header_fields {
+            status_spans.push(Span::styled(" · ", agent_style));
+            status_spans.push(Span::styled(format!("{key} "), agent_style));
+            status_spans.push(Span::styled(
+                crate::terminal::middle_truncate_chars(value, AGENT_PANEL_HEADER_FIELD_VALUE_COLS),
+                Style::default().fg(p.subtext0),
+            ));
+        }
         frame.render_widget(
             Paragraph::new(Line::from(status_spans)).style(row_style),
             Rect::new(body.x, row_y, body.width, 1),
@@ -3096,6 +3115,7 @@ mod tests {
             state: AgentState::Idle,
             seen: true,
             custom_status: None,
+            header_fields: Vec::new(),
             live_activity: None,
             state_labels: std::collections::HashMap::new(),
         };

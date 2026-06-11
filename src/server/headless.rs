@@ -4408,6 +4408,77 @@ next_tab = ""
             }));
     }
 
+    /// Header field TTLs ride the same scheduled tick as agent metadata —
+    /// the headless loop's sweep must drop expired chips and disarm the
+    /// deadline (the TUI loop shares the identical AppState sweep).
+    #[test]
+    fn headless_scheduled_tasks_expire_header_fields() {
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("fields");
+        let pane_id = workspace.tabs[0].root_pane;
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.ensure_test_terminals();
+
+        // Persistent chip first, then the TTL'd one: set_header_field prunes
+        // expired chips on every insert, so the TTL'd chip must be the last
+        // write before the deadline is read.
+        assert!(
+            server.handle_internal_event_with_forwarding(AppEvent::PaneHeaderFieldSet {
+                pane_id,
+                key: "pg".into(),
+                value: "up".into(),
+                ttl: None,
+            })
+        );
+        assert!(
+            server.handle_internal_event_with_forwarding(AppEvent::PaneHeaderFieldSet {
+                pane_id,
+                key: "build".into(),
+                value: "73%".into(),
+                ttl: Some(Duration::from_millis(1)),
+            })
+        );
+
+        let deadline = server
+            .app
+            .agent_metadata_deadline
+            .expect("header field ttl arms the shared deadline");
+        let terminal_id = server.app.state.workspaces[0]
+            .pane_state(pane_id)
+            .expect("pane")
+            .attached_terminal_id
+            .clone();
+        assert_eq!(
+            server
+                .app
+                .state
+                .terminals
+                .get(&terminal_id)
+                .expect("terminal")
+                .header_fields
+                .len(),
+            2
+        );
+
+        assert!(server.handle_scheduled_tasks_headless(deadline + Duration::from_millis(1), false));
+
+        assert_eq!(server.app.agent_metadata_deadline, None);
+        assert_eq!(
+            server
+                .app
+                .state
+                .terminals
+                .get(&terminal_id)
+                .expect("terminal")
+                .header_fields
+                .iter()
+                .map(|field| (field.key.clone(), field.value.clone()))
+                .collect::<Vec<_>>(),
+            vec![("pg".to_string(), "up".to_string())],
+            "the sweep itself must drop the expired chip from state"
+        );
+    }
+
     #[tokio::test]
     async fn headless_scheduled_tasks_do_not_start_pending_agent_resume_when_geometry_dirty() {
         let mut server = test_headless_server();

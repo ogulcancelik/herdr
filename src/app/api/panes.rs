@@ -351,6 +351,79 @@ impl App {
         encode_success(id, ResponseResult::Ok {})
     }
 
+    /// Promote a session-specific field onto the calling pane's header.
+    /// Validation (lengths, cap) is answered synchronously here; the actual
+    /// mutation rides `update_terminal_state` via an internal event, the
+    /// shared chokepoint both event loops consume — same path as
+    /// `pane.report_prompt`.
+    pub(super) fn handle_pane_set_header_field(
+        &mut self,
+        id: String,
+        params: crate::api::schema::PaneSetHeaderFieldParams,
+    ) -> String {
+        let Some((ws_idx, pane_id)) =
+            self.parse_pane_id_or_peer(&params.pane_id, self.current_api_peer_pid)
+        else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let (key, value) = match crate::terminal::validate_header_field(&params.key, &params.value)
+        {
+            Ok(field) => field,
+            Err(err) => return encode_error(id, "invalid_header_field", err.to_string()),
+        };
+        let Some(terminal) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.terminal_id(pane_id))
+            .and_then(|terminal_id| self.state.terminals.get(terminal_id))
+        else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        if !terminal.has_header_field_capacity(&key, std::time::Instant::now()) {
+            return encode_error(
+                id,
+                "too_many_header_fields",
+                crate::terminal::HeaderFieldError::TooManyFields.to_string(),
+            );
+        }
+        self.handle_internal_event(crate::events::AppEvent::PaneHeaderFieldSet {
+            pane_id,
+            key,
+            value,
+            ttl: params.ttl_secs.map(std::time::Duration::from_secs),
+        });
+
+        encode_success(id, ResponseResult::Ok {})
+    }
+
+    /// Clear a promoted header field on the calling pane. Idempotent.
+    pub(super) fn handle_pane_clear_header_field(
+        &mut self,
+        id: String,
+        params: crate::api::schema::PaneClearHeaderFieldParams,
+    ) -> String {
+        let Some((_ws_idx, pane_id)) =
+            self.parse_pane_id_or_peer(&params.pane_id, self.current_api_peer_pid)
+        else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let key = params.key.trim().to_string();
+        if key.is_empty() {
+            return encode_error(
+                id,
+                "invalid_header_field",
+                crate::terminal::HeaderFieldError::EmptyKey.to_string(),
+            );
+        }
+        self.handle_internal_event(crate::events::AppEvent::PaneHeaderFieldCleared {
+            pane_id,
+            key,
+        });
+
+        encode_success(id, ResponseResult::Ok {})
+    }
+
     pub(super) fn handle_pane_clear_agent_authority(
         &mut self,
         id: String,
@@ -604,6 +677,160 @@ mod tests {
         assert_eq!(app.state.request_remove_linked_worktree, None);
         assert!(app.state.workspaces.is_empty());
     }
+    /// App with one workspace whose root pane has a live TerminalState.
+    /// Returns the app, the terminal id, and the public pane id.
+    fn app_with_terminal() -> (App, crate::terminal::TerminalId, String) {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("main")];
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(pane_id)
+            .expect("pane state")
+            .attached_terminal_id
+            .clone();
+        app.state.terminals.insert(
+            terminal_id.clone(),
+            crate::terminal::TerminalState::new(terminal_id.clone(), "/tmp".into()),
+        );
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+        (app, terminal_id, public_pane_id)
+    }
+
+    fn set_field_response(app: &mut App, pane_id: &str, key: &str, value: &str) -> String {
+        app.handle_pane_set_header_field(
+            "req".into(),
+            crate::api::schema::PaneSetHeaderFieldParams {
+                pane_id: pane_id.to_string(),
+                key: key.to_string(),
+                value: value.to_string(),
+                ttl_secs: None,
+            },
+        )
+    }
+
+    #[test]
+    fn set_and_clear_header_field_round_trip_through_update_terminal_state() {
+        let (mut app, terminal_id, public_pane_id) = app_with_terminal();
+
+        assert!(set_field_response(&mut app, &public_pane_id, "build", "73%").contains("\"ok\""));
+        assert!(set_field_response(&mut app, &public_pane_id, "pg", "up").contains("\"ok\""));
+        assert_eq!(
+            app.state
+                .terminals
+                .get(&terminal_id)
+                .unwrap()
+                .active_header_fields(),
+            vec![
+                ("build".to_string(), "73%".to_string()),
+                ("pg".to_string(), "up".to_string()),
+            ]
+        );
+
+        let response = app.handle_pane_clear_header_field(
+            "req-clear".into(),
+            crate::api::schema::PaneClearHeaderFieldParams {
+                pane_id: public_pane_id,
+                key: "build".into(),
+            },
+        );
+        assert!(response.contains("\"ok\""));
+        assert_eq!(
+            app.state
+                .terminals
+                .get(&terminal_id)
+                .unwrap()
+                .active_header_fields(),
+            vec![("pg".to_string(), "up".to_string())]
+        );
+    }
+
+    #[test]
+    fn set_header_field_rejects_over_cap_requests() {
+        let (mut app, terminal_id, public_pane_id) = app_with_terminal();
+
+        // Fill the per-pane cap (6 fields).
+        for i in 0..6 {
+            assert!(
+                set_field_response(&mut app, &public_pane_id, &format!("k{i}"), "v")
+                    .contains("\"ok\"")
+            );
+        }
+        let response = set_field_response(&mut app, &public_pane_id, "k6", "v");
+        assert!(response.contains("too_many_header_fields"));
+        // Updating an existing key is still allowed at the cap.
+        assert!(set_field_response(&mut app, &public_pane_id, "k0", "v2").contains("\"ok\""));
+
+        // Key/value length caps reject via RPC error.
+        let response = set_field_response(&mut app, &public_pane_id, &"k".repeat(17), "v");
+        assert!(response.contains("invalid_header_field"));
+        let response = set_field_response(&mut app, &public_pane_id, "k", &"v".repeat(49));
+        assert!(response.contains("invalid_header_field"));
+        let response = set_field_response(&mut app, &public_pane_id, "  ", "v");
+        assert!(response.contains("invalid_header_field"));
+
+        assert_eq!(
+            app.state
+                .terminals
+                .get(&terminal_id)
+                .unwrap()
+                .active_header_fields()
+                .len(),
+            6
+        );
+    }
+
+    #[test]
+    fn set_header_field_with_ttl_arms_the_shared_expiry_deadline() {
+        let (mut app, terminal_id, public_pane_id) = app_with_terminal();
+        assert_eq!(app.agent_metadata_deadline, None);
+
+        let response = app.handle_pane_set_header_field(
+            "req".into(),
+            crate::api::schema::PaneSetHeaderFieldParams {
+                pane_id: public_pane_id,
+                key: "build".into(),
+                value: "73%".into(),
+                ttl_secs: Some(30),
+            },
+        );
+        assert!(response.contains("\"ok\""));
+
+        // The TTL rides the same scheduled tick that expires agent metadata,
+        // in both event loops.
+        let deadline = app.agent_metadata_deadline.expect("deadline armed");
+        let now = std::time::Instant::now();
+        assert!(deadline > now + std::time::Duration::from_secs(25));
+        assert!(deadline <= now + std::time::Duration::from_secs(30));
+
+        // Firing the shared sweep past the deadline drops the chip.
+        let updates = app
+            .state
+            .expire_agent_metadata_at(deadline, deadline + std::time::Duration::from_millis(1));
+        assert!(updates.is_empty());
+        assert!(app
+            .state
+            .terminals
+            .get(&terminal_id)
+            .unwrap()
+            .active_header_fields()
+            .is_empty());
+        assert_eq!(app.state.next_agent_metadata_expiry(), None);
+    }
+
+    #[test]
+    fn header_field_requests_for_unknown_panes_fail() {
+        let (mut app, _terminal_id, _public_pane_id) = app_with_terminal();
+        let response = set_field_response(&mut app, "w_99-1", "build", "73%");
+        assert!(response.contains("pane_not_found"));
+    }
+
     #[test]
     fn report_prompt_stores_sanitized_last_prompt() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();

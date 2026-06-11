@@ -1,7 +1,8 @@
 use crate::api::schema::{
-    Method, PaneListParams, PaneReadParams, PaneRenameParams, PaneReportAgentParams,
-    PaneReportMetadataParams, PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams,
-    PaneSplitParams, PaneTarget, ReadFormat, ReadSource, Request,
+    Method, PaneClearHeaderFieldParams, PaneListParams, PaneReadParams, PaneRenameParams,
+    PaneReportAgentParams, PaneReportMetadataParams, PaneSendInputParams, PaneSendKeysParams,
+    PaneSendTextParams, PaneSetHeaderFieldParams, PaneSplitParams, PaneTarget, ReadFormat,
+    ReadSource, Request,
 };
 
 pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
@@ -21,6 +22,8 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "send-keys" => pane_send_keys(&args[1..]),
         "report-agent" => pane_report_agent(&args[1..]),
         "report-metadata" => pane_report_metadata(&args[1..]),
+        "set-field" => pane_set_field(&args[1..]),
+        "clear-field" => pane_clear_field(&args[1..]),
         "run" => pane_run(&args[1..]),
         "help" | "--help" | "-h" => {
             print_pane_help();
@@ -601,6 +604,101 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
     }))
 }
 
+const SET_FIELD_USAGE: &str =
+    "usage: herdr pane set-field <key> <value> [--ttl <secs>] [--pane <pane_id>]";
+const CLEAR_FIELD_USAGE: &str = "usage: herdr pane clear-field <key> [--pane <pane_id>]";
+
+/// The calling pane's id, like the integration hooks resolve it: the
+/// env-baked HERDR_PANE_ID when present, otherwise an empty claim that the
+/// server heals by socket-peer process ancestry.
+fn calling_pane_id() -> String {
+    std::env::var("HERDR_PANE_ID").unwrap_or_default()
+}
+
+/// Parse the trailing `[--ttl <secs>] [--pane <pane_id>]` options shared by
+/// the set-field/clear-field verbs. `allow_ttl` rejects --ttl for
+/// clear-field. Returns `(ttl_secs, pane_id)` or an exit code on bad usage.
+fn parse_field_options(
+    args: &[String],
+    usage: &str,
+    allow_ttl: bool,
+) -> Result<(Option<u64>, String), i32> {
+    let mut ttl_secs = None;
+    let mut pane_id = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--ttl" if allow_ttl => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --ttl");
+                    return Err(2);
+                };
+                match super::parse_u64_flag("--ttl", value) {
+                    Ok(value) => ttl_secs = Some(value),
+                    Err(err) => {
+                        eprintln!("{err}");
+                        return Err(2);
+                    }
+                }
+                index += 2;
+            }
+            "--pane" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --pane");
+                    return Err(2);
+                };
+                pane_id = Some(super::normalize_pane_id(value));
+                index += 2;
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                eprintln!("{usage}");
+                return Err(2);
+            }
+        }
+    }
+    Ok((ttl_secs, pane_id.unwrap_or_else(calling_pane_id)))
+}
+
+/// `herdr pane set-field <key> <value> [--ttl <secs>]`: promote a
+/// session-specific field (container, progress, custom KV) into the calling
+/// pane's header. Capped at 6 fields per pane, key <= 16 chars, value <= 48.
+fn pane_set_field(args: &[String]) -> std::io::Result<i32> {
+    let (Some(key), Some(value)) = (args.first(), args.get(1)) else {
+        eprintln!("{SET_FIELD_USAGE}");
+        return Ok(2);
+    };
+    let (ttl_secs, pane_id) = match parse_field_options(&args[2..], SET_FIELD_USAGE, true) {
+        Ok(options) => options,
+        Err(code) => return Ok(code),
+    };
+
+    super::send_ok_request(Method::PaneSetHeaderField(PaneSetHeaderFieldParams {
+        pane_id,
+        key: key.clone(),
+        value: value.clone(),
+        ttl_secs,
+    }))
+}
+
+/// `herdr pane clear-field <key>`: remove a promoted header field from the
+/// calling pane. Idempotent.
+fn pane_clear_field(args: &[String]) -> std::io::Result<i32> {
+    let Some(key) = args.first() else {
+        eprintln!("{CLEAR_FIELD_USAGE}");
+        return Ok(2);
+    };
+    let (_ttl, pane_id) = match parse_field_options(&args[1..], CLEAR_FIELD_USAGE, false) {
+        Ok(options) => options,
+        Err(code) => return Ok(code),
+    };
+
+    super::send_ok_request(Method::PaneClearHeaderField(PaneClearHeaderFieldParams {
+        pane_id,
+        key: key.clone(),
+    }))
+}
+
 fn print_pane_help() {
     eprintln!("herdr pane commands:");
     eprintln!("  herdr pane list [--workspace <workspace_id>]");
@@ -615,5 +713,12 @@ fn print_pane_help() {
     eprintln!("  herdr pane send-keys <pane_id> <key> [key ...]");
     eprintln!("  herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--custom-status TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
     eprintln!("  herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--custom-status TEXT|--clear-custom-status] [--state-label STATUS=TEXT] [--clear-state-labels] [--seq N] [--ttl-ms N]");
+    eprintln!("  herdr pane set-field <key> <value> [--ttl <secs>] [--pane <pane_id>]");
+    eprintln!("  herdr pane clear-field <key> [--pane <pane_id>]");
     eprintln!("  herdr pane run <pane_id> <command>");
+    eprintln!();
+    eprintln!("set-field promotes a session-specific field (container, progress, custom KV)");
+    eprintln!("into the calling pane's header as a 'key value' chip; --ttl auto-expires it.");
+    eprintln!("The pane defaults to the calling pane ($HERDR_PANE_ID, healed by process");
+    eprintln!("ancestry). Caps: 6 fields per pane, key <= 16 chars, value <= 48 chars.");
 }

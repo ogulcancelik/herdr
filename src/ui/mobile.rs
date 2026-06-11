@@ -636,6 +636,14 @@ fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
     if let Some(custom_status) = entry.custom_status.as_deref() {
         parts.push(custom_status.to_string());
     }
+    // Promoted header fields, narrowest mobile budget (header > agent
+    // panel > nav list).
+    if let Some(summary) = crate::terminal::compact_header_fields(
+        &entry.header_fields,
+        crate::app::state::AppState::NAVIGATOR_HEADER_FIELD_VALUE_COLS,
+    ) {
+        parts.push(summary);
+    }
 
     format!("  {}", parts.join(" · "))
 }
@@ -947,6 +955,7 @@ mod tests {
             state: AgentState::Idle,
             seen: true,
             custom_status: None,
+            header_fields: Vec::new(),
             live_activity: None,
             state_labels: std::collections::HashMap::new(),
         }
@@ -964,6 +973,20 @@ mod tests {
         let entry = agent_entry(None, Some("pi"));
 
         assert_eq!(mobile_agent_detail(&entry), "  idle · pi");
+    }
+
+    #[test]
+    fn mobile_agent_detail_appends_promoted_header_fields() {
+        let mut entry = agent_entry(None, Some("pi"));
+        entry.header_fields = vec![
+            ("build".to_string(), "73%".to_string()),
+            ("pg".to_string(), "up".to_string()),
+        ];
+
+        assert_eq!(
+            mobile_agent_detail(&entry),
+            "  idle · pi · build 73% · pg up"
+        );
     }
 
     #[tokio::test]

@@ -392,6 +392,12 @@ fn pane_detail(
             if let Some(status) = terminal.effective_custom_status() {
                 parts.push(status.to_string());
             }
+            if let Some(summary) = crate::terminal::compact_header_fields(
+                &terminal.active_header_fields(),
+                crate::app::state::AppState::NAVIGATOR_HEADER_FIELD_VALUE_COLS,
+            ) {
+                parts.push(summary);
+            }
         }
     }
     parts.join(" · ")

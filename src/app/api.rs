@@ -690,6 +690,12 @@ impl App {
             Method::PaneReportMetadata(params) => {
                 return self.handle_pane_report_metadata(request.id, params);
             }
+            Method::PaneSetHeaderField(params) => {
+                return self.handle_pane_set_header_field(request.id, params);
+            }
+            Method::PaneClearHeaderField(params) => {
+                return self.handle_pane_clear_header_field(request.id, params);
+            }
             Method::PaneClearAgentAuthority(params) => {
                 return self.handle_pane_clear_agent_authority(request.id, params);
             }
