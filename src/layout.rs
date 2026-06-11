@@ -64,6 +64,17 @@ pub enum NavDirection {
     Down,
 }
 
+impl NavDirection {
+    fn opposite(self) -> NavDirection {
+        match self {
+            NavDirection::Left => NavDirection::Right,
+            NavDirection::Right => NavDirection::Left,
+            NavDirection::Up => NavDirection::Down,
+            NavDirection::Down => NavDirection::Up,
+        }
+    }
+}
+
 /// A node in the BSP tree. Public for serialization.
 pub enum Node {
     Pane(PaneId),
@@ -197,15 +208,21 @@ impl TileLayout {
         };
         let grows = matches!(nav, NavDirection::Right | NavDirection::Down);
 
-        let best = splits
-            .iter()
-            .filter(|s| s.direction == target_dir)
-            .filter(|s| split_area_overlaps_focused_pane(s, focused_rect, nav))
-            .filter(|s| split_on_requested_edge(s, focused_rect, nav))
-            .min_by_key(|s| split_edge_distance(s, focused_rect, nav));
+        let nearest_split_on_edge = |edge: NavDirection| {
+            splits
+                .iter()
+                .filter(|s| s.direction == target_dir)
+                .filter(|s| split_area_overlaps_focused_pane(s, focused_rect, edge))
+                .filter(|s| split_on_requested_edge(s, focused_rect, edge))
+                .min_by_key(|s| split_edge_distance(s, focused_rect, edge))
+                .map(|s| s.path.clone())
+        };
 
-        if let Some(split) = best {
-            let path = split.path.clone();
+        // Grow toward the neighbor on the pressed edge; if the pane is against
+        // the outer wall there, shrink via the divider on the opposite edge.
+        if let Some(path) =
+            nearest_split_on_edge(nav).or_else(|| nearest_split_on_edge(nav.opposite()))
+        {
             let current_ratio = get_ratio_at(&self.root, &path).unwrap_or(0.5);
             let adj = if grows { delta } else { -delta };
             self.set_ratio_at(&path, current_ratio + adj);
@@ -722,27 +739,53 @@ mod tests {
     }
 
     #[test]
-    fn resize_outer_edges_are_noops() {
+    fn resize_toward_outer_edge_shrinks_focused_pane() {
+        // Left pane against the left wall: pressing Left has no neighbor to grow
+        // into, so it shrinks the pane via its only (right) divider.
         let (mut horizontal, left) = TileLayout::new();
+        horizontal.split_focused(Direction::Horizontal);
+        assert!(horizontal.resize_pane(left, NavDirection::Left, 0.05, Rect::new(0, 0, 100, 40)));
+        assert!((split_snapshot(&horizontal)[0].1 - 0.45).abs() < f32::EPSILON);
+
+        // Right pane against the right wall: pressing Right shrinks it (the first
+        // child grows toward it).
+        let (mut horizontal, _left) = TileLayout::new();
         let right = horizontal.split_focused(Direction::Horizontal);
-        let horizontal_before = split_snapshot(&horizontal);
+        assert!(horizontal.resize_pane(right, NavDirection::Right, 0.05, Rect::new(0, 0, 100, 40)));
+        assert!((split_snapshot(&horizontal)[0].1 - 0.55).abs() < f32::EPSILON);
 
-        assert!(!horizontal.resize_pane(left, NavDirection::Left, 0.05, Rect::new(0, 0, 100, 40),));
-        assert!(!horizontal.resize_pane(
-            right,
-            NavDirection::Right,
-            0.05,
-            Rect::new(0, 0, 100, 40),
-        ));
-        assert_eq!(split_snapshot(&horizontal), horizontal_before);
-
+        // Same for the vertical axis.
         let (mut vertical, top) = TileLayout::new();
-        let bottom = vertical.split_focused(Direction::Vertical);
-        let vertical_before = split_snapshot(&vertical);
+        vertical.split_focused(Direction::Vertical);
+        assert!(vertical.resize_pane(top, NavDirection::Up, 0.05, Rect::new(0, 0, 100, 40)));
+        assert!((split_snapshot(&vertical)[0].1 - 0.45).abs() < f32::EPSILON);
 
-        assert!(!vertical.resize_pane(top, NavDirection::Up, 0.05, Rect::new(0, 0, 100, 40),));
-        assert!(!vertical.resize_pane(bottom, NavDirection::Down, 0.05, Rect::new(0, 0, 100, 40),));
-        assert_eq!(split_snapshot(&vertical), vertical_before);
+        let (mut vertical, _top) = TileLayout::new();
+        let bottom = vertical.split_focused(Direction::Vertical);
+        assert!(vertical.resize_pane(bottom, NavDirection::Down, 0.05, Rect::new(0, 0, 100, 40)));
+        assert!((split_snapshot(&vertical)[0].1 - 0.55).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn resize_single_pane_is_noop() {
+        let (mut layout, only) = TileLayout::new();
+        let before = split_snapshot(&layout);
+        assert!(!layout.resize_pane(only, NavDirection::Left, 0.05, Rect::new(0, 0, 100, 40)));
+        assert!(!layout.resize_pane(only, NavDirection::Down, 0.05, Rect::new(0, 0, 100, 40)));
+        assert_eq!(split_snapshot(&layout), before);
+    }
+
+    #[test]
+    fn resize_edge_pane_works_in_both_directions() {
+        let (mut layout, left) = TileLayout::new();
+        layout.split_focused(Direction::Horizontal);
+        layout.focus_pane(left);
+
+        assert!(layout.resize_pane(left, NavDirection::Right, 0.05, Rect::new(0, 0, 100, 40)));
+        assert!((split_snapshot(&layout)[0].1 - 0.55).abs() < f32::EPSILON);
+
+        assert!(layout.resize_pane(left, NavDirection::Left, 0.05, Rect::new(0, 0, 100, 40)));
+        assert!((split_snapshot(&layout)[0].1 - 0.50).abs() < f32::EPSILON);
     }
 
     #[test]
