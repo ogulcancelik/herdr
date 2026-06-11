@@ -956,8 +956,11 @@ mod tests {
             seen: true,
             custom_status: None,
             header_fields: Vec::new(),
-            live_activity: None,
             state_labels: std::collections::HashMap::new(),
+            server: "mba22".into(),
+            project: Some("herdr".into()),
+            target: "main".into(),
+            remote: None,
         }
     }
 

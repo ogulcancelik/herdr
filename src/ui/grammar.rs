@@ -101,6 +101,69 @@ pub(crate) fn remote_member_target(summary: &crate::api::schema::PeerWorkspaceSu
         .to_string()
 }
 
+/// The agents-panel single-row location string (#62), matching the spaces
+/// grammar: `<server> <proj> <target>` (e.g. `mba22 herdr keyboard-shorcuts`).
+/// Under width pressure the location truncates right-to-left: the branch/target
+/// shrinks first (middle-truncated), then the project, while the server
+/// qualifier stays whole so "where" is always answered. Returns the rendered
+/// location that fits `max_width` columns; the leading `<icon> <agent> ` is the
+/// caller's responsibility and is excluded from `max_width`.
+pub(crate) fn agent_location_label(
+    server: &str,
+    project: Option<&str>,
+    target: &str,
+    max_width: usize,
+) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    // Assemble server → proj → target, dropping the project segment entirely
+    // before sacrificing the server qualifier.
+    let mut segments: Vec<&str> = Vec::with_capacity(3);
+    segments.push(server);
+    if let Some(project) = project.filter(|p| !p.is_empty()) {
+        segments.push(project);
+    }
+    segments.push(target);
+
+    let joined = segments.join(" ");
+    if joined.chars().count() <= max_width {
+        return joined;
+    }
+
+    // Over budget: shrink target first (it carries the least-stable identity),
+    // then drop the project, keeping the server whole.
+    let sep = 1; // single space between segments
+    let server_len = server.chars().count();
+    let has_project = segments.len() == 3;
+
+    if has_project {
+        let project = segments[1];
+        let project_len = project.chars().count();
+        // Width left for the target after server + proj + two separators.
+        let fixed = server_len + sep + project_len + sep;
+        if fixed < max_width {
+            let target_budget = max_width - fixed;
+            return format!(
+                "{server} {project} {}",
+                crate::terminal::middle_truncate_chars(target, target_budget)
+            );
+        }
+        // Even a 1-col target won't fit alongside the project: drop the project.
+    }
+
+    let fixed = server_len + sep;
+    if fixed < max_width {
+        let target_budget = max_width - fixed;
+        return format!(
+            "{server} {}",
+            crate::terminal::middle_truncate_chars(target, target_budget)
+        );
+    }
+    // Server alone overflows: middle-truncate the whole thing.
+    crate::terminal::middle_truncate_chars(&joined, max_width)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,5 +195,36 @@ mod tests {
     #[test]
     fn project_identity_keeps_bare_key() {
         assert_eq!(project_identity_label("herdr"), "herdr");
+    }
+
+    #[test]
+    fn agent_location_joins_server_proj_target_when_it_fits() {
+        assert_eq!(
+            agent_location_label("mba22", Some("herdr"), "keyboard-shorcuts", 80),
+            "mba22 herdr keyboard-shorcuts"
+        );
+    }
+
+    #[test]
+    fn agent_location_omits_absent_project() {
+        assert_eq!(agent_location_label("sage", None, "main", 80), "sage main");
+    }
+
+    #[test]
+    fn agent_location_truncates_target_before_project() {
+        // Server + project stay whole; the target shrinks (middle-truncated).
+        let out = agent_location_label("mba22", Some("herdr"), "keyboard-shorcuts", 20);
+        assert!(out.starts_with("mba22 herdr "), "got {out:?}");
+        assert!(out.chars().count() <= 20, "got {out:?}");
+        assert!(out.contains('…'), "got {out:?}");
+    }
+
+    #[test]
+    fn agent_location_drops_project_under_hard_pressure() {
+        // Too tight for any project segment: drop it, keep server + target.
+        let out = agent_location_label("mba22", Some("herdr"), "main", 9);
+        assert!(out.starts_with("mba22 "), "got {out:?}");
+        assert!(!out.contains("herdr"), "got {out:?}");
+        assert!(out.chars().count() <= 9, "got {out:?}");
     }
 }

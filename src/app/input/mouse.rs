@@ -609,11 +609,18 @@ impl AppState {
                         return None;
                     }
 
-                    if let Some((ws_idx, _tab_idx, pane_id)) =
-                        self.agent_detail_target_at(mouse.row)
-                    {
-                        self.focus_pane_in_workspace(ws_idx, pane_id);
-                        self.mode = Mode::Terminal;
+                    if let Some(target) = self.agent_detail_target_at(mouse.row) {
+                        match target {
+                            super::sidebar::AgentDetailTarget::Local { ws_idx, pane_id } => {
+                                self.focus_pane_in_workspace(ws_idx, pane_id);
+                                self.mode = Mode::Terminal;
+                            }
+                            super::sidebar::AgentDetailTarget::Remote(request) => {
+                                // Selecting a remote agent row = the workspace
+                                // row's switch (#62).
+                                self.request_peer_switch = Some(request);
+                            }
+                        }
                         return None;
                     }
                 } else if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {

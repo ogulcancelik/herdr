@@ -12,7 +12,7 @@ use super::state_signal::{
     join_states, leading_count_spans, medallion_rings, packed_rects, tally_states, StateClass,
     StateJoin, StateTally,
 };
-use super::status::{agent_icon, remote_agent_icon, state_label, state_label_color};
+use super::status::{agent_icon, remote_agent_icon, state_label_color};
 use crate::app::state::{AgentPanelScope, Palette, PanelScope};
 use crate::app::{AppState, Mode};
 use crate::detect::AgentState;
@@ -38,12 +38,16 @@ pub(crate) struct AgentPanelEntry {
     pub state_labels: std::collections::HashMap<String, String>,
     /// Session-promoted header fields (chips), non-expired, insertion order.
     pub header_fields: Vec<(String, String)>,
-    pub live_activity: Option<String>,
+    /// Single-row location grammar (#62), matching the spaces list:
+    /// `<server> <proj> <workspace|branch>`. `server` is the local host for
+    /// local panes, the peer host for remote ones.
+    pub server: String,
+    pub project: Option<String>,
+    pub target: String,
+    /// `Some((peer, ws_idx))` for a REMOTE agent row — selecting it requests
+    /// the same server switch the workspace row would. `None` for local panes.
+    pub remote: Option<(crate::app::state::RemotePeerRef, usize)>,
 }
-
-/// Agent-panel width budget for a promoted field value (header > agent
-/// panel > nav list).
-const AGENT_PANEL_HEADER_FIELD_VALUE_COLS: usize = 24;
 
 fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
     if total_h == 0 {
@@ -212,6 +216,7 @@ fn agent_panel_entries_with_runtimes(
         }
     };
 
+    let local_server = super::grammar::local_server_name();
     match app.agent_panel_scope {
         AgentPanelScope::CurrentWorkspace => {
             let Some(ws_idx) = agent_panel_current_workspace_idx(app) else {
@@ -220,6 +225,10 @@ fn agent_panel_entries_with_runtimes(
             let Some(ws) = app.workspaces.get(ws_idx) else {
                 return Vec::new();
             };
+            let project = ws.project_key().map(super::grammar::project_identity_label);
+            let target = super::grammar::local_member_target(app, ws, terminal_runtimes);
+            // Current scope is local-by-definition (it follows the focused
+            // local workspace); no remote rows fold in here.
             ws.pane_details(&app.terminals)
                 .into_iter()
                 .map(|detail| AgentPanelEntry {
@@ -228,42 +237,112 @@ fn agent_panel_entries_with_runtimes(
                     pane_id: detail.pane_id,
                     primary_label: detail.label,
                     primary_tab_label: None,
-                    agent_label: None,
+                    agent_label: Some(detail.agent_label),
                     state: detail.state,
                     seen: detail.seen,
                     custom_status: detail.custom_status,
                     state_labels: detail.state_labels,
                     header_fields: detail.header_fields,
-                    live_activity: detail.live_activity,
+                    server: local_server.clone(),
+                    project: project.clone(),
+                    target: target.clone(),
+                    remote: None,
                 })
                 .collect()
         }
-        AgentPanelScope::AllWorkspaces => app
-            .workspaces
-            .iter()
-            .enumerate()
-            .flat_map(|(ws_idx, ws)| {
-                let multi_tab = ws.tabs.len() > 1;
-                let workspace_label = ws.display_name_from(&app.terminals, terminal_runtimes);
-                ws.pane_details(&app.terminals)
-                    .into_iter()
-                    .map(move |detail| AgentPanelEntry {
-                        ws_idx,
-                        tab_idx: detail.tab_idx,
-                        pane_id: detail.pane_id,
-                        primary_label: workspace_label.clone(),
-                        primary_tab_label: multi_tab.then_some(detail.tab_label),
-                        agent_label: Some(detail.agent_label),
-                        state: detail.state,
-                        seen: detail.seen,
-                        custom_status: detail.custom_status,
-                        state_labels: detail.state_labels,
-                        header_fields: detail.header_fields,
-                        live_activity: detail.live_activity,
-                    })
-            })
-            .collect(),
+        AgentPanelScope::AllWorkspaces => {
+            let mut entries: Vec<AgentPanelEntry> = app
+                .workspaces
+                .iter()
+                .enumerate()
+                .flat_map(|(ws_idx, ws)| {
+                    let multi_tab = ws.tabs.len() > 1;
+                    let workspace_label = ws.display_name_from(&app.terminals, terminal_runtimes);
+                    let project = ws.project_key().map(super::grammar::project_identity_label);
+                    let target = super::grammar::local_member_target(app, ws, terminal_runtimes);
+                    let server = local_server.clone();
+                    ws.pane_details(&app.terminals)
+                        .into_iter()
+                        .map(move |detail| AgentPanelEntry {
+                            ws_idx,
+                            tab_idx: detail.tab_idx,
+                            pane_id: detail.pane_id,
+                            primary_label: workspace_label.clone(),
+                            primary_tab_label: multi_tab.then_some(detail.tab_label),
+                            agent_label: Some(detail.agent_label),
+                            state: detail.state,
+                            seen: detail.seen,
+                            custom_status: detail.custom_status,
+                            state_labels: detail.state_labels,
+                            header_fields: detail.header_fields,
+                            server: server.clone(),
+                            project: project.clone(),
+                            target: target.clone(),
+                            remote: None,
+                        })
+                })
+                .collect();
+            // REMOTE agents (#62): the all-scope panel folds in peer agents
+            // from the SAME summaries that feed the spaces list, scope-
+            // respecting via the server filter. Selecting one requests the
+            // server switch its workspace row would. The server filter is
+            // honored: `Local` hides remote rows, `Peer` keeps only that peer.
+            entries.extend(remote_agent_panel_entries(app));
+            entries
+        }
     }
+}
+
+/// Remote agent rows for the all-scope agents panel: one per peer workspace
+/// summary that carries an agent, in the same (peer, summary) order the spaces
+/// list folds them, honoring the active server filter. `pane_id`/`tab_idx` are
+/// placeholders (remote rows are selected by their peer switch, not a local
+/// pane focus).
+fn remote_agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
+    use crate::app::state::ServerFilter;
+    let peers: Vec<_> = match app.server_filter.as_ref() {
+        Some(ServerFilter::Local) => return Vec::new(),
+        Some(ServerFilter::Peer { ssh_target }) => app
+            .remote_peers()
+            .into_iter()
+            .filter(|(_, peer)| peer.ssh_target == *ssh_target)
+            .collect(),
+        None => app.remote_peers(),
+    };
+
+    let mut entries = Vec::new();
+    for (peer_ref, peer) in peers {
+        let server = peer.host.clone().unwrap_or_else(|| peer.peer.clone());
+        for (ws_idx, summary) in peer.workspaces.iter().enumerate() {
+            // Only workspaces actually running an agent surface here.
+            let Some(agent) = summary.agent.as_deref() else {
+                continue;
+            };
+            let (state, seen) = super::status::remote_state(summary.status);
+            entries.push(AgentPanelEntry {
+                ws_idx,
+                tab_idx: 0,
+                pane_id: crate::layout::PaneId::from_raw(0),
+                primary_label: summary.workspace.clone(),
+                primary_tab_label: None,
+                agent_label: Some(agent.to_string()),
+                state,
+                seen,
+                custom_status: None,
+                state_labels: std::collections::HashMap::new(),
+                header_fields: Vec::new(),
+                server: server.clone(),
+                project: summary
+                    .project_key
+                    .as_deref()
+                    .map(super::grammar::project_identity_label)
+                    .or_else(|| summary.project_label.clone()),
+                target: super::grammar::remote_member_target(summary),
+                remote: Some((peer_ref, ws_idx)),
+            });
+        }
+    }
+    entries
 }
 
 pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static str {
@@ -274,65 +353,6 @@ pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static 
         (AgentState::Blocked, _) => "blocked",
         (AgentState::Unknown, _) => "unknown",
     }
-}
-
-fn truncate_text(text: &str, max_width: usize) -> String {
-    let len = text.chars().count();
-    if len <= max_width {
-        return text.to_string();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-    if max_width == 1 {
-        return "…".to_string();
-    }
-    let prefix: String = text.chars().take(max_width.saturating_sub(1)).collect();
-    format!("{prefix}…")
-}
-
-fn format_agent_panel_primary_label(entry: &AgentPanelEntry, max_width: usize) -> String {
-    let Some(tab_label) = entry.primary_tab_label.as_deref() else {
-        return truncate_text(&entry.primary_label, max_width);
-    };
-
-    let separator = " · ";
-    let separator_width = separator.chars().count();
-    if max_width <= separator_width + 2 {
-        return truncate_text(
-            &format!("{}{}{}", entry.primary_label, separator, tab_label),
-            max_width,
-        );
-    }
-
-    let available = max_width.saturating_sub(separator_width);
-    let min_tab = 4.min(available.saturating_sub(1)).max(1);
-    let preferred_workspace = ((available * 2) / 3).max(1);
-    let mut workspace_budget = preferred_workspace
-        .min(available.saturating_sub(min_tab))
-        .max(1);
-    let mut tab_budget = available.saturating_sub(workspace_budget);
-
-    let workspace_len = entry.primary_label.chars().count();
-    let tab_len = tab_label.chars().count();
-
-    if workspace_len < workspace_budget {
-        let spare = workspace_budget - workspace_len;
-        workspace_budget = workspace_len;
-        tab_budget = (tab_budget + spare).min(available.saturating_sub(workspace_budget));
-    }
-    if tab_len < tab_budget {
-        let spare = tab_budget - tab_len;
-        tab_budget = tab_len;
-        workspace_budget = (workspace_budget + spare).min(available.saturating_sub(tab_budget));
-    }
-
-    format!(
-        "{}{}{}",
-        truncate_text(&entry.primary_label, workspace_budget),
-        separator,
-        truncate_text(tab_label, tab_budget)
-    )
 }
 
 /// Every member row is a single line now (#62): the branch IS the label
@@ -1081,14 +1101,15 @@ pub(crate) fn agent_panel_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
 
 fn agent_panel_visible_count(area: Rect, row_gap: u16) -> usize {
     let body = agent_panel_body_rect(area, false);
-    if body.width == 0 || body.height < 2 {
+    if body.width == 0 || body.height < 1 {
         return 0;
     }
 
+    // Single-row entries (#62): one row per agent, plus the inter-row gap.
     let mut used_rows = 0u16;
     let mut visible = 0usize;
-    while used_rows.saturating_add(2) <= body.height {
-        used_rows = used_rows.saturating_add(2);
+    while used_rows.saturating_add(1) <= body.height {
+        used_rows = used_rows.saturating_add(1);
         visible += 1;
         if used_rows < body.height {
             used_rows = used_rows.saturating_add(row_gap);
@@ -2429,92 +2450,61 @@ fn render_agent_detail(
     let mut row_y = body.y;
     let body_bottom = body.y + body.height;
     for detail in details.iter().skip(app.agent_panel_scroll) {
-        if row_y.saturating_add(1) >= body_bottom {
+        if row_y >= body_bottom {
             break;
         }
 
-        // Check if this agent entry corresponds to the active session
-        let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
+        // Single-row grammar (#62): `<icon> <agent> <server> <proj> <target>`.
+        // The status symbol carries the state — no status text, no activity /
+        // custom-status / header-field chips (those live in the pane header,
+        // navigator, and member rows). Remote agent rows render identically.
+        // The active-pane highlight only applies to LOCAL rows; remote rows are
+        // never the focused local pane.
+        let is_active = detail.remote.is_none()
+            && app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
 
         let (icon, icon_style) = agent_icon(detail.state, detail.seen, app.spinner_tick, p);
-        let label_color = state_label_color(detail.state, detail.seen, p);
-        let label = detail
-            .state_labels
-            .get(agent_panel_status_key(detail.state, detail.seen))
-            .map(String::as_str)
-            .unwrap_or_else(|| state_label(detail.state, detail.seen));
 
         let row_style = if is_active {
             Style::default().bg(p.surface_dim)
         } else {
             Style::default()
         };
-
-        let name_style = if is_active {
+        let agent_style = if is_active {
             Style::default().fg(p.text).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
         };
-        // Status colors render at full strength regardless of selection —
-        // blocked/working/done are attention signals, not decoration. Only a
-        // settled idle (seen, nothing to report) stays toned down; the row
-        // highlight bar already marks the selected entry.
-        let settled_idle =
-            matches!(detail.state, AgentState::Idle | AgentState::Unknown) && detail.seen;
-        let status_style = if settled_idle && !is_active {
-            Style::default().fg(label_color).add_modifier(Modifier::DIM)
-        } else {
-            Style::default().fg(label_color)
-        };
-        let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
+        let location_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
 
-        let primary_label =
-            format_agent_panel_primary_label(detail, body.width.saturating_sub(3) as usize);
-        let name_line = Line::from(vec![
+        // Leading "  <icon> " consumes 4 columns (space, icon, space). The
+        // agent code then leads the location, which gets the remaining budget.
+        let agent_code = detail
+            .agent_label
+            .as_deref()
+            .map(|a| app.agent_alias(a).to_string())
+            .unwrap_or_default();
+        let prefix_cols = 4 + agent_code.chars().count() + usize::from(!agent_code.is_empty());
+        let location_budget = (body.width as usize).saturating_sub(prefix_cols);
+        let location = super::grammar::agent_location_label(
+            &detail.server,
+            detail.project.as_deref(),
+            &detail.target,
+            location_budget,
+        );
+
+        let mut spans = vec![
             Span::styled(" ", Style::default()),
             Span::styled(icon, icon_style),
             Span::styled(" ", Style::default()),
-            Span::styled(primary_label, name_style),
-        ]);
+        ];
+        if !agent_code.is_empty() {
+            spans.push(Span::styled(agent_code, agent_style));
+            spans.push(Span::styled(" ", Style::default()));
+        }
+        spans.push(Span::styled(location, location_style));
         frame.render_widget(
-            Paragraph::new(name_line).style(row_style),
-            Rect::new(body.x, row_y, body.width, 1),
-        );
-        row_y += 1;
-
-        // '<agent> · <activity-or-status>': the short agent code leads so the
-        // (potentially long) live activity text gets the remaining width.
-        let mut status_spans = vec![Span::styled("   ", Style::default())];
-        if let Some(agent_label) = &detail.agent_label {
-            status_spans.push(Span::styled(
-                app.agent_alias(agent_label).to_string(),
-                agent_style,
-            ));
-            status_spans.push(Span::styled(" · ", agent_style));
-        }
-        match &detail.live_activity {
-            Some(activity) => {
-                status_spans.push(Span::styled(format!("{activity}…"), status_style));
-            }
-            None => status_spans.push(Span::styled(label, status_style)),
-        }
-        if let Some(custom_status) = &detail.custom_status {
-            status_spans.push(Span::styled(" · ", agent_style));
-            status_spans.push(Span::styled(custom_status.clone(), agent_style));
-        }
-        // Promoted header fields, compact: muted key, readable value. The
-        // row is clipped at the panel edge; values get the agent-panel
-        // budget (header > agent panel > nav list).
-        for (key, value) in &detail.header_fields {
-            status_spans.push(Span::styled(" · ", agent_style));
-            status_spans.push(Span::styled(format!("{key} "), agent_style));
-            status_spans.push(Span::styled(
-                crate::terminal::middle_truncate_chars(value, AGENT_PANEL_HEADER_FIELD_VALUE_COLS),
-                Style::default().fg(p.subtext0),
-            ));
-        }
-        frame.render_widget(
-            Paragraph::new(Line::from(status_spans)).style(row_style),
+            Paragraph::new(Line::from(spans)).style(row_style),
             Rect::new(body.x, row_y, body.width, 1),
         );
         row_y += 1;
@@ -4533,28 +4523,6 @@ mod tests {
         let entries = agent_panel_entries(&app);
         assert_eq!(entries[0].primary_label, "bridge");
         assert_eq!(entries[0].agent_label.as_deref(), Some("planner"));
-    }
-
-    #[test]
-    fn all_workspaces_primary_label_truncates_workspace_and_tab() {
-        let entry = AgentPanelEntry {
-            ws_idx: 0,
-            tab_idx: 0,
-            pane_id: crate::layout::PaneId::from_raw(1),
-            primary_label: "agent-browser".into(),
-            primary_tab_label: Some("test-escalation".into()),
-            agent_label: Some("claude".into()),
-            state: AgentState::Idle,
-            seen: true,
-            custom_status: None,
-            header_fields: Vec::new(),
-            live_activity: None,
-            state_labels: std::collections::HashMap::new(),
-        };
-
-        let label = format_agent_panel_primary_label(&entry, 18);
-
-        assert_eq!(label, "agent-bro… · test…");
     }
 
     #[test]
