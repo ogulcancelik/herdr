@@ -106,20 +106,29 @@ impl FleetSnapshotState {
     }
 
     /// Re-encode for the next leap, excluding the hop target itself (it
-    /// becomes the self row on the receiving end). Ages are recomputed so
-    /// time spent on this server keeps counting against freshness.
+    /// becomes the self row on the receiving end) and any entry matching the
+    /// origin — the home row owns that slot, so a hub that lists itself in
+    /// [[peers]] must not render twice. Ages are recomputed so time spent on
+    /// this server keeps counting against freshness. Peer count is bounded:
+    /// the snapshot rides an env var between attach legs, and an unbounded
+    /// fleet could brush ARG_MAX and kill the leg spawn.
     pub fn to_wire(&self, exclude_ssh_target: &str) -> crate::protocol::FleetSnapshot {
         crate::protocol::FleetSnapshot {
             origin: self.origin.clone(),
             peers: self
                 .peers
                 .iter()
-                .filter(|peer| peer.ssh_target != exclude_ssh_target)
+                .filter(|peer| peer.ssh_target != exclude_ssh_target && peer.peer != self.origin)
+                .take(FLEET_SNAPSHOT_MAX_PEERS)
                 .map(peer_to_wire)
                 .collect(),
         }
     }
 }
+
+/// Carried-snapshot peer cap (env-var transport between attach legs — see
+/// `to_wire`). Far above any realistic personal fleet.
+pub const FLEET_SNAPSHOT_MAX_PEERS: usize = 16;
 
 /// Wire shape of one cached peer summary (`Instant` freshness → age in
 /// seconds at capture time).
@@ -270,6 +279,45 @@ fn parse_summary_response(stdout: &str, latency_ms: u64) -> Result<PeerSummaryPa
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn to_wire_dedups_origin_and_caps_peer_count() {
+        let mk = |name: &str| PeerSummaryState {
+            peer: name.to_string(),
+            ssh_target: name.to_string(),
+            host: None,
+            version: None,
+            system: None,
+            latency_ms: None,
+            workspaces: Vec::new(),
+            last_ok: None,
+            error: None,
+        };
+        let mut peers: Vec<PeerSummaryState> = (0..FLEET_SNAPSHOT_MAX_PEERS + 3)
+            .map(|i| mk(&format!("p{i}")))
+            .collect();
+        peers.push(mk("mba22")); // a hub that lists itself in [[peers]]
+        let snapshot = FleetSnapshotState {
+            origin: "mba22".into(),
+            peers,
+            received_at: Instant::now(),
+        };
+
+        let wire = snapshot.to_wire("p0");
+
+        assert!(
+            wire.peers.iter().all(|p| p.name != "mba22"),
+            "origin owns the home row"
+        );
+        assert!(
+            wire.peers.iter().all(|p| p.name != "p0"),
+            "hop target excluded"
+        );
+        assert!(
+            wire.peers.len() <= FLEET_SNAPSHOT_MAX_PEERS,
+            "env-var transport cap"
+        );
+    }
+
     use super::*;
     use crate::api::schema::AgentStatus;
 

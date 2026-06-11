@@ -1234,6 +1234,10 @@ fn render_servers_section(app: &AppState, frame: &mut Frame, area: Rect, is_navi
         let Some(rect) = server_slot_rect(area, slot as u16) else {
             break;
         };
+        // The currently-attached machine reads like the active workspace row —
+        // the standard highlight fill, one visual language for "current"
+        // across workspaces, agents, and servers.
+        let is_current = target.is_none();
         let rows = match target {
             // The local server: no hit-area, anchors the band.
             None => self_server_rows(app),
@@ -1260,6 +1264,15 @@ fn render_servers_section(app: &AppState, frame: &mut Frame, area: Rect, is_navi
                 peer_server_rows(peer, p)
             }
         };
+        if is_current {
+            let buf = frame.buffer_mut();
+            let fill = Style::default().bg(p.surface_dim);
+            for y in rect.y..rect.y.saturating_add(2).min(area.y + area.height) {
+                for x in rect.x..rect.x.saturating_add(rect.width) {
+                    buf[(x, y)].set_style(fill);
+                }
+            }
+        }
         render_server_rows(frame, rect, rows);
     }
 }
