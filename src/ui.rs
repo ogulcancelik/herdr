@@ -8,6 +8,7 @@ use ratatui::{
 mod dialogs;
 mod float;
 mod keybind_help;
+mod medallion;
 mod menus;
 mod mobile;
 mod navigator;
