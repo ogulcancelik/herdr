@@ -91,7 +91,7 @@ pub(crate) use self::{
         mobile_switcher_workspace_doc_range, MobileSwitcherTarget,
     },
     panes::pane_is_scrolled_back,
-    tabs::compute_tab_bar_view,
+    tabs::{compute_member_strip_view, compute_tab_bar_view},
     widgets::{centered_popup_rect, modal_stack_areas},
 };
 use crate::app::state::ViewLayout;
@@ -243,19 +243,30 @@ fn compute_view_internal(
         crate::ui::sidebar::compute_server_section_areas(app, sidebar_area)
     };
 
-    let tab_bar_view = app
-        .active
-        .and_then(|i| app.workspaces.get(i))
-        .map(|ws| {
-            compute_tab_bar_view(
-                ws,
-                tab_bar_rect,
-                app.tab_scroll,
-                app.tab_scroll_follow_active,
-                app.mouse_capture,
-            )
-        })
-        .unwrap_or_default();
+    // #33: workspace tab-mode lays the strip out over the active session's
+    // project-group members; tabs mode keeps the per-workspace tab layout.
+    let tab_bar_view = if app.tab_strip_shows_members() {
+        compute_member_strip_view(
+            app,
+            tab_bar_rect,
+            app.tab_scroll,
+            app.tab_scroll_follow_active,
+            app.mouse_capture,
+        )
+    } else {
+        app.active
+            .and_then(|i| app.workspaces.get(i))
+            .map(|ws| {
+                compute_tab_bar_view(
+                    ws,
+                    tab_bar_rect,
+                    app.tab_scroll,
+                    app.tab_scroll_follow_active,
+                    app.mouse_capture,
+                )
+            })
+            .unwrap_or_default()
+    };
     app.tab_scroll = tab_bar_view.scroll;
 
     let split_borders = app

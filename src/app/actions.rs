@@ -941,6 +941,77 @@ impl AppState {
         }
     }
 
+    /// Whether the tab bar is the session-member switcher (#33): workspace
+    /// tab-mode with an active workspace. In tabs mode the strip — and every
+    /// key acting on it — behaves exactly as upstream.
+    pub(crate) fn tab_strip_shows_members(&self) -> bool {
+        self.tab_mode == crate::config::TabModeConfig::Workspace && self.active.is_some()
+    }
+
+    /// The member tab-strip content (#33): the active workspace's project
+    /// section in sidebar visual order — primary first, then the remaining
+    /// members in storage order. Local rows only (selecting a remote row is
+    /// a server switch, not a member switch) and collapse state is ignored:
+    /// the strip always shows the whole session. Sectionless workspaces
+    /// (pending probe, misc) get a single-member strip.
+    pub(crate) fn workspace_strip_members(&self) -> Vec<usize> {
+        let Some(active) = self.active.filter(|idx| *idx < self.workspaces.len()) else {
+            return Vec::new();
+        };
+        let keys = self.project_section_keys();
+        let Some(key) = keys.get(active).cloned().flatten() else {
+            return vec![active];
+        };
+        let members: Vec<usize> = (0..self.workspaces.len())
+            .filter(|idx| keys[*idx].as_deref() == Some(key.as_str()))
+            .collect();
+        let Some(primary) = members
+            .iter()
+            .copied()
+            .find(|idx| !self.workspaces[*idx].is_linked_checkout())
+        else {
+            return members;
+        };
+        std::iter::once(primary)
+            .chain(members.into_iter().filter(|idx| *idx != primary))
+            .collect()
+    }
+
+    /// Switch to the strip member at `idx` (0-based strip position, i.e.
+    /// the rendered `<ID>` minus one). Returns false when the strip is not
+    /// the member switcher or the member doesn't exist, so keyboard callers
+    /// can mirror upstream's "missing tab is a kept-mode no-op".
+    pub(crate) fn switch_strip_member(&mut self, idx: usize) -> bool {
+        if !self.tab_strip_shows_members() {
+            return false;
+        }
+        let Some(ws_idx) = self.workspace_strip_members().get(idx).copied() else {
+            return false;
+        };
+        self.switch_workspace(ws_idx);
+        true
+    }
+
+    /// Cycle the strip's members by `delta` (#33). Returns true when the
+    /// member strip consumed the action — including the single-member
+    /// no-op, so workspace mode never falls back to cycling invisible tabs.
+    fn cycle_strip_member(&mut self, delta: isize) -> bool {
+        if !self.tab_strip_shows_members() {
+            return false;
+        }
+        let members = self.workspace_strip_members();
+        if members.len() < 2 {
+            return true;
+        }
+        let current = self
+            .active
+            .and_then(|active| members.iter().position(|idx| *idx == active))
+            .unwrap_or(0);
+        let target = (current as isize + delta).rem_euclid(members.len() as isize) as usize;
+        self.switch_workspace(members[target]);
+        true
+    }
+
     pub fn switch_workspace(&mut self, idx: usize) {
         if idx < self.workspaces.len() {
             let previous_focus = self.current_pane_focus_target();
@@ -1093,6 +1164,14 @@ impl AppState {
     }
 
     pub fn switch_tab(&mut self, idx: usize) {
+        // #33: in workspace tab-mode the strip's tabs ARE the active
+        // project's member workspaces — one branch point serves strip
+        // clicks and the prefix+N keys alike (the #29 resolution: the
+        // mode split lives in this fork-owned body, never in dispatch).
+        if self.tab_strip_shows_members() {
+            self.switch_strip_member(idx);
+            return;
+        }
         if let Some(ws_idx) = self.active {
             let previous_focus = self.current_pane_focus_target();
             self.selection = None;
@@ -1252,6 +1331,10 @@ impl AppState {
     }
 
     pub fn next_tab(&mut self) {
+        // #33: workspace tab-mode cycles the member strip instead.
+        if self.cycle_strip_member(1) {
+            return;
+        }
         if let Some(ws) = self.active.and_then(|i| self.workspaces.get(i)) {
             if !ws.tabs.is_empty() {
                 let next = (ws.active_tab + 1) % ws.tabs.len();
@@ -1261,6 +1344,10 @@ impl AppState {
     }
 
     pub fn previous_tab(&mut self) {
+        // #33: workspace tab-mode cycles the member strip instead.
+        if self.cycle_strip_member(-1) {
+            return;
+        }
         if let Some(ws) = self.active.and_then(|i| self.workspaces.get(i)) {
             if !ws.tabs.is_empty() {
                 let prev = if ws.active_tab == 0 {
@@ -1651,7 +1738,7 @@ impl AppState {
 
     fn refresh_tab_bar_view(&mut self) {
         let area = self.view.tab_bar_rect;
-        let Some(ws) = self.active.and_then(|idx| self.workspaces.get(idx)) else {
+        let Some(active_idx) = self.active.filter(|idx| *idx < self.workspaces.len()) else {
             self.tab_scroll = 0;
             self.view.tab_hit_areas.clear();
             self.view.tab_scroll_left_hit_area = ratatui::layout::Rect::default();
@@ -1660,13 +1747,25 @@ impl AppState {
             return;
         };
 
-        let layout = crate::ui::compute_tab_bar_view(
-            ws,
-            area,
-            self.tab_scroll,
-            self.tab_scroll_follow_active,
-            self.mouse_capture,
-        );
+        // #33: workspace tab-mode lays the strip out over the session's
+        // members, not the workspace's tabs.
+        let layout = if self.tab_strip_shows_members() {
+            crate::ui::compute_member_strip_view(
+                self,
+                area,
+                self.tab_scroll,
+                self.tab_scroll_follow_active,
+                self.mouse_capture,
+            )
+        } else {
+            crate::ui::compute_tab_bar_view(
+                &self.workspaces[active_idx],
+                area,
+                self.tab_scroll,
+                self.tab_scroll_follow_active,
+                self.mouse_capture,
+            )
+        };
         self.tab_scroll = layout.scroll;
         self.view.tab_hit_areas = layout.tab_hit_areas;
         self.view.tab_scroll_left_hit_area = layout.scroll_left_hit_area;
@@ -3835,6 +3934,87 @@ mod tests {
         state.switch_workspace(2);
         assert_eq!(state.active, Some(2));
         assert_eq!(state.selected, 2);
+    }
+
+    /// A three-member project section (#33): main checkout first, then two
+    /// linked worktrees, plus an unrelated flat workspace.
+    fn app_with_member_strip() -> AppState {
+        let mut state = app_with_workspaces(&["main", "wt-one", "wt-two", "other"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree(&mut state, 1);
+        mark_linked_worktree(&mut state, 2);
+        state.tab_mode = crate::config::TabModeConfig::Workspace;
+        state
+    }
+
+    #[test]
+    fn workspace_strip_members_run_primary_first_in_sidebar_order() {
+        let mut state = app_with_member_strip();
+        state.switch_workspace(1);
+        assert_eq!(state.workspace_strip_members(), vec![0, 1, 2]);
+
+        // A sectionless workspace gets a single-member strip.
+        state.switch_workspace(3);
+        assert_eq!(state.workspace_strip_members(), vec![3]);
+
+        // Collapse does not hide strip members: the strip always shows the
+        // whole session.
+        state.switch_workspace(1);
+        state.collapsed_space_keys.insert("repo-key".into());
+        assert_eq!(state.workspace_strip_members(), vec![0, 1, 2]);
+    }
+
+    /// #33/#29 — in workspace tab-mode, switch_tab acts on the strip's
+    /// members (the mouse-click path), even though every workspace has a
+    /// single real tab; out-of-range indices no-op.
+    #[test]
+    fn workspace_mode_switch_tab_switches_strip_members() {
+        let mut state = app_with_member_strip();
+        state.switch_tab(2);
+        assert_eq!(state.active, Some(2));
+        state.switch_tab(0);
+        assert_eq!(state.active, Some(0));
+        state.switch_tab(9);
+        assert_eq!(state.active, Some(0));
+    }
+
+    /// Tabs mode stays byte-identical: switch_tab keeps acting on tabs.
+    #[test]
+    fn tabs_mode_switch_tab_still_acts_on_tabs() {
+        let mut state = app_with_member_strip();
+        state.tab_mode = crate::config::TabModeConfig::Tabs;
+        let second_tab = state.workspaces[0].test_add_tab(Some("logs"));
+        state.switch_tab(second_tab);
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.workspaces[0].active_tab, second_tab);
+    }
+
+    /// #33/#29 — next_tab/previous_tab cycle the member strip in sidebar
+    /// visual order in workspace tab-mode.
+    #[test]
+    fn workspace_mode_next_tab_cycles_strip_members() {
+        let mut state = app_with_member_strip();
+        state.next_tab();
+        assert_eq!(state.active, Some(1));
+        state.next_tab();
+        assert_eq!(state.active, Some(2));
+        state.next_tab();
+        assert_eq!(state.active, Some(0), "cycling wraps to the primary");
+        state.previous_tab();
+        assert_eq!(state.active, Some(2));
+    }
+
+    /// #33 — a single-member strip consumes the cycle keys: workspace mode
+    /// never falls back to cycling tabs the strip doesn't show.
+    #[test]
+    fn workspace_mode_single_member_strip_consumes_tab_cycling() {
+        let mut state = app_with_member_strip();
+        let hidden_tab = state.workspaces[3].test_add_tab(Some("logs"));
+        state.workspaces[3].switch_tab(0);
+        state.switch_workspace(3);
+        state.next_tab();
+        assert_eq!(state.active, Some(3));
+        assert_ne!(state.workspaces[3].active_tab, hidden_tab);
     }
 
     #[test]

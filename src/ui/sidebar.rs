@@ -449,7 +449,11 @@ pub(crate) fn workspace_parent_group_state(
         .then(|| (key.clone(), app.collapsed_space_keys.contains(&key)))
 }
 
-fn grouped_child_display_label(label: &str, branch: Option<&str>, has_custom_name: bool) -> String {
+pub(super) fn grouped_child_display_label(
+    label: &str,
+    branch: Option<&str>,
+    has_custom_name: bool,
+) -> String {
     if has_custom_name {
         return label.to_string();
     }

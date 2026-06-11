@@ -699,6 +699,22 @@ pub(super) fn execute_navigate_action_in_context(
     context: ActionContext,
 ) {
     let previous_mode = state.mode;
+    // Workspace tab-mode (#33): the tab bar is the active session's member
+    // switcher, so the indexed switch_tab keys act on the strip's members —
+    // even when the workspace has fewer real tabs than the index. Handled
+    // here, BEFORE the dispatch match, with all branching in the fork-owned
+    // state methods, so every arm below stays byte-identical with upstream
+    // (the #29 resolution). A missing member mirrors upstream's missing-tab
+    // no-op: navigate mode is kept.
+    if let NavigateAction::SwitchTab(idx) = action {
+        if state.tab_strip_shows_members() {
+            if state.switch_strip_member(idx) {
+                leave_navigate_mode(state);
+            }
+            finish_action_context(state, context, previous_mode);
+            return;
+        }
+    }
     match action {
         NavigateAction::NewWorkspace => {
             state.request_new_workspace = true;
@@ -1695,6 +1711,41 @@ last_pane = "prefix+tab"
         );
 
         assert_eq!(action, Some(NavigateAction::SwitchTab(2)));
+    }
+
+    /// #33/#29 — workspace tab-mode: the SwitchTab dispatch switches the
+    /// member strip's workspaces (each a single real tab) via the pre-match
+    /// hook; the dispatch match itself stays byte-identical with upstream.
+    #[test]
+    fn workspace_mode_switch_tab_dispatch_switches_strip_members() {
+        let mut state = state_with_workspaces(&["main", "wt", "other"]);
+        mark_worktree_space_member(&mut state, 0, "grp");
+        mark_worktree_space_member(&mut state, 1, "grp");
+        state.tab_mode = crate::config::TabModeConfig::Workspace;
+
+        execute_navigate_action(&mut state, NavigateAction::SwitchTab(1));
+        assert_eq!(state.active, Some(1));
+        assert_eq!(state.mode, Mode::Terminal);
+
+        // A missing member mirrors upstream's missing-tab no-op: navigate
+        // mode is kept.
+        state.mode = Mode::Navigate;
+        execute_navigate_action(&mut state, NavigateAction::SwitchTab(8));
+        assert_eq!(state.active, Some(1));
+        assert_eq!(state.mode, Mode::Navigate);
+    }
+
+    /// Tabs mode stays byte-identical: a single-tab workspace has no tab 2,
+    /// so the upstream guard no-ops — the member strip never engages.
+    #[test]
+    fn tabs_mode_switch_tab_dispatch_unchanged_by_member_strip() {
+        let mut state = state_with_workspaces(&["main", "wt"]);
+        mark_worktree_space_member(&mut state, 0, "grp");
+        mark_worktree_space_member(&mut state, 1, "grp");
+
+        execute_navigate_action(&mut state, NavigateAction::SwitchTab(1));
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.mode, Mode::Navigate);
     }
 
     #[tokio::test]
