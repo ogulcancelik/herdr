@@ -38,6 +38,7 @@ fn parse_kitty_key_sequence(data: &str) -> Option<TerminalKey> {
         modifiers: key_modifiers_from_u8(modifier),
         kind,
         shifted_codepoint,
+        keypad_codepoint: keypad_native_codepoint(codepoint),
     })
 }
 
@@ -229,6 +230,11 @@ fn kitty_codepoint_to_keycode(codepoint: u32) -> Option<KeyCode> {
         9 => Some(KeyCode::Tab),
         13 | 57414 => Some(KeyCode::Enter),
         27 => Some(KeyCode::Esc),
+        // Keypad digits/operators (kitty KP_0..KP_9, KP_DECIMAL..KP_SEPARATOR).
+        // These map to their char equivalents so keybind matching and legacy
+        // panes see the same key as the top-row digit/operator. The native
+        // keypad codepoint is preserved separately for kitty-aware panes.
+        57399..=57416 => keypad_char_for_codepoint(codepoint).map(KeyCode::Char),
         57358 => Some(KeyCode::CapsLock),
         57359 => Some(KeyCode::ScrollLock),
         57360 => Some(KeyCode::NumLock),
@@ -281,6 +287,31 @@ fn kitty_codepoint_to_keycode(codepoint: u32) -> Option<KeyCode> {
 
 fn is_kitty_functional_codepoint(codepoint: u32) -> bool {
     (57358..=57454).contains(&codepoint)
+}
+
+/// The printable character a kitty keypad digit/operator codepoint stands for.
+/// Covers KP_0..KP_9, KP_DECIMAL, KP_DIVIDE, KP_MULTIPLY, KP_SUBTRACT, KP_ADD,
+/// KP_EQUAL and KP_SEPARATOR. KP_ENTER (57414) is handled as `Enter` elsewhere,
+/// and the keypad navigation keys (57417..=57427) map to their cursor keys.
+fn keypad_char_for_codepoint(codepoint: u32) -> Option<char> {
+    Some(match codepoint {
+        57399..=57408 => char::from(b'0' + (codepoint - 57399) as u8),
+        57409 => '.',
+        57410 => '/',
+        57411 => '*',
+        57412 => '-',
+        57413 => '+',
+        57415 => '=',
+        57416 => ',',
+        _ => return None,
+    })
+}
+
+/// Records the native kitty keypad codepoint for keys that originated from the
+/// numpad (57399..=57427), so a kitty-aware pane can be sent the distinct
+/// keypad code rather than the collapsed char/cursor-key equivalent.
+fn keypad_native_codepoint(codepoint: u32) -> Option<u32> {
+    (57399..=57427).contains(&codepoint).then_some(codepoint)
 }
 
 #[allow(dead_code)] // Reserved for the upcoming raw stdin parser.
@@ -548,6 +579,49 @@ mod tests {
         let key = parse_terminal_key_sequence("\x1b[57419;1u").unwrap();
         assert_eq!(key.code, KeyCode::Up);
         assert_eq!(key.modifiers, KeyModifiers::empty());
+    }
+
+    #[test]
+    fn parse_kitty_keypad_digit_maps_to_char_and_records_native_codepoint() {
+        let key = parse_terminal_key_sequence("\x1b[57404;1u").unwrap();
+        assert_eq!(key.code, KeyCode::Char('5'));
+        assert_eq!(key.modifiers, KeyModifiers::empty());
+        assert_eq!(key.kind, crossterm::event::KeyEventKind::Press);
+        assert_eq!(key.keypad_codepoint, Some(57404));
+    }
+
+    #[test]
+    fn parse_kitty_keypad_enter_maps_to_enter() {
+        let key = parse_terminal_key_sequence("\x1b[57414;1u").unwrap();
+        assert_eq!(key.code, KeyCode::Enter);
+        assert_eq!(key.keypad_codepoint, Some(57414));
+    }
+
+    #[test]
+    fn parse_kitty_keypad_operators_map_to_chars() {
+        let cases = [
+            ("\x1b[57399;1u", '0'),
+            ("\x1b[57408;1u", '9'),
+            ("\x1b[57409;1u", '.'),
+            ("\x1b[57410;1u", '/'),
+            ("\x1b[57411;1u", '*'),
+            ("\x1b[57412;1u", '-'),
+            ("\x1b[57413;1u", '+'),
+            ("\x1b[57415;1u", '='),
+            ("\x1b[57416;1u", ','),
+        ];
+        for (sequence, ch) in cases {
+            let key = parse_terminal_key_sequence(sequence).unwrap();
+            assert_eq!(key.code, KeyCode::Char(ch), "seq={sequence:?}");
+        }
+    }
+
+    #[test]
+    fn parse_kitty_keypad_navigation_keys_record_native_codepoint() {
+        // KP_LEFT collapses to the cursor key but still carries its keypad code.
+        let key = parse_terminal_key_sequence("\x1b[57417;1u").unwrap();
+        assert_eq!(key.code, KeyCode::Left);
+        assert_eq!(key.keypad_codepoint, Some(57417));
     }
 
     #[test]

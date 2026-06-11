@@ -1238,6 +1238,27 @@ mod tests {
     }
 
     #[test]
+    fn indexed_keybind_matches_numpad_digit() {
+        // A numpad digit collapses to its plain Char equivalent during parsing,
+        // so an indexed '1'..'9' binding fires for numpad-2 just like top-row 2.
+        let binding = IndexedKeybind {
+            trigger: BindingTrigger::Direct((KeyCode::Char('2'), KeyModifiers::empty())),
+            label: "switch_tab".to_string(),
+        };
+
+        let numpad_2 = crate::input::parse_terminal_key_sequence("\x1b[57401;1u").unwrap();
+        assert_eq!(numpad_2.code, KeyCode::Char('2'));
+        assert_eq!(binding.matched_index(numpad_2), Some(1));
+
+        let top_row_2 = crate::input::parse_terminal_key_sequence("2").unwrap();
+        assert_eq!(
+            binding.matched_index(top_row_2),
+            binding.matched_index(numpad_2),
+            "numpad and top-row digit must trigger the same indexed binding"
+        );
+    }
+
+    #[test]
     fn parse_simple_char_combo() {
         assert_eq!(
             parse_key_combo("v"),

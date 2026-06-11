@@ -12,6 +12,16 @@ pub fn encode_key(key: KeyEvent, protocol: KeyboardProtocol) -> Vec<u8> {
 }
 
 pub fn encode_terminal_key(key: TerminalKey, protocol: KeyboardProtocol) -> Vec<u8> {
+    // Numpad keys arrive collapsed to their char/cursor-key equivalent so that
+    // keybind matching and legacy panes behave like the top-row key. A pane that
+    // has itself negotiated kitty keyboard can legitimately distinguish the
+    // keypad, so re-emit the native keypad codepoint as a CSI-u sequence for it.
+    if let KeyboardProtocol::Kitty { flags } = protocol {
+        if let Some(bytes) = try_encode_keypad_csi_u(&key, flags) {
+            return bytes;
+        }
+    }
+
     if let Some(bytes) = encode_text_input(&key) {
         return bytes;
     }
@@ -22,6 +32,19 @@ pub fn encode_terminal_key(key: TerminalKey, protocol: KeyboardProtocol) -> Vec<
         }
     }
     encode_legacy(key.as_key_event())
+}
+
+/// Re-encode a numpad key for a kitty-aware pane as its native keypad CSI-u
+/// sequence (`\e[{keypad_codepoint};{modifiers}[:event]u`). Returns `None` for
+/// keys that did not originate from the numpad.
+fn try_encode_keypad_csi_u(key: &TerminalKey, flags: u16) -> Option<Vec<u8>> {
+    let codepoint = key.keypad_codepoint?;
+    let modifier = kitty_modifier(key.modifiers);
+    let sequence = match kitty_event_suffix(key, flags) {
+        Some(event) => format!("\x1b[{codepoint};{modifier}:{event}u"),
+        None => format!("\x1b[{codepoint};{modifier}u"),
+    };
+    Some(sequence.into_bytes())
 }
 
 #[allow(dead_code)] // exercised in input unit tests; production uses TerminalRuntime helpers
@@ -725,6 +748,64 @@ mod tests {
         assert_eq!(
             encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 7 }),
             b"!"
+        );
+    }
+
+    #[test]
+    fn legacy_pane_receives_keypad_digit_as_plain_char() {
+        let key = parse_terminal_key_sequence("\x1b[57404;1u").unwrap();
+        assert_eq!(encode_terminal_key(key, KeyboardProtocol::Legacy), b"5");
+    }
+
+    #[test]
+    fn legacy_pane_receives_keypad_enter_as_cr() {
+        let key = parse_terminal_key_sequence("\x1b[57414;1u").unwrap();
+        assert_eq!(encode_terminal_key(key, KeyboardProtocol::Legacy), b"\r");
+    }
+
+    #[test]
+    fn legacy_pane_receives_keypad_operators_as_plain_chars() {
+        for (seq, expected) in [
+            ("\x1b[57409;1u", b".".as_slice()),
+            ("\x1b[57410;1u", b"/".as_slice()),
+            ("\x1b[57411;1u", b"*".as_slice()),
+            ("\x1b[57412;1u", b"-".as_slice()),
+            ("\x1b[57413;1u", b"+".as_slice()),
+            ("\x1b[57415;1u", b"=".as_slice()),
+        ] {
+            let key = parse_terminal_key_sequence(seq).unwrap();
+            assert_eq!(
+                encode_terminal_key(key, KeyboardProtocol::Legacy),
+                expected,
+                "seq={seq:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn kitty_pane_receives_native_keypad_codepoint() {
+        let key = parse_terminal_key_sequence("\x1b[57404;1u").unwrap();
+        assert_eq!(
+            encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 1 }),
+            b"\x1b[57404;1u"
+        );
+    }
+
+    #[test]
+    fn kitty_pane_keypad_enter_keeps_native_codepoint() {
+        let key = parse_terminal_key_sequence("\x1b[57414;1u").unwrap();
+        assert_eq!(
+            encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 1 }),
+            b"\x1b[57414;1u"
+        );
+    }
+
+    #[test]
+    fn kitty_pane_keypad_includes_event_type_when_requested() {
+        let key = parse_terminal_key_sequence("\x1b[57404;1u").unwrap();
+        assert_eq!(
+            encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 3 }),
+            b"\x1b[57404;1:1u"
         );
     }
 

@@ -7,6 +7,13 @@ pub struct TerminalKey {
     pub modifiers: KeyModifiers,
     pub kind: crossterm::event::KeyEventKind,
     pub shifted_codepoint: Option<u32>,
+    /// The original kitty keypad functional codepoint (57399..=57427), when this
+    /// key was reported by the host terminal as a distinct numpad key under the
+    /// kitty protocol. The `code` field holds the char/key equivalent so keybind
+    /// matching and legacy panes behave as if the top-row key was pressed; panes
+    /// that have themselves negotiated kitty keyboard receive this native code so
+    /// they can still distinguish the keypad.
+    pub keypad_codepoint: Option<u32>,
 }
 
 impl TerminalKey {
@@ -16,6 +23,7 @@ impl TerminalKey {
             modifiers,
             kind: crossterm::event::KeyEventKind::Press,
             shifted_codepoint: None,
+            keypad_codepoint: None,
         }
     }
 
@@ -27,6 +35,12 @@ impl TerminalKey {
     #[allow(dead_code)] // Reserved for the upcoming raw input parser to preserve shifted/base key pairs.
     pub fn with_shifted_codepoint(mut self, shifted_codepoint: u32) -> Self {
         self.shifted_codepoint = Some(shifted_codepoint);
+        self
+    }
+
+    #[allow(dead_code)] // set by the kitty parser; consumed by the kitty CSI-u encoder.
+    pub fn with_keypad_codepoint(mut self, keypad_codepoint: u32) -> Self {
+        self.keypad_codepoint = Some(keypad_codepoint);
         self
     }
 
