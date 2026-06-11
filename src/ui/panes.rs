@@ -308,21 +308,12 @@ pub(super) fn render_panes(
     for info in &app.view.pane_infos {
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
             if multi_pane {
-                let (border_style, border_set) = if info.is_focused && terminal_active {
-                    (
-                        Style::default().fg(app.palette.accent),
-                        ratatui::symbols::border::THICK,
-                    )
-                } else if info.is_focused {
-                    (
-                        Style::default().fg(app.palette.accent),
-                        ratatui::symbols::border::PLAIN,
-                    )
+                let border_style =
+                    Style::default().fg(pane_focus_color(info.is_focused, &app.palette));
+                let border_set = if info.is_focused && terminal_active {
+                    ratatui::symbols::border::THICK
                 } else {
-                    (
-                        Style::default().fg(app.palette.overlay0),
-                        ratatui::symbols::border::PLAIN,
-                    )
+                    ratatui::symbols::border::PLAIN
                 };
 
                 let mut block = Block::default()
@@ -376,6 +367,18 @@ pub(super) fn render_panes(
 /// Render the reserved pane header: a context line (project · worktree ·
 /// branch) and the last submitted prompt, middle-collapsed into the
 /// remaining header rows.
+/// SSoT for "does this pane have focus" coloring: the pane borders and the
+/// header hairline divider speak the same language — accent for the focused
+/// pane (a single pane is focused by construction, so it always reads
+/// active), the muted overlay for the rest.
+fn pane_focus_color(is_focused: bool, p: &crate::app::state::Palette) -> ratatui::style::Color {
+    if is_focused {
+        p.accent
+    } else {
+        p.overlay0
+    }
+}
+
 fn render_pane_header(
     app: &AppState,
     ws: &crate::workspace::Workspace,
@@ -400,7 +403,9 @@ fn render_pane_header(
     }
     // Hairline divider — same visual language as the sidebar separators.
     let divider_y = header.y + header.height - 1;
-    let divider_style = Style::default().fg(p.divider_color());
+    // Same focus language as the pane borders (accent = focused; a single
+    // pane is always focused, so its header always reads active).
+    let divider_style = Style::default().fg(pane_focus_color(info.is_focused, p));
     for x in header.x..header.x + header.width {
         buf[(x, divider_y)].set_symbol("\u{2500}");
         buf[(x, divider_y)].set_style(divider_style);
