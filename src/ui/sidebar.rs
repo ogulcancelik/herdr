@@ -1614,7 +1614,7 @@ fn render_server_rows(frame: &mut Frame, rect: Rect, [title, health]: [Line<'sta
 /// Indentation that lines the health glyphs up under the server name for
 /// rows WITHOUT a leading medallion (home, unreachable peers) — the same
 /// three columns the medallion + gap occupy.
-const SERVER_HEALTH_INDENT: &str = "   ";
+const SERVER_HEALTH_INDENT: &str = "    ";
 
 /// The local server's row: the leading state medallion (the join of every
 /// local agent state, #42), then `mba22 ✦` plus battery and net throughput
@@ -3602,45 +3602,31 @@ mod tests {
         // the inner (working) color; default sextant glyphs leave the
         // grid-corner sub-blocks to the row fill (bg = surface_dim, the
         // current-server highlight).
-        let sextant_corners = ['\u{1fb3b}', '\u{1fb3a}', '\u{1fb2c}', '\u{1fb1d}'];
-        for (i, (dx, dy, fg)) in [
-            (0, 0, p.red),
-            (1, 0, p.red),
-            (0, 1, p.yellow),
-            (1, 1, p.yellow),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let cell = &buffer[(self_rect.x + dx, self_rect.y + dy)];
-            assert_eq!(
-                cell.symbol().chars().next().unwrap(),
-                sextant_corners[i],
-                "self cell {i}"
-            );
-            assert_eq!(cell.style().fg, Some(fg), "self cell {i}");
-            assert_eq!(cell.style().bg, Some(p.surface_dim), "self cell {i}");
+        // Rectangular medallion v2: a two-ring join renders the inner color's
+        // sub-blocks as fg over the outer (worst) color as bg in EVERY cell —
+        // the medallion is opaque, so the row fill never bleeds through it.
+        for dx in 0..3u16 {
+            for dy in 0..2u16 {
+                let cell = &buffer[(self_rect.x + dx, self_rect.y + dy)];
+                assert_eq!(cell.style().fg, Some(p.yellow), "self cell {dx},{dy}");
+                assert_eq!(cell.style().bg, Some(p.red), "self cell {dx},{dy}");
+                assert_ne!(cell.symbol(), " ", "self cell {dx},{dy}");
+            }
         }
         // The host name follows the medallion + gap column.
         let title: String = buffer_row_text(&buffer, self_rect, self_rect.y)
             .chars()
-            .skip(3)
+            .skip(4)
             .collect();
         assert!(
             title.starts_with(&crate::app::short_host_name()),
             "{title:?}"
         );
 
-        // Peer row: same join language, no highlight fill underneath.
+        // Peer row: same join language — opaque rectangle, outer ring as bg.
         let tl = &buffer[(peer_rect.x, peer_rect.y)];
-        assert_eq!(tl.style().fg, Some(p.red));
-        assert_eq!(
-            tl.style().bg,
-            Some(ratatui::style::Color::Reset),
-            "peer rows keep the plain row fill"
-        );
-        let bl = &buffer[(peer_rect.x, peer_rect.y + 1)];
-        assert_eq!(bl.style().fg, Some(p.yellow));
+        assert_eq!(tl.style().fg, Some(p.yellow));
+        assert_eq!(tl.style().bg, Some(p.red), "outer ring carries the bg");
 
         // The rollup chips are gone: no circled-digit dingbats anywhere.
         assert_no_circled_digit_dingbats(&buffer);
@@ -3663,8 +3649,8 @@ mod tests {
             expanded_sidebar_sections(area, app.sidebar_section_split, app.sidebar_pane_gap);
         let (servers_area, _) = carve_servers_band(ws_area, servers_section_height(&app));
         let self_rect = server_slot_rect(server_band_rows_area(servers_area), 0).expect("self");
-        // Quadrant fallback: the 2x2 half-block raster instead of sextants.
-        assert_eq!(buffer[(self_rect.x, self_rect.y)].symbol(), "\u{259f}");
+        // Quadrant fallback with a single (muted) ring: a solid rectangle.
+        assert_eq!(buffer[(self_rect.x, self_rect.y)].symbol(), "\u{2588}");
         // No live agents: the medallion still marks presence in muted color.
         assert_eq!(
             buffer[(self_rect.x, self_rect.y)].style().fg,
