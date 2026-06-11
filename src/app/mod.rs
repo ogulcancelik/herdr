@@ -191,12 +191,17 @@ fn auto_updates_enabled(no_session: bool) -> bool {
     !no_session && !cfg!(debug_assertions)
 }
 
-fn agent_panel_scope_from_config(
-    scope: crate::config::AgentPanelScopeConfig,
-) -> state::AgentPanelScope {
+fn agent_panel_scope_from_config(scope: crate::config::PanelScopeConfig) -> state::AgentPanelScope {
     match scope {
-        crate::config::AgentPanelScopeConfig::Current => state::AgentPanelScope::CurrentWorkspace,
-        crate::config::AgentPanelScopeConfig::All => state::AgentPanelScope::AllWorkspaces,
+        crate::config::PanelScopeConfig::Current => state::AgentPanelScope::CurrentWorkspace,
+        crate::config::PanelScopeConfig::All => state::AgentPanelScope::AllWorkspaces,
+    }
+}
+
+fn panel_scope_from_config(scope: crate::config::PanelScopeConfig) -> state::PanelScope {
+    match scope {
+        crate::config::PanelScopeConfig::Current => state::PanelScope::Current,
+        crate::config::PanelScopeConfig::All => state::PanelScope::All,
     }
 }
 
@@ -475,6 +480,8 @@ impl App {
             fleet_snapshot: None,
             request_peer_switch: None,
             servers_collapsed: false,
+            servers_panel_scope: panel_scope_from_config(config.ui.servers_panel_scope),
+            spaces_panel_scope: panel_scope_from_config(config.ui.spaces_panel_scope),
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
             request_remove_linked_worktree: None,
@@ -726,6 +733,8 @@ impl App {
             .selected
             .min(app.state.workspaces.len().saturating_sub(1));
         app.state.agent_panel_scope = snapshot.agent_panel_scope;
+        app.state.servers_panel_scope = snapshot.servers_panel_scope;
+        app.state.spaces_panel_scope = snapshot.spaces_panel_scope;
         if let Some(width) = snapshot.sidebar_width {
             app.state.sidebar_width = width;
             app.state.sidebar_width_source = state::SidebarWidthSource::Persisted;
@@ -1299,6 +1308,11 @@ impl App {
                 self.state.agent_panel_scope =
                     agent_panel_scope_from_config(config.ui.agent_panel_scope);
                 self.state.agent_panel_scroll = 0;
+                self.state.servers_panel_scope =
+                    panel_scope_from_config(config.ui.servers_panel_scope);
+                self.state.spaces_panel_scope =
+                    panel_scope_from_config(config.ui.spaces_panel_scope);
+                self.state.workspace_scroll = 0;
                 self.state.accent = crate::config::parse_color(&config.ui.accent);
                 if !self.state.local_sound_playback && self.state.sound != config.ui.sound {
                     self.state.request_client_config_reload = true;
@@ -1904,7 +1918,7 @@ mod tests {
     #[test]
     fn startup_uses_configured_agent_panel_scope() {
         let mut config = Config::default();
-        config.ui.agent_panel_scope = crate::config::AgentPanelScopeConfig::Current;
+        config.ui.agent_panel_scope = crate::config::PanelScopeConfig::Current;
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());

@@ -328,7 +328,7 @@ mod tests {
             &runtimes,
             state.active,
             state.selected,
-            state.agent_panel_scope,
+            state.panel_scopes(),
             state.sidebar_width,
             state.sidebar_section_split,
             state.collapsed_space_keys.clone(),

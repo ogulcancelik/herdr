@@ -229,6 +229,16 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Agent panel scope: "current" or "all". Toggling it in the sidebar saves this setting.
 # agent_panel_scope = "all"
 
+# Servers section scope: "all" shows every server row, "current" only this
+# machine (plus the home row when attached remotely). Toggling it in the
+# sidebar saves this setting.
+# servers_panel_scope = "all"
+
+# Spaces section scope: "all" shows the full workspace list, "current" only
+# the focused workspace's space group. Toggling it in the sidebar saves this
+# setting.
+# spaces_panel_scope = "all"
+
 # Accent color for highlights, borders, and navigation UI.
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"

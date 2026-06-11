@@ -51,15 +51,17 @@ pub enum ToastDelivery {
     System,
 }
 
+/// Scope of a sidebar panel (agents, servers, spaces): everything, or only
+/// what belongs to the current workspace/machine/space group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
-pub enum AgentPanelScopeConfig {
+pub enum PanelScopeConfig {
     Current,
     #[default]
     All,
 }
 
-impl AgentPanelScopeConfig {
+impl PanelScopeConfig {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Current => "current",
@@ -511,7 +513,14 @@ pub struct UiConfig {
     /// Show agent labels in split pane borders when no manual pane label is set. Default: false.
     pub show_agent_labels_on_pane_borders: bool,
     /// Agent sidebar scope. Saved values are "current" or "all". Default: "all".
-    pub agent_panel_scope: AgentPanelScopeConfig,
+    pub agent_panel_scope: PanelScopeConfig,
+    /// Servers sidebar scope: "all" shows every server row (home/self/
+    /// snapshot/config peers), "current" only the current machine (plus the
+    /// home row when attached remotely). Default: "all".
+    pub servers_panel_scope: PanelScopeConfig,
+    /// Spaces sidebar scope: "all" shows the full workspace list, "current"
+    /// only the focused workspace's space group. Default: "all".
+    pub spaces_panel_scope: PanelScopeConfig,
     /// Display alias overrides for agent labels in the sidebar, e.g.
     /// `agent_aliases = { claude = "CC" }`. Built-in short codes apply
     /// when no override is set (claude -> cc, codex -> cd, ...).
@@ -713,7 +722,9 @@ impl Default for UiConfig {
             prompt_new_tab_name: true,
             tab_mode: TabModeConfig::default(),
             show_agent_labels_on_pane_borders: false,
-            agent_panel_scope: AgentPanelScopeConfig::All,
+            agent_panel_scope: PanelScopeConfig::All,
+            servers_panel_scope: PanelScopeConfig::All,
+            spaces_panel_scope: PanelScopeConfig::All,
             agent_aliases: std::collections::HashMap::new(),
             accent: "cyan".into(),
             toast: ToastConfig::default(),
@@ -871,7 +882,23 @@ resume_agents_on_restore = false
 agent_panel_scope = "all"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.ui.agent_panel_scope, AgentPanelScopeConfig::All);
+        assert_eq!(config.ui.agent_panel_scope, PanelScopeConfig::All);
+    }
+
+    #[test]
+    fn servers_and_spaces_panel_scopes_parse_and_default_to_all() {
+        let default_config = Config::default();
+        assert_eq!(default_config.ui.servers_panel_scope, PanelScopeConfig::All);
+        assert_eq!(default_config.ui.spaces_panel_scope, PanelScopeConfig::All);
+
+        let toml = r#"
+[ui]
+servers_panel_scope = "current"
+spaces_panel_scope = "current"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.servers_panel_scope, PanelScopeConfig::Current);
+        assert_eq!(config.ui.spaces_panel_scope, PanelScopeConfig::Current);
     }
 
     #[test]

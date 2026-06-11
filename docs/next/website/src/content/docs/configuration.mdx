@@ -274,6 +274,8 @@ confirm_close = true
 prompt_new_tab_name = true
 show_agent_labels_on_pane_borders = false
 agent_panel_scope = "all"
+servers_panel_scope = "all"
+spaces_panel_scope = "all"
 accent = "cyan"
 ```
 
@@ -284,6 +286,8 @@ accent = "cyan"
 `mobile_width_threshold` controls the terminal width at or below which Herdr uses the mobile single-column layout. The default is 64 columns; increase it for foldables, tablets, or wide phone terminals.
 
 `agent_panel_scope` can be `all` or `current`. Use `current` if you only want the agent panel to show agents in the active workspace.
+
+`servers_panel_scope` can be `all` or `current`. With `current`, the servers section shows only the machine you are attached to (plus the way-home row when you are attached to a remote server). `spaces_panel_scope` can be `all` or `current`. With `current`, the spaces list shows only the focused workspace's space group. Both default to `all`, and clicking the `all`/`current` label in each section header toggles and saves the setting — exactly like the agents panel.
 
 `confirm_close` controls whether closing a workspace asks for confirmation. `prompt_new_tab_name` controls whether new tabs ask for a label first.
 

@@ -210,6 +210,8 @@ impl App {
         let handled_pane_double_click = self.handle_pane_double_click(mouse);
 
         let previous_agent_panel_scope = self.state.agent_panel_scope;
+        let previous_servers_panel_scope = self.state.servers_panel_scope;
+        let previous_spaces_panel_scope = self.state.spaces_panel_scope;
         let previous_settings_section = self.state.settings.section;
         if !handled_pane_double_click {
             if let Some(action) = self.state.handle_mouse(&mut self.terminal_runtimes, mouse) {
@@ -243,6 +245,12 @@ impl App {
         }
         if self.state.agent_panel_scope != previous_agent_panel_scope {
             self.save_agent_panel_scope(self.state.agent_panel_scope);
+        }
+        if self.state.servers_panel_scope != previous_servers_panel_scope {
+            self.save_servers_panel_scope(self.state.servers_panel_scope);
+        }
+        if self.state.spaces_panel_scope != previous_spaces_panel_scope {
+            self.save_spaces_panel_scope(self.state.spaces_panel_scope);
         }
 
         if let Some(content) = self.state.request_clipboard_write.take() {
@@ -507,7 +515,7 @@ fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
         &terminal_runtimes,
         state.active,
         state.selected,
-        state.agent_panel_scope,
+        state.panel_scopes(),
         state.sidebar_width,
         state.sidebar_section_split,
         state.collapsed_space_keys.clone(),

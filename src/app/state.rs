@@ -966,6 +966,24 @@ pub enum AgentPanelScope {
     AllWorkspaces,
 }
 
+/// Scope of the `servers` and `spaces` sidebar sections: everything, or only
+/// what belongs to the current machine / focused space group. Mirrors
+/// [`AgentPanelScope`] for the agents panel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PanelScope {
+    Current,
+    #[default]
+    All,
+}
+
+/// The three sidebar section scopes captured/persisted together.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PanelScopes {
+    pub agent: AgentPanelScope,
+    pub servers: PanelScope,
+    pub spaces: PanelScope,
+}
+
 // ---------------------------------------------------------------------------
 // Settings UI state
 // ---------------------------------------------------------------------------
@@ -1428,6 +1446,12 @@ pub struct AppState {
     pub request_peer_switch: Option<PeerSwitchRequest>,
     /// Whether the `servers` sidebar section is collapsed to its header.
     pub servers_collapsed: bool,
+    /// Scope of the `servers` sidebar section: all server rows, or only the
+    /// current machine (plus the home row when attached remotely).
+    pub servers_panel_scope: PanelScope,
+    /// Scope of the `spaces` sidebar section: the full workspace list, or
+    /// only the focused workspace's space group.
+    pub spaces_panel_scope: PanelScope,
     pub request_open_existing_worktree: Option<usize>,
     pub request_new_workspace_cwd: Option<std::path::PathBuf>,
     pub request_remove_linked_worktree: Option<usize>,
@@ -1575,6 +1599,15 @@ pub struct AppState {
 impl AppState {
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
+    }
+
+    /// The sidebar section scopes, bundled for session-snapshot capture.
+    pub(crate) fn panel_scopes(&self) -> PanelScopes {
+        PanelScopes {
+            agent: self.agent_panel_scope,
+            servers: self.servers_panel_scope,
+            spaces: self.spaces_panel_scope,
+        }
     }
 
     pub(crate) fn remove_alias_shadowed_by_new_pane(&mut self, pane_id: PaneId) {
@@ -1798,6 +1831,8 @@ impl AppState {
             fleet_snapshot: None,
             request_peer_switch: None,
             servers_collapsed: false,
+            servers_panel_scope: PanelScope::All,
+            spaces_panel_scope: PanelScope::All,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
             request_remove_linked_worktree: None,

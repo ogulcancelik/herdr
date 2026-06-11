@@ -134,21 +134,49 @@ impl App {
     pub(super) fn save_agent_panel_scope(&mut self, scope: crate::app::state::AgentPanelScope) {
         let value = match scope {
             crate::app::state::AgentPanelScope::CurrentWorkspace => {
-                crate::config::AgentPanelScopeConfig::Current.as_str()
+                crate::config::PanelScopeConfig::Current
             }
             crate::app::state::AgentPanelScope::AllWorkspaces => {
-                crate::config::AgentPanelScopeConfig::All.as_str()
+                crate::config::PanelScopeConfig::All
             }
         };
-        if self.update_config_file("agent panel scope", |content| {
-            crate::config::upsert_section_value(
-                content,
-                "ui",
-                "agent_panel_scope",
-                &format!("\"{value}\""),
-            )
+        self.save_ui_panel_scope("agent panel scope", "agent_panel_scope", value);
+    }
+
+    pub(super) fn save_servers_panel_scope(&mut self, scope: crate::app::state::PanelScope) {
+        self.save_ui_panel_scope(
+            "servers panel scope",
+            "servers_panel_scope",
+            panel_scope_config(scope),
+        );
+    }
+
+    pub(super) fn save_spaces_panel_scope(&mut self, scope: crate::app::state::PanelScope) {
+        self.save_ui_panel_scope(
+            "spaces panel scope",
+            "spaces_panel_scope",
+            panel_scope_config(scope),
+        );
+    }
+
+    fn save_ui_panel_scope(
+        &mut self,
+        label: &str,
+        key: &str,
+        scope: crate::config::PanelScopeConfig,
+    ) {
+        let value = scope.as_str();
+        if self.update_config_file(label, |content| {
+            crate::config::upsert_section_value(content, "ui", key, &format!("\"{value}\""))
         }) {
             self.apply_config_from_disk(false);
         }
+    }
+}
+
+fn panel_scope_config(scope: crate::app::state::PanelScope) -> crate::config::PanelScopeConfig {
+    match scope {
+        crate::app::state::PanelScope::Current => crate::config::PanelScopeConfig::Current,
+        crate::app::state::PanelScope::All => crate::config::PanelScopeConfig::All,
     }
 }

@@ -206,6 +206,8 @@ mod tests {
             active: None,
             selected: 0,
             agent_panel_scope: AgentPanelScope::CurrentWorkspace,
+            servers_panel_scope: crate::app::state::PanelScope::All,
+            spaces_panel_scope: crate::app::state::PanelScope::All,
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
