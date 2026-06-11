@@ -220,6 +220,102 @@ fn quadrant_char(bits: u8) -> char {
 
 #[cfg(test)]
 mod tests {
+    /// Eyeball demo — renders the medallion variants as raw true-color ANSI.
+    /// Run in a real terminal (this is the design-review artifact for #42):
+    ///   cargo test --bin herdr medallion_demo -- --ignored --nocapture
+    #[test]
+    #[ignore = "visual demo, run with --ignored --nocapture in a real terminal"]
+    fn medallion_demo() {
+        use std::io::Write;
+
+        // dalton palette
+        let red = Color::Rgb(216, 80, 80);
+        let yellow = Color::Rgb(196, 196, 12);
+        let green = Color::Rgb(136, 185, 125);
+        let muted = Color::Rgb(110, 116, 128);
+        let plain_bg = Color::Rgb(46, 50, 58); // band chrome #2e323a
+        let highlight_bg = Color::Rgb(40, 40, 40); // surface_dim row fill
+
+        fn sgr(color: Color, layer: u8) -> String {
+            match color {
+                Color::Rgb(r, g, b) => format!("\x1b[{layer};2;{r};{g};{b}m"),
+                _ => String::new(),
+            }
+        }
+        fn span_ansi(span: &Span<'_>) -> String {
+            let mut out = String::new();
+            if let Some(fg) = span.style.fg {
+                out.push_str(&sgr(fg, 38));
+            }
+            if let Some(bg) = span.style.bg {
+                out.push_str(&sgr(bg, 48));
+            }
+            out.push_str(&span.content);
+            out.push_str("\x1b[0m");
+            out
+        }
+
+        let combos: [(&str, Vec<Color>); 8] = [
+            ("r.y.g", vec![red, yellow, green]),
+            ("y.g.g", vec![yellow, green, green]),
+            ("r.r.r", vec![red, red, red]),
+            ("y.y.y", vec![yellow, yellow, yellow]),
+            ("r.g.g", vec![red, green, green]),
+            ("r.y  ", vec![red, yellow]),
+            ("g    ", vec![green]),
+            ("none ", vec![]),
+        ];
+
+        let mut out = std::io::stdout();
+        for (style_name, style) in [
+            ("SEXTANT ", MedallionStyle::Sextant),
+            ("QUADRANT", MedallionStyle::Quadrant),
+        ] {
+            for (bg_name, bg) in [("plain", plain_bg), ("highlight", highlight_bg)] {
+                writeln!(out, "\n{style_name} on {bg_name} bg:").unwrap();
+                let rendered: Vec<[Vec<Span<'static>>; 2]> = combos
+                    .iter()
+                    .map(|(_, rings)| ring_medallion(rings, bg, style))
+                    .collect();
+                let mut label_row = String::from("  ");
+                for (label, _) in &combos {
+                    label_row.push_str(&format!("{label}   "));
+                }
+                writeln!(out, "{label_row}").unwrap();
+                for line_idx in 0..2 {
+                    let mut row = String::from("  ");
+                    for medallion in &rendered {
+                        for span in &medallion[line_idx] {
+                            row.push_str(&span_ansi(span));
+                        }
+                        row.push_str(&format!("{}      \x1b[0m", sgr(bg, 48)));
+                    }
+                    writeln!(out, "{row}").unwrap();
+                }
+            }
+        }
+
+        // Alternates for comparison: packed rects + hollow, circle + digits.
+        writeln!(
+            out,
+            "\nALTERNATES (packed rects / hollow no-conn / circle+digits):"
+        )
+        .unwrap();
+        let rect = |c: Color| format!("{}\u{25AE}\x1b[0m", sgr(c, 38));
+        writeln!(
+            out,
+            "  {}{}{}  {}{}{}  {}\u{25AF}\x1b[0m(no conn)   {}\u{25CF}\x1b[0m herdr {}2\x1b[0m {}1\x1b[0m",
+            rect(red), rect(yellow), rect(green),
+            rect(yellow), rect(green), rect(green),
+            sgr(muted, 38),
+            sgr(red, 38),
+            sgr(red, 38),
+            sgr(yellow, 38),
+        )
+        .unwrap();
+        writeln!(out).unwrap();
+    }
+
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
