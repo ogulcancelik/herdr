@@ -886,8 +886,12 @@ fn server_filter_label(app: &AppState) -> Option<String> {
     }
 }
 
-/// Display label for a remote row: `host:branch` (matched/indented rows) or
-/// `project · host:branch` for rows that lead a remote-only project group.
+/// Display label for a remote row: the member grammar `<host>:<branch>` on a
+/// matched/indented row, or the PROJECT IDENTITY alone on a remote-only group
+/// leader (#78) — leaders NEVER read `<server>:<branch>` (that grammar would
+/// erase the project name, and two repos that both head as `sage:main` are then
+/// indistinguishable). `owner/repo` per #27 when the project key resolves, the
+/// peer's display label when it doesn't, the workspace name as a last resort.
 pub(crate) fn remote_entry_label(
     app: &AppState,
     peer_ref: crate::app::state::RemotePeerRef,
@@ -903,18 +907,49 @@ pub(crate) fn remote_entry_label(
     let host = peer.host.as_deref().unwrap_or(peer.peer.as_str());
     let member = super::grammar::member_label(host, &super::grammar::remote_member_target(ws));
     if indented {
-        member
+        return member;
+    }
+    // An UNINDENTED remote row either leads a remote-only project GROUP (members
+    // indent beneath it) or is a project's lone remote checkout. A true group
+    // leader renders the project identity ALONE (#78) — never `<host>:<branch>`,
+    // which would erase the project name; the members below carry the grammar. A
+    // lone remote keeps `project · <host>:<branch>` so its branch stays visible
+    // (it is both the project AND its only checkout, like a solo local section).
+    let project = ws
+        .project_key
+        .as_deref()
+        .map(super::grammar::project_identity_label)
+        .or_else(|| ws.project_label.clone())
+        .unwrap_or_else(|| ws.workspace.clone());
+    if remote_project_has_siblings(app, ws.project_key.as_deref(), peer_ref, ws_idx) {
+        project
     } else {
-        // A remote-only project group: the leader row carries the project
-        // identity (#27 owner/repo when known) then the member grammar.
-        let project = ws
-            .project_key
-            .as_deref()
-            .map(super::grammar::project_identity_label)
-            .or_else(|| ws.project_label.clone())
-            .unwrap_or_else(|| ws.workspace.clone());
         format!("{project} · {member}")
     }
+}
+
+/// Whether a remote-only project has MORE than the one row at `(peer_ref, ws_idx)` —
+/// i.e. the unindented row truly LEADS a group (members fold beneath) rather than
+/// being the project's lone remote checkout. Drives whether the leader collapses
+/// to the bare project identity (#78) or keeps its `project · member` form.
+fn remote_project_has_siblings(
+    app: &AppState,
+    project_key: Option<&str>,
+    peer_ref: crate::app::state::RemotePeerRef,
+    ws_idx: usize,
+) -> bool {
+    let Some(project_key) = project_key else {
+        return false;
+    };
+    app.remote_peers().into_iter().any(|(other_ref, peer)| {
+        peer.workspaces
+            .iter()
+            .enumerate()
+            .any(|(other_idx, other_ws)| {
+                other_ws.project_key.as_deref() == Some(project_key)
+                    && !(other_ref == peer_ref && other_idx == ws_idx)
+            })
+    })
 }
 
 /// Max peer rows shown in the `servers` section before it stops growing
@@ -2244,10 +2279,6 @@ fn render_workspace_list(
         // spinner working / escalation blocked / muted idle, driven by the
         // member's own join head.
         let (icon, icon_style) = agent_icon(agg_state, agg_seen, app.spinner_tick, p);
-        // Uniform member grammar: `<server>:<target>` (the branch IS the label
-        // for git checkouts, the workspace name for misc) — local and remote
-        // read the same. The space identity lives in the group header row.
-        let label = super::grammar::local_member_label(app, ws, terminal_runtimes);
         let mut line1 = Vec::new();
         let mut show_workspace_icon = true;
         let mut collapsed_group_key: Option<String> = None;
@@ -2285,6 +2316,18 @@ fn render_workspace_list(
             line1.push(Span::styled(icon, icon_style));
             line1.push(Span::styled(" ", Style::default()));
         }
+        // A section LEADER (`group_key` is set: the selectable main checkout that
+        // heads a multi-member project section) renders the PROJECT IDENTITY, not
+        // `<server>:<branch>` (#78) — two repos that both head as `mba22:main` are
+        // otherwise indistinguishable. Members keep the uniform `<server>:<target>`
+        // grammar (the branch IS the label for git checkouts, the workspace name
+        // for misc); local and remote read the same. One place (`grammar`) owns
+        // both label forms.
+        let label = if group_key.is_some() {
+            super::grammar::leader_label(app, ws, terminal_runtimes)
+        } else {
+            super::grammar::local_member_label(app, ws, terminal_runtimes)
+        };
         line1.push(Span::styled(label, name_style));
         // ahead/behind appends inline (the branch line is gone).
         if let Some((ahead, behind)) = ws.git_ahead_behind() {
@@ -2309,20 +2352,28 @@ fn render_workspace_list(
             line1.push(Span::styled(" ", Style::default()));
             line1.push(Span::styled(text, Style::default().fg(color)));
         }
-        // The row's state language as packed rects (#42): the group join on
-        // space header rows — even when expanded, the primary row always
-        // carries its group's aggregate — the workspace's own join elsewhere.
-        // Hollow ▯ = no live agents.
-        let join = match group_key.as_deref() {
+        // The row's state language as packed rects (#42, refined #78): the
+        // group join on a COLLAPSED leader (its members are hidden, so the
+        // aggregate is the only signal), the workspace's own join on an
+        // individual row. On an EXPANDED leader the rects are dropped — the
+        // member icons rendered right beneath already carry that aggregate, so
+        // the leader's ▮▮ would just duplicate them. Hollow ▯ follows the same
+        // rule. `collapsed_group_key` is set only on collapsed leaders.
+        let join = match collapsed_group_key.as_deref() {
             Some(key) => space_join(app, key),
             None => workspace_join(app, ws),
         };
-        // Rects render only where they AGGREGATE: always on group-leading
-        // rows (the join spans members the leading mark can't show), but on
-        // individual rows only when the join has more than one element — a
-        // single ▮ would just repeat the leading circle's color. The hollow
-        // ▯ (no live agents) keeps rendering everywhere.
-        if group_key.is_some() || join.is_empty() || join.classes().len() > 1 {
+        // Rects render where they AGGREGATE hidden state: always on a collapsed
+        // leader (the join spans members no longer visible), but on an
+        // individual (non-leader) row only when the join has more than one
+        // element — a single ▮ would just repeat the leading icon's color. The
+        // hollow ▯ (no live agents) keeps rendering on those individual rows.
+        // Expanded leaders (`group_key` set but not collapsed) render nothing
+        // here: their members below carry the signal.
+        let is_expanded_leader = group_key.is_some() && collapsed_group_key.is_none();
+        if !is_expanded_leader
+            && (collapsed_group_key.is_some() || join.is_empty() || join.classes().len() > 1)
+        {
             line1.push(Span::styled(" ", Style::default()));
             line1.extend(packed_rects(&join, p));
         }
@@ -3292,16 +3343,40 @@ mod tests {
                 },
             ]
         );
-        // The leader row carries the project identity (#27 owner/repo from the
-        // project key) then the uniform `<server>:<target>` member grammar.
+        // A remote-only GROUP leader (it has sibling members) carries the
+        // project identity ALONE (#78) — never `<server>:<branch>`, which would
+        // erase the project name. The indented members carry the member grammar.
         let config_peer = crate::app::state::RemotePeerRef::Config { peer_idx: 0 };
         assert_eq!(
             remote_entry_label(&app, config_peer, 0, false),
-            "gerchowl/dotfiles · sage:dotfiles"
+            "gerchowl/dotfiles"
         );
         assert_eq!(
             remote_entry_label(&app, config_peer, 1, true),
             "sage:vm-dev"
+        );
+    }
+
+    /// #78: a remote project's LONE checkout (no siblings to fold beneath it)
+    /// keeps the combined `project · <server>:<branch>` form — it is both the
+    /// project AND its only checkout, like a solo local section, so its branch
+    /// stays visible.
+    #[test]
+    fn solo_remote_project_keeps_project_and_member_grammar() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.peer_summaries = vec![peer_with_workspaces(
+            "sage",
+            vec![remote_summary(
+                "dotfiles",
+                Some("github.com/gerchowl/dotfiles"),
+                Some("dotfiles"),
+                Some("main"),
+            )],
+        )];
+        let config_peer = crate::app::state::RemotePeerRef::Config { peer_idx: 0 };
+        assert_eq!(
+            remote_entry_label(&app, config_peer, 0, false),
+            "gerchowl/dotfiles · sage:main"
         );
     }
 
@@ -4135,30 +4210,200 @@ mod tests {
         assert_no_circled_digit_dingbats(&buffer);
     }
 
+    /// #78: an EXPANDED leader drops the group-join rects — the member icons
+    /// rendered right beneath already carry that aggregate, so the leader's ▮▮
+    /// would just duplicate them. (Collapsed leaders keep the rects: their
+    /// members are hidden, so the aggregate is the only signal.)
     #[test]
-    fn expanded_primary_row_still_carries_the_group_join_rects() {
+    fn expanded_leader_drops_the_group_join_rects() {
         let mut app = space_group_app();
         set_pane_state(&mut app, 0, AgentState::Idle, true);
         set_pane_state(&mut app, 1, AgentState::Working, true);
 
         let area = Rect::new(0, 0, 30, 40);
         let buffer = render_sidebar_to_buffer(&mut app, area);
-        let p = &app.palette;
 
-        // The expanded parent row aggregates its group: y·g rects even
-        // though the member rows are visible ("main row has no traffic
-        // light" fix).
+        // The expanded leader renders NO rects (neither ▮ nor hollow ▯): the
+        // visible member rows below carry the aggregate.
         let parent = app.view.workspace_card_areas[0];
-        let rects = row_glyph_positions(&buffer, parent.rect, parent.rect.y, "\u{25ae}");
-        assert_eq!(rects.len(), 2, "parent row carries the group join");
-        assert_eq!(buffer[(rects[0], parent.rect.y)].style().fg, Some(p.yellow));
-        assert_eq!(buffer[(rects[1], parent.rect.y)].style().fg, Some(p.green));
+        assert!(
+            row_glyph_positions(&buffer, parent.rect, parent.rect.y, "\u{25ae}").is_empty(),
+            "expanded leader drops the packed group-join rects"
+        );
+        assert!(
+            row_glyph_positions(&buffer, parent.rect, parent.rect.y, "\u{25af}").is_empty(),
+            "expanded leader drops the hollow rect too (#78)"
+        );
 
-        // The member row's single-class join dedups into its leading circle
+        // The member row's single-class join dedups into its leading icon
         // (the rect would only repeat that color) — no rect at all.
         let child = app.view.workspace_card_areas[1];
         let rects = row_glyph_positions(&buffer, child.rect, child.rect.y, "\u{25ae}");
         assert!(rects.is_empty(), "single-class member row renders no rect");
+    }
+
+    /// #78: an expanded leader whose members are ALL idle/no-agents still drops
+    /// its rects — including the hollow ▯ that would otherwise mark an empty
+    /// join. The same rule applies to a leader headed by a worktree after main
+    /// closed (the head is the first remaining member, still local).
+    #[test]
+    fn expanded_leader_drops_rects_for_empty_and_worktree_headed_groups() {
+        // Empty join (no live agents in either member): no hollow ▯ on the leader.
+        let mut app = space_group_app();
+        let area = Rect::new(0, 0, 30, 40);
+        let buffer = render_sidebar_to_buffer(&mut app, area);
+        let parent = app.view.workspace_card_areas[0];
+        assert!(
+            row_glyph_positions(&buffer, parent.rect, parent.rect.y, "\u{25af}").is_empty(),
+            "expanded leader with an empty join shows no hollow rect"
+        );
+
+        // Close main (idx 0): the worktree (idx 1) becomes the section head and
+        // still leads the group; an expanded worktree-headed leader drops rects too.
+        app.workspaces.remove(0);
+        app.workspaces.push(Workspace::test_new("sibling"));
+        {
+            use crate::workspace::WorktreeSpaceMembership;
+            app.workspaces[1].worktree_space = Some(WorktreeSpaceMembership {
+                key: "grp".into(),
+                label: "herdr".into(),
+                repo_root: "/repo/herdr".into(),
+                checkout_path: "/repo/ws-2".into(),
+                is_linked_worktree: true,
+            });
+        }
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        set_pane_state(&mut app, 0, AgentState::Idle, true);
+        set_pane_state(&mut app, 1, AgentState::Working, true);
+        let buffer = render_sidebar_to_buffer(&mut app, area);
+        let head = app.view.workspace_card_areas[0];
+        assert!(!head.indented, "worktree head is the unindented leader");
+        assert!(
+            row_glyph_positions(&buffer, head.rect, head.rect.y, "\u{25ae}").is_empty()
+                && row_glyph_positions(&buffer, head.rect, head.rect.y, "\u{25af}").is_empty(),
+            "expanded worktree-headed leader drops its rects"
+        );
+    }
+
+    /// A two-member project section whose HEAD (idx 0) carries a resolved
+    /// `project_key`; the second member shares the repo family so they group.
+    fn project_group_app(head_project_key: &str) -> crate::app::state::AppState {
+        let mut app = crate::app::state::AppState::test_new();
+        let family = "/repo/herdr/.git";
+        let mut head = workspace_with_project_key("herdr", head_project_key);
+        // Pin the family key so the worktree below shares the section.
+        if let Some(space) = head.cached_git_space.as_mut() {
+            space.key = family.into();
+        }
+        let mut worktree = workspace_with_project_key("feature", head_project_key);
+        if let Some(space) = worktree.cached_git_space.as_mut() {
+            space.key = family.into();
+            space.is_linked_worktree = true;
+        }
+        app.workspaces = vec![head, worktree];
+        app.ensure_test_terminals();
+        app.mode = crate::app::Mode::Terminal;
+        app.active = Some(0);
+        app
+    }
+
+    /// #78: the section LEADER renders the PROJECT IDENTITY (`owner/repo` when the
+    /// project key resolves), NEVER `<server>:<branch>` — two repos that both head
+    /// as `mba22:main` are otherwise indistinguishable. Members keep the member
+    /// grammar.
+    #[test]
+    fn leader_renders_owner_repo_identity_never_server_branch() {
+        let mut app = project_group_app("github.com/gerchowl/herdr");
+        let area = Rect::new(0, 0, 40, 40);
+        let buffer = render_sidebar_to_buffer(&mut app, area);
+
+        let leader = app.view.workspace_card_areas[0];
+        assert!(!leader.indented);
+        let row = buffer_row_text(&buffer, leader.rect, leader.rect.y);
+        assert!(
+            row.contains("gerchowl/herdr"),
+            "leader shows owner/repo: {row:?}"
+        );
+        assert!(
+            !row.contains(&format!("{}:", crate::ui::grammar::local_server_name())),
+            "leader NEVER renders server:branch: {row:?}"
+        );
+
+        // The member row beneath keeps the `<server>:<target>` grammar.
+        let member = app.view.workspace_card_areas[1];
+        assert!(member.indented);
+        let member_row = buffer_row_text(&buffer, member.rect, member.rect.y);
+        assert!(
+            member_row.contains(&format!("{}:", crate::ui::grammar::local_server_name())),
+            "member keeps server:branch: {member_row:?}"
+        );
+    }
+
+    /// #78: when the project key has NOT resolved (no `owner/repo`), the leader
+    /// falls back to the workspace DISPLAY LABEL — still never `<server>:<branch>`.
+    #[test]
+    fn leader_falls_back_to_display_label_when_project_unresolved() {
+        // `space_group_app` heads carry worktree membership but no resolved
+        // project_key, so `leader_label` uses the display-name fallback.
+        let mut app = space_group_app();
+        let area = Rect::new(0, 0, 40, 40);
+        let buffer = render_sidebar_to_buffer(&mut app, area);
+        let leader = app.view.workspace_card_areas[0];
+        let row = buffer_row_text(&buffer, leader.rect, leader.rect.y);
+        assert!(
+            !row.contains(&format!("{}:", crate::ui::grammar::local_server_name())),
+            "unresolved leader still avoids server:branch: {row:?}"
+        );
+    }
+
+    /// #78: a COLLAPSED leader KEEPS its packed rects (members hidden → the
+    /// aggregate is the only signal) — both for a local-main-headed group and
+    /// after main closes and a worktree heads it.
+    #[test]
+    fn collapsed_leader_keeps_rects_for_both_leader_kinds() {
+        // Local-main-headed, collapsed: rects present.
+        let mut app = project_group_app("github.com/gerchowl/herdr");
+        set_pane_state(&mut app, 0, AgentState::Blocked, true);
+        set_pane_state(&mut app, 1, AgentState::Working, true);
+        let key = app.project_section_key(0).expect("section key");
+        app.collapsed_space_keys.insert(key.clone());
+        let area = Rect::new(0, 0, 40, 40);
+        let buffer = render_sidebar_to_buffer(&mut app, area);
+        let leader = app.view.workspace_card_areas[0];
+        assert!(
+            !row_glyph_positions(&buffer, leader.rect, leader.rect.y, "\u{25ae}").is_empty(),
+            "collapsed main-headed leader keeps its rects"
+        );
+
+        // Worktree-headed (main closed), collapsed: rects still present.
+        app.workspaces.remove(0);
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        set_pane_state(&mut app, 0, AgentState::Blocked, true);
+        let key = app
+            .project_section_key(0)
+            .expect("section key after main close");
+        app.collapsed_space_keys.insert(key);
+        // Need a second member so it stays a group after main closed.
+        let mut extra = workspace_with_project_key("feature2", "github.com/gerchowl/herdr");
+        if let Some(space) = extra.cached_git_space.as_mut() {
+            space.key = "/repo/herdr/.git".into();
+            space.is_linked_worktree = true;
+        }
+        app.workspaces.push(extra);
+        app.ensure_test_terminals();
+        set_pane_state(&mut app, 0, AgentState::Blocked, true);
+        set_pane_state(&mut app, 1, AgentState::Working, true);
+        let key = app.project_section_key(0).expect("section key");
+        app.collapsed_space_keys.insert(key);
+        let buffer = render_sidebar_to_buffer(&mut app, area);
+        let head = app.view.workspace_card_areas[0];
+        assert!(!head.indented, "worktree head leads the collapsed group");
+        assert!(
+            !row_glyph_positions(&buffer, head.rect, head.rect.y, "\u{25ae}").is_empty(),
+            "collapsed worktree-headed leader keeps its rects"
+        );
     }
 
     /// #33 — two-level highlight: with a member workspace focused, BOTH the
@@ -4215,12 +4460,13 @@ mod tests {
         );
     }
 
-    /// #33 — the primary row IS the section's selectable row (no synthetic
-    /// header) and carries the join of the WHOLE section, including plain
-    /// same-repo members merged in by the restructure; members indent
-    /// under it with their own joins.
+    /// #33/#78 — the primary row IS the section's selectable row (no synthetic
+    /// header), spanning plain same-repo members merged in by the restructure.
+    /// When COLLAPSED it carries the join of the WHOLE section as packed rects
+    /// (members hidden → the aggregate is the only signal); members indent under
+    /// it with their own joins when expanded.
     #[test]
-    fn primary_row_carries_section_join_across_plain_members() {
+    fn collapsed_primary_row_carries_section_join_across_plain_members() {
         let mut app = space_group_app();
         let mut plain = Workspace::test_new("scratch");
         plain.cached_git_space = Some(crate::workspace::GitSpaceMetadata {
@@ -4238,34 +4484,40 @@ mod tests {
         set_pane_state(&mut app, 2, AgentState::Blocked, true);
 
         let area = Rect::new(0, 0, 30, 40);
-        let buffer = render_sidebar_to_buffer(&mut app, area);
-        let p = &app.palette;
 
         // Three rows: the primary (main checkout) unindented, the linked
         // worktree AND the plain same-repo workspace indented under it.
+        let buffer = render_sidebar_to_buffer(&mut app, area);
         let cards = app.view.workspace_card_areas.clone();
         assert_eq!(cards.len(), 3);
         assert_eq!((cards[0].ws_idx, cards[0].indented), (0, false));
         assert_eq!((cards[1].ws_idx, cards[1].indented), (1, true));
         assert_eq!((cards[2].ws_idx, cards[2].indented), (2, true));
 
-        // The primary row joins ALL members: r·y·g packed rects.
-        let rects = row_glyph_positions(&buffer, cards[0].rect, cards[0].rect.y, "\u{25ae}");
-        assert_eq!(rects.len(), 3, "primary row carries the section join");
-        assert_eq!(buffer[(rects[0], cards[0].rect.y)].style().fg, Some(p.red));
-        assert_eq!(
-            buffer[(rects[1], cards[0].rect.y)].style().fg,
-            Some(p.yellow)
+        // Expanded: the leader drops the rects (the visible members carry them).
+        assert!(
+            row_glyph_positions(&buffer, cards[0].rect, cards[0].rect.y, "\u{25ae}").is_empty(),
+            "expanded leader drops the section-join rects (#78)"
         );
-        assert_eq!(
-            buffer[(rects[2], cards[0].rect.y)].style().fg,
-            Some(p.green)
+        // The plain member row's own join is a single class (blocked) — it
+        // dedups into the leading icon, so no rect renders.
+        let member_rects = row_glyph_positions(&buffer, cards[2].rect, cards[2].rect.y, "\u{25ae}");
+        assert!(
+            member_rects.is_empty(),
+            "single-class member row renders no rect"
         );
 
-        // The plain member row's own join is a single class (blocked) — it
-        // dedups into the leading circle, so no rect renders.
-        let rects = row_glyph_positions(&buffer, cards[2].rect, cards[2].rect.y, "\u{25ae}");
-        assert!(rects.is_empty(), "single-class member row renders no rect");
+        // Collapse the section: now the leader DOES carry the whole-section
+        // join (r·y·g) since its members are hidden.
+        app.collapsed_space_keys.insert("grp".into());
+        let buffer = render_sidebar_to_buffer(&mut app, area);
+        let leader = app.view.workspace_card_areas[0];
+        let p = &app.palette;
+        let rects = row_glyph_positions(&buffer, leader.rect, leader.rect.y, "\u{25ae}");
+        assert_eq!(rects.len(), 3, "collapsed leader carries the section join");
+        assert_eq!(buffer[(rects[0], leader.rect.y)].style().fg, Some(p.red));
+        assert_eq!(buffer[(rects[1], leader.rect.y)].style().fg, Some(p.yellow));
+        assert_eq!(buffer[(rects[2], leader.rect.y)].style().fg, Some(p.green));
 
         // The group affordances live on the primary alone.
         assert_eq!(

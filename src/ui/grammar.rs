@@ -75,6 +75,24 @@ pub(crate) fn project_identity_label(project_key: &str) -> String {
     }
 }
 
+/// The label for a section-LEADER row (the selectable main checkout that heads
+/// a multi-member project section): the PROJECT IDENTITY, never `<server>:<branch>`
+/// (#78). Two different repos that both head as `mba22:main` are indistinguishable
+/// under the member grammar — the leader must read the project, with its members
+/// carrying the `<server>:<target>` qualifier beneath. Resolves to `owner/repo`
+/// from the project key (#27), falling back to the workspace's display label when
+/// the git identity hasn't resolved (no project key yet).
+pub(crate) fn leader_label(
+    app: &AppState,
+    ws: &Workspace,
+    terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+) -> String {
+    match ws.project_key() {
+        Some(key) => project_identity_label(key),
+        None => ws.display_name_from(&app.terminals, terminal_runtimes),
+    }
+}
+
 /// The PR glyph + number for a member row, sharing the pane-header symbol set:
 /// open `⊙`, draft `◐`, merged `✓`, closed `✗`. Returns `(text, color)` where
 /// `text` is `#<n> <glyph>`.
