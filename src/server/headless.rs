@@ -5578,7 +5578,12 @@ next_tab = ""
         server.resize_shared_runtime_to_effective_size();
 
         let terminal_area = server.app.state.view.terminal_area;
-        let expected = (terminal_area.height, terminal_area.width.saturating_sub(1));
+        // Always-framed single pane: the border insets 2 rows/cols before
+        // the scrollbar gutter takes its column.
+        let expected = (
+            terminal_area.height.saturating_sub(2),
+            terminal_area.width.saturating_sub(3),
+        );
         assert_eq!(
             server
                 .app

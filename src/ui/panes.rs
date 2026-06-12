@@ -151,12 +151,12 @@ pub(super) fn resize_tab_panes(
     area: Rect,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
-    let multi_pane = tab.layout.pane_count() > 1;
-
     if tab.zoomed {
         let focused_id = tab.layout.focused();
         if let Some((terminal_id, rt)) = runtime_for_tab_pane(terminal_runtimes, tab, focused_id) {
-            let pane_inner = pane_inner_rect(area, multi_pane);
+            // Always framed — matches the render geometry (single pane
+            // keeps the focus outline).
+            let pane_inner = pane_inner_rect(area, true);
             let (_, pane_inner) = carve_pane_header(app, Some(terminal_id), pane_inner);
             let inner_rect = stable_terminal_inner_rect(pane_inner);
             if !app.direct_attach_resize_locks.contains(terminal_id) {
@@ -172,11 +172,7 @@ pub(super) fn resize_tab_panes(
     }
 
     for info in tab.layout.panes(area) {
-        let pane_inner = if multi_pane {
-            Block::default().borders(Borders::ALL).inner(info.rect)
-        } else {
-            area
-        };
+        let pane_inner = Block::default().borders(Borders::ALL).inner(info.rect);
 
         if let Some((terminal_id, rt)) = runtime_for_tab_pane(terminal_runtimes, tab, info.id) {
             let (_, pane_inner) = carve_pane_header(app, Some(terminal_id), pane_inner);
@@ -208,12 +204,13 @@ pub(super) fn compute_pane_infos(
         return Vec::new();
     };
 
-    let multi_pane = ws.layout.pane_count() > 1;
     let terminal_active = app.mode == Mode::Terminal;
 
     if ws.zoomed {
         let focused_id = ws.layout.focused();
-        let pane_inner = pane_inner_rect(area, multi_pane);
+        // Always framed: a lone (or zoomed) pane keeps the focus outline —
+        // the same border language as splits (#43 SSoT).
+        let pane_inner = pane_inner_rect(area, true);
         let (header_rect, pane_inner) =
             carve_pane_header(app, ws.terminal_id(focused_id), pane_inner);
         let mut inner_rect = pane_inner;
@@ -246,7 +243,7 @@ pub(super) fn compute_pane_infos(
     let mut pane_infos = ws.layout.panes(area);
 
     for info in &mut pane_infos {
-        let pane_inner = if multi_pane {
+        let pane_inner = {
             let border_set = if info.is_focused && terminal_active {
                 ratatui::symbols::border::THICK
             } else {
@@ -256,8 +253,6 @@ pub(super) fn compute_pane_infos(
                 .borders(Borders::ALL)
                 .border_set(border_set);
             block.inner(info.rect)
-        } else {
-            area
         };
 
         let (header_rect, pane_inner) = carve_pane_header(app, ws.terminal_id(info.id), pane_inner);
@@ -307,7 +302,7 @@ pub(super) fn render_panes(
 
     for info in &app.view.pane_infos {
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
-            if multi_pane {
+            {
                 let border_style =
                     Style::default().fg(pane_focus_color(info.is_focused, &app.palette));
                 let border_set = if info.is_focused && terminal_active {
@@ -1003,7 +998,7 @@ mod tests {
 
         assert_eq!(info.rect, area);
         assert_eq!(info.scrollbar_rect, None);
-        assert_eq!(info.inner_rect, Rect::new(10, 3, 39, 8));
+        assert_eq!(info.inner_rect, Rect::new(11, 4, 37, 6));
     }
 
     #[tokio::test]
@@ -1032,7 +1027,7 @@ mod tests {
 
         assert_eq!(info.rect, area);
         assert_eq!(info.scrollbar_rect, None);
-        assert_eq!(info.inner_rect, Rect::new(10, 3, 39, 8));
+        assert_eq!(info.inner_rect, Rect::new(11, 4, 37, 6));
     }
 
     #[tokio::test]
@@ -1090,7 +1085,8 @@ mod tests {
 
         assert_eq!(info.rect, area);
         assert_eq!(info.scrollbar_rect, None);
-        assert_eq!(info.inner_rect, area);
+        // Always framed: even a tiny lone pane keeps the focus outline.
+        assert_eq!(info.inner_rect, Rect::new(11, 4, 2, 6));
     }
 
     #[tokio::test]
@@ -1122,8 +1118,8 @@ mod tests {
         let info = &infos[0];
 
         assert_eq!(info.rect, area);
-        assert_eq!(info.scrollbar_rect, Some(Rect::new(49, 3, 1, 8)));
-        assert_eq!(info.inner_rect, Rect::new(10, 3, 39, 8));
+        assert_eq!(info.scrollbar_rect, Some(Rect::new(48, 4, 1, 6)));
+        assert_eq!(info.inner_rect, Rect::new(11, 4, 37, 6));
     }
 
     #[test]
