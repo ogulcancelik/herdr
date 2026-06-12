@@ -8,14 +8,15 @@ This control tool compiles the roster and drives herdr's existing primitives
 panes per task.
 
 Stdlib only. The compile/validate/roster/plan commands run without a live herdr
-server; up/submit/status/down talk to a running herdr instance via the `herdr`
-CLI on PATH.
+server; up/submit/watch/status/down talk to a running herdr instance via the
+`herdr` CLI on PATH. `mcp` runs an MCP stdio server so external agentic tools can
+discover the agency and forward requests to it.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -336,6 +337,234 @@ def runtime_path(agency: Agency) -> Path:
     return agency.root / "runtime.json"
 
 
+def dispatch_state_path(agency: Agency) -> Path:
+    return agency.root / "dispatch_state.json"
+
+
+# --------------------------------------------------------------------------- #
+# Request queue + automatic distribution
+#
+# Every request — from `submit`, the MCP server, or a file appended directly —
+# lands in inbox.jsonl. A single cursor-guarded dispatcher forwards each new
+# request to the orchestrator pane exactly once, so distribution is automatic
+# regardless of who enqueued it.
+# --------------------------------------------------------------------------- #
+def enqueue_request(agency: Agency, request: str) -> str:
+    inbox = inbox_path(agency)
+    inbox.parent.mkdir(parents=True, exist_ok=True)
+    task_id = f"task-{int(time.time() * 1000)}"
+    record = {"id": task_id, "request": request, "ts": int(time.time())}
+    with inbox.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record) + "\n")
+    return task_id
+
+
+def _read_inbox(agency: Agency) -> list[dict]:
+    inbox = inbox_path(agency)
+    if not inbox.is_file():
+        return []
+    out: list[dict] = []
+    for line in inbox.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def _dispatch_cursor(agency: Agency) -> int:
+    path = dispatch_state_path(agency)
+    if path.is_file():
+        try:
+            return int(json.loads(path.read_text(encoding="utf-8"))["last_index"])
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+            return 0
+    return 0
+
+
+def _set_dispatch_cursor(agency: Agency, index: int) -> None:
+    dispatch_state_path(agency).write_text(
+        json.dumps({"last_index": index}), encoding="utf-8"
+    )
+
+
+def pending_requests(agency: Agency) -> list[tuple[int, dict]]:
+    """Inbox entries not yet marked dispatched, as (index, record) pairs."""
+    cursor = _dispatch_cursor(agency)
+    return [(i, e) for i, e in enumerate(_read_inbox(agency)) if i >= cursor]
+
+
+def _load_runtime(agency: Agency) -> dict:
+    path = runtime_path(agency)
+    if path.is_file():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _nudge_orchestrator(pane: str, text: str) -> None:
+    run_herdr(["pane", "send-text", pane, text], check=False)
+    run_herdr(["pane", "send-keys", pane, "Enter"], check=False)
+
+
+def dispatch_pending(agency: Agency, nudge: bool = True) -> list[dict]:
+    """Forward undispatched requests to the orchestrator pane, once each.
+
+    Advances the cursor only for requests actually delivered, so requests
+    submitted while the agency is down stay pending for the watcher.
+    """
+    pending = pending_requests(agency)
+    if not pending:
+        return []
+    runtime = _load_runtime(agency)
+    pane = runtime.get("orchestrator_pane")
+    if not (nudge and pane and herdr_available()):
+        return []
+    delivered: list[dict] = []
+    for index, entry in pending:
+        msg = (
+            f"new agency request {entry.get('id', '?')}: "
+            f"{entry.get('request', '')}"
+        )
+        _nudge_orchestrator(pane, msg)
+        delivered.append(entry)
+        _set_dispatch_cursor(agency, index + 1)
+    return delivered
+
+
+# --------------------------------------------------------------------------- #
+# MCP server (stdio, JSON-RPC 2.0)
+#
+# Lets agentic frameworks (Claude Code, Codex, ...) discover the running agency
+# and forward requests to it. Register `herdr-agency mcp` as an MCP stdio server;
+# the framework then sees `submit_task`, `agency_status`, and `agency_roster`.
+# --------------------------------------------------------------------------- #
+MCP_PROTOCOL_VERSION = "2024-11-05"
+MCP_SERVER_VERSION = "0.1.0"
+
+
+def mcp_tools() -> list[dict]:
+    return [
+        {
+            "name": "submit_task",
+            "description": (
+                "Forward a request to the running herdr agency. The agency's "
+                "orchestrator routes it to the right specialist agents and "
+                "integrates their results. Use this to delegate work to the "
+                "agency, like handing a task to an outside team."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "request": {
+                        "type": "string",
+                        "description": "The task or request to delegate.",
+                    }
+                },
+                "required": ["request"],
+            },
+        },
+        {
+            "name": "agency_roster",
+            "description": (
+                "Return the agency roster: every agent's role, model, "
+                "complexity tier, and routing tags. Call this to see what the "
+                "agency can do before delegating."
+            ),
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "agency_status",
+            "description": (
+                "Report the agency's runtime: which workspace it runs in and "
+                "the current status of its agents."
+            ),
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+    ]
+
+
+def _mcp_result(message_id, result) -> dict:
+    return {"jsonrpc": "2.0", "id": message_id, "result": result}
+
+
+def _mcp_error(message_id, code: int, message: str) -> dict:
+    return {"jsonrpc": "2.0", "id": message_id, "error": {"code": code, "message": message}}
+
+
+def _mcp_text(text: str) -> dict:
+    return {"content": [{"type": "text", "text": text}]}
+
+
+def mcp_call_tool(agency: Agency, name: str, arguments: dict) -> str:
+    if name == "submit_task":
+        request = str(arguments.get("request", "")).strip()
+        if not request:
+            raise AgencyError("submit_task requires a non-empty 'request'")
+        task_id = enqueue_request(agency, request)
+        delivered = dispatch_pending(agency)
+        return json.dumps(
+            {"id": task_id, "queued": True, "dispatched": bool(delivered)}
+        )
+    if name == "agency_roster":
+        return json.dumps(compile_roster(agency))
+    if name == "agency_status":
+        statuses = ""
+        if herdr_available():
+            out = run_herdr(["agent", "list"], check=False)
+            statuses = (out.stdout or out.stderr).strip()
+        return json.dumps(
+            {
+                "agency": agency.name,
+                "runtime": _load_runtime(agency),
+                "pending": len(pending_requests(agency)),
+                "herdr_agents": statuses,
+            }
+        )
+    raise AgencyError(f"unknown tool: {name}")
+
+
+def mcp_handle(agency: Agency, message: dict):
+    """Handle one JSON-RPC message; return a response dict or None (notification)."""
+    method = message.get("method")
+    message_id = message.get("id")
+    if method == "initialize":
+        return _mcp_result(
+            message_id,
+            {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {"tools": {}},
+                "serverInfo": {
+                    "name": f"herdr-agency:{agency.name}",
+                    "version": MCP_SERVER_VERSION,
+                },
+            },
+        )
+    if method in ("notifications/initialized", "initialized"):
+        return None
+    if method == "ping":
+        return _mcp_result(message_id, {})
+    if method == "tools/list":
+        return _mcp_result(message_id, {"tools": mcp_tools()})
+    if method == "tools/call":
+        params = message.get("params") or {}
+        name = params.get("name", "")
+        arguments = params.get("arguments") or {}
+        try:
+            text = mcp_call_tool(agency, name, arguments)
+        except AgencyError as err:
+            return _mcp_error(message_id, -32000, str(err))
+        return _mcp_result(message_id, _mcp_text(text))
+    if message_id is None:
+        return None  # unknown notification — ignore
+    return _mcp_error(message_id, -32601, f"method not found: {method}")
+
+
 # --------------------------------------------------------------------------- #
 # Commands
 # --------------------------------------------------------------------------- #
@@ -471,6 +700,7 @@ def cmd_up(args) -> int:
             "argv": orch.argv() if orch else [],
             "brief_chars": len(brief),
         },
+        "dispatcher": bool(args.watch),
         "roster": str(roster_path),
         "inbox": str(inbox),
     }
@@ -515,9 +745,33 @@ def cmd_up(args) -> int:
         run_herdr(["pane", "send-text", root_pane, brief], check=False)
         run_herdr(["pane", "send-keys", root_pane, "Enter"], check=False)
 
+    # Optionally spawn the auto-dispatcher in its own pane so new requests are
+    # forwarded to the orchestrator without anyone re-prompting.
+    if args.watch and root_pane:
+        disp = run_herdr(
+            ["pane", "split", root_pane, "--direction", "down", "--no-focus"],
+            check=False,
+        )
+        disp_pane = None
+        try:
+            disp_pane = json.loads(disp.stdout or "{}")["result"]["pane"]["pane_id"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            disp_pane = None
+        if disp_pane:
+            tool = str(Path(__file__).resolve())
+            agency_dir = str(agency.root.resolve())
+            watch_cmd = (
+                f"{shlex.quote(tool)} --dir {shlex.quote(agency_dir)} watch"
+            )
+            run_herdr(["pane", "run", disp_pane, watch_cmd], check=False)
+            runtime["dispatcher_pane"] = disp_pane
+            runtime_path(agency).write_text(json.dumps(runtime, indent=2), encoding="utf-8")
+
     print(f"agency '{agency.name}' is up in workspace '{agency.workspace}'")
     print(f"orchestrator pane: {root_pane}")
-    print(f"submit requests with: herdr-agency submit \"<request>\"")
+    if args.watch:
+        print(f"dispatcher pane: {runtime.get('dispatcher_pane')}")
+    print('submit requests with: herdr-agency submit "<request>"')
     return 0
 
 
@@ -527,29 +781,57 @@ def cmd_submit(args) -> int:
     except AgencyError as err:
         print(f"error: {err}", file=sys.stderr)
         return 1
-    inbox = inbox_path(agency)
-    task_id = f"task-{int(time.time()*1000)}"
-    record = {"id": task_id, "request": args.request, "ts": int(time.time())}
-    with inbox.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record) + "\n")
+    task_id = enqueue_request(agency, args.request)
+    # Try immediate distribution so it works without a running watcher; the
+    # cursor makes this idempotent if a watcher also picks it up.
+    delivered = [] if args.queue_only else dispatch_pending(agency)
+    print(json.dumps({"id": task_id, "queued": True, "dispatched": bool(delivered)}))
+    return 0
 
-    runtime = {}
-    rp = runtime_path(agency)
-    if rp.is_file():
+
+def cmd_watch(args) -> int:
+    try:
+        agency = _load_or_die(args)
+    except AgencyError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    if not herdr_available():
+        print("warning: `herdr` not on PATH; cannot deliver to the orchestrator",
+              file=sys.stderr)
+    print(f"watching {inbox_path(agency)} (interval {args.interval}s); ctrl+c to stop",
+          file=sys.stderr)
+    try:
+        while True:
+            for entry in dispatch_pending(agency):
+                print(f"dispatched {entry.get('id')}: {entry.get('request')}")
+                sys.stdout.flush()
+            if args.once:
+                break
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+def cmd_mcp(args) -> int:
+    try:
+        agency = _load_or_die(args)
+    except AgencyError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    # Newline-delimited JSON-RPC over stdio (MCP stdio transport).
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
         try:
-            runtime = json.loads(rp.read_text(encoding="utf-8"))
+            message = json.loads(line)
         except json.JSONDecodeError:
-            runtime = {}
-    pane = runtime.get("orchestrator_pane")
-
-    nudged = False
-    if pane and herdr_available() and not args.queue_only:
-        msg = f"new agency request {task_id}: {args.request}"
-        run_herdr(["pane", "send-text", pane, msg], check=False)
-        run_herdr(["pane", "send-keys", pane, "Enter"], check=False)
-        nudged = True
-
-    print(json.dumps({"id": task_id, "queued": True, "nudged_orchestrator": nudged}))
+            continue
+        response = mcp_handle(agency, message)
+        if response is not None:
+            sys.stdout.write(json.dumps(response) + "\n")
+            sys.stdout.flush()
     return 0
 
 
@@ -614,13 +896,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("up", help="launch the orchestrator in herdr")
     sp.add_argument("--dry-run", action="store_true")
+    sp.add_argument("--watch", action="store_true",
+                    help="also start the auto-dispatcher in its own pane")
     sp.set_defaults(func=cmd_up)
 
     sp = sub.add_parser("submit", help="forward a request to the running agency")
     sp.add_argument("request")
     sp.add_argument("--queue-only", action="store_true",
-                    help="enqueue without nudging the orchestrator pane")
+                    help="enqueue without dispatching to the orchestrator")
     sp.set_defaults(func=cmd_submit)
+
+    sp = sub.add_parser("watch", help="auto-dispatch new inbox requests to the orchestrator")
+    sp.add_argument("--interval", type=float, default=1.0,
+                    help="poll interval in seconds (default: 1.0)")
+    sp.add_argument("--once", action="store_true",
+                    help="dispatch pending requests once and exit")
+    sp.set_defaults(func=cmd_watch)
+
+    sp = sub.add_parser("mcp", help="run an MCP stdio server for external tools")
+    sp.set_defaults(func=cmd_mcp)
 
     sp = sub.add_parser("status", help="show agency agents and runtime")
     sp.set_defaults(func=cmd_status)

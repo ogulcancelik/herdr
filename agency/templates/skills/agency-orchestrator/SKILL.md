@@ -28,13 +28,16 @@ high-complexity agent only when the task needs it.
 
 ## 2. Receive requests
 
-Requests arrive two ways:
+Requests arrive three ways:
 
-- A human or external tool runs `herdr-agency submit "<request>"`, which appends
-  a JSON line to `.herdr/agency/inbox.jsonl` and nudges this pane.
+- The dispatcher (`herdr-agency watch` / `up --watch`) pushes each new request
+  into this pane automatically as a `new agency request <id>: <text>` message.
+- External tools call the MCP `submit_task` tool or run `herdr-agency submit`,
+  which append a JSON line to `.herdr/agency/inbox.jsonl`.
 - You are asked directly in this pane.
 
-Drain new inbox lines you have not handled yet:
+When the dispatcher is running you can just act on the messages it pushes. To
+double-check or recover, drain new inbox lines you have not handled yet:
 
 ```bash
 tail -n +1 .herdr/agency/inbox.jsonl

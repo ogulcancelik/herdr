@@ -5,6 +5,7 @@ These tests cover the server-free surface: frontmatter parsing, roster
 compilation, validation, and offline routing. They do not require a herdr server.
 """
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -109,6 +110,101 @@ class RosterAndPlanTests(unittest.TestCase):
         result = agency_mod.plan_task(self._agency(), "research the docs and search the code")
         top = result["candidates"][0]["name"]
         self.assertEqual(top, "researcher")
+
+
+class DispatchCursorTests(unittest.TestCase):
+    def _agency(self):
+        import shutil
+        tmp = tempfile.mkdtemp()
+        dest = Path(tmp) / "agency"
+        shutil.copytree(TEMPLATES, dest)
+        return agency_mod.load_agency(dest)
+
+    def test_pending_tracks_cursor_and_is_idempotent(self):
+        agency = self._agency()
+        self.assertEqual(agency_mod.pending_requests(agency), [])
+        agency_mod.enqueue_request(agency, "first")
+        agency_mod.enqueue_request(agency, "second")
+        pending = agency_mod.pending_requests(agency)
+        self.assertEqual([e["request"] for _, e in pending], ["first", "second"])
+        # Mark both dispatched; nothing pending afterwards.
+        agency_mod._set_dispatch_cursor(agency, 2)
+        self.assertEqual(agency_mod.pending_requests(agency), [])
+        # A later request is the only new pending one.
+        agency_mod.enqueue_request(agency, "third")
+        pending = agency_mod.pending_requests(agency)
+        self.assertEqual([e["request"] for _, e in pending], ["third"])
+
+    def test_dispatch_without_orchestrator_leaves_pending(self):
+        agency = self._agency()
+        agency_mod.enqueue_request(agency, "work")
+        # No runtime.json (and no herdr server): nothing delivered, still pending.
+        self.assertEqual(agency_mod.dispatch_pending(agency), [])
+        self.assertEqual(len(agency_mod.pending_requests(agency)), 1)
+
+
+class McpTests(unittest.TestCase):
+    def _agency(self):
+        import shutil
+        tmp = tempfile.mkdtemp()
+        dest = Path(tmp) / "agency"
+        shutil.copytree(TEMPLATES, dest)
+        return agency_mod.load_agency(dest)
+
+    def test_initialize(self):
+        agency = self._agency()
+        resp = agency_mod.mcp_handle(agency, {"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+        self.assertEqual(resp["id"], 1)
+        self.assertEqual(resp["result"]["protocolVersion"], agency_mod.MCP_PROTOCOL_VERSION)
+        self.assertIn("tools", resp["result"]["capabilities"])
+
+    def test_notification_returns_none(self):
+        agency = self._agency()
+        resp = agency_mod.mcp_handle(
+            agency, {"jsonrpc": "2.0", "method": "notifications/initialized"}
+        )
+        self.assertIsNone(resp)
+
+    def test_tools_list_exposes_submit_task(self):
+        agency = self._agency()
+        resp = agency_mod.mcp_handle(agency, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        names = {t["name"] for t in resp["result"]["tools"]}
+        self.assertEqual(names, {"submit_task", "agency_roster", "agency_status"})
+
+    def test_tools_call_submit_task_enqueues(self):
+        agency = self._agency()
+        resp = agency_mod.mcp_handle(
+            agency,
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "submit_task", "arguments": {"request": "ship it"}},
+            },
+        )
+        payload = json.loads(resp["result"]["content"][0]["text"])
+        self.assertTrue(payload["queued"])
+        self.assertTrue(payload["id"].startswith("task-"))
+        self.assertEqual(len(agency_mod._read_inbox(agency)), 1)
+
+    def test_tools_call_empty_request_errors(self):
+        agency = self._agency()
+        resp = agency_mod.mcp_handle(
+            agency,
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "submit_task", "arguments": {"request": "  "}},
+            },
+        )
+        self.assertIn("error", resp)
+
+    def test_roster_tool_returns_agents(self):
+        agency = self._agency()
+        text = agency_mod.mcp_call_tool(agency, "agency_roster", {})
+        roster = json.loads(text)
+        self.assertEqual(roster["orchestrator"], "manager")
 
 
 if __name__ == "__main__":

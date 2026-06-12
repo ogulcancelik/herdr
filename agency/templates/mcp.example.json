@@ -1,0 +1,9 @@
+{
+  "//": "Register the running agency as an MCP server so Claude Code / Codex can discover and forward to it. Copy to .mcp.json and replace the absolute paths.",
+  "mcpServers": {
+    "agency": {
+      "command": "/abs/path/to/agency/bin/herdr-agency",
+      "args": ["--dir", "/abs/path/to/.herdr/agency", "mcp"]
+    }
+  }
+}
