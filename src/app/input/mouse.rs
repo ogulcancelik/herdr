@@ -86,6 +86,13 @@ impl AppState {
             return false;
         };
         if !rect_contains(outer, mouse.column, mouse.row) {
+            // Blur dismiss (#88): the first click outside the float HIDES it
+            // and is consumed — a second click acts on the layout normally.
+            // Wheel/motion outside keep the normal path (no surprise hides).
+            if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                self.hide_active_float();
+                return true;
+            }
             return false;
         }
         let pane_id = float.pane_id;
@@ -3804,7 +3811,8 @@ mod tests {
             Bytes::from_static(b"\x1b[<64;3;4M")
         );
 
-        // Click outside the overlay: the layout pane underneath still gets it.
+        // Click outside the overlay (#88 blur dismiss): the FIRST click hides
+        // the float and is consumed — neither side receives bytes.
         let pane_inner = app.state.view.pane_infos[0].inner_rect;
         let outer = crate::ui::float_overlay_rect(app.state.view.terminal_area).unwrap();
         assert!(
@@ -3816,11 +3824,23 @@ mod tests {
             pane_inner.x,
             pane_inner.y,
         ));
+        assert!(
+            app.state.visible_float_for_active_workspace().is_none(),
+            "outside click hides the float"
+        );
+        assert!(pane_rx.try_recv().is_err(), "blur click is consumed");
+        assert!(float_rx.try_recv().is_err(), "float saw nothing");
+
+        // The SECOND click (float hidden) reaches the layout pane normally.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            pane_inner.x,
+            pane_inner.y,
+        ));
         assert_eq!(
             pane_rx.try_recv().expect("pane mouse down"),
             Bytes::from_static(b"\x1b[<0;1;1M")
         );
-        assert!(float_rx.try_recv().is_err(), "float saw nothing");
     }
 
     #[tokio::test]
