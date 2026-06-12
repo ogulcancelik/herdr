@@ -1426,6 +1426,9 @@ async fn run_client_loop(
     // OR briefly during a success/cancel/failure beat; `None` otherwise. The
     // popup paints only while `Some`, and Esc is only intercepted while `Some`.
     let mut pending_switch: Option<PendingSwitch> = None;
+    // A lone 0x1b chunk held for ESC_DEBOUNCE before deciding cancel vs the
+    // first byte of a split key sequence.
+    let mut pending_esc: Option<(Instant, Vec<u8>)> = None;
     // Esc-grace: after a successful switch, swallow a lone Esc chunk arriving
     // within this window so muscle-memory `Esc to cancel` from the popup does
     // not land as a key inside the new session.
@@ -1459,28 +1462,28 @@ async fn run_client_loop(
                 // arrow/function/CSI keys and pass through untouched. Esc-grace
                 // after a successful switch likewise swallows a lone Esc that
                 // arrived too late to mean cancel.
-                if is_bare_esc_chunk(&data) {
-                    if pending_switch.is_some() {
-                        // Cancel: bump gen so any in-flight dial's outcome is
-                        // stale-on-arrival, beat `cancelled ✓`, and stay on
-                        // the previous slot (active_slot_key unchanged).
-                        next_dial_gen = next_dial_gen.wrapping_add(1);
-                        if let Some(p) = pending_switch.as_mut() {
-                            p.gen = next_dial_gen;
-                            p.outcome_beat = Some((
-                                Instant::now() + POPUP_CANCEL_BEAT,
-                                "cancelled \u{2713}".to_string(),
-                            ));
-                            paint_switch_popup(p, state.reported_size, Instant::now());
-                        }
-                        continue;
-                    }
-                    if let Some(until) = esc_grace_until {
-                        if Instant::now() < until {
-                            debug!("swallowing post-switch Esc within grace window");
-                            continue;
-                        }
-                    }
+                // A held bare Esc (debounce below) joins the next chunk: a
+                // TTY under load can deliver Esc and `[A` in separate reads,
+                // and treating that lone first byte as cancel would
+                // phantom-cancel during arrow spam. If more bytes follow
+                // within the debounce window the joined chunk is a key
+                // sequence and passes through whole.
+                let data: Vec<u8> = if let Some((_, held)) = pending_esc.take() {
+                    let mut joined = held;
+                    joined.extend_from_slice(&data);
+                    joined
+                } else {
+                    data
+                };
+                if is_bare_esc_chunk(&data)
+                    && (pending_switch.is_some()
+                        || esc_grace_until.is_some_and(|u| Instant::now() < u))
+                {
+                    // Hold the lone Esc briefly: a real Esc cancels when the
+                    // debounce deadline passes on the Timer arm; a sequence
+                    // start gets joined to its continuation instead.
+                    pending_esc = Some((Instant::now() + ESC_DEBOUNCE, data));
+                    continue;
                 }
                 let data = if let Some(attach_escape) = &mut state.attach_escape {
                     match attach_escape.filter_input(
@@ -1909,8 +1912,13 @@ async fn run_client_loop(
                     // Stale event: drop the stream + bridge. Plain drop closes
                     // the socket so the server sees a disconnect (#93).
                     debug!(target = %key, gen, "stale SlotWarmed; dropping stream");
-                    drop(stream);
-                    drop(bridge);
+                    // Detached drop: SshStdioBridge::drop joins its listener
+                    // thread and can block on a live ssh child's teardown for
+                    // seconds -- never on the loop thread.
+                    std::thread::spawn(move || {
+                        drop(stream);
+                        drop(bridge);
+                    });
                 }
             }
             ClientLoopEvent::SlotDialFailed { gen, key, err } => {
@@ -1944,6 +1952,25 @@ async fn run_client_loop(
                 }
             }
             ClientLoopEvent::Timer => {
+                // Debounced bare Esc: nothing followed it, so it was a real
+                // Esc keypress -- cancel (while pending) or swallow (grace).
+                if pending_esc
+                    .as_ref()
+                    .is_some_and(|(d, _)| Instant::now() >= *d)
+                {
+                    pending_esc = None;
+                    if pending_switch.is_some() {
+                        next_dial_gen = next_dial_gen.wrapping_add(1);
+                        if let Some(p) = pending_switch.as_mut() {
+                            p.gen = next_dial_gen;
+                            p.outcome_beat = Some((
+                                Instant::now() + POPUP_CANCEL_BEAT,
+                                "cancelled \u{2713}".to_string(),
+                            ));
+                            paint_switch_popup(p, state.reported_size, Instant::now());
+                        }
+                    }
+                }
                 // Warm-all dial sweep (#65): periodically dial the registry's
                 // pending cold slots so a later switch to any fleet server is an
                 // instant flip. Throttled; in-flight slots are skipped.
@@ -2184,6 +2211,9 @@ const ESC_GRACE_AFTER_SUCCESS: Duration = Duration::from_millis(150);
 const POPUP_FAILURE_BEAT: Duration = Duration::from_secs(2);
 
 /// How long the cancel-confirmation beat stays up.
+/// Hold a lone Esc this long before treating it as a real Esc rather
+/// than the first byte of a split key sequence.
+const ESC_DEBOUNCE: Duration = Duration::from_millis(30);
 const POPUP_CANCEL_BEAT: Duration = Duration::from_millis(600);
 
 /// Render the popup over the active slot's still-live frame. Plain raw-ANSI
