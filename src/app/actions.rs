@@ -119,7 +119,9 @@ impl AppState {
     }
 
     /// Toggle the full-prompt header expansion for the focused pane — the
-    /// keyboard twin of clicking the pane header.
+    /// keyboard twin of clicking the pane header. Scrollback opens pinned to
+    /// the latest entry; the scroll position resets on every open and close
+    /// so the bottom-pinned semantics are sticky.
     pub(crate) fn toggle_focused_prompt_expand(&mut self) {
         let Some(pane_id) = self
             .active
@@ -133,6 +135,78 @@ impl AppState {
         } else {
             Some(pane_id)
         };
+        self.prompt_history_scroll = 0;
+    }
+
+    /// Close the prompt-history scrollback panel if it is open. Used by Esc
+    /// while the panel has focus.
+    pub(crate) fn close_prompt_history_panel(&mut self) -> bool {
+        if self.expanded_prompt_pane.is_some() {
+            self.expanded_prompt_pane = None;
+            self.prompt_history_scroll = 0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Scroll the open prompt-history panel by `lines` (positive = older,
+    /// negative = newer / toward pinned-at-bottom). Scroll is clamped to
+    /// `[0, max_offset]`. Returns whether anything moved.
+    pub(crate) fn scroll_prompt_history(&mut self, lines: i32, max_offset: u16) -> bool {
+        if self.expanded_prompt_pane.is_none() {
+            return false;
+        }
+        let current = self.prompt_history_scroll as i32;
+        let next = (current + lines).clamp(0, max_offset as i32);
+        if next == current {
+            return false;
+        }
+        self.prompt_history_scroll = next as u16;
+        true
+    }
+
+    /// Geometry for the open prompt-history panel over `info`. Mirrors the
+    /// renderer's [`ui::panes::prompt_history_panel_rect`] so mouse routing
+    /// and rendering speak the same coordinates.
+    pub(crate) fn prompt_history_panel_rect_for(
+        &self,
+        info: &crate::layout::PaneInfo,
+    ) -> Option<ratatui::layout::Rect> {
+        let ws = self.active.and_then(|idx| self.workspaces.get(idx))?;
+        let terminal = ws
+            .pane_state(info.id)
+            .and_then(|pane| self.terminals.get(&pane.attached_terminal_id))?;
+        crate::ui::prompt_history_panel_rect(self, info, Some(terminal))
+    }
+
+    /// Maximum scroll offset (lines from bottom) for the prompt-history panel
+    /// over `info`: `total_rendered_lines - viewport`. Zero when everything
+    /// fits.
+    pub(crate) fn prompt_history_max_offset_for(&self, info: &crate::layout::PaneInfo) -> u16 {
+        let Some(panel) = self.prompt_history_panel_rect_for(info) else {
+            return 0;
+        };
+        let Some(ws) = self.active.and_then(|idx| self.workspaces.get(idx)) else {
+            return 0;
+        };
+        let Some(terminal) = ws
+            .pane_state(info.id)
+            .and_then(|pane| self.terminals.get(&pane.attached_terminal_id))
+        else {
+            return 0;
+        };
+        let total: usize = terminal
+            .prompt_history
+            .iter()
+            .map(crate::terminal::PromptHistoryEntry::rendered_line_count)
+            .sum();
+        // Viewport = panel inner height = panel.height - 2 (borders).
+        let viewport = panel.height.saturating_sub(2) as usize;
+        total
+            .saturating_sub(viewport)
+            .try_into()
+            .unwrap_or(u16::MAX)
     }
 
     fn pane_focus_target_indices(&self, target: &PaneFocusTarget) -> Option<(usize, usize)> {
@@ -2749,7 +2823,18 @@ impl AppState {
             | AppEvent::PeerSummaryFetched(_) => Vec::new(),
             AppEvent::HookPromptReported { pane_id, prompt } => self
                 .update_terminal_state(pane_id, |terminal| {
-                    terminal.last_prompt = Some(prompt.clone());
+                    // Updates `last_prompt` (legacy collapsed-header field)
+                    // AND appends a timestamped entry to the scrollback ring
+                    // (#96). Both reads share the same chokepoint, so the
+                    // headless loop gets the same history.
+                    terminal.record_prompt(prompt.clone());
+                    None
+                })
+                .into_iter()
+                .collect(),
+            AppEvent::HookRecapReported { pane_id, recap } => self
+                .update_terminal_state(pane_id, |terminal| {
+                    terminal.record_recap(recap.clone());
                     None
                 })
                 .into_iter()
@@ -5529,5 +5614,26 @@ mod tests {
         assert_eq!(state.expanded_prompt_pane, Some(pane));
         state.toggle_focused_prompt_expand();
         assert_eq!(state.expanded_prompt_pane, None);
+    }
+
+    #[test]
+    fn scroll_prompt_history_clamps_and_resets_on_close() {
+        let mut state = app_with_workspaces(&["a"]);
+        state.active = Some(0);
+        let pane = state.workspaces[0].focused_pane_id().expect("focused pane");
+        state.expanded_prompt_pane = Some(pane);
+
+        // Cannot go below 0.
+        assert!(!state.scroll_prompt_history(-5, 10));
+        assert_eq!(state.prompt_history_scroll, 0);
+        // Bounded above by max_offset.
+        assert!(state.scroll_prompt_history(50, 10));
+        assert_eq!(state.prompt_history_scroll, 10);
+        // Closing the panel resets scroll.
+        assert!(state.close_prompt_history_panel());
+        assert_eq!(state.prompt_history_scroll, 0);
+        assert_eq!(state.expanded_prompt_pane, None);
+        // No-op when nothing is open.
+        assert!(!state.scroll_prompt_history(3, 10));
     }
 }

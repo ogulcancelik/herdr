@@ -22,6 +22,14 @@ pub use header_fields::{
     HeaderFieldError,
 };
 
+#[path = "prompt_history.rs"]
+mod prompt_history;
+#[cfg(test)]
+pub use prompt_history::MAX_PROMPT_HISTORY_LINES;
+pub use prompt_history::{
+    append_with_cap as append_prompt_history_with_cap, PromptHistoryEntry, PromptHistoryKind,
+};
+
 const CLAUDE_WORKING_HOLD: Duration = Duration::from_millis(1200);
 const STALE_HOOK_IDLE_GRACE: Duration = Duration::from_secs(2);
 
@@ -73,8 +81,16 @@ pub struct TerminalState {
     fallback_visible_working: bool,
     fallback_observed_at: Option<Instant>,
     /// The last user prompt submitted to this pane's agent, reported by the
-    /// integration hook (Claude's UserPromptSubmit). Shown in the pane header.
+    /// integration hook (Claude's UserPromptSubmit). Shown in the pane header
+    /// collapsed view (mirrors the latest prompt entry in `prompt_history` so
+    /// the byte-identical render path for the legacy single-prompt case is
+    /// preserved).
     pub last_prompt: Option<String>,
+    /// Per-pane prompt + recap scrollback (issue #96). Chronological,
+    /// timestamped entries; capped at
+    /// [`MAX_PROMPT_HISTORY_LINES`] rendered lines (drop oldest whole entries).
+    /// Ephemeral by design — never persisted into session snapshots.
+    pub prompt_history: Vec<PromptHistoryEntry>,
     /// Session-promoted header fields ("chips": containers, progress, custom
     /// KV), insertion-ordered, optionally TTL-expiring. Ephemeral by design —
     /// never persisted into session snapshots.
@@ -116,6 +132,7 @@ impl TerminalState {
             fallback_visible_working: false,
             fallback_observed_at: None,
             last_prompt: None,
+            prompt_history: Vec::new(),
             header_fields: Vec::new(),
             header_reserved: false,
             state_changed_at: None,
@@ -867,6 +884,43 @@ impl TerminalState {
             state,
             presentation,
         })
+    }
+
+    /// Append a user prompt to the history ring and refresh `last_prompt`
+    /// (the legacy collapsed-header field). Same as `record_prompt_at` with
+    /// `Instant::now()`.
+    pub fn record_prompt(&mut self, prompt: String) {
+        self.record_prompt_at(prompt, Instant::now());
+    }
+
+    pub fn record_prompt_at(&mut self, prompt: String, now: Instant) {
+        self.last_prompt = Some(prompt.clone());
+        append_prompt_history_with_cap(
+            &mut self.prompt_history,
+            PromptHistoryEntry {
+                kind: PromptHistoryKind::Prompt,
+                text: prompt,
+                recorded_at: now,
+            },
+        );
+    }
+
+    /// Append a recap entry to the history ring. Recaps render visually
+    /// distinct from prompts and do NOT update `last_prompt` — the collapsed
+    /// header still shows the latest user prompt verbatim.
+    pub fn record_recap(&mut self, recap: String) {
+        self.record_recap_at(recap, Instant::now());
+    }
+
+    pub fn record_recap_at(&mut self, recap: String, now: Instant) {
+        append_prompt_history_with_cap(
+            &mut self.prompt_history,
+            PromptHistoryEntry {
+                kind: PromptHistoryKind::Recap,
+                text: recap,
+                recorded_at: now,
+            },
+        );
     }
 }
 

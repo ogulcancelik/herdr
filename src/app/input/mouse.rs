@@ -42,6 +42,32 @@ impl AppState {
             return;
         };
 
+        // Prompt-history panel: when its rect covers the mouse, wheel events
+        // scroll the panel instead of the pane runtime. The panel is the
+        // bounded scrollable surface mandated by #96 — wheel/PageKeys/Esc
+        // here, no pane scrollback bleed-through.
+        if self.expanded_prompt_pane == Some(info.id)
+            && matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            )
+        {
+            let panel_rect = self.prompt_history_panel_rect_for(&info);
+            if let Some(rect) = panel_rect {
+                if rect_contains(rect, mouse.column, mouse.row) {
+                    let max_offset = self.prompt_history_max_offset_for(&info);
+                    let step = self.mouse_scroll_lines as i32;
+                    let delta = match mouse.kind {
+                        MouseEventKind::ScrollUp => step,
+                        MouseEventKind::ScrollDown => -step,
+                        _ => 0,
+                    };
+                    self.scroll_prompt_history(delta, max_offset);
+                    return;
+                }
+            }
+        }
+
         match mouse.kind {
             MouseEventKind::ScrollUp
             | MouseEventKind::ScrollDown
@@ -749,6 +775,7 @@ impl AppState {
                     } else {
                         Some(id)
                     };
+                    self.prompt_history_scroll = 0;
                     self.focus_pane(id);
                 } else if let Some(info) = self.view.pane_infos.iter().find(|p| {
                     mouse.column >= p.rect.x

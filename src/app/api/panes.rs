@@ -224,6 +224,30 @@ impl App {
         encode_success(id, ResponseResult::Ok {})
     }
 
+    /// Append a recap entry to the pane's prompt-history scrollback. Recaps
+    /// are wired from session lifecycle hooks (e.g. Claude Stop) — the API
+    /// just stores them; they render visually distinct from prompts.
+    pub(super) fn handle_pane_report_recap(
+        &mut self,
+        id: String,
+        params: crate::api::schema::PaneReportRecapParams,
+    ) -> String {
+        let Some((_ws_idx, pane_id)) =
+            self.parse_pane_id_or_peer(&params.pane_id, self.current_api_peer_pid)
+        else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        if normalize_reported_agent_label(&params.agent).is_none() {
+            return invalid_agent(id);
+        }
+        let recap = sanitize_reported_prompt(&params.recap);
+        if recap.is_empty() {
+            return encode_success(id, ResponseResult::Ok {});
+        }
+        self.handle_internal_event(crate::events::AppEvent::HookRecapReported { pane_id, recap });
+        encode_success(id, ResponseResult::Ok {})
+    }
+
     pub(super) fn handle_pane_report_agent_session(
         &mut self,
         id: String,
@@ -829,6 +853,192 @@ mod tests {
         let (mut app, _terminal_id, _public_pane_id) = app_with_terminal();
         let response = set_field_response(&mut app, "w_99-1", "build", "73%");
         assert!(response.contains("pane_not_found"));
+    }
+
+    #[test]
+    fn report_prompt_appends_timestamped_history_entry() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("main")];
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(pane_id)
+            .expect("pane state")
+            .attached_terminal_id
+            .clone();
+        app.state.terminals.insert(
+            terminal_id.clone(),
+            crate::terminal::TerminalState::new(terminal_id.clone(), "/tmp".into()),
+        );
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+
+        for prompt in ["first prompt", "second prompt", "third prompt"] {
+            app.handle_pane_report_prompt(
+                "rid".into(),
+                crate::api::schema::PaneReportPromptParams {
+                    pane_id: public_pane_id.clone(),
+                    source: "herdr:claude".into(),
+                    agent: "claude".into(),
+                    prompt: prompt.into(),
+                    seq: None,
+                },
+            );
+        }
+        let history = &app
+            .state
+            .terminals
+            .get(&terminal_id)
+            .unwrap()
+            .prompt_history;
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].text, "first prompt");
+        assert_eq!(history[2].text, "third prompt");
+        assert!(history
+            .iter()
+            .all(|e| e.kind == crate::terminal::PromptHistoryKind::Prompt));
+        // The legacy collapsed-header field still mirrors the latest.
+        assert_eq!(
+            app.state
+                .terminals
+                .get(&terminal_id)
+                .and_then(|t| t.last_prompt.as_deref()),
+            Some("third prompt")
+        );
+    }
+
+    #[test]
+    fn report_recap_round_trips_through_update_terminal_state() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("main")];
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(pane_id)
+            .expect("pane state")
+            .attached_terminal_id
+            .clone();
+        app.state.terminals.insert(
+            terminal_id.clone(),
+            crate::terminal::TerminalState::new(terminal_id.clone(), "/tmp".into()),
+        );
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+
+        // A prompt, then a recap — the recap survives visually distinct and
+        // does NOT touch `last_prompt`.
+        app.handle_pane_report_prompt(
+            "rid".into(),
+            crate::api::schema::PaneReportPromptParams {
+                pane_id: public_pane_id.clone(),
+                source: "herdr:claude".into(),
+                agent: "claude".into(),
+                prompt: "fix the bug".into(),
+                seq: None,
+            },
+        );
+        let response = app.handle_pane_report_recap(
+            "rid-recap".into(),
+            crate::api::schema::PaneReportRecapParams {
+                pane_id: public_pane_id.clone(),
+                source: "herdr:claude".into(),
+                agent: "claude".into(),
+                recap: "fixed the parser bug".into(),
+                seq: None,
+            },
+        );
+        assert!(response.contains("\"ok\""));
+
+        let history = &app
+            .state
+            .terminals
+            .get(&terminal_id)
+            .unwrap()
+            .prompt_history;
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].kind, crate::terminal::PromptHistoryKind::Prompt);
+        assert_eq!(history[1].kind, crate::terminal::PromptHistoryKind::Recap);
+        assert_eq!(history[1].text, "fixed the parser bug");
+        // Recap does not update last_prompt — collapsed header still shows
+        // the latest USER prompt.
+        assert_eq!(
+            app.state
+                .terminals
+                .get(&terminal_id)
+                .and_then(|t| t.last_prompt.as_deref()),
+            Some("fix the bug")
+        );
+    }
+
+    #[test]
+    fn report_recap_rejects_unknown_pane_and_invalid_agent() {
+        let (mut app, _terminal_id, public_pane_id) = app_with_terminal();
+        let response = app.handle_pane_report_recap(
+            "rid".into(),
+            crate::api::schema::PaneReportRecapParams {
+                pane_id: "w_99-1".into(),
+                source: "herdr:claude".into(),
+                agent: "claude".into(),
+                recap: "nope".into(),
+                seq: None,
+            },
+        );
+        assert!(response.contains("pane_not_found"));
+
+        let response = app.handle_pane_report_recap(
+            "rid".into(),
+            crate::api::schema::PaneReportRecapParams {
+                pane_id: public_pane_id,
+                source: "herdr:claude".into(),
+                agent: "   ".into(),
+                recap: "nope".into(),
+                seq: None,
+            },
+        );
+        assert!(response.contains("invalid_agent"));
+    }
+
+    #[test]
+    fn prompt_history_drops_oldest_whole_entries_past_cap() {
+        let (mut app, terminal_id, public_pane_id) = app_with_terminal();
+        // Each entry: chrome + 50 body lines = 51 rendered lines.
+        let big_body = (0..50)
+            .map(|i| format!("body-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for i in 0..25 {
+            app.handle_pane_report_prompt(
+                "rid".into(),
+                crate::api::schema::PaneReportPromptParams {
+                    pane_id: public_pane_id.clone(),
+                    source: "herdr:claude".into(),
+                    agent: "claude".into(),
+                    prompt: format!("entry-{i}\n{big_body}"),
+                    seq: None,
+                },
+            );
+        }
+        let history = &app
+            .state
+            .terminals
+            .get(&terminal_id)
+            .unwrap()
+            .prompt_history;
+        let total: usize = history.iter().map(|e| e.rendered_line_count()).sum();
+        assert!(total <= crate::terminal::state::MAX_PROMPT_HISTORY_LINES);
+        assert!(history.last().unwrap().text.starts_with("entry-24\n"));
+        // The earliest entries were dropped.
+        assert!(history.iter().all(|e| !e.text.starts_with("entry-0\n")));
     }
 
     #[test]

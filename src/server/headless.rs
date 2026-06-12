@@ -4641,6 +4641,59 @@ next_tab = ""
             }));
     }
 
+    /// Both event loops consume `update_terminal_state` through the same
+    /// chokepoint (#96). Verify the headless loop also routes
+    /// `HookPromptReported` + `HookRecapReported` into the pane's history.
+    #[test]
+    fn headless_handle_internal_event_appends_prompt_history() {
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("prompts");
+        let pane_id = workspace.tabs[0].root_pane;
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.ensure_test_terminals();
+        let terminal_id = server.app.state.workspaces[0]
+            .pane_state(pane_id)
+            .expect("pane")
+            .attached_terminal_id
+            .clone();
+
+        assert!(
+            server.handle_internal_event_with_forwarding(AppEvent::HookPromptReported {
+                pane_id,
+                prompt: "fix the parser".into(),
+            })
+        );
+        assert!(
+            server.handle_internal_event_with_forwarding(AppEvent::HookRecapReported {
+                pane_id,
+                recap: "fixed it".into(),
+            })
+        );
+
+        let history = &server
+            .app
+            .state
+            .terminals
+            .get(&terminal_id)
+            .expect("terminal")
+            .prompt_history;
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].text, "fix the parser");
+        assert_eq!(history[0].kind, crate::terminal::PromptHistoryKind::Prompt);
+        assert_eq!(history[1].text, "fixed it");
+        assert_eq!(history[1].kind, crate::terminal::PromptHistoryKind::Recap);
+        assert_eq!(
+            server
+                .app
+                .state
+                .terminals
+                .get(&terminal_id)
+                .and_then(|t| t.last_prompt.as_deref()),
+            Some("fix the parser"),
+            "the headless loop mirrors the latest USER prompt into last_prompt; the recap must not"
+        );
+    }
+
     /// Header field TTLs ride the same scheduled tick as agent metadata —
     /// the headless loop's sweep must drop expired chips and disarm the
     /// deadline (the TUI loop shares the identical AppState sweep).

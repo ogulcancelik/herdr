@@ -723,6 +723,9 @@ impl App {
             Method::PaneReportPrompt(params) => {
                 return self.handle_pane_report_prompt(request.id, params);
             }
+            Method::PaneReportRecap(params) => {
+                return self.handle_pane_report_recap(request.id, params);
+            }
             Method::PaneReportMetadata(params) => {
                 return self.handle_pane_report_metadata(request.id, params);
             }
