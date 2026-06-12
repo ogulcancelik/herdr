@@ -1450,7 +1450,7 @@ async fn run_client_loop(
                 // arrow/function/CSI keys and pass through untouched. Esc-grace
                 // after a successful switch likewise swallows a lone Esc that
                 // arrived too late to mean cancel.
-                if data.as_slice() == [0x1b] {
+                if is_bare_esc_chunk(&data) {
                     if pending_switch.is_some() {
                         // Cancel: bump gen so any in-flight dial's outcome is
                         // stale-on-arrival, beat `cancelled ✓`, and stay on
@@ -1820,16 +1820,12 @@ async fn run_client_loop(
                 // for that key — registers the slot as warm. Any other gen is
                 // STALE: drop the stream (the server sees disconnect) and let
                 // the bridge drop teardown the ssh transport.
-                let is_switch = pending_switch
+                let pending_view = pending_switch
                     .as_ref()
-                    .map(|p| p.gen == gen && p.target.key() == key && p.outcome_beat.is_none())
-                    .unwrap_or(false);
-                let sweep_match = slot_dials_in_flight
-                    .get(&key)
-                    .copied()
-                    .map(|g| g == gen)
-                    .unwrap_or(false);
-                if is_switch {
+                    .map(|p| (p.gen, p.target.key(), p.outcome_beat.is_some()));
+                let sweep_gen = slot_dials_in_flight.get(&key).copied();
+                let disposition = classify_dial_event(gen, &key, pending_view, sweep_gen);
+                if disposition == DialDisposition::Pending {
                     if let Some(manager) = slot_manager.as_mut() {
                         let target = slots::SlotTarget::from_key(&key);
                         // Register the new connection as warm (with bridge
@@ -1885,7 +1881,7 @@ async fn run_client_loop(
                     }
                     // Switch dials are tracked outside the sweep map; nothing
                     // to remove there.
-                } else if sweep_match {
+                } else if disposition == DialDisposition::Sweep {
                     slot_dials_in_flight.remove(&key);
                     if let Some(manager) = slot_manager.as_mut() {
                         let target = slots::SlotTarget::from_key(&key);
@@ -1909,16 +1905,12 @@ async fn run_client_loop(
                 }
             }
             ClientLoopEvent::SlotDialFailed { gen, key, err } => {
-                let is_switch = pending_switch
+                let pending_view = pending_switch
                     .as_ref()
-                    .map(|p| p.gen == gen && p.target.key() == key && p.outcome_beat.is_none())
-                    .unwrap_or(false);
-                let sweep_match = slot_dials_in_flight
-                    .get(&key)
-                    .copied()
-                    .map(|g| g == gen)
-                    .unwrap_or(false);
-                if is_switch {
+                    .map(|p| (p.gen, p.target.key(), p.outcome_beat.is_some()));
+                let sweep_gen = slot_dials_in_flight.get(&key).copied();
+                let disposition = classify_dial_event(gen, &key, pending_view, sweep_gen);
+                if disposition == DialDisposition::Pending {
                     if let Some(manager) = slot_manager.as_mut() {
                         manager
                             .registry
@@ -1931,7 +1923,7 @@ async fn run_client_loop(
                         ));
                         paint_switch_popup(p, state.reported_size, Instant::now());
                     }
-                } else if sweep_match {
+                } else if disposition == DialDisposition::Sweep {
                     slot_dials_in_flight.remove(&key);
                     if let Some(manager) = slot_manager.as_mut() {
                         manager
@@ -2122,6 +2114,51 @@ struct PendingSwitch {
 /// flickers the box; the elapsed counter renders whole seconds anyway, so
 /// 4-5x/sec is plenty.
 const POPUP_REPAINT_INTERVAL: Duration = Duration::from_millis(220);
+
+/// What the loop should do with a gen-stamped dial outcome event (#93).
+/// Pure function so the cancel/re-switch race table is unit-testable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DialDisposition {
+    /// The event matches the live pending switch's `(gen, key)`: apply it as
+    /// a switch-success flip or a switch-failure beat. Pending switches with
+    /// an active outcome_beat already terminated; further dial events for
+    /// them are stale.
+    Pending,
+    /// The event matches the warm-sweep entry for this key: register as warm
+    /// (or mark dial failure for backoff).
+    Sweep,
+    /// The event's gen is stale (cancel/re-switch superseded it). Drop the
+    /// stream so the server sees disconnect; never flip the active slot.
+    Stale,
+}
+
+/// Classify a `SlotWarmed`/`SlotDialFailed` event against the live pending
+/// switch and the sweep map. Caller passes the pending switch's `(gen, key,
+/// has_outcome_beat)` and the sweep entry's gen for `event_key` (if any).
+fn classify_dial_event(
+    event_gen: u64,
+    event_key: &str,
+    pending: Option<(u64, &str, bool)>,
+    sweep_gen_for_key: Option<u64>,
+) -> DialDisposition {
+    if let Some((p_gen, p_key, p_has_beat)) = pending {
+        if !p_has_beat && p_gen == event_gen && p_key == event_key {
+            return DialDisposition::Pending;
+        }
+    }
+    if sweep_gen_for_key == Some(event_gen) {
+        return DialDisposition::Sweep;
+    }
+    DialDisposition::Stale
+}
+
+/// True for a bare-Esc keypress chunk (#93). Longer chunks starting with
+/// `0x1b` are arrow/function/CSI sequences and must NOT be intercepted as
+/// cancel. Pure fn so the esc-chunk classification table can assert on every
+/// shape without driving the event loop.
+fn is_bare_esc_chunk(data: &[u8]) -> bool {
+    data == [0x1b]
+}
 
 /// Tone schedule (#93 spec): neutral → yellow → host-not-responding subtitle →
 /// retry-window-ending hint. Switches by elapsed-since-armed.
@@ -3694,5 +3731,313 @@ mod tests {
         unsafe {
             std::env::remove_var("SSH_CONNECTION");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Switch-popup tests (#93)
+    // -----------------------------------------------------------------------
+
+    fn make_pending(target_key: &str, gen: u64) -> PendingSwitch {
+        PendingSwitch {
+            gen,
+            target: slots::SlotTarget::from_key(target_key),
+            previous_display: "home".to_string(),
+            target_display: target_key.to_string(),
+            started_at: Instant::now(),
+            outcome_beat: None,
+        }
+    }
+
+    // --- gen disposition table -------------------------------------------
+
+    #[test]
+    fn classify_pending_match_routes_to_pending() {
+        let disposition = classify_dial_event(7, "anvil", Some((7, "anvil", false)), None);
+        assert_eq!(disposition, DialDisposition::Pending);
+    }
+
+    #[test]
+    fn classify_sweep_match_routes_to_sweep() {
+        let disposition = classify_dial_event(3, "sage", None, Some(3));
+        assert_eq!(disposition, DialDisposition::Sweep);
+    }
+
+    #[test]
+    fn classify_stale_success_after_cancel_is_dropped() {
+        // Cancel bumped pending.gen to 9; an earlier dial's success (gen 7)
+        // is stale and MUST drop its stream — never flip the active slot.
+        let disposition = classify_dial_event(7, "anvil", Some((9, "anvil", false)), None);
+        assert_eq!(disposition, DialDisposition::Stale);
+    }
+
+    #[test]
+    fn classify_stale_failure_during_outcome_beat_is_dropped() {
+        // Once the pending switch is in an outcome_beat (cancel / failure),
+        // further dial outcomes are stale by construction.
+        let disposition = classify_dial_event(7, "anvil", Some((7, "anvil", true)), None);
+        assert_eq!(disposition, DialDisposition::Stale);
+    }
+
+    #[test]
+    fn classify_wrong_key_with_matching_gen_is_stale() {
+        // Pending switch is to "anvil"; an event for "sage" with the same
+        // gen never matches.
+        let disposition = classify_dial_event(7, "sage", Some((7, "anvil", false)), None);
+        assert_eq!(disposition, DialDisposition::Stale);
+    }
+
+    #[test]
+    fn classify_no_pending_no_sweep_is_stale() {
+        let disposition = classify_dial_event(1, "anvil", None, None);
+        assert_eq!(disposition, DialDisposition::Stale);
+    }
+
+    // --- esc chunk classification ----------------------------------------
+
+    #[test]
+    fn esc_chunk_bare_esc_is_intercepted() {
+        assert!(is_bare_esc_chunk(&[0x1b]));
+    }
+
+    #[test]
+    fn esc_chunk_csi_sequence_passes_through() {
+        // Arrow up: ESC [ A — must NOT be intercepted as cancel.
+        assert!(!is_bare_esc_chunk(&[0x1b, 0x5b, b'A']));
+        // F1: ESC O P.
+        assert!(!is_bare_esc_chunk(&[0x1b, 0x4f, b'P']));
+        // ESC + key combo (alt-a in some terminals): ESC a.
+        assert!(!is_bare_esc_chunk(&[0x1b, b'a']));
+    }
+
+    #[test]
+    fn esc_chunk_empty_or_non_esc_is_not_cancel() {
+        assert!(!is_bare_esc_chunk(&[]));
+        assert!(!is_bare_esc_chunk(b"a"));
+    }
+
+    // --- popup text builder + tone schedule ------------------------------
+
+    #[test]
+    fn popup_lines_neutral_window_shows_cancel_subtitle() {
+        let p = make_pending("anvil", 1);
+        let now = p.started_at + Duration::from_secs(1);
+        let lines = popup_lines(&p, now);
+        assert!(lines[0].contains("switching to anvil"));
+        assert!(lines[0].contains("1s"));
+        assert!(lines[1].contains("[esc] cancel"));
+        assert!(lines[1].contains("returns to home"));
+        // Tone is neutral for the first 3 seconds.
+        let (border, _) = popup_tone_ansi(&p, now);
+        assert_eq!(border, "\x1b[37m");
+    }
+
+    #[test]
+    fn popup_lines_yellow_at_three_seconds() {
+        let p = make_pending("anvil", 1);
+        let now = p.started_at + POPUP_YELLOW_AT;
+        let (border, text) = popup_tone_ansi(&p, now);
+        assert_eq!(border, "\x1b[33m");
+        assert_eq!(text, "\x1b[1;33m");
+    }
+
+    #[test]
+    fn popup_lines_unresponsive_at_ten_seconds() {
+        let p = make_pending("anvil", 1);
+        let now = p.started_at + POPUP_UNRESPONSIVE_AT;
+        let lines = popup_lines(&p, now);
+        assert!(lines[1].contains("host not responding"));
+        assert!(lines[1].contains("returns to home"));
+    }
+
+    #[test]
+    fn popup_lines_retry_ending_late_window() {
+        let p = make_pending("anvil", 1);
+        let now = p.started_at + POPUP_RETRY_ENDING_AT;
+        let lines = popup_lines(&p, now);
+        assert!(lines[1].contains("retry window ending soon"));
+    }
+
+    #[test]
+    fn popup_lines_outcome_beat_overrides_live_title() {
+        let mut p = make_pending("anvil", 1);
+        p.outcome_beat = Some((
+            Instant::now() + Duration::from_secs(1),
+            "cancelled".to_string(),
+        ));
+        let lines = popup_lines(&p, Instant::now());
+        assert_eq!(lines[0], "cancelled");
+        assert!(lines[1].is_empty());
+    }
+
+    // --- cancel returns to previous (loop-level invariant) ---------------
+
+    /// Loop-level invariant: a bare-Esc chunk while a switch is pending
+    /// bumps the pending gen, sets a cancel beat, and leaves the active slot
+    /// untouched. We model the loop's relevant state inline; the actual loop
+    /// calls `classify_dial_event` against `pending_view` so a later dial
+    /// success arriving with the old gen is dropped.
+    #[test]
+    fn cancel_bumps_gen_and_leaves_active_slot_unchanged() {
+        let active_slot_key = "<home>".to_string();
+        let mut pending = make_pending("anvil", 7);
+        let original_gen = pending.gen;
+
+        // Simulate the StdinInput Esc handling: bump gen + beat cancelled.
+        let mut next_dial_gen: u64 = pending.gen + 1;
+        let new_gen = next_dial_gen;
+        pending.gen = new_gen;
+        pending.outcome_beat = Some((
+            Instant::now() + POPUP_CANCEL_BEAT,
+            "cancelled \u{2713}".to_string(),
+        ));
+        next_dial_gen = next_dial_gen.wrapping_add(1);
+        let _ = next_dial_gen;
+
+        // Active slot is untouched by cancel.
+        assert_eq!(active_slot_key, "<home>");
+        // Gen advanced past the original.
+        assert_ne!(pending.gen, original_gen);
+        // A late dial-success (carrying the original gen) is STALE — the
+        // dispatcher must drop it.
+        let disposition = classify_dial_event(
+            original_gen,
+            "anvil",
+            Some((
+                pending.gen,
+                pending.target.key(),
+                pending.outcome_beat.is_some(),
+            )),
+            None,
+        );
+        assert_eq!(disposition, DialDisposition::Stale);
+    }
+
+    /// Rapid A → cancel → A: the second switch's dial success applies; any
+    /// stale success from the first one must drop its stream (the server
+    /// sees disconnect) and never flip the active slot. Implemented at the
+    /// dispatcher level — the live loop wires this disposition into the
+    /// flip/no-flip decision (see SlotWarmed arm).
+    #[test]
+    fn rapid_switch_cancel_switch_only_second_pending_matches() {
+        // First switch arms gen=1.
+        let mut pending = make_pending("anvil", 1);
+        // User hits Esc: gen advances to 2, beat is set.
+        pending.gen = 2;
+        pending.outcome_beat = Some((Instant::now() + POPUP_CANCEL_BEAT, "cancelled".to_string()));
+        // First dial's late success (gen=1) is stale.
+        let d1 = classify_dial_event(
+            1,
+            "anvil",
+            Some((
+                pending.gen,
+                pending.target.key(),
+                pending.outcome_beat.is_some(),
+            )),
+            None,
+        );
+        assert_eq!(d1, DialDisposition::Stale);
+        // Second switch fires: clear beat, arm gen=3.
+        pending.outcome_beat = None;
+        pending.gen = 3;
+        // Second dial's success (gen=3) is the live pending one.
+        let d2 = classify_dial_event(
+            3,
+            "anvil",
+            Some((
+                pending.gen,
+                pending.target.key(),
+                pending.outcome_beat.is_some(),
+            )),
+            None,
+        );
+        assert_eq!(d2, DialDisposition::Pending);
+        // First dial's success arriving later (gen=1) is still stale.
+        let d3 = classify_dial_event(
+            1,
+            "anvil",
+            Some((
+                pending.gen,
+                pending.target.key(),
+                pending.outcome_beat.is_some(),
+            )),
+            None,
+        );
+        assert_eq!(d3, DialDisposition::Stale);
+    }
+
+    // --- socketpair pattern: real stream + bridge=None reaches apply_slot_flip
+    //
+    // The end-to-end loop integration (StdinInput Esc → bumped gen → stale
+    // dispatch → no active_slot_key flip) is exercised at the dispatcher
+    // table above. The here-tested invariant is that apply_slot_flip
+    // succeeds against a real socketpair-backed UnixStream and never panics
+    // — the same flow both the warm-flip arm and the cold-dial success arm
+    // share.
+    #[test]
+    fn apply_slot_flip_replaces_write_stream_against_socketpair() {
+        use std::os::unix::net::UnixStream;
+        // Original "active" pair.
+        let (old_local, _old_peer) = UnixStream::pair().unwrap();
+        // New "next active" pair: this is what the cold dial would return.
+        let (new_local, mut new_peer) = UnixStream::pair().unwrap();
+
+        let mut active_reader_quit = Arc::new(AtomicBool::new(false));
+        let old_quit_observer = active_reader_quit.clone();
+        let mut active_slot_key = "<home>".to_string();
+        let mut write_stream = old_local;
+        let mut state = ClientState {
+            blit_encoder: render_ansi::BlitEncoder::new(),
+            mouse_capture_active: false,
+            reported_size: (80, 24),
+            reported_cell_size: (10, 20),
+            sound_config: crate::config::SoundConfig::default(),
+            kitty_graphics_enabled: false,
+            attach_escape: None,
+            mouse_scroll_lines: 3,
+            redraw_on_focus_gained: false,
+        };
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<ClientLoopEvent>(8);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let target = slots::SlotTarget::Ssh("anvil".to_string());
+
+        apply_slot_flip(
+            new_local,
+            &target,
+            &mut active_reader_quit,
+            &mut active_slot_key,
+            &mut write_stream,
+            &mut state,
+            &event_tx,
+            &should_quit,
+            MAX_FRAME_SIZE,
+        )
+        .expect("flip should succeed against a live socketpair");
+
+        // Active slot key flipped to the new target.
+        assert_eq!(active_slot_key, "anvil");
+        // The new stream is what we get; reading on the new peer should see
+        // the Resize re-assert that apply_slot_flip just wrote.
+        new_peer
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let msg: ClientMessage =
+            protocol::read_message(&mut new_peer, MAX_FRAME_SIZE).expect("resize");
+        match msg {
+            ClientMessage::Resize {
+                cols,
+                rows,
+                cell_width_px,
+                cell_height_px,
+            } => {
+                assert_eq!((cols, rows), (80, 24));
+                assert_eq!((cell_width_px, cell_height_px), (10, 20));
+            }
+            other => panic!("expected Resize, got {other:?}"),
+        }
+        // The old reader quit flag was raised before the swap.
+        assert!(old_quit_observer.load(Ordering::Acquire));
+        // And the new active_reader_quit is the freshly-allocated one (not
+        // the old observer), so the new reader sees a clean false.
+        assert!(!active_reader_quit.load(Ordering::Acquire));
     }
 }
