@@ -5578,11 +5578,11 @@ next_tab = ""
         server.resize_shared_runtime_to_effective_size();
 
         let terminal_area = server.app.state.view.terminal_area;
-        // Always-framed single pane: the border insets 2 rows/cols before
-        // the scrollbar gutter takes its column.
+        // Always-framed single pane: the border insets 2 rows/cols; the
+        // flush scrollbar reserves no extra column.
         let expected = (
             terminal_area.height.saturating_sub(2),
-            terminal_area.width.saturating_sub(3),
+            terminal_area.width.saturating_sub(2),
         );
         assert_eq!(
             server

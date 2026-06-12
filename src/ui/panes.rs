@@ -43,16 +43,9 @@ fn pane_border_title(label: &str, pane_width: u16) -> Option<String> {
 }
 
 fn stable_terminal_inner_rect(pane_inner: Rect) -> Rect {
-    if pane_inner.width <= 4 {
-        return pane_inner;
-    }
-
-    Rect::new(
-        pane_inner.x,
-        pane_inner.y,
-        pane_inner.width.saturating_sub(1),
-        pane_inner.height,
-    )
+    // The scrollbar lives ON the pane border now (flush, no reserved
+    // gutter) -- content keeps the full inner width.
+    pane_inner
 }
 
 fn pane_inner_rect(area: Rect, framed: bool) -> Rect {
@@ -80,11 +73,11 @@ fn runtime_for_tab_pane<'a>(
 
 fn stable_scrollbar_gutter(rt: &TerminalRuntime, pane_inner: Rect) -> (Rect, Option<Rect>) {
     let inner_rect = stable_terminal_inner_rect(pane_inner);
-    if inner_rect == pane_inner {
-        return (inner_rect, None);
-    }
-    let gutter = Rect::new(
-        pane_inner.x + pane_inner.width.saturating_sub(1),
+    // Flush scrollbar: the thumb draws over the pane's right BORDER column
+    // (always present since panes are always framed), so no content column
+    // is reserved and the track is the border line itself.
+    let border_col = Rect::new(
+        pane_inner.x + pane_inner.width,
         pane_inner.y,
         1,
         pane_inner.height,
@@ -92,7 +85,7 @@ fn stable_scrollbar_gutter(rt: &TerminalRuntime, pane_inner: Rect) -> (Rect, Opt
     let scrollbar_rect = rt
         .scroll_metrics()
         .filter(|metrics| should_show_scrollbar(*metrics))
-        .map(|_| gutter);
+        .map(|_| border_col);
 
     (inner_rect, scrollbar_rect)
 }
@@ -366,7 +359,10 @@ pub(super) fn render_panes(
 /// header hairline divider speak the same language — accent for the focused
 /// pane (a single pane is focused by construction, so it always reads
 /// active), the muted overlay for the rest.
-fn pane_focus_color(is_focused: bool, p: &crate::app::state::Palette) -> ratatui::style::Color {
+pub(super) fn pane_focus_color(
+    is_focused: bool,
+    p: &crate::app::state::Palette,
+) -> ratatui::style::Color {
     if is_focused {
         p.accent
     } else {
@@ -998,7 +994,7 @@ mod tests {
 
         assert_eq!(info.rect, area);
         assert_eq!(info.scrollbar_rect, None);
-        assert_eq!(info.inner_rect, Rect::new(11, 4, 37, 6));
+        assert_eq!(info.inner_rect, Rect::new(11, 4, 38, 6));
     }
 
     #[tokio::test]
@@ -1027,7 +1023,7 @@ mod tests {
 
         assert_eq!(info.rect, area);
         assert_eq!(info.scrollbar_rect, None);
-        assert_eq!(info.inner_rect, Rect::new(11, 4, 37, 6));
+        assert_eq!(info.inner_rect, Rect::new(11, 4, 38, 6));
     }
 
     #[tokio::test]
@@ -1057,7 +1053,7 @@ mod tests {
         assert_eq!(info.id, focused_pane);
         assert_eq!(info.rect, area);
         assert_eq!(info.scrollbar_rect, None);
-        assert_eq!(info.inner_rect, Rect::new(11, 4, 37, 6));
+        assert_eq!(info.inner_rect, Rect::new(11, 4, 38, 6));
     }
 
     #[tokio::test]
@@ -1118,8 +1114,9 @@ mod tests {
         let info = &infos[0];
 
         assert_eq!(info.rect, area);
-        assert_eq!(info.scrollbar_rect, Some(Rect::new(48, 4, 1, 6)));
-        assert_eq!(info.inner_rect, Rect::new(11, 4, 37, 6));
+        // Flush: the thumb track is the right BORDER column itself.
+        assert_eq!(info.scrollbar_rect, Some(Rect::new(49, 4, 1, 6)));
+        assert_eq!(info.inner_rect, Rect::new(11, 4, 38, 6));
     }
 
     #[test]
