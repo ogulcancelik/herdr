@@ -73,7 +73,7 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.close` |
-| Pane | `pane.split`, `pane.list`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.list`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_prompt`, `pane.report_metadata`, `pane.set_header_field`, `pane.clear_header_field`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.send`, `agent.rename`, `agent.focus`, `agent.start` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
@@ -219,6 +219,37 @@ Use `pane.report_metadata` when a user hook wants to customize presentation with
 ```
 
 Metadata reports are display-only. Valid metadata can override the pane title, displayed agent name, compact custom status, and visible state labels. `working`, `blocked`, `idle`, waits, notifications, and rollups still come from semantic state. Native session restore comes from stored official session references. `agent` is an optional guard for the authoritative agent label; `applies_to_source` is an optional guard for the active lifecycle authority source. Use `display_agent` to change the visible name. `state_labels` keys must be `idle`, `working`, `blocked`, `done`, or `unknown`. Use clear fields such as `clear_custom_status: true` with the same `source` to remove one presentation override.
+
+## Promoted header fields
+
+Use `pane.set_header_field` when a session wants to promote a session-specific fact — a dev container it started, long-task progress, a port, a model name — into its own pane's header as a compact `key value` chip. Chips also surface in the sidebar agent panel, the navigator pane lists, and mobile pane lists, so "which pane has the build at 73%?" is answerable wherever you choose panes.
+
+```json
+{
+  "id": "req_3",
+  "method": "pane.set_header_field",
+  "params": {
+    "pane_id": "1-1",
+    "key": "build",
+    "value": "73%",
+    "ttl_secs": 120
+  }
+}
+```
+
+`ttl_secs` is optional: when set, the chip auto-expires (progress that stops updating shouldn't lie). Fields are display-only and ephemeral — they are never persisted into session snapshots, so a restored session starts with a clean header. Caps: 6 fields per pane, key up to 16 characters, value up to 48 characters; over-cap requests fail with an RPC error (`too_many_header_fields`, `invalid_header_field`). Setting an existing key updates it in place.
+
+Remove a chip with `pane.clear_header_field` (idempotent):
+
+```json
+{
+  "id": "req_4",
+  "method": "pane.clear_header_field",
+  "params": { "pane_id": "1-1", "key": "build" }
+}
+```
+
+The `pane_id` resolves like the report methods: a stale env-baked pane id is healed by socket-peer process ancestry, so hooks and wrapper scripts inside the pane can call it without bookkeeping.
 
 ## Event subscriptions
 

@@ -259,7 +259,16 @@ pub(super) fn render_new_linked_worktree_overlay(app: &AppState, frame: &mut Fra
     ])
     .areas::<8>(inner);
 
-    render_modal_header(frame, rows[0], "new worktree", &app.palette);
+    let header = if app
+        .worktree_create
+        .as_ref()
+        .is_some_and(|create| create.branch_plan.is_some())
+    {
+        "branch session into new worktree"
+    } else {
+        "new worktree"
+    };
+    render_modal_header(frame, rows[0], header, &app.palette);
 
     frame.render_widget(
         Paragraph::new(" branch").style(Style::default().fg(app.palette.overlay0)),
@@ -347,9 +356,14 @@ pub(super) fn render_remove_worktree_overlay(app: &AppState, frame: &mut Frame, 
     ])
     .areas::<8>(inner);
 
+    let title = if remove.delete_branch {
+        " kill worktree & branch?"
+    } else {
+        " delete worktree checkout?"
+    };
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            " delete worktree checkout?",
+            title,
             Style::default()
                 .fg(app.palette.red)
                 .add_modifier(Modifier::BOLD),
@@ -366,11 +380,32 @@ pub(super) fn render_remove_worktree_overlay(app: &AppState, frame: &mut Frame, 
             .style(Style::default().fg(app.palette.text)),
         rows[2],
     );
-    frame.render_widget(
-        Paragraph::new(" The branch is not deleted. The Herdr workspace will close.")
-            .style(Style::default().fg(app.palette.overlay0)),
-        rows[3],
-    );
+    if remove.delete_branch {
+        let (gate_line, gate_style) = match &remove.merge_gate {
+            None => (
+                " checking merge status…".to_string(),
+                Style::default().fg(app.palette.overlay0),
+            ),
+            Some(crate::worktree::WorktreeMergeGate::Merged { evidence }) => (
+                format!(
+                    " ✓ {evidence} — branch {} will be deleted too.",
+                    remove.branch.as_deref().unwrap_or("?")
+                ),
+                Style::default().fg(app.palette.green),
+            ),
+            Some(crate::worktree::WorktreeMergeGate::NotMerged) => (
+                " ✗ no merge evidence — checkout only; the branch is kept.".to_string(),
+                Style::default().fg(app.palette.peach),
+            ),
+        };
+        frame.render_widget(Paragraph::new(gate_line).style(gate_style), rows[3]);
+    } else {
+        frame.render_widget(
+            Paragraph::new(" The branch is not deleted. The Herdr workspace will close.")
+                .style(Style::default().fg(app.palette.overlay0)),
+            rows[3],
+        );
+    }
     if remove.force_confirmation {
         frame.render_widget(
             Paragraph::new(" Dirty or untracked files will be permanently deleted.")
@@ -604,21 +639,27 @@ fn confirm_close_overlay_text(app: &AppState) -> (String, String) {
         .workspaces
         .get(app.selected)
         .and_then(|ws| ws.worktree_space());
-    let group_member_indices = selected_space
-        .filter(|space| !space.is_linked_worktree)
-        .map(|space| {
-            app.workspaces
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, ws)| {
-                    ws.worktree_space()
-                        .is_some_and(|member| member.key == space.key)
-                        .then_some(idx)
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let closes_group = group_member_indices.len() > 1;
+    // The whole-space close (#62) is an explicit affordance now, signalled by
+    // the flag — NOT inferred from the selection being a non-linked parent.
+    // Plain "Close" closes only the selected workspace even on the main row.
+    let group_member_indices = if app.confirm_close_whole_space {
+        selected_space
+            .map(|space| {
+                app.workspaces
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, ws)| {
+                        ws.worktree_space()
+                            .is_some_and(|member| member.key == space.key)
+                            .then_some(idx)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let closes_group = app.confirm_close_whole_space && group_member_indices.len() > 1;
     let pane_count = if closes_group {
         group_member_indices
             .iter()
@@ -780,10 +821,42 @@ mod tests {
         });
         app.workspaces = vec![parent, child];
         app.selected = 0;
+        // Whole-space scope is now explicit (#62), not inferred.
+        app.confirm_close_whole_space = true;
 
         let (title, detail) = confirm_close_overlay_text(&app);
 
         assert_eq!(title, "Close worktree group?");
         assert_eq!(detail, "main — 2 workspaces, 2 panes");
+    }
+
+    #[test]
+    fn confirm_close_text_reports_single_workspace_when_not_whole_space() {
+        // Plain "Close" on the main row (#62): even with worktree siblings,
+        // the confirm reports a single-workspace close, not the group.
+        let mut app = AppState::test_new();
+        let mut parent = Workspace::test_new("main");
+        parent.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr".into(),
+            is_linked_worktree: false,
+        });
+        let mut child = Workspace::test_new("issue");
+        child.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr-issue".into(),
+            is_linked_worktree: true,
+        });
+        app.workspaces = vec![parent, child];
+        app.selected = 0;
+        app.confirm_close_whole_space = false;
+
+        let (title, _detail) = confirm_close_overlay_text(&app);
+
+        assert_eq!(title, "Close workspace?");
     }
 }

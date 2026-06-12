@@ -133,6 +133,22 @@ pub fn handoff_pane_aliases(
             }
         }
     }
+    // Chain the previous server's aliases so env ids minted generations ago
+    // keep resolving: ancient -> previous current -> (this import) -> new.
+    for (ancient, previous) in &snapshot.pane_id_aliases {
+        let resolved = aliases.get(previous).copied().or_else(|| {
+            workspaces
+                .iter()
+                .flat_map(|ws| ws.tabs.iter())
+                .flat_map(|tab| tab.layout.pane_ids())
+                .find(|pane| pane.raw() == *previous)
+        });
+        if let Some(resolved) = resolved {
+            if *ancient != resolved.raw() {
+                aliases.insert(*ancient, resolved);
+            }
+        }
+    }
     aliases
 }
 
@@ -319,7 +335,9 @@ fn restore_workspace(
     let worktree_space = restored_worktree_space_membership(snap.worktree_space.clone());
 
     (
+        #[allow(clippy::needless_update)]
         Some(Workspace {
+            pr_state: None,
             id: snap
                 .id
                 .clone()
@@ -329,6 +347,9 @@ fn restore_workspace(
             cached_git_branch: crate::workspace::git_branch(&snap.identity_cwd),
             cached_git_ahead_behind: None,
             cached_git_space: crate::workspace::git_space_metadata(&snap.identity_cwd),
+            // The synchronous restore-time probe above IS a completed git
+            // identity check: a None space here is genuinely non-git (#33).
+            git_identity_resolved: true,
             worktree_space,
             public_pane_numbers,
             next_public_pane_number,
@@ -400,6 +421,8 @@ fn restore_tab(
         let saved_label = saved_pane.and_then(|p| p.label.clone());
         let saved_agent_name = saved_pane.and_then(|p| p.agent_name.clone());
         let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
+        let saved_last_prompt = saved_pane.and_then(|p| p.last_prompt.clone());
+        let saved_header_reserved = saved_pane.is_some_and(|p| p.header_reserved);
         let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
         let saved_history =
             old_id.and_then(|old_id| history.and_then(|history| history.panes.get(old_id)));
@@ -427,6 +450,8 @@ fn restore_tab(
             let terminal_id = TerminalId::alloc();
             let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone())
                 .with_pending_agent_resume_plan(plan);
+            terminal.last_prompt = saved_last_prompt.clone();
+            terminal.header_reserved = saved_header_reserved;
             if let Some(label) = saved_label {
                 terminal.set_manual_label(label);
             }
@@ -487,6 +512,8 @@ fn restore_tab(
             Ok(runtime) => {
                 let terminal_id = TerminalId::alloc();
                 let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone());
+                terminal.last_prompt = saved_last_prompt.clone();
+                terminal.header_reserved = saved_header_reserved;
                 if was_imported {
                     if let Some(argv) = saved_launch_argv {
                         terminal = terminal.with_launch_argv(argv).with_respawn_shell_on_exit();
@@ -1016,6 +1043,8 @@ mod tests {
                         super::super::snapshot::PaneSnapshot {
                             cwd,
                             label: None,
+                            last_prompt: None,
+                            header_reserved: false,
                             agent_name: None,
                             agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
                                 source: "herdr:opencode".into(),
@@ -1035,9 +1064,12 @@ mod tests {
             active: Some(0),
             selected: 0,
             agent_panel_scope: Default::default(),
+            servers_panel_scope: Default::default(),
+            spaces_panel_scope: Default::default(),
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            pane_id_aliases: std::collections::HashMap::new(),
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1091,6 +1123,8 @@ mod tests {
                         super::super::snapshot::PaneSnapshot {
                             cwd,
                             label: None,
+                            last_prompt: None,
+                            header_reserved: false,
                             agent_name: None,
                             agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
                                 source: "herdr:codex".into(),
@@ -1110,9 +1144,12 @@ mod tests {
             active: Some(0),
             selected: 0,
             agent_panel_scope: Default::default(),
+            servers_panel_scope: Default::default(),
+            spaces_panel_scope: Default::default(),
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            pane_id_aliases: std::collections::HashMap::new(),
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1258,6 +1295,8 @@ mod tests {
             super::super::snapshot::PaneSnapshot {
                 cwd: cwd.clone(),
                 label: None,
+                last_prompt: None,
+                header_reserved: false,
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
@@ -1297,10 +1336,42 @@ mod tests {
             active: Some(0),
             selected: 0,
             agent_panel_scope: crate::app::state::AgentPanelScope::CurrentWorkspace,
+            servers_panel_scope: Default::default(),
+            spaces_panel_scope: Default::default(),
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: Default::default(),
+            pane_id_aliases: std::collections::HashMap::new(),
         };
         (snapshot, history)
+    }
+    #[test]
+    fn handoff_aliases_chain_across_generations() {
+        let ws_old = crate::workspace::Workspace::test_new("gen2");
+        let old_pane = ws_old.tabs[0].root_pane;
+        let registry = crate::terminal::TerminalRuntimeRegistry::new();
+        // gen1 env id 5 was aliased to the gen2 id by the previous handoff.
+        let snapshot = super::super::snapshot::capture(
+            &[ws_old],
+            &std::collections::HashMap::new(),
+            &registry,
+            None,
+            0,
+            crate::app::state::PanelScopes::default(),
+            26,
+            0.5,
+            std::collections::HashSet::new(),
+            std::collections::HashMap::from([(5u32, old_pane.raw())]),
+        );
+
+        // gen3 import allocates fresh ids.
+        let ws_new = crate::workspace::Workspace::test_new("gen3");
+        let new_pane = ws_new.tabs[0].root_pane;
+        assert_ne!(old_pane, new_pane);
+
+        let aliases = handoff_pane_aliases(&snapshot, &[ws_new]);
+        assert_eq!(aliases.get(&old_pane.raw()), Some(&new_pane));
+        // The ancient gen1 id still resolves: 5 -> gen2 -> gen3.
+        assert_eq!(aliases.get(&5), Some(&new_pane));
     }
 }

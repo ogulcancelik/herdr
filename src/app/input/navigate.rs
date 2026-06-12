@@ -55,6 +55,10 @@ impl App {
                 let previous_mode = self.state.mode;
                 self.launch_focused_scrollback_editor();
                 finish_action_context(&mut self.state, ActionContext::Prefix, previous_mode);
+            } else if action == NavigateAction::ToggleFloat {
+                let previous_mode = self.state.mode;
+                self.toggle_float_pane();
+                finish_action_context(&mut self.state, ActionContext::Prefix, previous_mode);
             } else {
                 execute_navigate_action_in_context(
                     &mut self.state,
@@ -91,6 +95,9 @@ impl App {
         if let Some(action) = navigate_mode_action_for_key(&self.state, raw_key) {
             if action == NavigateAction::EditScrollback {
                 self.launch_focused_scrollback_editor();
+            } else if action == NavigateAction::ToggleFloat {
+                self.toggle_float_pane();
+                leave_navigate_mode(&mut self.state);
             } else {
                 execute_navigate_action_in_context(
                     &mut self.state,
@@ -112,10 +119,16 @@ impl App {
         let Some(ws_idx) = self.state.active else {
             return false;
         };
-        let Some(rt) = self
+        // A visible float owns terminal input: double-prefix passthrough
+        // lands in the float's shell, not the focused layout pane.
+        let float_rt = self
             .state
-            .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
-        else {
+            .visible_float_for_active_workspace()
+            .and_then(|float| self.terminal_runtimes.get(&float.terminal_id));
+        let Some(rt) = float_rt.or_else(|| {
+            self.state
+                .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+        }) else {
             return false;
         };
 
@@ -477,11 +490,18 @@ pub(crate) fn handle_navigate_key(state: &mut AppState, key: KeyEvent) {
 pub(crate) enum NavigateAction {
     NewWorkspace,
     NewWorktree,
+    BranchSession,
+    KillWorktree,
+    FocusAttention,
+    FocusAttentionPrevious,
+    FocusAttentionProject,
+    FocusAttentionProjectPrevious,
     OpenWorktree,
     RemoveWorktree,
     RenameWorkspace,
     CloseWorkspace,
     SwitchWorkspace(usize),
+    SwitchSpace(usize),
     SwitchTab(usize),
     FocusAgent(usize),
     WorkspacePicker,
@@ -503,10 +523,14 @@ pub(crate) enum NavigateAction {
     SplitHorizontal,
     ClosePane,
     EditScrollback,
+    ToggleFloat,
     CopyMode,
     Zoom,
     EnterResizeMode,
     ToggleSidebar,
+    ToggleCollapseAll,
+    TogglePromptExpand,
+    SwitchHome,
     CyclePaneNext,
     CyclePanePrevious,
     LastPane,
@@ -540,6 +564,13 @@ fn indexed_navigation_action(
         if trigger_matches(binding) {
             if let Some(idx) = binding.matched_index(key) {
                 return Some(NavigateAction::SwitchWorkspace(idx));
+            }
+        }
+    }
+    for binding in &kb.switch_space {
+        if trigger_matches(binding) {
+            if let Some(idx) = binding.matched_index(key) {
+                return Some(NavigateAction::SwitchSpace(idx));
             }
         }
     }
@@ -581,14 +612,29 @@ fn action_for_key(
         (&kb.workspace_picker, NavigateAction::WorkspacePicker),
         (&kb.new_workspace, NavigateAction::NewWorkspace),
         (&kb.new_worktree, NavigateAction::NewWorktree),
+        (&kb.branch_session, NavigateAction::BranchSession),
         (&kb.open_worktree, NavigateAction::OpenWorktree),
         (&kb.remove_worktree, NavigateAction::RemoveWorktree),
+        (&kb.kill_worktree, NavigateAction::KillWorktree),
         (&kb.rename_workspace, NavigateAction::RenameWorkspace),
         (&kb.close_workspace, NavigateAction::CloseWorkspace),
         (&kb.previous_workspace, NavigateAction::PreviousWorkspace),
         (&kb.next_workspace, NavigateAction::NextWorkspace),
         (&kb.previous_agent, NavigateAction::PreviousAgent),
         (&kb.next_agent, NavigateAction::NextAgent),
+        (&kb.focus_attention, NavigateAction::FocusAttention),
+        (
+            &kb.focus_attention_previous,
+            NavigateAction::FocusAttentionPrevious,
+        ),
+        (
+            &kb.focus_attention_project,
+            NavigateAction::FocusAttentionProject,
+        ),
+        (
+            &kb.focus_attention_project_previous,
+            NavigateAction::FocusAttentionProjectPrevious,
+        ),
         (&kb.new_tab, NavigateAction::NewTab),
         (&kb.rename_tab, NavigateAction::RenameTab),
         (&kb.previous_tab, NavigateAction::PreviousTab),
@@ -596,6 +642,7 @@ fn action_for_key(
         (&kb.close_tab, NavigateAction::CloseTab),
         (&kb.rename_pane, NavigateAction::RenamePane),
         (&kb.edit_scrollback, NavigateAction::EditScrollback),
+        (&kb.toggle_float, NavigateAction::ToggleFloat),
         (&kb.copy_mode, NavigateAction::CopyMode),
         (&kb.focus_pane_left, NavigateAction::FocusPaneLeft),
         (&kb.focus_pane_down, NavigateAction::FocusPaneDown),
@@ -610,6 +657,9 @@ fn action_for_key(
         (&kb.zoom, NavigateAction::Zoom),
         (&kb.resize_mode, NavigateAction::EnterResizeMode),
         (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
+        (&kb.toggle_collapse_all, NavigateAction::ToggleCollapseAll),
+        (&kb.toggle_prompt_expand, NavigateAction::TogglePromptExpand),
+        (&kb.switch_home, NavigateAction::SwitchHome),
         (&kb.reload_config, NavigateAction::ReloadConfig),
         (
             &kb.open_notification_target,
@@ -657,6 +707,22 @@ pub(super) fn execute_navigate_action_in_context(
     context: ActionContext,
 ) {
     let previous_mode = state.mode;
+    // Workspace tab-mode (#33): the tab bar is the active session's member
+    // switcher, so the indexed switch_tab keys act on the strip's members —
+    // even when the workspace has fewer real tabs than the index. Handled
+    // here, BEFORE the dispatch match, with all branching in the fork-owned
+    // state methods, so every arm below stays byte-identical with upstream
+    // (the #29 resolution). A missing member mirrors upstream's missing-tab
+    // no-op: navigate mode is kept.
+    if let NavigateAction::SwitchTab(idx) = action {
+        if state.tab_strip_shows_members() {
+            if state.switch_strip_member(idx) {
+                leave_navigate_mode(state);
+            }
+            finish_action_context(state, context, previous_mode);
+            return;
+        }
+    }
     match action {
         NavigateAction::NewWorkspace => {
             state.request_new_workspace = true;
@@ -667,6 +733,14 @@ pub(super) fn execute_navigate_action_in_context(
                 .filter(|idx| workspace_can_start_worktree_action(state, terminal_runtimes, *idx))
             {
                 state.request_new_linked_worktree = Some(ws_idx);
+                leave_navigate_mode(state);
+            }
+        }
+        NavigateAction::BranchSession => {
+            if let Some(ws_idx) = workspace_action_target(state, context)
+                .filter(|idx| workspace_can_start_worktree_action(state, terminal_runtimes, *idx))
+            {
+                state.request_branch_session = Some(ws_idx);
                 leave_navigate_mode(state);
             }
         }
@@ -681,6 +755,12 @@ pub(super) fn execute_navigate_action_in_context(
         NavigateAction::RemoveWorktree => {
             if let Some(ws_idx) = workspace_action_target(state, context) {
                 state.request_remove_linked_worktree = Some(ws_idx);
+                leave_navigate_mode(state);
+            }
+        }
+        NavigateAction::KillWorktree => {
+            if let Some(ws_idx) = workspace_action_target(state, context) {
+                state.request_kill_worktree = Some(ws_idx);
                 leave_navigate_mode(state);
             }
         }
@@ -702,6 +782,16 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::SwitchWorkspace(idx) => {
             if let Some(ws_idx) = state.workspace_at_visible_position(idx) {
+                state.switch_workspace(ws_idx);
+                leave_navigate_mode(state);
+            }
+        }
+        NavigateAction::SwitchSpace(idx) => {
+            // The Nth project SECTION (#62): focus its active member when one
+            // is live, else the section's primary (local main, else its first
+            // member). The fallback lives in the state method so this dispatch
+            // arm stays a thin shell like its siblings.
+            if let Some(ws_idx) = state.space_switch_target(idx) {
                 state.switch_workspace(ws_idx);
                 leave_navigate_mode(state);
             }
@@ -739,6 +829,22 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::NextAgent => {
             state.next_agent();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::FocusAttention => {
+            state.focus_attention_agent();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::FocusAttentionPrevious => {
+            state.focus_attention_agent_previous();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::FocusAttentionProject => {
+            state.focus_attention_project();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::FocusAttentionProjectPrevious => {
+            state.focus_attention_project_previous();
             leave_navigate_mode(state);
         }
         NavigateAction::NewTab => {
@@ -792,6 +898,9 @@ pub(super) fn execute_navigate_action_in_context(
             }
         }
         NavigateAction::EditScrollback => {}
+        // Handled at the App level (PTY spawn needs event_tx/runtimes),
+        // mirroring EditScrollback above.
+        NavigateAction::ToggleFloat => {}
         NavigateAction::CopyMode => state.enter_copy_mode(terminal_runtimes),
         NavigateAction::Zoom => {
             state.toggle_zoom();
@@ -800,6 +909,20 @@ pub(super) fn execute_navigate_action_in_context(
         NavigateAction::EnterResizeMode => state.mode = Mode::Resize,
         NavigateAction::ToggleSidebar => {
             state.sidebar_collapsed = !state.sidebar_collapsed;
+            leave_navigate_mode(state);
+        }
+        NavigateAction::ToggleCollapseAll => {
+            state.toggle_all_space_groups();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::SwitchHome => {
+            // Same chokepoint as selecting the sidebar home row; the
+            // consuming loop answers "already home" when no origin exists.
+            state.request_peer_switch = Some(crate::app::state::PeerSwitchRequest::Home);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::TogglePromptExpand => {
+            state.toggle_focused_prompt_expand();
             leave_navigate_mode(state);
         }
         NavigateAction::CyclePaneNext => {
@@ -1115,6 +1238,66 @@ mod tests {
     }
 
     #[test]
+    fn prefix_branch_session_key_dispatches_from_parsed_config() {
+        let config: crate::config::Config =
+            toml::from_str("[keys]\nbranch_session = \"prefix+y\"\n").unwrap();
+        let mut app = super::super::app_for_mouse_test();
+        app.state.keybinds = config.keybinds();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("main")];
+        // Pin a non-git identity cwd: the test process may itself run inside a
+        // linked worktree checkout, where worktree actions are refused.
+        app.state.workspaces[0].identity_cwd = unique_temp_path("navigate-branch-session-prefix");
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Prefix;
+
+        app.handle_prefix_key(crate::input::TerminalKey::new(
+            KeyCode::Char('y'),
+            KeyModifiers::empty(),
+        ));
+
+        assert_eq!(app.state.request_branch_session, Some(0));
+    }
+
+    #[test]
+    fn prefix_branch_session_key_requests_active_workspace() {
+        let mut app = super::super::app_for_mouse_test();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("main")];
+        // Pin a non-git identity cwd: the test process may itself run inside a
+        // linked worktree checkout, where worktree actions are refused.
+        app.state.workspaces[0].identity_cwd = unique_temp_path("navigate-branch-session-prefix");
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Prefix;
+        app.state.keybinds.branch_session = crate::config::ActionKeybinds::prefix("y");
+
+        app.handle_prefix_key(crate::input::TerminalKey::new(
+            KeyCode::Char('y'),
+            KeyModifiers::empty(),
+        ));
+
+        assert_eq!(app.state.request_branch_session, Some(0));
+    }
+
+    #[test]
+    fn custom_branch_session_key_requests_selected_workspace() {
+        let mut state = state_with_workspaces(&["main", "scratch"]);
+        state.workspaces[1].identity_cwd = unique_temp_path("navigate-branch-session-selected");
+        state.mode = Mode::Navigate;
+        state.selected = 1;
+        state.active = Some(0);
+        state.keybinds.branch_session = crate::config::ActionKeybinds::prefix("y");
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.request_branch_session, Some(1));
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
     fn worktree_actions_do_not_start_from_linked_child_workspace() {
         let mut terminal_runtimes = TerminalRuntimeRegistry::new();
         let mut state = state_with_workspaces(&["main", "issue"]);
@@ -1214,6 +1397,93 @@ mod tests {
 
         assert_eq!(state.active, Some(2));
         assert_eq!(state.selected, 2);
+    }
+
+    #[test]
+    fn switch_space_jumps_to_nth_project_section_head() {
+        // Sections: [0]=grouped repo (main idx0 + worktree idx2), [1]=standalone
+        // "solo" (idx1). switch_space(1) targets the second SECTION → idx1, not
+        // the second visible WORKSPACE (which would be the worktree).
+        let mut state = state_with_workspaces(&["main", "solo", "issue"]);
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        mark_worktree_space_member(&mut state, 0, "repo-key");
+        mark_worktree_space_member(&mut state, 2, "repo-key");
+        state.mode = Mode::Prefix;
+        state.active = Some(0);
+        state.selected = 0;
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::SwitchSpace(1),
+            ActionContext::Prefix,
+        );
+
+        assert_eq!(state.active, Some(1));
+        assert_eq!(state.selected, 1);
+    }
+
+    #[test]
+    fn switch_space_focuses_section_head_when_no_member_active() {
+        // Section 0 = grouped repo (main idx0 + worktree idx2); active is on a
+        // different section. switch_space(0) lands on the head (main, idx0).
+        let mut state = state_with_workspaces(&["main", "solo", "issue"]);
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        mark_worktree_space_member(&mut state, 0, "repo-key");
+        mark_worktree_space_member(&mut state, 2, "repo-key");
+        state.mode = Mode::Prefix;
+        state.active = Some(1);
+        state.selected = 1;
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::SwitchSpace(0),
+            ActionContext::Prefix,
+        );
+
+        assert_eq!(state.active, Some(0));
+    }
+
+    #[test]
+    fn switch_space_keeps_active_member_within_the_section() {
+        // Active is the worktree (idx2) of the grouped repo (section 0).
+        // Re-selecting section 0 must not yank focus to main — muscle memory.
+        let mut state = state_with_workspaces(&["main", "solo", "issue"]);
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        mark_worktree_space_member(&mut state, 0, "repo-key");
+        mark_worktree_space_member(&mut state, 2, "repo-key");
+        state.mode = Mode::Prefix;
+        state.active = Some(2);
+        state.selected = 2;
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::SwitchSpace(0),
+            ActionContext::Prefix,
+        );
+
+        assert_eq!(state.active, Some(2));
+    }
+
+    #[test]
+    fn switch_space_out_of_bounds_is_noop() {
+        let mut state = state_with_workspaces(&["main"]);
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        state.mode = Mode::Prefix;
+        state.active = Some(0);
+        state.selected = 0;
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::SwitchSpace(5),
+            ActionContext::Prefix,
+        );
+
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.selected, 0);
     }
 
     #[test]
@@ -1548,6 +1818,41 @@ last_pane = "prefix+tab"
         assert_eq!(action, Some(NavigateAction::SwitchTab(2)));
     }
 
+    /// #33/#29 — workspace tab-mode: the SwitchTab dispatch switches the
+    /// member strip's workspaces (each a single real tab) via the pre-match
+    /// hook; the dispatch match itself stays byte-identical with upstream.
+    #[test]
+    fn workspace_mode_switch_tab_dispatch_switches_strip_members() {
+        let mut state = state_with_workspaces(&["main", "wt", "other"]);
+        mark_worktree_space_member(&mut state, 0, "grp");
+        mark_worktree_space_member(&mut state, 1, "grp");
+        state.tab_mode = crate::config::TabModeConfig::Workspace;
+
+        execute_navigate_action(&mut state, NavigateAction::SwitchTab(1));
+        assert_eq!(state.active, Some(1));
+        assert_eq!(state.mode, Mode::Terminal);
+
+        // A missing member mirrors upstream's missing-tab no-op: navigate
+        // mode is kept.
+        state.mode = Mode::Navigate;
+        execute_navigate_action(&mut state, NavigateAction::SwitchTab(8));
+        assert_eq!(state.active, Some(1));
+        assert_eq!(state.mode, Mode::Navigate);
+    }
+
+    /// Tabs mode stays byte-identical: a single-tab workspace has no tab 2,
+    /// so the upstream guard no-ops — the member strip never engages.
+    #[test]
+    fn tabs_mode_switch_tab_dispatch_unchanged_by_member_strip() {
+        let mut state = state_with_workspaces(&["main", "wt"]);
+        mark_worktree_space_member(&mut state, 0, "grp");
+        mark_worktree_space_member(&mut state, 1, "grp");
+
+        execute_navigate_action(&mut state, NavigateAction::SwitchTab(1));
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.mode, Mode::Navigate);
+    }
+
     #[tokio::test]
     async fn navigate_mode_runs_prefix_action_rhs_without_pressing_prefix_again() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1815,6 +2120,20 @@ last_pane = "prefix+tab"
         assert!(!state.creating_new_tab);
         assert!(!state.request_new_tab);
         assert!(state.workspaces.is_empty());
+    }
+
+    #[test]
+    fn switch_home_requests_home_switch_through_the_shared_chokepoint() {
+        let mut state = state_with_workspaces(&["main"]);
+        state.mode = Mode::Navigate;
+
+        execute_navigate_action(&mut state, NavigateAction::SwitchHome);
+
+        assert_eq!(
+            state.request_peer_switch,
+            Some(crate::app::state::PeerSwitchRequest::Home)
+        );
+        assert_eq!(state.mode, Mode::Terminal);
     }
 
     #[test]

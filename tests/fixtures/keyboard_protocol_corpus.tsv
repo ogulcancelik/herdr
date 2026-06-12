@@ -19,3 +19,12 @@ kitty_shift_symbol	1b5b34393a33333b323a3175	char:1	shift	press	33
 kitty_release_letter	1b5b3130383a37363b323a3375	char:l	shift	release	76
 kitty_functional_up	1b5b35373431393b3175	up	-	press	
 kitty_functional_home	1b5b35373432333b3175	home	-	press	
+kitty_keypad_0	1b5b35373339393b3175	char:0	-	press	
+kitty_keypad_5	1b5b35373430343b3175	char:5	-	press	
+kitty_keypad_decimal	1b5b35373430393b3175	char:.	-	press	
+kitty_keypad_divide	1b5b35373431303b3175	char:/	-	press	
+kitty_keypad_multiply	1b5b35373431313b3175	char:*	-	press	
+kitty_keypad_subtract	1b5b35373431323b3175	char:-	-	press	
+kitty_keypad_add	1b5b35373431333b3175	char:+	-	press	
+kitty_keypad_enter	1b5b35373431343b3175	enter	-	press	
+kitty_keypad_equal	1b5b35373431353b3175	char:=	-	press	

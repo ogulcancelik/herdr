@@ -5,7 +5,9 @@ use serde::{de, Deserialize, Deserializer, Serialize};
 
 use super::{
     BindingConfig, CommandKeybindConfig, SoundConfig, ThemeConfig, DEFAULT_MOBILE_WIDTH_THRESHOLD,
-    DEFAULT_MOUSE_SCROLL_LINES, DEFAULT_SCROLLBACK_LIMIT_BYTES,
+    DEFAULT_MOUSE_SCROLL_LINES, DEFAULT_PROMPT_FLOAT_LINES, DEFAULT_SCROLLBACK_LIMIT_BYTES,
+    DEFAULT_SIDEBAR_PANE_GAP, DEFAULT_SIDEBAR_ROW_GAP, MAX_PROMPT_FLOAT_LINES,
+    MAX_SIDEBAR_PANE_GAP, MAX_SIDEBAR_ROW_GAP,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -49,15 +51,17 @@ pub enum ToastDelivery {
     System,
 }
 
+/// Scope of a sidebar panel (agents, servers, spaces): everything, or only
+/// what belongs to the current workspace/machine/space group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
-pub enum AgentPanelScopeConfig {
+pub enum PanelScopeConfig {
     Current,
     #[default]
     All,
 }
 
-impl AgentPanelScopeConfig {
+impl PanelScopeConfig {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Current => "current",
@@ -157,6 +161,33 @@ pub enum ShellModeConfig {
     NonLogin,
 }
 
+/// What `new_tab` creates (spike gerchowl/herdr#25). In `workspace` mode the
+/// workspace is the unit: "new tab" spawns a SIBLING WORKSPACE in the same
+/// space group (membership cloned, cwd pinned to the checkout) instead of a
+/// tab. The tab model itself is untouched — existing tabs keep working and
+/// existing sessions restore unchanged.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TabModeConfig {
+    #[default]
+    Tabs,
+    Workspace,
+}
+
+/// Leading state mark on servers-band rows (#42): `counts` (the default —
+/// fixed r/y/g count columns, `0 2 1 herdr`, zeros muted, band-global digit
+/// width) or the rectangular state medallion in `medallion_sextant`
+/// (2x3 sub-blocks via Symbols for Legacy Computing) / `medallion_quadrant`
+/// (2x2 half blocks for fonts without sextant coverage).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerStateMarkConfig {
+    #[default]
+    Counts,
+    MedallionSextant,
+    MedallionQuadrant,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct TerminalConfig {
@@ -211,6 +242,21 @@ pub fn validated_sidebar_bounds(min: u16, max: u16) -> Option<(u16, u16)> {
     }
 }
 
+/// Clamp `[ui] sidebar_row_gap` to its supported range (0..=MAX_SIDEBAR_ROW_GAP).
+pub fn validated_sidebar_row_gap(gap: u16) -> u16 {
+    gap.min(MAX_SIDEBAR_ROW_GAP)
+}
+
+/// Clamp `[ui] sidebar_pane_gap` to its supported range (0..=MAX_SIDEBAR_PANE_GAP).
+pub fn validated_sidebar_pane_gap(gap: u16) -> u16 {
+    gap.min(MAX_SIDEBAR_PANE_GAP)
+}
+
+/// Clamp `[ui] prompt_float_lines` to its supported range (0 disables).
+pub fn validated_prompt_float_lines(lines: u16) -> u16 {
+    lines.min(MAX_PROMPT_FLOAT_LINES)
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -225,6 +271,8 @@ pub struct Config {
     pub advanced: AdvancedConfig,
     pub experimental: ExperimentalConfig,
     pub remote: RemoteConfig,
+    pub slots: SlotsConfig,
+    pub peers: Vec<PeerConfig>,
 }
 
 #[derive(Debug)]
@@ -247,6 +295,37 @@ pub struct KeysConfig {
     pub new_workspace: BindingConfig,
     /// Create a Git worktree from the selected workspace. Default: "prefix+shift+g"
     pub new_worktree: BindingConfig,
+    /// Branch the focused pane's agent session into a new worktree. Unset by default.
+    pub branch_session: BindingConfig,
+    /// Collapse every sidebar worktree group at once; pressed again, expand
+    /// them all. Unset by default.
+    pub toggle_collapse_all: BindingConfig,
+    /// Switch the attached client back to its home server (the host it
+    /// originally launched from) without touching the sidebar. Only acts
+    /// when the client carried an origin, i.e. it attached via a server
+    /// switch or --remote. Unset by default.
+    pub switch_home: BindingConfig,
+    /// Toggle the full last-prompt view in the focused pane's header (keyboard
+    /// twin of clicking the header). Unset by default.
+    pub toggle_prompt_expand: BindingConfig,
+    /// Toggle the per-workspace ephemeral floating pane: first press spawns
+    /// and shows it, pressing again while visible hides it (the shell keeps
+    /// running), and the next press shows the same float. Unset by default.
+    pub toggle_float: BindingConfig,
+    /// Delete a linked worktree checkout AND its local branch once the merge
+    /// gate (PR merged / branch merged into the default branch) passes.
+    /// Unset by default.
+    pub kill_worktree: BindingConfig,
+    /// Focus the agent most in need of attention (blocked oldest-first, then
+    /// unseen-done). Unset by default.
+    pub focus_attention: BindingConfig,
+    /// Walk the attention queue backwards. Unset by default.
+    pub focus_attention_previous: BindingConfig,
+    /// Attention queue restricted to the active workspace's repo family
+    /// (main checkout + its worktrees). Unset by default.
+    pub focus_attention_project: BindingConfig,
+    /// Project-scoped attention queue, backwards. Unset by default.
+    pub focus_attention_project_previous: BindingConfig,
     /// Open an existing Git worktree from the selected workspace. Unset by default.
     pub open_worktree: BindingConfig,
     /// Delete the selected managed worktree checkout after confirmation. Unset by default.
@@ -299,6 +378,9 @@ pub struct KeysConfig {
     pub switch_tab: BindingConfig,
     /// Switch to workspace 1-9 from prefix mode. Unset by default.
     pub switch_workspace: BindingConfig,
+    /// Switch to the Nth project SECTION (1-9) of the spaces list (#62).
+    /// Unset by default.
+    pub switch_space: BindingConfig,
     /// Close the active tab. Default: "prefix+shift+x".
     pub close_tab: BindingConfig,
     /// Rename the focused pane. Default: "prefix+shift+p".
@@ -357,6 +439,51 @@ pub struct IndexedKeysConfig {
 pub struct WorktreesConfig {
     /// Root directory under which Herdr creates <repo>/<branch-slug> checkouts.
     pub directory: String,
+    /// Adopt workspaces that sit in linked git worktrees Herdr didn't create:
+    /// they group under their open parent repo workspace and get the managed
+    /// worktree actions. Default: true.
+    pub adopt_external: bool,
+}
+
+/// A federated peer Herdr server. Declared as `[[peers]]` entries. Peers are
+/// polled over SSH for a lightweight workspace/agent summary; their rows fold
+/// into the sidebar's project groups and selecting one switches the client to
+/// that server.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct PeerConfig {
+    /// Short host badge shown on remote rows (e.g. "anvil"). Required.
+    pub name: String,
+    /// SSH destination used for polling and attach. Defaults to `name`.
+    pub ssh: String,
+    /// Command run on the peer to fetch its summary. The default wraps the
+    /// herdr CLI in a login shell so profile-managed PATHs (nix, brew) apply.
+    pub summary_command: String,
+}
+
+impl Default for PeerConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            ssh: String::new(),
+            summary_command: default_peer_summary_command().to_string(),
+        }
+    }
+}
+
+pub fn default_peer_summary_command() -> &'static str {
+    "sh -lc 'herdr peers summary --json'"
+}
+
+impl PeerConfig {
+    /// SSH destination, falling back to the peer name.
+    pub fn ssh_target(&self) -> &str {
+        if self.ssh.is_empty() {
+            &self.name
+        } else {
+            &self.ssh
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -369,6 +496,22 @@ pub struct UiConfig {
     pub sidebar_max_width: u16,
     /// Terminal width at or below which Herdr uses the mobile single-column layout. Default: 64.
     pub mobile_width_threshold: u16,
+    /// Blank rows between sidebar list entries (workspaces and agents). Default: 1, max: 3.
+    pub sidebar_row_gap: u16,
+    /// Blank columns on each side of the sidebar/pane divider. Default: 0, max: 4.
+    pub sidebar_pane_gap: u16,
+    /// Max height of the prompt section in the pane header (the last
+    /// submitted prompt, middle-collapsed). 0 = context-only header. Default: 3.
+    pub prompt_float_lines: u16,
+    /// Auto-collapse every sidebar worktree group except the one holding the
+    /// focused workspace. Default: false.
+    pub auto_collapse_groups: bool,
+    /// Reserve a header strip (project · worktree · branch + last prompt) at
+    /// the top of agent panes. The pane PTY shrinks accordingly. Default: true.
+    pub pane_header: bool,
+    /// Show the global machine status line (cpu/mem/disk/battery/net/gpu)
+    /// above the tab bar. Default: true.
+    pub status_line: bool,
     /// Capture mouse input for Herdr's mouse UI. Default: true.
     pub mouse_capture: bool,
     /// Modifier that lets right-click gestures pass through to pane apps. Empty disables it.
@@ -381,10 +524,28 @@ pub struct UiConfig {
     pub confirm_close: bool,
     /// Ask for a tab name before creating a new tab. Default: true.
     pub prompt_new_tab_name: bool,
+    /// What `new_tab` creates: "tabs" (a tab, today's behavior) or
+    /// "workspace" (a sibling workspace in the same space group — the
+    /// workspace-as-unit model, spike #25). Default: "tabs".
+    pub tab_mode: TabModeConfig,
     /// Show agent labels in split pane borders when no manual pane label is set. Default: false.
     pub show_agent_labels_on_pane_borders: bool,
     /// Agent sidebar scope. Saved values are "current" or "all". Default: "all".
-    pub agent_panel_scope: AgentPanelScopeConfig,
+    pub agent_panel_scope: PanelScopeConfig,
+    /// Servers sidebar scope: "all" shows every server row (home/self/
+    /// snapshot/config peers), "current" only the current machine (plus the
+    /// home row when attached remotely). Default: "all".
+    pub servers_panel_scope: PanelScopeConfig,
+    /// Spaces sidebar scope: "all" shows the full workspace list, "current"
+    /// only the focused workspace's space group. Default: "all".
+    pub spaces_panel_scope: PanelScopeConfig,
+    /// Servers-band leading state mark: "counts" (default), or
+    /// "medallion_sextant" / "medallion_quadrant".
+    pub server_state_mark: ServerStateMarkConfig,
+    /// Display alias overrides for agent labels in the sidebar, e.g.
+    /// `agent_aliases = { claude = "CC" }`. Built-in short codes apply
+    /// when no override is set (claude -> cc, codex -> cd, ...).
+    pub agent_aliases: std::collections::HashMap<String, String>,
     /// Accent color for highlights, borders, and navigation UI.
     /// Accepts hex (#89b4fa), named colors (cyan, blue), or RGB (rgb(137,180,250)).
     pub accent: String,
@@ -445,6 +606,32 @@ impl Default for RemoteConfig {
     }
 }
 
+/// Connection slots (#65): the multi-connection client warms one framed
+/// connection per fleet server in the background and flips between them in
+/// process on a switch, instead of exiting and relaunching an attach leg.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct SlotsConfig {
+    /// Master switch for the slots client. Default false: the client keeps the
+    /// exit-and-relaunch leg model until the fork owner opts in (lockstep
+    /// deploy, then dogfood). When true, the active server's fleet (config
+    /// peers plus the carried snapshot, home always warm) defines the slots.
+    pub enabled: bool,
+    /// Generous sanity cap on the number of concurrently warmed slots,
+    /// including home and the active slot. Far above a personal fleet; only a
+    /// large-fleet guard.
+    pub max: usize,
+}
+
+impl Default for SlotsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max: 8,
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ExperimentalConfig {
@@ -493,6 +680,16 @@ impl Default for KeysConfig {
             settings: BindingConfig::one("prefix+s"),
             new_workspace: BindingConfig::one("prefix+shift+n"),
             new_worktree: BindingConfig::one("prefix+shift+g"),
+            branch_session: BindingConfig::empty(),
+            toggle_collapse_all: BindingConfig::empty(),
+            switch_home: BindingConfig::empty(),
+            toggle_prompt_expand: BindingConfig::empty(),
+            toggle_float: BindingConfig::empty(),
+            kill_worktree: BindingConfig::empty(),
+            focus_attention: BindingConfig::empty(),
+            focus_attention_previous: BindingConfig::empty(),
+            focus_attention_project: BindingConfig::empty(),
+            focus_attention_project_previous: BindingConfig::empty(),
             open_worktree: BindingConfig::empty(),
             remove_worktree: BindingConfig::empty(),
             rename_workspace: BindingConfig::one("prefix+shift+w"),
@@ -519,6 +716,7 @@ impl Default for KeysConfig {
             next_tab: BindingConfig::one("prefix+n"),
             switch_tab: BindingConfig::one("prefix+1..9"),
             switch_workspace: BindingConfig::empty(),
+            switch_space: BindingConfig::empty(),
             close_tab: BindingConfig::one("prefix+shift+x"),
             rename_pane: BindingConfig::one("prefix+shift+p"),
             edit_scrollback: BindingConfig::one("prefix+e"),
@@ -546,6 +744,7 @@ impl Default for WorktreesConfig {
     fn default() -> Self {
         Self {
             directory: "~/.herdr/worktrees".into(),
+            adopt_external: true,
         }
     }
 }
@@ -557,14 +756,25 @@ impl Default for UiConfig {
             sidebar_min_width: 18,
             sidebar_max_width: 36,
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
+            sidebar_row_gap: DEFAULT_SIDEBAR_ROW_GAP,
+            sidebar_pane_gap: DEFAULT_SIDEBAR_PANE_GAP,
+            prompt_float_lines: DEFAULT_PROMPT_FLOAT_LINES,
+            auto_collapse_groups: false,
+            pane_header: true,
+            status_line: true,
             mouse_capture: true,
             right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),
             redraw_on_focus_gained: true,
             mouse_scroll_lines: None,
             confirm_close: true,
             prompt_new_tab_name: true,
+            tab_mode: TabModeConfig::default(),
             show_agent_labels_on_pane_borders: false,
-            agent_panel_scope: AgentPanelScopeConfig::All,
+            agent_panel_scope: PanelScopeConfig::All,
+            servers_panel_scope: PanelScopeConfig::All,
+            spaces_panel_scope: PanelScopeConfig::All,
+            server_state_mark: ServerStateMarkConfig::default(),
+            agent_aliases: std::collections::HashMap::new(),
             accent: "cyan".into(),
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
@@ -657,6 +867,21 @@ shell_mode = "non_login"
     }
 
     #[test]
+    fn tab_mode_defaults_tabs_and_parses_workspace() {
+        let default_config = Config::default();
+        assert_eq!(default_config.ui.tab_mode, TabModeConfig::Tabs);
+
+        let config: Config = toml::from_str(
+            r#"
+[ui]
+tab_mode = "workspace"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.ui.tab_mode, TabModeConfig::Workspace);
+    }
+
+    #[test]
     fn terminal_new_cwd_defaults_follow_and_parses() {
         let default_config = Config::default();
         assert_eq!(
@@ -706,7 +931,23 @@ resume_agents_on_restore = false
 agent_panel_scope = "all"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.ui.agent_panel_scope, AgentPanelScopeConfig::All);
+        assert_eq!(config.ui.agent_panel_scope, PanelScopeConfig::All);
+    }
+
+    #[test]
+    fn servers_and_spaces_panel_scopes_parse_and_default_to_all() {
+        let default_config = Config::default();
+        assert_eq!(default_config.ui.servers_panel_scope, PanelScopeConfig::All);
+        assert_eq!(default_config.ui.spaces_panel_scope, PanelScopeConfig::All);
+
+        let toml = r#"
+[ui]
+servers_panel_scope = "current"
+spaces_panel_scope = "current"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.servers_panel_scope, PanelScopeConfig::Current);
+        assert_eq!(config.ui.spaces_panel_scope, PanelScopeConfig::Current);
     }
 
     #[test]
@@ -833,6 +1074,47 @@ mobile_width_threshold = 96
         assert_eq!(config.ui.sidebar_min_width, 12);
         assert_eq!(config.ui.sidebar_max_width, 80);
         assert_eq!(config.ui.mobile_width_threshold, 96);
+    }
+
+    #[test]
+    fn sidebar_pane_gap_default_parse_and_clamp() {
+        let default_config = Config::default();
+        assert_eq!(default_config.ui.sidebar_pane_gap, DEFAULT_SIDEBAR_PANE_GAP);
+
+        let toml = r#"
+[ui]
+sidebar_pane_gap = 2
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.sidebar_pane_gap, 2);
+
+        assert_eq!(validated_sidebar_pane_gap(0), 0);
+        assert_eq!(
+            validated_sidebar_pane_gap(MAX_SIDEBAR_PANE_GAP),
+            MAX_SIDEBAR_PANE_GAP
+        );
+        assert_eq!(validated_sidebar_pane_gap(u16::MAX), MAX_SIDEBAR_PANE_GAP);
+    }
+
+    #[test]
+    fn sidebar_row_gap_default_parse_and_clamp() {
+        let default_config = Config::default();
+        assert_eq!(default_config.ui.sidebar_row_gap, DEFAULT_SIDEBAR_ROW_GAP);
+
+        let toml = r#"
+[ui]
+sidebar_row_gap = 0
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.sidebar_row_gap, 0);
+
+        assert_eq!(validated_sidebar_row_gap(0), 0);
+        assert_eq!(validated_sidebar_row_gap(1), 1);
+        assert_eq!(
+            validated_sidebar_row_gap(MAX_SIDEBAR_ROW_GAP),
+            MAX_SIDEBAR_ROW_GAP
+        );
+        assert_eq!(validated_sidebar_row_gap(u16::MAX), MAX_SIDEBAR_ROW_GAP);
     }
 
     #[test]

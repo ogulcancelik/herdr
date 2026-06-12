@@ -263,6 +263,16 @@ pub struct Keybinds {
     pub settings: ActionKeybinds,
     pub new_workspace: ActionKeybinds,
     pub new_worktree: ActionKeybinds,
+    pub branch_session: ActionKeybinds,
+    pub toggle_collapse_all: ActionKeybinds,
+    pub switch_home: ActionKeybinds,
+    pub toggle_prompt_expand: ActionKeybinds,
+    pub toggle_float: ActionKeybinds,
+    pub kill_worktree: ActionKeybinds,
+    pub focus_attention: ActionKeybinds,
+    pub focus_attention_previous: ActionKeybinds,
+    pub focus_attention_project: ActionKeybinds,
+    pub focus_attention_project_previous: ActionKeybinds,
     pub open_worktree: ActionKeybinds,
     pub remove_worktree: ActionKeybinds,
     pub rename_workspace: ActionKeybinds,
@@ -283,6 +293,9 @@ pub struct Keybinds {
     pub next_tab: ActionKeybinds,
     pub switch_tab: Vec<IndexedKeybind>,
     pub switch_workspace: Vec<IndexedKeybind>,
+    /// Indexed jump to the Nth project SECTION of the spaces list (#62).
+    /// No default binding (`BindingConfig::empty`); opt-in via `keys.switch_space`.
+    pub switch_space: Vec<IndexedKeybind>,
     pub close_tab: ActionKeybinds,
     pub rename_pane: ActionKeybinds,
     pub edit_scrollback: ActionKeybinds,
@@ -439,6 +452,31 @@ impl Config {
             settings: action!("keys.settings", &self.keys.settings),
             new_workspace: action!("keys.new_workspace", &self.keys.new_workspace),
             new_worktree: action!("keys.new_worktree", &self.keys.new_worktree),
+            branch_session: action!("keys.branch_session", &self.keys.branch_session),
+            toggle_collapse_all: action!(
+                "keys.toggle_collapse_all",
+                &self.keys.toggle_collapse_all
+            ),
+            switch_home: action!("keys.switch_home", &self.keys.switch_home),
+            toggle_prompt_expand: action!(
+                "keys.toggle_prompt_expand",
+                &self.keys.toggle_prompt_expand
+            ),
+            toggle_float: action!("keys.toggle_float", &self.keys.toggle_float),
+            kill_worktree: action!("keys.kill_worktree", &self.keys.kill_worktree),
+            focus_attention: action!("keys.focus_attention", &self.keys.focus_attention),
+            focus_attention_previous: action!(
+                "keys.focus_attention_previous",
+                &self.keys.focus_attention_previous
+            ),
+            focus_attention_project: action!(
+                "keys.focus_attention_project",
+                &self.keys.focus_attention_project
+            ),
+            focus_attention_project_previous: action!(
+                "keys.focus_attention_project_previous",
+                &self.keys.focus_attention_project_previous
+            ),
             open_worktree: action!("keys.open_worktree", &self.keys.open_worktree),
             remove_worktree: action!("keys.remove_worktree", &self.keys.remove_worktree),
             rename_workspace: action!("keys.rename_workspace", &self.keys.rename_workspace),
@@ -462,6 +500,7 @@ impl Config {
             next_tab: action!("keys.next_tab", &self.keys.next_tab),
             switch_tab: indexed!("keys.switch_tab", &self.keys.switch_tab),
             switch_workspace: indexed!("keys.switch_workspace", &self.keys.switch_workspace),
+            switch_space: indexed!("keys.switch_space", &self.keys.switch_space),
             close_tab: action!("keys.close_tab", &self.keys.close_tab),
             rename_pane: action!("keys.rename_pane", &self.keys.rename_pane),
             edit_scrollback: action!("keys.edit_scrollback", &self.keys.edit_scrollback),
@@ -1203,6 +1242,27 @@ mod tests {
     }
 
     #[test]
+    fn indexed_keybind_matches_numpad_digit() {
+        // A numpad digit collapses to its plain Char equivalent during parsing,
+        // so an indexed '1'..'9' binding fires for numpad-2 just like top-row 2.
+        let binding = IndexedKeybind {
+            trigger: BindingTrigger::Direct((KeyCode::Char('2'), KeyModifiers::empty())),
+            label: "switch_tab".to_string(),
+        };
+
+        let numpad_2 = crate::input::parse_terminal_key_sequence("\x1b[57401;1u").unwrap();
+        assert_eq!(numpad_2.code, KeyCode::Char('2'));
+        assert_eq!(binding.matched_index(numpad_2), Some(1));
+
+        let top_row_2 = crate::input::parse_terminal_key_sequence("2").unwrap();
+        assert_eq!(
+            binding.matched_index(top_row_2),
+            binding.matched_index(numpad_2),
+            "numpad and top-row digit must trigger the same indexed binding"
+        );
+    }
+
+    #[test]
     fn parse_simple_char_combo() {
         assert_eq!(
             parse_key_combo("v"),
@@ -1708,6 +1768,17 @@ switch_workspace = "prefix+shift+1..9"
     }
 
     #[test]
+    fn switch_space_is_unbound_by_default_and_parses_indexed() {
+        // No default binding (#62): opt-in only.
+        assert!(Config::default().keybinds().switch_space.is_empty());
+
+        let config: Config = toml::from_str("[keys]\nswitch_space = \"ctrl+1..9\"\n").unwrap();
+        let kb = config.keybinds();
+        assert_eq!(kb.switch_space.len(), 9);
+        assert_eq!(kb.switch_space[0].label, "ctrl+1");
+    }
+
+    #[test]
     fn default_keymap_is_prefix_first_and_tab_centered() {
         let kb = Config::default().keybinds();
         assert_eq!(
@@ -1771,5 +1842,20 @@ description = "say hello"
             keybinds.custom_commands[0].description,
             Some("say hello".to_string())
         );
+    }
+    #[test]
+    fn branch_session_parses_from_keys_table() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+branch_session = "prefix+y"
+
+[worktrees]
+directory = "/tmp/x"
+"#,
+        )
+        .unwrap();
+        let kb = config.keybinds();
+        assert_eq!(kb.branch_session.label().as_deref(), Some("prefix+y"));
     }
 }

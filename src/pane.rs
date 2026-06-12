@@ -76,11 +76,13 @@ fn active_pending_release(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn publish_state_changed_event(
     state_events: mpsc::Sender<AppEvent>,
     pane_id: PaneId,
     agent: Option<Agent>,
     state: AgentState,
+    activity: Option<String>,
     visible_blocker: bool,
     visible_idle: bool,
     visible_working: bool,
@@ -95,6 +97,7 @@ async fn publish_state_changed_event(
             pane_id,
             agent,
             state,
+            activity,
             visible_blocker,
             visible_idle,
             visible_working,
@@ -380,6 +383,7 @@ fn detection_update_for_publish(
     if process_exited {
         return Some(crate::detect::AgentDetection {
             state: AgentState::Idle,
+            activity: None,
             skip_state_update: false,
             visible_blocker: false,
             visible_idle: false,
@@ -409,6 +413,7 @@ fn spawn_basic_detection_task(
     let handle = tokio::spawn(async move {
         let mut agent_presence = AgentDetectionPresence::from_agent(None);
         let mut state = AgentState::Unknown;
+        let mut last_activity: Option<String> = None;
         let mut last_visible_blocker = false;
         let mut last_visible_idle = false;
         let mut last_visible_working = false;
@@ -544,17 +549,20 @@ fn spawn_basic_detection_task(
                 now,
             );
 
+            let activity_changed = detection.activity != last_activity;
             if should_publish_detection_update(
                 previous_publish,
                 next_publish,
                 agent_changed,
                 false,
                 stable_refresh_due,
-            ) {
+            ) || activity_changed
+            {
                 state = new_state;
                 last_visible_blocker = visible_blocker;
                 last_visible_idle = visible_idle;
                 last_visible_working = visible_working;
+                last_activity.clone_from(&detection.activity);
                 if visible_blocker || visible_idle || visible_working {
                     last_visible_signal_refresh = Some(now);
                 } else {
@@ -565,6 +573,7 @@ fn spawn_basic_detection_task(
                     pane_id,
                     agent,
                     new_state,
+                    detection.activity.clone(),
                     visible_blocker,
                     visible_idle,
                     visible_working,
@@ -634,6 +643,15 @@ impl AgentDetectionPresence {
 
 /// PTY runtime for a pane. Owns the terminal, I/O channels, and background tasks.
 /// Dropping this shuts down all background tasks and closes the PTY.
+impl PaneRuntime {
+    /// PID of the pane's direct child (the shell or argv command), used to
+    /// resolve hook reports by process ancestry when env pane-ids are stale.
+    pub fn child_pid(&self) -> Option<u32> {
+        let pid = self.child_pid.load(Ordering::Acquire);
+        (pid > 0).then_some(pid)
+    }
+}
+
 pub struct PaneRuntime {
     pane_id: PaneId,
     terminal: Arc<PaneTerminal>,
@@ -1097,6 +1115,12 @@ impl PaneRuntime {
 
     pub fn apply_host_terminal_theme(&self, theme: crate::terminal_theme::TerminalTheme) {
         self.terminal.apply_host_terminal_theme(theme);
+    }
+
+    /// Host terminal theme last written into this pane's emulator.
+    #[cfg(test)]
+    pub fn test_host_terminal_theme(&self) -> crate::terminal_theme::TerminalTheme {
+        self.terminal.test_host_terminal_theme()
     }
 
     pub fn spawn(
@@ -1700,7 +1724,7 @@ impl PaneRuntime {
                     let new_state = crate::terminal::state::stabilize_agent_detection(
                         agent,
                         state,
-                        detection,
+                        detection.clone(),
                         process_exited,
                         now,
                         &mut last_claude_working_at,
@@ -1759,6 +1783,7 @@ impl PaneRuntime {
                             pane_id,
                             agent,
                             new_state,
+                            detection.activity.clone(),
                             visible_blocker,
                             visible_idle,
                             visible_working,
@@ -3046,6 +3071,7 @@ mod tests {
             pane_id,
             Some(Agent::Pi),
             AgentState::Idle,
+            None,
             false,
             false,
             false,
@@ -3085,6 +3111,7 @@ mod tests {
                 pane_id: delivered_pane,
                 agent: Some(Agent::Pi),
                 state: AgentState::Idle,
+                activity: None,
                 visible_blocker: false,
                 visible_idle: false,
                 visible_working: false,

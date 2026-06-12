@@ -156,6 +156,295 @@ pub(crate) fn run_worktree_command(command: &WorktreeCommand) -> Result<(), Stri
     })
 }
 
+/// Evidence-gated decision for deleting a worktree's local branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeMergeGate {
+    /// The branch's work is recorded elsewhere; deleting it is safe.
+    Merged { evidence: String },
+    /// No merge evidence found; only the checkout should be removed.
+    NotMerged,
+}
+
+fn run_command_capture(
+    program: &str,
+    args: &[&str],
+    cwd: Option<&std::path::Path>,
+) -> Result<String, String> {
+    let mut command = std::process::Command::new(program);
+    command.args(args);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let output = command.output().map_err(|err| err.to_string())?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("{program} failed with status {}", output.status)
+        } else {
+            stderr
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Main checkout root derived from a git common dir: "…/repo/.git" -> "…/repo";
+/// bare-style common dirs are returned unchanged (git -C works there too).
+pub(crate) fn main_root_from_common_dir(common_dir: &std::path::Path) -> std::path::PathBuf {
+    if common_dir.file_name().and_then(|name| name.to_str()) == Some(".git") {
+        common_dir
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| common_dir.to_path_buf())
+    } else {
+        common_dir.to_path_buf()
+    }
+}
+
+/// Branch checked out in `checkout`, if any (detached HEAD yields None).
+pub(crate) fn checkout_branch_name(checkout: &std::path::Path) -> Option<String> {
+    let path = checkout.to_string_lossy().to_string();
+    run_command_capture("git", &["-C", &path, "branch", "--show-current"], None)
+        .ok()
+        .filter(|branch| !branch.is_empty())
+}
+
+/// The repo's default branch: origin/HEAD when set, else main/master if present.
+pub(crate) fn detect_default_branch(repo_root: &std::path::Path) -> Option<String> {
+    let root = repo_root.to_string_lossy().to_string();
+    if let Ok(full) = run_command_capture(
+        "git",
+        &[
+            "-C",
+            &root,
+            "symbolic-ref",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+        None,
+    ) {
+        if let Some(branch) = full.strip_prefix("origin/") {
+            return Some(branch.to_string());
+        }
+    }
+    for candidate in ["main", "master"] {
+        let probe = format!("refs/heads/{candidate}");
+        if run_command_capture(
+            "git",
+            &["-C", &root, "show-ref", "--verify", "--quiet", &probe],
+            None,
+        )
+        .is_ok()
+        {
+            return Some(candidate.to_string());
+        }
+    }
+    None
+}
+
+/// GitHub PR state for a worktree branch, shown in the pane header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrState {
+    Open,
+    Draft,
+    Merged,
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrStateInfo {
+    pub state: PrState,
+    pub number: u64,
+}
+
+pub(crate) fn parse_pr_state_json(json: &str) -> Option<PrStateInfo> {
+    let value = serde_json::from_str::<serde_json::Value>(json).ok()?;
+    let number = value.get("number")?.as_u64()?;
+    let state = match value.get("state")?.as_str()? {
+        "OPEN" if value.get("isDraft").and_then(|v| v.as_bool()) == Some(true) => PrState::Draft,
+        "OPEN" => PrState::Open,
+        "MERGED" => PrState::Merged,
+        "CLOSED" => PrState::Closed,
+        _ => return None,
+    };
+    Some(PrStateInfo { state, number })
+}
+
+/// Query the PR for `branch` on the checkout's origin repo. Slow (network):
+/// only called from the background PR poller.
+pub(crate) fn query_pr_state(
+    repo_root: &std::path::Path,
+    checkout: &std::path::Path,
+    branch: &str,
+) -> Option<PrStateInfo> {
+    let root = repo_root.to_string_lossy().to_string();
+    let repo = run_command_capture("git", &["-C", &root, "remote", "get-url", "origin"], None)
+        .ok()
+        .as_deref()
+        .and_then(github_repo_from_remote_url)?;
+    let json = run_command_capture(
+        "gh",
+        &[
+            "pr",
+            "view",
+            branch,
+            "--repo",
+            &repo,
+            "--json",
+            "state,number,isDraft",
+        ],
+        Some(checkout),
+    )
+    .ok()?;
+    parse_pr_state_json(&json)
+}
+
+/// Parse "owner/repo" out of a github remote URL (ssh or https).
+fn github_repo_from_remote_url(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("git@github.com:")
+        .or_else(|| url.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| url.strip_prefix("https://github.com/"))
+        .or_else(|| url.strip_prefix("http://github.com/"))?;
+    let repo = rest.trim_end_matches('/').trim_end_matches(".git");
+    let mut parts = repo.splitn(3, '/');
+    let owner = parts.next()?;
+    let name = parts.next()?;
+    if owner.is_empty() || name.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some(format!("{owner}/{name}"))
+}
+
+/// gh matches PRs by branch NAME; commits added locally after the merge
+/// would not be covered by that evidence. Only accept it when the PR's head
+/// equals the local tip — otherwise fall through to the tip-exact checks.
+fn gh_pr_merged_evidence(
+    args: &[&str],
+    cwd: &std::path::Path,
+    local_tip: Option<&str>,
+) -> Option<String> {
+    let json = run_command_capture("gh", args, Some(cwd)).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&json).ok()?;
+    if value.get("state").and_then(|v| v.as_str()) != Some("MERGED") {
+        return None;
+    }
+    let head_oid = value.get("headRefOid").and_then(|v| v.as_str())?;
+    if local_tip != Some(head_oid) {
+        return None;
+    }
+    Some(match value.get("number").and_then(|v| v.as_u64()) {
+        Some(number) => format!("PR #{number} merged"),
+        None => "PR merged".to_string(),
+    })
+}
+
+/// PR-merged gate for deleting `branch`. Evidence sources, in order:
+/// 1. `gh pr view` with gh's own repo resolution, then pinned to the origin
+///    remote's repo (multi-remote checkouts resolve to upstream otherwise).
+/// 2. `git branch --merged <default-branch>`.
+/// 3. Remote containment: the branch tip is reachable from another pushed
+///    remote ref (e.g. merged into a feature branch) — the work is recorded,
+///    so deleting the local branch loses nothing.
+///    Anything inconclusive is NotMerged — deletion needs positive evidence.
+pub(crate) fn branch_merge_gate(
+    repo_root: &std::path::Path,
+    checkout: &std::path::Path,
+    branch: &str,
+) -> WorktreeMergeGate {
+    let root = repo_root.to_string_lossy().to_string();
+    let local_tip = run_command_capture("git", &["-C", &root, "rev-parse", branch], None).ok();
+    if let Some(evidence) = gh_pr_merged_evidence(
+        &["pr", "view", branch, "--json", "state,number,headRefOid"],
+        checkout,
+        local_tip.as_deref(),
+    ) {
+        return WorktreeMergeGate::Merged { evidence };
+    }
+    if let Some(repo) =
+        run_command_capture("git", &["-C", &root, "remote", "get-url", "origin"], None)
+            .ok()
+            .as_deref()
+            .and_then(github_repo_from_remote_url)
+    {
+        if let Some(evidence) = gh_pr_merged_evidence(
+            &[
+                "pr",
+                "view",
+                branch,
+                "--repo",
+                &repo,
+                "--json",
+                "state,number,headRefOid",
+            ],
+            checkout,
+            local_tip.as_deref(),
+        ) {
+            return WorktreeMergeGate::Merged { evidence };
+        }
+    }
+
+    if let Some(default_branch) = detect_default_branch(repo_root) {
+        if let Ok(merged) = run_command_capture(
+            "git",
+            &[
+                "-C",
+                &root,
+                "branch",
+                "--merged",
+                &default_branch,
+                "--format",
+                "%(refname:short)",
+            ],
+            None,
+        ) {
+            if merged.lines().any(|line| line.trim() == branch) {
+                return WorktreeMergeGate::Merged {
+                    evidence: format!("merged into {default_branch}"),
+                };
+            }
+        }
+    }
+
+    // Remote containment: any remote ref other than the branch's own
+    // tracking ref that contains the tip.
+    if let Ok(containing) = run_command_capture(
+        "git",
+        &[
+            "-C",
+            &root,
+            "branch",
+            "-r",
+            "--contains",
+            branch,
+            "--format",
+            "%(refname:short)",
+        ],
+        None,
+    ) {
+        let own_suffix = format!("/{branch}");
+        if let Some(remote_ref) = containing
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .find(|line| !line.ends_with(&own_suffix) && !line.contains("HEAD"))
+        {
+            return WorktreeMergeGate::Merged {
+                evidence: format!("contained in {remote_ref}"),
+            };
+        }
+    }
+
+    WorktreeMergeGate::NotMerged
+}
+
+/// `git branch -D <branch>` in `repo_root`. Only called once the merge gate
+/// produced positive evidence; -D because -d judges merges against the
+/// current HEAD, not the default branch.
+pub(crate) fn delete_local_branch(repo_root: &std::path::Path, branch: &str) -> Result<(), String> {
+    let root = repo_root.to_string_lossy().to_string();
+    run_command_capture("git", &["-C", &root, "branch", "-D", branch], None).map(|_| ())
+}
+
 pub(crate) fn parse_worktree_list_porcelain(output: &str) -> Vec<ExistingWorktree> {
     let mut entries = Vec::new();
     let mut path: Option<PathBuf> = None;
@@ -485,5 +774,211 @@ prunable stale
         assert!(!checkout.exists());
 
         let _ = std::fs::remove_dir_all(repo);
+    }
+    #[test]
+    fn checkout_branch_name_and_default_branch_detection() {
+        let repo = create_committed_repo("merge-gate-names");
+        let checkout = unique_temp_path("merge-gate-names-checkout");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "feature/gate",
+                checkout.to_str().unwrap(),
+            ],
+        );
+
+        assert_eq!(
+            checkout_branch_name(&checkout).as_deref(),
+            Some("feature/gate")
+        );
+        // create_committed_repo commits on the default init branch; detection
+        // falls back to main/master existence when origin/HEAD is unset.
+        let default = detect_default_branch(&repo);
+        assert!(
+            default.as_deref() == Some("master") || default.as_deref() == Some("main"),
+            "unexpected default branch: {default:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&checkout);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn branch_merge_gate_requires_positive_evidence() {
+        let repo = create_committed_repo("merge-gate-evidence");
+        let checkout = unique_temp_path("merge-gate-evidence-checkout");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "feature/unmerged",
+                checkout.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(checkout.join("new.txt"), "x\n").unwrap();
+        run_git(&checkout, &["add", "new.txt"]);
+        run_git(&checkout, &["commit", "--quiet", "-m", "feature work"]);
+
+        // Unmerged branch: no evidence (gh pr view fails in a remote-less repo).
+        assert_eq!(
+            branch_merge_gate(&repo, &checkout, "feature/unmerged"),
+            WorktreeMergeGate::NotMerged
+        );
+
+        // Merge it into the default branch: the git fallback now has evidence.
+        let default = detect_default_branch(&repo).expect("default branch");
+        run_git(&repo, &["merge", "--quiet", "feature/unmerged"]);
+        let gate = branch_merge_gate(&repo, &checkout, "feature/unmerged");
+        assert_eq!(
+            gate,
+            WorktreeMergeGate::Merged {
+                evidence: format!("merged into {default}")
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(&checkout);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn delete_local_branch_removes_merged_branch() {
+        let repo = create_committed_repo("merge-gate-delete");
+        run_git(&repo, &["branch", "feature/done"]);
+        delete_local_branch(&repo, "feature/done").expect("branch delete should succeed");
+        let out = std::process::Command::new("git")
+            .args([
+                "-C",
+                repo.to_str().unwrap(),
+                "branch",
+                "--list",
+                "feature/done",
+            ])
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).trim().is_empty());
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+    #[test]
+    fn github_repo_parses_ssh_and_https_remote_urls() {
+        assert_eq!(
+            github_repo_from_remote_url("git@github.com:gerchowl/herdr.git").as_deref(),
+            Some("gerchowl/herdr")
+        );
+        assert_eq!(
+            github_repo_from_remote_url("https://github.com/ogulcancelik/herdr").as_deref(),
+            Some("ogulcancelik/herdr")
+        );
+        assert_eq!(github_repo_from_remote_url("https://example.com/x/y"), None);
+        assert_eq!(github_repo_from_remote_url("git@github.com:broken"), None);
+    }
+
+    #[test]
+    fn branch_merge_gate_accepts_remote_containment_in_feature_branch() {
+        // origin bare repo; feature branch merged into a NON-default branch
+        // that is pushed — the containment fallback must accept it.
+        let origin = unique_temp_path("merge-gate-containment-origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        run_git(&origin, &["init", "--quiet", "--bare"]);
+
+        let repo = create_committed_repo("merge-gate-containment-repo");
+        run_git(
+            &repo,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        let default = detect_default_branch(&repo).expect("default branch");
+        run_git(&repo, &["push", "--quiet", "origin", &default]);
+
+        let checkout = unique_temp_path("merge-gate-containment-checkout");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "feature/float",
+                checkout.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(checkout.join("w.txt"), "w\n").unwrap();
+        run_git(&checkout, &["add", "w.txt"]);
+        run_git(&checkout, &["commit", "--quiet", "-m", "float work"]);
+        run_git(&checkout, &["push", "--quiet", "origin", "feature/float"]);
+
+        // Not merged anywhere else yet: own tracking ref must NOT count.
+        assert_eq!(
+            branch_merge_gate(&repo, &checkout, "feature/float"),
+            WorktreeMergeGate::NotMerged
+        );
+
+        // Merge into a pushed integration branch (not the default).
+        run_git(&repo, &["branch", "integration", &default]);
+        run_git(&repo, &["checkout", "--quiet", "integration"]);
+        run_git(&repo, &["merge", "--quiet", "feature/float"]);
+        run_git(&repo, &["push", "--quiet", "origin", "integration"]);
+        run_git(&repo, &["checkout", "--quiet", &default]);
+        run_git(&repo, &["fetch", "--quiet", "origin"]);
+
+        assert_eq!(
+            branch_merge_gate(&repo, &checkout, "feature/float"),
+            WorktreeMergeGate::Merged {
+                evidence: "contained in origin/integration".to_string()
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(&checkout);
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&origin);
+    }
+    #[test]
+    fn main_root_from_common_dir_strips_dot_git() {
+        assert_eq!(
+            main_root_from_common_dir(std::path::Path::new("/repo/herdr/.git")),
+            std::path::PathBuf::from("/repo/herdr")
+        );
+        assert_eq!(
+            main_root_from_common_dir(std::path::Path::new("/repo/bare.git")),
+            std::path::PathBuf::from("/repo/bare.git")
+        );
+    }
+    #[test]
+    fn pr_state_json_parses_all_states() {
+        assert_eq!(
+            parse_pr_state_json(r#"{"state":"OPEN","number":7,"isDraft":false}"#),
+            Some(PrStateInfo {
+                state: PrState::Open,
+                number: 7
+            })
+        );
+        assert_eq!(
+            parse_pr_state_json(r#"{"state":"OPEN","number":7,"isDraft":true}"#),
+            Some(PrStateInfo {
+                state: PrState::Draft,
+                number: 7
+            })
+        );
+        assert_eq!(
+            parse_pr_state_json(r#"{"state":"MERGED","number":5,"isDraft":false}"#),
+            Some(PrStateInfo {
+                state: PrState::Merged,
+                number: 5
+            })
+        );
+        assert_eq!(
+            parse_pr_state_json(r#"{"state":"CLOSED","number":2,"isDraft":false}"#),
+            Some(PrStateInfo {
+                state: PrState::Closed,
+                number: 2
+            })
+        );
+        assert_eq!(parse_pr_state_json("not json"), None);
+        assert_eq!(parse_pr_state_json(r#"{"state":"WEIRD","number":1}"#), None);
     }
 }

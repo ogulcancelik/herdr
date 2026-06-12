@@ -11,6 +11,13 @@
   git,
   apple-sdk ? null,
   cctools ? null,
+  # Build identity baked into `herdr status` / federation summaries:
+  # version renders as "<base>-<channel>.<id>" (src/build_info.rs). The
+  # flake passes the fork channel + short rev so every deployed build
+  # self-identifies — two fork builds are otherwise indistinguishable
+  # ("0.6.8" / proto N). null keeps the plain upstream version string.
+  buildChannel ? null,
+  buildId ? null,
 }:
 
 let
@@ -85,6 +92,12 @@ rustPlatform.buildRustPackage {
     LIBGHOSTTY_VT_SIMD = "true";
     LIBGHOSTTY_VT_ZIG_SYSTEM_DIR = zigDeps;
     ZIG = lib.getExe zig_0_15;
+  }
+  // lib.optionalAttrs (buildChannel != null) {
+    HERDR_BUILD_CHANNEL = buildChannel;
+  }
+  // lib.optionalAttrs (buildId != null) {
+    HERDR_BUILD_ID = buildId;
   }
   // lib.optionalAttrs stdenv.hostPlatform.isDarwin {
     SDKROOT = darwinSdkRoot;

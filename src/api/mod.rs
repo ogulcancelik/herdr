@@ -41,6 +41,8 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::PaneReportAgent(_)
             | Method::PaneReportAgentSession(_)
             | Method::PaneReportMetadata(_)
+            | Method::PaneSetHeaderField(_)
+            | Method::PaneClearHeaderField(_)
             | Method::PaneClearAgentAuthority(_)
             | Method::PaneReleaseAgent(_)
             | Method::PaneClose(_)
@@ -50,6 +52,10 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
 pub struct ApiRequestMessage {
     pub request: Request,
     pub respond_to: std::sync::mpsc::Sender<String>,
+    /// PID of the process on the other end of the API socket, when the
+    /// platform exposes it. Lets pane reports resolve by process ancestry
+    /// when their env-baked pane id has gone stale.
+    pub peer_pid: Option<u32>,
 }
 
 pub type ApiRequestSender = mpsc::UnboundedSender<ApiRequestMessage>;

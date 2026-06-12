@@ -7,6 +7,11 @@ pub struct GitSpaceMetadata {
     pub label: String,
     pub repo_root: PathBuf,
     pub is_linked_worktree: bool,
+    /// Machine-independent project identity: the normalized origin URL
+    /// (e.g. "github.com/owner/repo"), or a "dir:<name>" fallback when the
+    /// repo has no origin remote. Folds checkouts of the same project across
+    /// federated peer servers.
+    pub project_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,13 +87,64 @@ pub fn git_space_metadata(cwd: &Path) -> Option<GitSpaceMetadata> {
         .and_then(|name| name.to_str())
         .unwrap_or("repo")
         .to_string();
+    let project_key = project_key_for_common_dir(&info.git_common_dir, &label);
     Some(GitSpaceMetadata {
         key,
         checkout_key,
         label,
         repo_root: info.repo_root,
         is_linked_worktree: info.is_linked_worktree,
+        project_key,
     })
+}
+
+/// Machine-independent project key: normalized origin URL from the repo's
+/// git config, falling back to "dir:<label>" for origin-less repos.
+pub fn project_key_for_common_dir(git_common_dir: &Path, label: &str) -> String {
+    read_git_config_subsection_value(&git_common_dir.join("config"), "remote", "origin", "url")
+        .map(|url| normalize_git_remote_url(&url))
+        .unwrap_or_else(|| format!("dir:{label}"))
+}
+
+/// Normalize a git remote URL to a host/path identity that is stable across
+/// transports: scheme, credentials, port, a trailing ".git" and trailing
+/// slashes are stripped; the host is lowercased.
+/// `git@github.com:owner/Repo.git` == `https://GitHub.com/owner/Repo` ->
+/// `github.com/owner/Repo`.
+pub fn normalize_git_remote_url(url: &str) -> String {
+    let url = url.trim();
+    // URL form (ssh://, https://, git://, file://, ...): authority/path.
+    if let Some((_, rest)) = url.split_once("://") {
+        return match rest.split_once('/') {
+            Some((host, path)) => normalize_git_host_path(host, path),
+            None => normalize_git_host_path(rest, ""),
+        };
+    }
+    // scp-like form: [user@]host:path (host has no slashes; a single leading
+    // char before ':' is a Windows drive letter, i.e. a local path).
+    if let Some((host, path)) = url.split_once(':') {
+        if host.len() > 1 && !host.contains('/') {
+            return normalize_git_host_path(host, path);
+        }
+    }
+    // Local path remote: machine-specific, but keep a stable trimmed form.
+    url.trim_end_matches('/').trim_end_matches(".git").into()
+}
+
+fn normalize_git_host_path(host: &str, path: &str) -> String {
+    // Drop credentials and port from the authority.
+    let host = host.rsplit_once('@').map_or(host, |(_, host)| host);
+    let host = host.split_once(':').map_or(host, |(host, _)| host);
+    let host = host.to_ascii_lowercase();
+    let path = path
+        .trim_matches('/')
+        .trim_end_matches(".git")
+        .trim_end_matches('/');
+    if path.is_empty() {
+        host
+    } else {
+        format!("{host}/{path}")
+    }
 }
 
 pub(super) fn canonicalize_best_effort_path(path: &Path) -> PathBuf {
@@ -168,6 +224,46 @@ fn read_git_config_value(path: &Path, section: &str, key: &str) -> Option<String
         }
         if let Some(section_name) = simple_git_config_section(line) {
             in_section = section_name.eq_ignore_ascii_case(section);
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case(key) {
+            return Some(strip_git_config_comment(value).trim().to_string());
+        }
+    }
+    None
+}
+
+/// Read a key from a quoted-subsection git config section, e.g.
+/// `[remote "origin"] url = ...` via ("remote", "origin", "url").
+fn read_git_config_subsection_value(
+    path: &Path,
+    section: &str,
+    subsection: &str,
+    key: &str,
+) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let header = format!("{} \"{}\"", section.to_ascii_lowercase(), subsection);
+    let mut in_section = false;
+    for raw_line in contents.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.split_once(']')) {
+            // Section names are case-insensitive; subsection names are not.
+            let name = name.0.trim();
+            in_section = match name.split_once(char::is_whitespace) {
+                Some((base, rest)) => {
+                    format!("{} {}", base.to_ascii_lowercase(), rest.trim()) == header
+                }
+                None => false,
+            };
             continue;
         }
         if !in_section {
@@ -371,6 +467,96 @@ mod tests {
         let label = root.file_name().and_then(|name| name.to_str()).unwrap();
 
         assert_eq!(derive_label_from_cwd(Path::new(&root)), label);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn normalize_git_remote_url_folds_transport_variants() {
+        for url in [
+            "git@github.com:gerchowl/herdr.git",
+            "https://github.com/gerchowl/herdr.git",
+            "https://GitHub.com/gerchowl/herdr",
+            "ssh://git@github.com:22/gerchowl/herdr.git",
+            "git://github.com/gerchowl/herdr.git/",
+            "https://user:token@github.com/gerchowl/herdr.git",
+        ] {
+            assert_eq!(
+                normalize_git_remote_url(url),
+                "github.com/gerchowl/herdr",
+                "url: {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_git_remote_url_keeps_path_case_and_local_paths() {
+        assert_eq!(
+            normalize_git_remote_url("git@gitlab.psi.ch:Group/MyRepo.git"),
+            "gitlab.psi.ch/Group/MyRepo"
+        );
+        assert_eq!(
+            normalize_git_remote_url("/srv/git/herdr.git/"),
+            "/srv/git/herdr"
+        );
+        assert_eq!(
+            normalize_git_remote_url("C:\\repos\\herdr"),
+            "C:\\repos\\herdr"
+        );
+    }
+
+    #[test]
+    fn project_key_reads_origin_from_git_config() {
+        let root = temp_test_dir("project-key");
+        let git_dir = root.join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(
+            git_dir.join("config"),
+            "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = git@github.com:gerchowl/herdr.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            project_key_for_common_dir(&git_dir, "herdr"),
+            "github.com/gerchowl/herdr"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn project_key_falls_back_to_dir_label_without_origin() {
+        let root = temp_test_dir("project-key-no-origin");
+        let git_dir = root.join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(git_dir.join("config"), "[core]\n\tbare = false\n").unwrap();
+
+        assert_eq!(
+            project_key_for_common_dir(&git_dir, "scratch"),
+            "dir:scratch"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn read_subsection_value_ignores_other_remotes() {
+        let root = temp_test_dir("subsection-remotes");
+        let config = root.join("config");
+        std::fs::write(
+            &config,
+            "[remote \"upstream\"]\n\turl = git@github.com:ogulcancelik/herdr.git\n[Remote \"origin\"]\n\turl = git@github.com:gerchowl/herdr.git # fork\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_git_config_subsection_value(&config, "remote", "origin", "url").as_deref(),
+            Some("git@github.com:gerchowl/herdr.git")
+        );
+        assert_eq!(
+            read_git_config_subsection_value(&config, "remote", "missing", "url"),
+            None
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }

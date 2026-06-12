@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 mod agents;
 mod integrations;
 mod panes;
+pub(crate) mod peers;
 mod responses;
 mod tabs;
 mod workspaces;
@@ -16,6 +17,49 @@ use crate::events::AppEvent;
 enum RuntimeExitAction {
     RespawnShell,
     ClosePane,
+}
+
+/// One background `gh pr view` query of the 120s PR poll: a unique
+/// (repo, branch) pair plus every workspace its result applies to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrPollTarget {
+    workspace_ids: Vec<String>,
+    repo_root: std::path::PathBuf,
+    checkout: std::path::PathBuf,
+    branch: String,
+}
+
+/// PR-poll targets across ALL workspaces with a branch (#42) — linked
+/// worktrees AND primary/standalone checkouts (previously linked-only,
+/// which left most sidebar rows without PR state). Deduplicated by
+/// (repo root, branch) so shared checkouts cost one gh call per cycle.
+fn pr_poll_targets(state: &super::AppState) -> Vec<PrPollTarget> {
+    let mut targets: Vec<PrPollTarget> = Vec::new();
+    for ws in &state.workspaces {
+        let Some(branch) = ws.branch() else {
+            continue;
+        };
+        let (repo_root, checkout) = if let Some(space) = ws.worktree_space() {
+            (space.repo_root.clone(), space.checkout_path.clone())
+        } else if let Some(git) = ws.git_space() {
+            (git.repo_root.clone(), git.repo_root.clone())
+        } else {
+            continue;
+        };
+        match targets
+            .iter_mut()
+            .find(|target| target.repo_root == repo_root && target.branch == branch)
+        {
+            Some(target) => target.workspace_ids.push(ws.id.clone()),
+            None => targets.push(PrPollTarget {
+                workspace_ids: vec![ws.id.clone()],
+                repo_root,
+                checkout,
+                branch,
+            }),
+        }
+    }
+    targets
 }
 
 impl App {
@@ -44,9 +88,11 @@ impl App {
             } else {
                 self.last_git_remote_status_refresh = Instant::now();
             }
+            let adopted = self.state.adopt_external_worktrees();
             if self
                 .state
                 .apply_workspace_git_statuses(&self.terminal_runtimes, results)
+                || adopted
             {
                 self.render_dirty.store(true, Ordering::Release);
                 self.render_notify.notify_one();
@@ -64,7 +110,115 @@ impl App {
             return;
         }
 
+        if let AppEvent::PrStatePollDue = ev {
+            let targets = pr_poll_targets(&self.state);
+            if !targets.is_empty() {
+                let event_tx = self.event_tx.clone();
+                std::thread::spawn(move || {
+                    let results: Vec<_> = targets
+                        .into_iter()
+                        .flat_map(|target| {
+                            // One gh call per unique (repo, branch); the
+                            // result fans out to every workspace on it.
+                            let pr_state = crate::worktree::query_pr_state(
+                                &target.repo_root,
+                                &target.checkout,
+                                &target.branch,
+                            );
+                            target
+                                .workspace_ids
+                                .into_iter()
+                                .map(move |id| (id, pr_state))
+                        })
+                        .collect();
+                    let _ = event_tx.blocking_send(AppEvent::PrStatesUpdated(results));
+                });
+            }
+            return;
+        }
+
+        if let AppEvent::PrStatesUpdated(results) = ev {
+            let mut changed = false;
+            for (workspace_id, pr_state) in results {
+                if let Some(ws) = self
+                    .state
+                    .workspaces
+                    .iter_mut()
+                    .find(|ws| ws.id == workspace_id)
+                {
+                    if ws.pr_state != pr_state {
+                        ws.pr_state = pr_state;
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                self.render_dirty.store(true, Ordering::Release);
+                self.render_notify.notify_one();
+            }
+            return;
+        }
+
+        if let AppEvent::PeerPollDue = ev {
+            // One worker per peer: a hung host must not delay the others.
+            for peer in self.state.peers.clone() {
+                let event_tx = self.event_tx.clone();
+                std::thread::spawn(move || {
+                    let fetch = crate::peers::fetch_peer_summary(&peer);
+                    let _ = event_tx.blocking_send(AppEvent::PeerSummaryFetched(fetch));
+                });
+            }
+            return;
+        }
+
+        if let AppEvent::PeerSummaryFetched(fetch) = ev {
+            let Some(summary) = self
+                .state
+                .peer_summaries
+                .iter_mut()
+                .find(|summary| summary.peer == fetch.peer)
+            else {
+                // Peer was removed from config while the fetch was in flight.
+                return;
+            };
+            match fetch.result {
+                Ok(payload) => {
+                    summary.host = (!payload.host.is_empty()).then_some(payload.host);
+                    summary.version = payload.version;
+                    summary.system = payload.system;
+                    summary.latency_ms = Some(payload.latency_ms);
+                    summary.workspaces = payload.workspaces;
+                    summary.last_ok = Some(std::time::Instant::now());
+                    summary.error = None;
+                }
+                Err(error) => summary.error = Some(error),
+            }
+            self.render_dirty.store(true, Ordering::Release);
+            self.render_notify.notify_one();
+            return;
+        }
+
+        if let AppEvent::WorktreeKillGateFinished(result) = ev {
+            self.handle_worktree_kill_gate_finished(result);
+            return;
+        }
+
+        if let AppEvent::WorktreeBranchDeleteFinished(result) = ev {
+            self.handle_worktree_branch_delete_finished(result);
+            return;
+        }
+
         if let AppEvent::PaneDied { pane_id } = &ev {
+            // Floating panes live outside the workspace tree: when their
+            // process exits, reap the float here (this handler runs in both
+            // the App and headless event loops) and skip the workspace pane
+            // teardown below entirely.
+            if self.state.remove_float_for_pane(*pane_id) {
+                self.shutdown_detached_terminal_runtimes();
+                self.render_dirty.store(true, Ordering::Release);
+                self.render_notify.notify_one();
+                return;
+            }
             if self.runtime_exit_action(*pane_id) == RuntimeExitAction::RespawnShell
                 && self.respawn_shell_for_launch_pane(*pane_id)
             {
@@ -519,6 +673,7 @@ impl App {
                     },
                 }
             }
+            Method::PeersSummary(_) => return self.handle_peers_summary(request.id),
             Method::WorkspaceList(_) => return self.handle_workspace_list(request.id),
             Method::WorkspaceGet(target) => return self.handle_workspace_get(request.id, target),
             Method::WorkspaceCreate(params) => {
@@ -565,8 +720,17 @@ impl App {
             Method::PaneReportAgentSession(params) => {
                 return self.handle_pane_report_agent_session(request.id, params);
             }
+            Method::PaneReportPrompt(params) => {
+                return self.handle_pane_report_prompt(request.id, params);
+            }
             Method::PaneReportMetadata(params) => {
                 return self.handle_pane_report_metadata(request.id, params);
+            }
+            Method::PaneSetHeaderField(params) => {
+                return self.handle_pane_set_header_field(request.id, params);
+            }
+            Method::PaneClearHeaderField(params) => {
+                return self.handle_pane_clear_header_field(request.id, params);
             }
             Method::PaneClearAgentAuthority(params) => {
                 return self.handle_pane_clear_agent_authority(request.id, params);
@@ -611,6 +775,127 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "git init failed for {}", path.display());
+    }
+
+    #[tokio::test]
+    async fn peer_summary_fetch_merges_into_state() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut config = crate::config::Config::default();
+        config.peers = vec![crate::config::PeerConfig {
+            name: "anvil".into(),
+            ..Default::default()
+        }];
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        assert_eq!(app.state.peer_summaries.len(), 1);
+        assert!(app.state.peer_summaries[0].is_stale());
+
+        app.handle_internal_event(AppEvent::PeerSummaryFetched(
+            crate::peers::PeerSummaryFetch {
+                peer: "anvil".into(),
+                result: Ok(crate::peers::PeerSummaryPayload {
+                    host: "anvil-host".into(),
+                    version: Some("0.6.8".into()),
+                    system: Some(crate::api::schema::PeerSystemSummary {
+                        cpu_percent: Some(71),
+                        mem_used: Some(48_000_000_000),
+                        mem_total: Some(64_000_000_000),
+                        disk_free: Some(200_000_000_000),
+                    }),
+                    latency_ms: 34,
+                    workspaces: vec![crate::api::schema::PeerWorkspaceSummary {
+                        id: "ws_1".into(),
+                        workspace: "herdr".into(),
+                        project_key: Some("github.com/gerchowl/herdr".into()),
+                        project_label: Some("herdr".into()),
+                        branch: Some("fix/pty".into()),
+                        is_linked_worktree: true,
+                        agent: Some("cc".into()),
+                        status: crate::api::schema::AgentStatus::Blocked,
+                        status_age_secs: Some(840),
+                        activity: None,
+                    }],
+                }),
+            },
+        ));
+        let summary = &app.state.peer_summaries[0];
+        assert_eq!(summary.host.as_deref(), Some("anvil-host"));
+        assert_eq!(summary.version.as_deref(), Some("0.6.8"));
+        assert_eq!(summary.latency_ms, Some(34));
+        assert_eq!(
+            summary.system.as_ref().and_then(|s| s.cpu_percent),
+            Some(71)
+        );
+        assert_eq!(summary.workspaces.len(), 1);
+        assert!(!summary.is_stale());
+        assert!(summary.error.is_none());
+        assert_eq!(summary.reachability(), crate::peers::PeerReachability::Live);
+
+        // Errors keep the last good data but record the failure.
+        app.handle_internal_event(AppEvent::PeerSummaryFetched(
+            crate::peers::PeerSummaryFetch {
+                peer: "anvil".into(),
+                result: Err("ssh: connect timed out".into()),
+            },
+        ));
+        let summary = &app.state.peer_summaries[0];
+        assert_eq!(summary.workspaces.len(), 1);
+        assert_eq!(summary.error.as_deref(), Some("ssh: connect timed out"));
+
+        // Unknown peers (removed from config mid-flight) are ignored.
+        app.handle_internal_event(AppEvent::PeerSummaryFetched(
+            crate::peers::PeerSummaryFetch {
+                peer: "ghost".into(),
+                result: Err("nope".into()),
+            },
+        ));
+        assert_eq!(app.state.peer_summaries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn peers_summary_reports_workspace_project_and_status() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+
+        let mut workspace = crate::workspace::Workspace::test_new("herdr");
+        workspace.cached_git_branch = Some("feat/peer-federation".into());
+        workspace.cached_git_space = Some(crate::workspace::GitSpaceMetadata {
+            key: "/repo/herdr/.git".into(),
+            checkout_key: "/repo/herdr".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            is_linked_worktree: false,
+            project_key: "github.com/gerchowl/herdr".into(),
+        });
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(app.state.workspaces[0].tabs[0].root_pane)
+            .cloned()
+            .unwrap();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Claude);
+        terminal.state = AgentState::Blocked;
+        terminal.state_changed_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(90));
+
+        let response = app.handle_peers_summary("req_peers".into());
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let result = &value["result"];
+        assert!(result["host"].as_str().is_some_and(|h| !h.is_empty()));
+        let summary = &result["workspaces"][0];
+        assert_eq!(summary["workspace"], "herdr");
+        assert_eq!(summary["project_key"], "github.com/gerchowl/herdr");
+        assert_eq!(summary["project_label"], "herdr");
+        assert_eq!(summary["branch"], "feat/peer-federation");
+        assert_eq!(summary["status"], "blocked");
+        assert_eq!(summary["agent"], "cc");
+        assert!(summary["status_age_secs"].as_u64().unwrap() >= 90);
     }
 
     #[tokio::test]
@@ -676,6 +961,7 @@ mod tests {
             pane_id: root,
             agent: Some(Agent::Codex),
             state: AgentState::Working,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -686,6 +972,7 @@ mod tests {
             pane_id: root,
             agent: Some(Agent::Codex),
             state: AgentState::Idle,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -783,6 +1070,7 @@ mod tests {
             pane_id: root,
             agent: Some(Agent::Codex),
             state: AgentState::Working,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -803,6 +1091,7 @@ mod tests {
             pane_id: root,
             agent: Some(Agent::Codex),
             state: AgentState::Idle,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -814,5 +1103,101 @@ mod tests {
             app.state.toast.as_ref().map(|toast| toast.context.as_str()),
             Some("__herdr_original__ · 1")
         );
+    }
+    #[tokio::test]
+    async fn pr_states_updated_applies_to_matching_workspace() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("wt")];
+        let id = app.state.workspaces[0].id.clone();
+
+        app.handle_internal_event(crate::events::AppEvent::PrStatesUpdated(vec![(
+            id,
+            Some(crate::worktree::PrStateInfo {
+                state: crate::worktree::PrState::Merged,
+                number: 6,
+            }),
+        )]));
+
+        assert_eq!(
+            app.state.workspaces[0].pr_state(),
+            Some(crate::worktree::PrStateInfo {
+                state: crate::worktree::PrState::Merged,
+                number: 6,
+            })
+        );
+    }
+
+    /// The 120s PR poll covers ALL workspaces with a branch (#42): linked
+    /// worktrees, the primary checkout of a space, and standalone repos —
+    /// deduplicated to one gh call per (repo, branch).
+    #[test]
+    fn pr_poll_targets_cover_linked_primary_and_standalone_checkouts() {
+        use crate::workspace::{Workspace, WorktreeSpaceMembership};
+        let membership = |idx: usize, linked: bool, root: &str| WorktreeSpaceMembership {
+            key: root.into(),
+            label: "herdr".into(),
+            repo_root: root.into(),
+            checkout_path: format!("{root}/ws-{idx}").into(),
+            is_linked_worktree: linked,
+        };
+
+        let mut state = crate::app::state::AppState::test_new();
+        // Linked worktree member.
+        let mut linked = Workspace::test_new("linked");
+        linked.worktree_space = Some(membership(1, true, "/repo/herdr"));
+        linked.cached_git_branch = Some("feat/a".into());
+        // Primary (non-linked) checkout of the same space.
+        let mut primary = Workspace::test_new("primary");
+        primary.worktree_space = Some(membership(0, false, "/repo/herdr"));
+        primary.cached_git_branch = Some("master".into());
+        // Standalone repo: no worktree space, only live git metadata.
+        let mut standalone = Workspace::test_new("solo");
+        standalone.cached_git_space = Some(crate::workspace::GitSpaceMetadata {
+            key: "/repo/solo/.git".into(),
+            checkout_key: "/repo/solo".into(),
+            label: "solo".into(),
+            repo_root: "/repo/solo".into(),
+            is_linked_worktree: false,
+            project_key: "github.com/g/solo".into(),
+        });
+        standalone.cached_git_branch = Some("main".into());
+        // Second workspace on the SAME standalone repo+branch: dedupes into
+        // the standalone target instead of a second gh call.
+        let mut duplicate = Workspace::test_new("solo-2");
+        duplicate.cached_git_space = standalone.cached_git_space.clone();
+        duplicate.cached_git_branch = Some("main".into());
+        // No branch -> never polled.
+        let branchless = Workspace::test_new("scratch");
+
+        let ids: Vec<String> = [&linked, &primary, &standalone, &duplicate]
+            .map(|ws| ws.id.clone())
+            .to_vec();
+        state.workspaces = vec![linked, primary, standalone, duplicate, branchless];
+
+        let targets = pr_poll_targets(&state);
+
+        assert_eq!(targets.len(), 3, "{targets:?}");
+        assert_eq!(targets[0].workspace_ids, vec![ids[0].clone()]);
+        assert_eq!(targets[0].branch, "feat/a");
+        assert_eq!(
+            targets[0].checkout,
+            std::path::PathBuf::from("/repo/herdr/ws-1")
+        );
+        assert_eq!(targets[1].workspace_ids, vec![ids[1].clone()]);
+        assert_eq!(targets[1].branch, "master");
+        // The standalone pair shares one query; both ids ride its result.
+        assert_eq!(
+            targets[2].workspace_ids,
+            vec![ids[2].clone(), ids[3].clone()]
+        );
+        assert_eq!(targets[2].repo_root, std::path::PathBuf::from("/repo/solo"));
+        assert_eq!(targets[2].checkout, std::path::PathBuf::from("/repo/solo"));
     }
 }

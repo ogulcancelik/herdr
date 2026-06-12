@@ -16,6 +16,20 @@ pub struct WorktreeAddResult {
 }
 
 #[derive(Debug)]
+pub struct WorktreeKillGateResult {
+    pub workspace_id: String,
+    pub path: std::path::PathBuf,
+    pub branch: Option<String>,
+    pub gate: crate::worktree::WorktreeMergeGate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeBranchDeleteResult {
+    pub branch: String,
+    pub result: Result<(), String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeRemoveResult {
     pub workspace_id: String,
     pub path: std::path::PathBuf,
@@ -26,17 +40,48 @@ pub struct WorktreeRemoveResult {
 #[derive(Debug)]
 pub enum AppEvent {
     /// A pane's child process exited.
-    PaneDied { pane_id: PaneId },
+    PaneDied {
+        pane_id: PaneId,
+    },
     /// Fallback detector state changed in a pane.
     StateChanged {
         pane_id: PaneId,
         agent: Option<Agent>,
         state: AgentState,
+        /// Free-text activity from the agent's status line while Working.
+        activity: Option<String>,
         visible_blocker: bool,
         visible_idle: bool,
         visible_working: bool,
         process_exited: bool,
         observed_at: Instant,
+    },
+    /// Periodic machine metrics snapshot for the global status line.
+    SystemStatsUpdated(crate::system_stats::SystemStats),
+    /// The slow PR-state poll interval elapsed; collect targets and query gh.
+    PrStatePollDue,
+    /// Background gh results: per-workspace PR state for worktree branches.
+    PrStatesUpdated(Vec<(String, Option<crate::worktree::PrStateInfo>)>),
+    /// The peer-summary poll interval elapsed; spawn SSH fetches per peer.
+    PeerPollDue,
+    /// Background SSH result: one peer's federated summary (or error).
+    PeerSummaryFetched(crate::peers::PeerSummaryFetch),
+    /// A user prompt submitted to an agent pane (integration hook report).
+    HookPromptReported {
+        pane_id: PaneId,
+        prompt: String,
+    },
+    /// A session promoted (or refreshed) a header field for its own pane.
+    PaneHeaderFieldSet {
+        pane_id: PaneId,
+        key: String,
+        value: String,
+        ttl: Option<std::time::Duration>,
+    },
+    /// A session cleared one of its pane's promoted header fields.
+    PaneHeaderFieldCleared {
+        pane_id: PaneId,
+        key: String,
     },
     /// Hook-authoritative agent state was reported for a pane.
     HookStateReported {
@@ -95,7 +140,9 @@ pub enum AppEvent {
     },
     /// A pane child emitted a valid OSC 52 clipboard write. The main loop
     /// re-emits it through herdr's own clipboard writer.
-    ClipboardWrite { content: Vec<u8> },
+    ClipboardWrite {
+        content: Vec<u8>,
+    },
     /// Background git status refresh completed for workspaces.
     GitStatusRefreshed {
         results: Vec<WorkspaceGitStatus>,
@@ -105,4 +152,6 @@ pub enum AppEvent {
     WorktreeAddFinished(WorktreeAddResult),
     /// Background `git worktree remove` completed.
     WorktreeRemoveFinished(WorktreeRemoveResult),
+    WorktreeKillGateFinished(WorktreeKillGateResult),
+    WorktreeBranchDeleteFinished(WorktreeBranchDeleteResult),
 }

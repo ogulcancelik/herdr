@@ -596,11 +596,23 @@ pub(crate) fn handle_resize_key(state: &mut AppState, raw_key: TerminalKey) {
 }
 
 pub(super) fn open_confirm_close(state: &mut AppState) {
+    state.confirm_close_whole_space = false;
+    state.mode = Mode::ConfirmClose;
+}
+
+/// Confirm-close for the whole-space affordance (#62): on accept, close every
+/// member of the selected workspace's space.
+pub(super) fn open_confirm_close_space(state: &mut AppState) {
+    state.confirm_close_whole_space = true;
     state.mode = Mode::ConfirmClose;
 }
 
 pub(super) fn confirm_close_accept(state: &mut AppState) {
-    state.close_selected_workspace();
+    if std::mem::take(&mut state.confirm_close_whole_space) {
+        state.close_selected_space();
+    } else {
+        state.close_selected_workspace();
+    }
     if state.workspaces.is_empty() {
         state.mode = Mode::Navigate;
     } else {
@@ -609,6 +621,7 @@ pub(super) fn confirm_close_accept(state: &mut AppState) {
 }
 
 pub(super) fn confirm_close_cancel(state: &mut AppState) {
+    state.confirm_close_whole_space = false;
     state.mode = Mode::Navigate;
 }
 
@@ -636,6 +649,10 @@ pub(super) fn apply_context_menu_action(
             state.request_remove_linked_worktree = Some(ws_idx);
             leave_modal(state);
         }
+        (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("Kill worktree & branch...")) => {
+            state.request_kill_worktree = Some(ws_idx);
+            leave_modal(state);
+        }
         (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("Open worktree...")) => {
             state.request_open_existing_worktree = Some(ws_idx);
             leave_modal(state);
@@ -646,11 +663,11 @@ pub(super) fn apply_context_menu_action(
             },
             Some("Collapse" | "Expand"),
         ) => {
-            if let Some(key) = state
-                .workspaces
-                .get(ws_idx)
-                .and_then(|ws| ws.worktree_space())
-                .map(|space| space.key.clone())
+            // Collapse operates on the project-section key (#33) — the same
+            // identity the sidebar groups and persists by.
+            if let Some(key) = (ws_idx < state.workspaces.len())
+                .then(|| state.project_section_key(ws_idx))
+                .flatten()
             {
                 if collapsed {
                     state.collapsed_space_keys.remove(&key);
@@ -669,13 +686,25 @@ pub(super) fn apply_context_menu_action(
         }
         (
             ContextMenuKind::Workspace { ws_idx } | ContextMenuKind::GitWorkspace { ws_idx, .. },
-            Some("Close" | "Close group"),
+            Some("Close"),
         ) => {
             state.selected = ws_idx;
             if state.confirm_close {
                 open_confirm_close(state);
             } else {
                 state.close_selected_workspace();
+                state.mode = Mode::Navigate;
+            }
+        }
+        // "Close group" is the close-WHOLE-space affordance (#62): it lives on
+        // the space-row (group head) context menu and closes every member,
+        // unlike plain "Close" which now closes only the selected workspace.
+        (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("Close group")) => {
+            state.selected = ws_idx;
+            if state.confirm_close {
+                open_confirm_close_space(state);
+            } else {
+                state.close_selected_space();
                 state.mode = Mode::Navigate;
             }
         }
@@ -740,6 +769,18 @@ pub(super) fn apply_context_menu_action(
                     Mode::Navigate
                 };
             }
+        }
+        // Per-server spaces filter (#46): transient view state, never
+        // persisted — so no mark_session_dirty here.
+        (ContextMenuKind::Server { filter, .. }, Some("Show only this server")) => {
+            state.server_filter = Some(filter);
+            state.workspace_scroll = 0;
+            leave_modal(state);
+        }
+        (ContextMenuKind::Server { .. }, Some("Show all servers")) => {
+            state.server_filter = None;
+            state.workspace_scroll = 0;
+            leave_modal(state);
         }
         _ => leave_modal(state),
     }
@@ -1304,5 +1345,54 @@ mod tests {
         assert_eq!(state.selected, 0);
         assert_eq!(state.mode, Mode::ConfirmClose);
         assert_eq!(state.workspaces.len(), 2);
+    }
+
+    #[test]
+    fn server_context_menu_replaces_or_clears_an_existing_filter() {
+        use crate::app::state::ServerFilter;
+        let mut state = state_with_workspaces(&["main"]);
+        state.active = Some(0);
+        state.server_filter = Some(ServerFilter::Local);
+        let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+
+        fn server_menu(
+            filter: ServerFilter,
+            is_filtered: bool,
+            any_filter: bool,
+        ) -> ContextMenuState {
+            ContextMenuState {
+                kind: ContextMenuKind::Server {
+                    filter,
+                    is_filtered,
+                    any_filter,
+                },
+                x: 0,
+                y: 0,
+                list: MenuListState::new(0),
+            }
+        }
+        let peer_filter = ServerFilter::Peer {
+            ssh_target: "lars@anvil".into(),
+        };
+
+        // Another row's menu while a filter is active: both the narrowing
+        // and the clear are offered.
+        let peer_menu = server_menu(peer_filter.clone(), false, true);
+        assert_eq!(
+            peer_menu.items(),
+            &["Show only this server", "Show all servers"]
+        );
+
+        // Item 0 replaces the active filter with this row's.
+        apply_context_menu_action(&mut state, &mut terminal_runtimes, peer_menu, 0);
+        assert_eq!(state.server_filter, Some(peer_filter.clone()));
+        assert_eq!(state.workspace_scroll, 0);
+        assert_eq!(state.mode, Mode::Terminal);
+
+        // The filtered row itself only offers the clear.
+        let active_menu = server_menu(peer_filter, true, true);
+        assert_eq!(active_menu.items(), &["Show all servers"]);
+        apply_context_menu_action(&mut state, &mut terminal_runtimes, active_menu, 0);
+        assert_eq!(state.server_filter, None);
     }
 }

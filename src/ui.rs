@@ -1,12 +1,15 @@
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::Span,
     Frame,
 };
 
 mod dialogs;
+mod float;
+mod grammar;
 mod keybind_help;
+mod medallion;
 mod menus;
 mod mobile;
 mod navigator;
@@ -16,6 +19,7 @@ mod release_notes;
 mod scrollbar;
 mod settings;
 mod sidebar;
+pub(crate) mod state_signal;
 mod status;
 mod tabs;
 mod widgets;
@@ -24,6 +28,8 @@ use self::dialogs::{
     render_confirm_close_overlay, render_new_linked_worktree_overlay,
     render_open_existing_worktree_overlay, render_remove_worktree_overlay, render_rename_overlay,
 };
+pub(crate) use self::float::float_overlay_inner_rect;
+use self::float::{render_float_overlay, resize_float_runtime};
 use self::keybind_help::render_keybind_help_overlay;
 use self::menus::{
     render_context_menu, render_copy_mode_overlay, render_global_launcher_menu,
@@ -51,7 +57,7 @@ pub(crate) use self::scrollbar::{
 use self::settings::render_settings_overlay;
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
 use self::status::{
-    render_config_diagnostic, render_copy_feedback, render_toast_notification,
+    render_config_diagnostic, render_copy_feedback, render_status_line, render_toast_notification,
     toast_notification_rect,
 };
 use self::tabs::render_tab_bar;
@@ -66,14 +72,19 @@ pub(crate) use self::{
     settings::{settings_button_rects, settings_show_primary_action},
     sidebar::{
         agent_panel_body_rect, agent_panel_entries, agent_panel_scroll_metrics,
-        agent_panel_scrollbar_rect, agent_panel_toggle_rect, collapsed_sidebar_sections,
-        collapsed_sidebar_toggle_rect, compute_workspace_card_areas, expanded_sidebar_sections,
-        expanded_sidebar_toggle_rect, normalized_workspace_scroll, sidebar_section_divider_rect,
-        workspace_drop_indicator_row, workspace_list_entries, workspace_list_rect,
+        agent_panel_scrollbar_rect, collapsed_sidebar_sections, collapsed_sidebar_toggle_rect,
+        compute_workspace_card_areas, expanded_sidebar_sections, expanded_sidebar_toggle_rect,
+        normalized_workspace_scroll, server_band_slot_at, servers_section_height,
+        sidebar_menu_row_rect, sidebar_section_divider_rect, workspace_drop_indicator_row,
+        workspace_list_body_rect, workspace_list_entries, workspace_list_rect,
         workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
-        WorkspaceListEntry,
+        WorkspaceListEntry, SIDEBAR_MENU_BAND_ROWS,
     },
 };
+// The scope-label rects are only consulted by hit-area tests now that the
+// whole header row toggles (#41); rendering uses them inside `ui::sidebar`.
+#[cfg(test)]
+pub(crate) use self::sidebar::{agent_panel_toggle_rect, panel_scope_toggle_rect};
 pub(crate) use self::{
     keybind_help::keybind_help_lines,
     mobile::{
@@ -81,7 +92,7 @@ pub(crate) use self::{
         mobile_switcher_workspace_doc_range, MobileSwitcherTarget,
     },
     panes::pane_is_scrolled_back,
-    tabs::compute_tab_bar_view,
+    tabs::{compute_member_strip_view, compute_tab_bar_view},
     widgets::{centered_popup_rect, modal_stack_areas},
 };
 use crate::app::state::ViewLayout;
@@ -184,21 +195,35 @@ fn compute_view_internal(
             .clamp(app.sidebar_min_width, app.sidebar_max_width)
     };
 
-    let [sidebar_area, main_area] =
-        Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Min(1)]).areas(area);
+    // Symmetric breathing room around the sidebar/pane divider: the divider stays
+    // the last column of `sidebar_area`, with `pane_gap` blank columns inside it
+    // (between content and divider) and another `pane_gap` columns before the panes.
+    let pane_gap = app.sidebar_pane_gap;
+    let [sidebar_area, _divider_gap, main_area] = Layout::horizontal([
+        Constraint::Length(sidebar_w + pane_gap),
+        Constraint::Length(pane_gap),
+        Constraint::Min(1),
+    ])
+    .areas(area);
 
+    let status_rows = u16::from(app.status_line && main_area.height > 4);
     let has_tabs = app.active.and_then(|i| app.workspaces.get(i)).is_some();
-    let (tab_bar_rect, terminal_area) = if has_tabs && main_area.height > 1 {
-        let [tab_bar_rect, terminal_area] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(main_area);
-        (tab_bar_rect, terminal_area)
+    let (status_line_rect, tab_bar_rect, terminal_area) = if has_tabs && main_area.height > 1 {
+        let [status_line_rect, tab_bar_rect, terminal_area] = Layout::vertical([
+            Constraint::Length(status_rows),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .areas(main_area);
+        (status_line_rect, tab_bar_rect, terminal_area)
     } else {
-        (Rect::default(), main_area)
+        (Rect::default(), Rect::default(), main_area)
     };
 
     if !app.sidebar_collapsed {
         app.workspace_scroll = normalized_workspace_scroll(app, sidebar_area, app.workspace_scroll);
-        let (_, detail_area) = expanded_sidebar_sections(sidebar_area, app.sidebar_section_split);
+        let (_, detail_area) =
+            expanded_sidebar_sections(sidebar_area, app.sidebar_section_split, pane_gap);
         let max_agent_scroll = agent_panel_scroll_metrics(app, detail_area).max_offset_from_bottom;
         app.agent_panel_scroll = app.agent_panel_scroll.min(max_agent_scroll);
     } else {
@@ -208,25 +233,41 @@ fn compute_view_internal(
         app.agent_panel_scroll = 0;
     }
 
-    let workspace_card_areas = if app.sidebar_collapsed {
-        Vec::new()
+    let (workspace_card_areas, remote_card_areas) = if app.sidebar_collapsed {
+        (Vec::new(), Vec::new())
     } else {
-        compute_workspace_card_areas(app, sidebar_area)
+        crate::ui::sidebar::compute_workspace_list_areas(app, sidebar_area)
+    };
+    let (servers_header_rect, server_card_areas) = if app.sidebar_collapsed {
+        (Rect::default(), Vec::new())
+    } else {
+        crate::ui::sidebar::compute_server_section_areas(app, sidebar_area)
     };
 
-    let tab_bar_view = app
-        .active
-        .and_then(|i| app.workspaces.get(i))
-        .map(|ws| {
-            compute_tab_bar_view(
-                ws,
-                tab_bar_rect,
-                app.tab_scroll,
-                app.tab_scroll_follow_active,
-                app.mouse_capture,
-            )
-        })
-        .unwrap_or_default();
+    // #33: workspace tab-mode lays the strip out over the active session's
+    // project-group members; tabs mode keeps the per-workspace tab layout.
+    let tab_bar_view = if app.tab_strip_shows_members() {
+        compute_member_strip_view(
+            app,
+            tab_bar_rect,
+            app.tab_scroll,
+            app.tab_scroll_follow_active,
+            app.mouse_capture,
+        )
+    } else {
+        app.active
+            .and_then(|i| app.workspaces.get(i))
+            .map(|ws| {
+                compute_tab_bar_view(
+                    ws,
+                    tab_bar_rect,
+                    app.tab_scroll,
+                    app.tab_scroll_follow_active,
+                    app.mouse_capture,
+                )
+            })
+            .unwrap_or_default()
+    };
     app.tab_scroll = tab_bar_view.scroll;
 
     let split_borders = app
@@ -249,6 +290,7 @@ fn compute_view_internal(
             terminal_area,
             cell_size,
         );
+        resize_float_runtime(app, terminal_runtimes, terminal_area, cell_size);
     }
 
     let toast_hit_area = app
@@ -261,7 +303,11 @@ fn compute_view_internal(
         layout: ViewLayout::Desktop,
         sidebar_rect: sidebar_area,
         workspace_card_areas,
+        remote_card_areas,
+        server_card_areas,
+        servers_header_rect,
         tab_bar_rect,
+        status_line_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
         tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
         tab_scroll_right_hit_area: tab_bar_view.scroll_right_hit_area,
@@ -317,6 +363,7 @@ fn compute_mobile_view(
             terminal_area,
             cell_size,
         );
+        resize_float_runtime(app, terminal_runtimes, terminal_area, cell_size);
     }
     let header_hits = compute_mobile_header_hit_areas(app, header_rect);
 
@@ -330,7 +377,11 @@ fn compute_mobile_view(
         layout: ViewLayout::Mobile,
         sidebar_rect: Rect::default(),
         workspace_card_areas: Vec::new(),
+        remote_card_areas: Vec::new(),
+        server_card_areas: Vec::new(),
+        servers_header_rect: Rect::default(),
         tab_bar_rect: Rect::default(),
+        status_line_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
         tab_scroll_left_hit_area: Rect::default(),
         tab_scroll_right_hit_area: Rect::default(),
@@ -360,6 +411,23 @@ pub fn render_with_runtime_registry(
     let tab_bar_area = app.view.tab_bar_rect;
     let terminal_area = app.view.terminal_area;
 
+    // Chrome background: when the theme defines a panel color, the sidebar and
+    // status line paint it (like the tab bar) so the chrome frames the
+    // terminal field as one tone — otherwise they'd show the host terminal's
+    // default background through. Themes with panel_bg = Reset keep the
+    // transparent chrome.
+    if app.palette.panel_bg != Color::Reset && app.view.layout != ViewLayout::Mobile {
+        let chrome = Style::default().bg(app.palette.panel_bg);
+        let buf = frame.buffer_mut();
+        for rect in [sidebar_area, app.view.status_line_rect] {
+            for y in rect.y..rect.y.saturating_add(rect.height) {
+                for x in rect.x..rect.x.saturating_add(rect.width) {
+                    buf[(x, y)].set_style(chrome);
+                }
+            }
+        }
+    }
+
     if app.view.layout == ViewLayout::Mobile {
         render_mobile_header(app, terminal_runtimes, frame, app.view.mobile_header_rect);
     } else if app.sidebar_collapsed {
@@ -369,11 +437,16 @@ pub fn render_with_runtime_registry(
     }
     if app.view.layout != ViewLayout::Mobile {
         render_tab_bar(app, frame, tab_bar_area);
+        render_status_line(app, frame, app.view.status_line_rect);
     }
     render_panes(app, terminal_runtimes, frame, terminal_area);
 
     // Ambient notifications sit above panes, but below interactive overlays.
     render_notifications(app, frame, terminal_area);
+
+    // The ephemeral float paints above the pane field and notifications but
+    // below the modal overlays (rendered as a post-pass: no Mode variant).
+    render_float_overlay(app, terminal_runtimes, frame, terminal_area);
 
     match app.mode {
         Mode::Onboarding => render_onboarding_overlay(app, frame, frame.area()),
@@ -412,6 +485,16 @@ fn render_notifications(app: &AppState, frame: &mut Frame, terminal_area: Rect) 
         render_config_diagnostic(frame, terminal_area, message, &app.palette);
     }
     let mut copy_feedback_offset = u16::from(has_config_diagnostic);
+    if let Some(notice) = &app.action_notice {
+        self::status::render_action_notice(
+            frame,
+            terminal_area,
+            copy_feedback_offset,
+            notice,
+            &app.palette,
+        );
+        copy_feedback_offset += 1;
+    }
     if let Some(toast) = &app.toast {
         if app.view.layout == ViewLayout::Mobile {
             render_mobile_toast_banner(
@@ -646,11 +729,64 @@ mod tests {
         terminal.draw(|frame| render(&app, frame)).unwrap();
         let buffer = terminal.backend().buffer();
 
-        let (ws_area, _, _) = collapsed_sidebar_sections(app.view.sidebar_rect);
+        let (ws_area, _, _) =
+            collapsed_sidebar_sections(app.view.sidebar_rect, app.sidebar_pane_gap);
         let active_row = ws_area.y + 1;
         let active_style = buffer[(ws_area.x, active_row)].style();
 
         assert_eq!(active_style.bg, Some(app.palette.surface_dim));
+    }
+
+    #[test]
+    fn servers_band_renders_self_row_first_with_two_line_peers() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        let mut peer = crate::peers::PeerSummaryState::new(&crate::config::PeerConfig {
+            name: "anvil".into(),
+            ..Default::default()
+        });
+        peer.host = Some("anvil".into());
+        peer.last_ok = Some(std::time::Instant::now());
+        peer.latency_ms = Some(34);
+        app.peer_summaries = vec![peer];
+        app.system_stats = Some(crate::system_stats::SystemStats {
+            cpu_percent: Some(42.0),
+            ..Default::default()
+        });
+
+        let area = Rect::new(0, 0, 80, 30);
+        compute_view(&mut app, area);
+
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let header = app.view.servers_header_rect;
+        assert_ne!(header, Rect::default());
+        assert!(buffer_row_text(buffer, header, header.y).contains("servers"));
+
+        // The local server anchors the band: first row, marked as current,
+        // with the status line's health glyphs on its second line.
+        let self_title = buffer_row_text(buffer, header, header.y + 1);
+        assert!(
+            self_title.contains(&crate::app::short_host_name()),
+            "{self_title}"
+        );
+        let self_health = buffer_row_text(buffer, header, header.y + 2);
+        assert!(self_health.contains("\u{f0ee0}  42%"), "{self_health}");
+
+        // The peer renders below on its two-line hit-area; the self rows
+        // above it carry no card, so clicking them stays a no-op.
+        let card = &app.view.server_card_areas[0];
+        assert_eq!(card.rect.y, header.y + 3);
+        assert_eq!(card.rect.height, 2);
+        let peer_title = buffer_row_text(buffer, card.rect, card.rect.y);
+        assert!(peer_title.contains("anvil"), "{peer_title}");
+        assert!(peer_title.contains("34ms"), "{peer_title}");
     }
 
     #[test]
@@ -678,13 +814,18 @@ mod tests {
         terminal.draw(|frame| render(&app, frame)).unwrap();
         let buffer = terminal.backend().buffer();
 
+        // Single-line member row (#62): ` <icon> <server>:<target>`, no row
+        // number (switch_space is unbound by default). The custom name "one"
+        // is the target half of the uniform <server>:<target> grammar.
         let card = app.view.workspace_card_areas[0].rect;
+        assert_eq!(card.height, 1);
         let line1 = buffer_row_text(buffer, card, card.y);
-        let line2 = buffer_row_text(buffer, card, card.y + 1);
 
-        assert!(line1.starts_with(" · one"));
-        assert!(!line1.contains("1 one"));
-        assert_eq!(line2, "   main");
+        // State icon leads the name, before the <server>:one label.
+        assert!(line1.trim_start().contains(":one"), "{line1}");
+        assert!(line1.contains("one"), "{line1}");
+        // No leading row number on the member row.
+        assert!(!line1.contains("1 "), "{line1}");
 
         std::fs::remove_dir_all(repo).ok();
     }
@@ -745,6 +886,60 @@ mod tests {
         assert_eq!(custom_style.bg, Some(app.palette.accent));
         assert_eq!(custom_style.fg, Some(app.palette.surface_dim));
         assert!(custom_style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn sidebar_and_status_line_paint_panel_bg_chrome() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.palette.panel_bg = Color::Rgb(46, 50, 58);
+        app.workspaces = vec![Workspace::test_new("test")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let sb = app.view.sidebar_rect;
+        assert_eq!(
+            buffer[(sb.x, sb.y + sb.height - 1)].style().bg,
+            Some(app.palette.panel_bg),
+            "sidebar bottom-left cell carries the chrome bg"
+        );
+        let sl = app.view.status_line_rect;
+        assert_eq!(
+            buffer[(sl.x + sl.width - 1, sl.y)].style().bg,
+            Some(app.palette.panel_bg),
+            "status line right edge carries the chrome bg"
+        );
+    }
+
+    #[test]
+    fn chrome_stays_transparent_when_panel_bg_resets() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.palette.panel_bg = Color::Reset;
+        app.workspaces = vec![Workspace::test_new("test")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let sb = app.view.sidebar_rect;
+        let bg = buffer[(sb.x, sb.y + sb.height - 1)].style().bg;
+        assert!(
+            bg.is_none() || bg == Some(Color::Reset),
+            "reset-panel themes keep the transparent chrome, got {bg:?}"
+        );
     }
 
     #[test]
@@ -854,6 +1049,7 @@ mod tests {
             rect: Rect::new(0, 0, 12, 8),
             inner_rect: Rect::new(1, 1, 9, 6),
             scrollbar_rect: Some(Rect::new(10, 1, 1, 6)),
+            header_rect: None,
             is_focused: true,
         };
 

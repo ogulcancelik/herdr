@@ -1,0 +1,66 @@
+# Governance gates, run by `prek` (pre-commit compatible). Tooling comes from
+# the guardrails devShell (flake.nix → lib.mkDevShell), so every `entry` is on
+# PATH. Installed automatically by the devShell shellHook; manually via
+# `just install-hooks`.
+#
+# Rollout status: all three agent-drift gates are now HARD gates. herdr's source
+# is clean of real stubs and debug spew; the few flagged lines are legitimate CLI
+# output (allowlisted via GUARDRAILS_OUTPUT_GLOBS) or doc-comment prose/examples
+# (annotated `guardrails-ok`). Per-line escape hatch anywhere: `guardrails-ok`.
+default_install_hook_types: [pre-commit, commit-msg]
+repos:
+  - repo: local
+    hooks:
+      # --- agent-drift gates (hard) --------------------------------------------
+      - id: no-fake-impl
+        name: "no fake/placeholder implementations"
+        entry: guardrails-no-fake-impl
+        language: system
+        pass_filenames: true
+      # Promoted to a hard gate: herdr already has a tracing facade, and the only
+      # println/eprintln left are legitimate CLI/UX output, allowlisted below as
+      # output surfaces. A stray dbg!/print!/println! in app or library code is a
+      # real leftover and blocks. Escape any one line with `guardrails-ok`.
+      - id: no-debug-leftovers
+        name: "no debug-print leftovers — use the tracing facade"
+        entry: env GUARDRAILS_OUTPUT_GLOBS=*/cli/*:*/cli.rs:*/update.rs:*/remote.rs:*/server/headless.rs:*/client/mod.rs:*/integration/mod.rs:scripts/*:vendor/* guardrails-no-debug-leftovers
+        language: system
+        pass_filenames: true
+      - id: no-commented-code
+        name: "no commented-out code"
+        entry: guardrails-no-commented-code
+        language: system
+        pass_filenames: true
+
+      # --- hard gates ----------------------------------------------------------
+      - id: gitleaks
+        name: secrets scan
+        entry: gitleaks protect --staged --redact -v
+        language: system
+        pass_filenames: false
+      - id: rustfmt
+        name: rustfmt
+        entry: cargo fmt --all -- --check
+        language: system
+        files: \.rs$
+        pass_filenames: false
+      - id: clippy
+        name: "clippy (-D warnings)"
+        entry: cargo clippy --all-targets --locked -- -D warnings
+        language: system
+        files: \.rs$
+        pass_filenames: false
+      - id: cargo-deny
+        name: "cargo-deny (licenses + advisories)"
+        entry: cargo deny check
+        language: system
+        files: (Cargo\.(toml|lock)|deny\.toml)$
+        pass_filenames: false
+
+      # --- commit message ------------------------------------------------------
+      - id: conventional-commits
+        name: conventional commit message
+        entry: python3 scripts/conventional_commits.py --message-file
+        language: system
+        stages: [commit-msg]
+        pass_filenames: true

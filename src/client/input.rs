@@ -19,18 +19,18 @@ use std::sync::Arc;
 use std::os::fd::AsRawFd;
 use tokio::sync::mpsc;
 
-use super::ClientLoopEvent;
-
 // ---------------------------------------------------------------------------
 // Stdin reader thread
 // ---------------------------------------------------------------------------
 
 /// Reads raw bytes from stdin and sends them to the main event loop.
 ///
-/// This runs on a dedicated thread because stdin reading is blocking.
-/// The main loop receives the raw bytes and forwards them as
-/// `ClientMessage::Input` to the server.
-pub fn stdin_reader_loop(event_tx: mpsc::Sender<ClientLoopEvent>, should_quit: &Arc<AtomicBool>) {
+/// This runs on a dedicated thread because stdin reading is blocking. It is
+/// spawned once per client process and outlives individual attach attempts
+/// (the live-handoff retry loop), so no stdin byte is ever stranded in a
+/// session-scoped reader. The main loop receives the raw chunks and forwards
+/// them as `ClientMessage::Input` to the server.
+pub fn stdin_reader_loop(stdin_tx: mpsc::Sender<Vec<u8>>, should_quit: &Arc<AtomicBool>) {
     let stdin = io::stdin();
     let mut reader = stdin.lock();
     let mut scratch = [0u8; 4096];
@@ -41,20 +41,14 @@ pub fn stdin_reader_loop(event_tx: mpsc::Sender<ClientLoopEvent>, should_quit: &
             Ok(0) => break,
             Ok(n) => {
                 for data in framer.push(&scratch[..n]) {
-                    if event_tx
-                        .blocking_send(ClientLoopEvent::StdinInput(data))
-                        .is_err()
-                    {
+                    if stdin_tx.blocking_send(data).is_err() {
                         return;
                     }
                 }
 
                 if stdin_read_ready(&reader, 10) == Some(false) {
                     for data in framer.flush_timeout() {
-                        if event_tx
-                            .blocking_send(ClientLoopEvent::StdinInput(data))
-                            .is_err()
-                        {
+                        if stdin_tx.blocking_send(data).is_err() {
                             return;
                         }
                     }
@@ -71,12 +65,12 @@ pub fn stdin_reader_loop(event_tx: mpsc::Sender<ClientLoopEvent>, should_quit: &
 }
 
 #[cfg(unix)]
-fn stdin_read_ready<R: AsRawFd>(reader: &R, timeout_ms: i32) -> Option<bool> {
+pub(crate) fn stdin_read_ready<R: AsRawFd>(reader: &R, timeout_ms: i32) -> Option<bool> {
     poll_read_ready(reader.as_raw_fd(), timeout_ms)
 }
 
 #[cfg(not(unix))]
-fn stdin_read_ready<R>(_reader: &R, _timeout_ms: i32) -> Option<bool> {
+pub(crate) fn stdin_read_ready<R>(_reader: &R, _timeout_ms: i32) -> Option<bool> {
     None
 }
 
@@ -119,14 +113,12 @@ mod tests {
     // Integration tests will verify the full client→server input flow.
     // Here we test the event type construction.
 
-    use super::*;
-
     #[test]
     fn stdin_input_event_carries_raw_bytes() {
         let data = vec![0x1b, b'[', b'A']; // Up arrow escape sequence
-        let event = ClientLoopEvent::StdinInput(data.clone());
+        let event = crate::client::ClientLoopEvent::StdinInput(data.clone());
         match event {
-            ClientLoopEvent::StdinInput(d) => assert_eq!(d, data),
+            crate::client::ClientLoopEvent::StdinInput(d) => assert_eq!(d, data),
             _ => panic!("expected StdinInput event"),
         }
     }

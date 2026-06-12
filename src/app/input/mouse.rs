@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Direction, Rect};
 use tracing::warn;
 
@@ -94,12 +94,16 @@ impl AppState {
                     | Mode::GlobalMenu
                     | Mode::KeybindHelp
             );
+        // The whole pinned menu row launches the global menu — except the
+        // sidebar collapse toggle's cell, which keeps priority when the
+        // pane gap is 0 and the two share the bottom row.
         let launcher = self.global_launcher_rect();
         let launcher_hit = launcher_enabled
             && mouse.column >= launcher.x
             && mouse.column < launcher.x + launcher.width
             && mouse.row >= launcher.y
-            && mouse.row < launcher.y + launcher.height;
+            && mouse.row < launcher.y + launcher.height
+            && !self.on_sidebar_toggle(mouse.column, mouse.row);
 
         if matches!(mouse.kind, MouseEventKind::Moved) && self.mode == Mode::GlobalMenu {
             let actions = global_menu_actions(self);
@@ -503,6 +507,36 @@ impl AppState {
                         return None;
                     }
 
+                    // Servers section: the header's all/current label toggles
+                    // the scope, a (two-line) peer row switches to that
+                    // peer's first workspace. The self row has no card, so
+                    // clicking it is a no-op.
+                    if self.on_servers_panel_scope_toggle(mouse.column, mouse.row) {
+                        self.servers_panel_scope = self.servers_panel_scope.toggled();
+                        self.mark_session_dirty();
+                        return None;
+                    }
+                    if let Some(card) = self.view.server_card_areas.iter().find(|card| {
+                        mouse.row >= card.rect.y && mouse.row < card.rect.y + card.rect.height
+                    }) {
+                        self.request_peer_switch = Some(card.target.clone());
+                        return None;
+                    }
+
+                    // Spaces section: the header's all/current label toggles
+                    // the scope between the full workspace list and the
+                    // focused space group.
+                    if self.on_spaces_panel_scope_toggle(mouse.column, mouse.row) {
+                        self.spaces_panel_scope = self.spaces_panel_scope.toggled();
+                        // Toggling the scope also resets the per-server
+                        // narrowing (#46): the toggle is the always-visible
+                        // escape hatch out of a filtered list.
+                        self.server_filter = None;
+                        self.workspace_scroll = 0;
+                        self.mark_session_dirty();
+                        return None;
+                    }
+
                     let cards = if self.view.workspace_card_areas.is_empty() {
                         crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect)
                     } else {
@@ -535,6 +569,20 @@ impl AppState {
                         return None;
                     }
 
+                    // Remote (federated peer) rows: request a server switch.
+                    // Config-peer rows carry the workspace for the remote
+                    // pre-focus; snapshot rows reuse the band's pass-through
+                    // switch with the carried ssh address (#46).
+                    if let Some(card) = self
+                        .view
+                        .remote_card_areas
+                        .iter()
+                        .find(|card| mouse.row == card.rect.y)
+                    {
+                        self.request_peer_switch = Some(card.peer.switch_request(card.ws_idx));
+                        return None;
+                    }
+
                     if self.on_agent_panel_scope_toggle(mouse.column, mouse.row) {
                         self.agent_panel_scope = match self.agent_panel_scope {
                             AgentPanelScope::CurrentWorkspace => AgentPanelScope::AllWorkspaces,
@@ -561,11 +609,18 @@ impl AppState {
                         return None;
                     }
 
-                    if let Some((ws_idx, _tab_idx, pane_id)) =
-                        self.agent_detail_target_at(mouse.row)
-                    {
-                        self.focus_pane_in_workspace(ws_idx, pane_id);
-                        self.mode = Mode::Terminal;
+                    if let Some(target) = self.agent_detail_target_at(mouse.row) {
+                        match target {
+                            super::sidebar::AgentDetailTarget::Local { ws_idx, pane_id } => {
+                                self.focus_pane_in_workspace(ws_idx, pane_id);
+                                self.mode = Mode::Terminal;
+                            }
+                            super::sidebar::AgentDetailTarget::Remote(request) => {
+                                // Selecting a remote agent row = the workspace
+                                // row's switch (#62).
+                                self.request_peer_switch = Some(request);
+                            }
+                        }
                         return None;
                     }
                 } else if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
@@ -590,6 +645,22 @@ impl AppState {
                         col,
                         self.pane_scroll_metrics(terminal_runtimes, info.id),
                     ));
+                } else if let Some(info) = self.view.pane_infos.iter().find(|p| {
+                    p.header_rect.is_some_and(|h| {
+                        mouse.column >= h.x
+                            && mouse.column < h.x + h.width
+                            && mouse.row > h.y
+                            && mouse.row < h.y + h.height
+                    })
+                }) {
+                    // Click on the header prompt rows toggles the full-prompt view.
+                    let id = info.id;
+                    self.expanded_prompt_pane = if self.expanded_prompt_pane == Some(id) {
+                        None
+                    } else {
+                        Some(id)
+                    };
+                    self.focus_pane(id);
                 } else if let Some(info) = self.view.pane_infos.iter().find(|p| {
                     mouse.column >= p.rect.x
                         && mouse.column < p.rect.x + p.rect.width
@@ -641,7 +712,11 @@ impl AppState {
                     } else if let Some(press) = &self.tab_press {
                         let delta_col = mouse.column.abs_diff(press.start_col);
                         let delta_row = mouse.row.abs_diff(press.start_row);
-                        if delta_col.max(delta_row) >= TAB_DRAG_THRESHOLD {
+                        // #33: the workspace-mode member strip has no tab
+                        // reorder — its order is the sidebar's section order.
+                        if delta_col.max(delta_row) >= TAB_DRAG_THRESHOLD
+                            && !self.tab_strip_shows_members()
+                        {
                             self.drag = Some(DragState {
                                 target: DragTarget::TabReorder {
                                     ws_idx: press.ws_idx,
@@ -900,6 +975,32 @@ impl AppState {
                 {
                     return None;
                 }
+                // Servers-band rows: offer the per-server spaces filter
+                // (#46). The home row gets no menu — the origin's own
+                // workspaces are never in this list, so "only this server"
+                // would always show nothing.
+                if let Some(slot) = crate::ui::server_band_slot_at(
+                    self,
+                    self.view.sidebar_rect,
+                    mouse.column,
+                    mouse.row,
+                ) {
+                    if let Some(filter) = self.server_filter_for_band_slot(slot) {
+                        let is_filtered = self.server_filter.as_ref() == Some(&filter);
+                        self.context_menu = Some(ContextMenuState {
+                            kind: ContextMenuKind::Server {
+                                filter,
+                                is_filtered,
+                                any_filter: self.server_filter.is_some(),
+                            },
+                            x: mouse.column,
+                            y: mouse.row,
+                            list: MenuListState::new(0),
+                        });
+                        self.mode = Mode::ContextMenu;
+                    }
+                    return None;
+                }
                 if let Some(idx) = self.workspace_at_row(mouse.row) {
                     self.selected = idx;
                     let kind = self
@@ -951,8 +1052,18 @@ impl AppState {
                     (self.active, self.tab_at(mouse.column, mouse.row))
                 {
                     self.switch_tab(tab_idx);
+                    // #33: in workspace tab-mode the strip rows are member
+                    // workspaces — a tab menu doesn't apply; offer the
+                    // workspace menu for the (now focused) member instead.
+                    let kind = if self.tab_strip_shows_members() {
+                        ContextMenuKind::Workspace {
+                            ws_idx: self.active.unwrap_or(ws_idx),
+                        }
+                    } else {
+                        ContextMenuKind::Tab { ws_idx, tab_idx }
+                    };
                     self.context_menu = Some(ContextMenuState {
-                        kind: ContextMenuKind::Tab { ws_idx, tab_idx },
+                        kind,
                         x: mouse.column,
                         y: mouse.row,
                         list: MenuListState::new(0),
@@ -1038,7 +1149,12 @@ impl AppState {
                 open_new_tab_dialog(self);
             }
             Some(crate::ui::MobileSwitcherTarget::Tab(tab_idx)) => {
-                self.switch_tab(tab_idx);
+                // The mobile switcher lists real tabs; route around the
+                // workspace-mode member-strip semantics of switch_tab (#33)
+                // so taps keep their meaning in both tab modes.
+                if let Some(ws_idx) = self.active {
+                    self.switch_workspace_tab(ws_idx, tab_idx);
+                }
                 self.mode = Mode::Terminal;
             }
             Some(crate::ui::MobileSwitcherTarget::Agent {
@@ -1338,6 +1454,71 @@ impl AppState {
         }
     }
 
+    /// Page the focused pane's host scrollback (Shift+PageUp/Down). `dir` is
+    /// -1 for up (into history) / +1 for down (toward live). A page is the
+    /// pane's visible height minus one row of overlap. Returns false when
+    /// there is no focused pane to scroll.
+    pub(crate) fn scroll_focused_pane_page(
+        &self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+        dir: i8,
+    ) -> bool {
+        let Some((pane_id, page)) = self.focused_pane_scroll_page(terminal_runtimes) else {
+            return false;
+        };
+        if dir < 0 {
+            self.scroll_pane_up(terminal_runtimes, pane_id, page);
+        } else {
+            self.scroll_pane_down(terminal_runtimes, pane_id, page);
+        }
+        true
+    }
+
+    /// Jump the focused pane's host scrollback to the top of history
+    /// (Shift+Home) or back to the live bottom (Shift+End).
+    pub(crate) fn scroll_focused_pane_edge(
+        &self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+        to_top: bool,
+    ) -> bool {
+        let Some(pane_id) = self.focused_pane_id_for_scroll() else {
+            return false;
+        };
+        let offset = if to_top {
+            self.pane_scroll_metrics(terminal_runtimes, pane_id)
+                .map_or(0, |metrics| metrics.max_offset_from_bottom)
+        } else {
+            0
+        };
+        self.set_pane_scroll_offset(terminal_runtimes, pane_id, offset);
+        true
+    }
+
+    fn focused_pane_id_for_scroll(&self) -> Option<crate::layout::PaneId> {
+        self.workspaces
+            .get(self.active?)
+            .and_then(|ws| ws.focused_pane_id())
+    }
+
+    fn focused_pane_scroll_page(
+        &self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) -> Option<(crate::layout::PaneId, usize)> {
+        let pane_id = self.focused_pane_id_for_scroll()?;
+        // Prefer the live viewport height; fall back to the laid-out pane rect.
+        let page = self
+            .pane_scroll_metrics(terminal_runtimes, pane_id)
+            .map(|metrics| metrics.viewport_rows)
+            .or_else(|| {
+                self.pane_info_by_id(pane_id)
+                    .map(|info| info.inner_rect.height as usize)
+            })
+            .unwrap_or(1)
+            .saturating_sub(1)
+            .max(1);
+        Some((pane_id, page))
+    }
+
     pub(crate) fn pane_scroll_metrics(
         &self,
         terminal_runtimes: &TerminalRuntimeRegistry,
@@ -1431,9 +1612,14 @@ impl AppState {
     ) {
         let lines_per_notch = self.mouse_scroll_lines;
 
+        // Shift+wheel is a deterministic escape hatch: always scroll herdr's
+        // own scrollback, even in alt-screen / mouse-reporting panes where a
+        // bare wheel is forwarded to the app.
+        let shift_held = mouse.modifiers.contains(KeyModifiers::SHIFT);
+
         if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
             self.focus_pane(info.id);
-            if self.forward_pane_wheel(terminal_runtimes, &info, mouse) {
+            if !shift_held && self.forward_pane_wheel(terminal_runtimes, &info, mouse) {
                 return;
             }
             match mouse.kind {
@@ -1714,6 +1900,317 @@ mod tests {
         detect::{Agent, AgentState},
         workspace::Workspace,
     };
+
+    #[tokio::test]
+    async fn server_band_click_hits_both_peer_lines_but_never_the_self_row() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let mut peer = crate::peers::PeerSummaryState::new(&crate::config::PeerConfig {
+            name: "anvil".into(),
+            ..Default::default()
+        });
+        peer.last_ok = Some(std::time::Instant::now());
+        app.state.peer_summaries = vec![peer];
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 30));
+
+        // The self row (the two lines under the header) has no hit-area:
+        // clicking yourself must never request a server switch.
+        let header = app.state.view.servers_header_rect;
+        assert_ne!(header, Rect::default());
+        for row in [header.y + 1, header.y + 2] {
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                header.x + 2,
+                row,
+            ));
+            assert_eq!(app.state.request_peer_switch, None);
+        }
+
+        // Both lines of the peer's two-line card map to that peer.
+        let card = app.state.view.server_card_areas[0].clone();
+        assert_eq!(card.rect.height, 2);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            card.rect.x + 2,
+            card.rect.y + 1,
+        ));
+        assert_eq!(
+            app.state.request_peer_switch,
+            Some(crate::app::state::PeerSwitchRequest::ConfigPeer {
+                peer_idx: 0,
+                ws_idx: 0,
+            })
+        );
+    }
+
+    fn federated_peer(
+        name: &str,
+        ssh: &str,
+        rows: Vec<crate::api::schema::PeerWorkspaceSummary>,
+    ) -> crate::peers::PeerSummaryState {
+        let mut peer = crate::peers::PeerSummaryState::new(&crate::config::PeerConfig {
+            name: name.into(),
+            ssh: ssh.into(),
+            ..Default::default()
+        });
+        peer.last_ok = Some(std::time::Instant::now());
+        peer.workspaces = rows;
+        peer
+    }
+
+    fn remote_row(project_key: &str, branch: &str) -> crate::api::schema::PeerWorkspaceSummary {
+        crate::api::schema::PeerWorkspaceSummary {
+            id: "ws_1".into(),
+            workspace: "herdr".into(),
+            project_key: Some(project_key.into()),
+            project_label: Some("herdr".into()),
+            branch: Some(branch.into()),
+            is_linked_worktree: true,
+            agent: Some("cc".into()),
+            status: crate::api::schema::AgentStatus::Working,
+            status_age_secs: Some(10),
+            activity: None,
+        }
+    }
+
+    fn workspace_with_project(name: &str, project_key: &str) -> Workspace {
+        let mut ws = Workspace::test_new(name);
+        ws.cached_git_space = Some(crate::workspace::GitSpaceMetadata {
+            key: format!("/repo/{name}/.git"),
+            checkout_key: format!("/repo/{name}"),
+            label: name.into(),
+            repo_root: std::path::PathBuf::from(format!("/repo/{name}")),
+            is_linked_worktree: false,
+            project_key: project_key.into(),
+        });
+        ws
+    }
+
+    /// Issue #46: a snapshot-fed remote row in the spaces list reuses the
+    /// band's pass-through switch — carried ssh address, fleet attached.
+    #[tokio::test]
+    async fn snapshot_remote_row_click_requests_switch_with_carried_address() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![workspace_with_project("herdr", "github.com/gerchowl/herdr")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.fleet_snapshot = Some(crate::peers::FleetSnapshotState {
+            origin: "mba22".into(),
+            peers: vec![federated_peer(
+                "anvil",
+                "lars@anvil",
+                vec![remote_row("github.com/gerchowl/herdr", "fix/pty")],
+            )],
+            origin_summary: None,
+            received_at: std::time::Instant::now(),
+        });
+        // Tall enough that the band, the local card, and the folded remote
+        // row all fit the spaces list.
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 40));
+
+        let card = app.state.view.remote_card_areas[0].clone();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            card.rect.x + 2,
+            card.rect.y,
+        ));
+        assert_eq!(
+            app.state.request_peer_switch,
+            Some(crate::app::state::PeerSwitchRequest::SnapshotPeer { entry_idx: 0 })
+        );
+
+        // The shared switch path resolves the carried address and keeps the
+        // fleet riding along (pass-through, original origin).
+        let prepared = app
+            .prepare_switch_server(app.state.request_peer_switch.clone().unwrap())
+            .expect("snapshot row resolves");
+        assert_eq!(prepared.ssh_target, "lars@anvil");
+        let fleet = prepared.fleet.expect("pass-through fleet rides the leap");
+        assert_eq!(fleet.origin, "mba22");
+    }
+
+    /// Issue #63 (the live bug): a CONFIG-peer remote row folded under a
+    /// local project block (indented, sharing the project key) must emit
+    /// the same switch the servers band does — clicking `sage:main` under a
+    /// local `herdr` checkout requests ConfigPeer carrying the target ws.
+    #[tokio::test]
+    async fn folded_config_peer_row_click_requests_switch() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![workspace_with_project("herdr", "github.com/gerchowl/herdr")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        // A config peer (live-polled, not a snapshot) whose workspace shares
+        // the local project key, so its row folds INTO the local block.
+        app.state.peer_summaries = vec![federated_peer(
+            "sage",
+            "lars@sage",
+            vec![remote_row("github.com/gerchowl/herdr", "main")],
+        )];
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 40));
+
+        // The folded remote row exists and is indented under the local block.
+        let card = app
+            .state
+            .view
+            .remote_card_areas
+            .first()
+            .cloned()
+            .expect("config-peer row should fold into the spaces list");
+        assert!(card.indented, "row folds under the local project block");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            card.rect.x + 2,
+            card.rect.y,
+        ));
+        assert_eq!(
+            app.state.request_peer_switch,
+            Some(crate::app::state::PeerSwitchRequest::ConfigPeer {
+                peer_idx: 0,
+                ws_idx: 0,
+            }),
+            "folded config-peer row must request the switch (issue #63)"
+        );
+
+        let prepared = app
+            .prepare_switch_server(app.state.request_peer_switch.clone().unwrap())
+            .expect("config-peer row resolves to a switch");
+        assert_eq!(prepared.ssh_target, "lars@sage");
+    }
+
+    #[tokio::test]
+    async fn right_click_server_row_filters_spaces_and_same_menu_clears() {
+        use crate::app::state::ServerFilter;
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![workspace_with_project("herdr", "github.com/gerchowl/herdr")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.peer_summaries = vec![federated_peer(
+            "anvil",
+            "lars@anvil",
+            vec![remote_row("github.com/gerchowl/herdr", "fix/pty")],
+        )];
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 30));
+
+        // Right-click the peer's band row: the menu offers the narrowing.
+        let card = app.state.view.server_card_areas[0].clone();
+        let (col, row) = (card.rect.x + 2, card.rect.y);
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Right), col, row));
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        let menu = app.state.context_menu.as_ref().expect("server menu opens");
+        assert_eq!(menu.items(), &["Show only this server"]);
+
+        handle_context_menu_key(
+            &mut app.state,
+            &mut app.terminal_runtimes,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert_eq!(
+            app.state.server_filter,
+            Some(ServerFilter::Peer {
+                ssh_target: "lars@anvil".into()
+            })
+        );
+        let entries = crate::ui::workspace_list_entries(&app.state);
+        assert!(!entries.is_empty());
+        assert!(
+            entries
+                .iter()
+                .all(|entry| matches!(entry, crate::ui::WorkspaceListEntry::Remote { .. })),
+            "only the filtered server's rows stay: {entries:?}"
+        );
+
+        // The same row's menu now offers only the clear.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Right), col, row));
+        let menu = app.state.context_menu.as_ref().expect("server menu opens");
+        assert_eq!(menu.items(), &["Show all servers"]);
+        handle_context_menu_key(
+            &mut app.state,
+            &mut app.terminal_runtimes,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert_eq!(app.state.server_filter, None);
+    }
+
+    #[tokio::test]
+    async fn right_click_self_row_filters_local_and_scope_toggle_clears() {
+        use crate::app::state::{PanelScope, ServerFilter};
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![workspace_with_project("herdr", "github.com/gerchowl/herdr")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.peer_summaries = vec![federated_peer(
+            "anvil",
+            "lars@anvil",
+            vec![remote_row("github.com/gerchowl/herdr", "fix/pty")],
+        )];
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 30));
+
+        // Right-click the self row (the two lines under the band header).
+        let header = app.state.view.servers_header_rect;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            header.x + 2,
+            header.y + 1,
+        ));
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        handle_context_menu_key(
+            &mut app.state,
+            &mut app.terminal_runtimes,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert_eq!(app.state.server_filter, Some(ServerFilter::Local));
+        assert!(!crate::ui::workspace_list_entries(&app.state)
+            .iter()
+            .any(|entry| matches!(entry, crate::ui::WorkspaceListEntry::Remote { .. })));
+
+        // Toggling the spaces scope (header click) clears the filter too.
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 30));
+        let list_rect = app.state.workspace_list_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            list_rect.x + 2,
+            list_rect.y,
+        ));
+        assert_eq!(app.state.spaces_panel_scope, PanelScope::Current);
+        assert_eq!(app.state.server_filter, None);
+    }
+
+    #[tokio::test]
+    async fn right_click_home_row_opens_no_menu() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.fleet_snapshot = Some(crate::peers::FleetSnapshotState {
+            origin: "mba22".into(),
+            peers: vec![federated_peer("anvil", "lars@anvil", vec![])],
+            origin_summary: None,
+            received_at: std::time::Instant::now(),
+        });
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 30));
+
+        // The home row is the first card with a snapshot present. Its
+        // origin's workspaces are never in the spaces list, so "only this
+        // server" would always show nothing — no menu.
+        let card = app.state.view.server_card_areas[0].clone();
+        assert_eq!(card.target, crate::app::state::PeerSwitchRequest::Home);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            card.rect.x + 2,
+            card.rect.y,
+        ));
+        assert!(app.state.context_menu.is_none());
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
 
     #[tokio::test]
     async fn terminal_wheel_uses_configured_mouse_scroll_lines() {
@@ -2165,6 +2662,7 @@ mod tests {
                 pane_id: target_pane,
                 agent: Some(Agent::Pi),
                 state: AgentState::Idle,
+                activity: None,
                 visible_blocker: false,
                 visible_idle: false,
                 visible_working: false,
@@ -2326,12 +2824,16 @@ mod tests {
         let mut app = app_for_mouse_test();
         app.state.mode = Mode::ConfirmRemoveWorktree;
         app.state.worktree_remove = Some(crate::app::state::WorktreeRemoveState {
+            managed: true,
             workspace_id: "issue".into(),
             repo_root: "/repo/herdr".into(),
             path: "/repo/herdr-issue".into(),
             error: None,
             removing: false,
             force_confirmation: false,
+            delete_branch: false,
+            branch: None,
+            merge_gate: None,
         });
         let popup = crate::ui::remove_worktree_popup_rect(app.state.screen_rect()).unwrap();
         let inner = Rect::new(
@@ -2354,12 +2856,16 @@ mod tests {
         let mut app = app_for_mouse_test();
         app.state.mode = Mode::ConfirmRemoveWorktree;
         app.state.worktree_remove = Some(crate::app::state::WorktreeRemoveState {
+            managed: true,
             workspace_id: "issue".into(),
             repo_root: "/repo/herdr".into(),
             path: "/repo/herdr-issue".into(),
             error: None,
             removing: false,
             force_confirmation: false,
+            delete_branch: false,
+            branch: None,
+            merge_gate: None,
         });
         let popup = crate::ui::remove_worktree_popup_rect(app.state.screen_rect()).unwrap();
         let inner = Rect::new(

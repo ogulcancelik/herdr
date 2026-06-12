@@ -143,6 +143,22 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
     })
 }
 
+/// Like [`plan`], but for branching: the new pane should fork the
+/// conversation instead of taking over the original session. Claude has a
+/// dedicated `--fork-session` flag; other agents fall back to a plain
+/// resume of the same session.
+pub fn branch_plan(
+    source: &str,
+    agent: &str,
+    session_ref: &AgentSessionRef,
+) -> Option<AgentResumePlan> {
+    let mut plan = plan(source, agent, session_ref)?;
+    if source == "herdr:claude" {
+        plan.argv.push("--fork-session".into());
+    }
+    Some(plan)
+}
+
 pub fn dedupe_key(source: &str, agent: &str, session_ref: &AgentSessionRef) -> String {
     format!(
         "{source}\u{0}{agent}\u{0}{:?}\u{0}{}",
@@ -353,5 +369,27 @@ mod tests {
             "copilot-session"
         )
         .is_some());
+    }
+    #[test]
+    fn branch_plan_claude_appends_fork_session_flag() {
+        let session = AgentSessionRef::id("claude-session").unwrap();
+        let plan = branch_plan("herdr:claude", "claude", &session).unwrap();
+        assert_eq!(
+            plan.argv,
+            vec!["claude", "--resume", "claude-session", "--fork-session"]
+        );
+    }
+
+    #[test]
+    fn branch_plan_non_claude_agents_fall_back_to_plain_resume() {
+        let session = AgentSessionRef::id("codex-session").unwrap();
+        let plan = branch_plan("herdr:codex", "codex", &session).unwrap();
+        assert_eq!(plan.argv, vec!["codex", "resume", "codex-session"]);
+    }
+
+    #[test]
+    fn branch_plan_rejects_unofficial_sources() {
+        let session = AgentSessionRef::id("claude-session").unwrap();
+        assert!(branch_plan("tmux:claude", "claude", &session).is_none());
     }
 }

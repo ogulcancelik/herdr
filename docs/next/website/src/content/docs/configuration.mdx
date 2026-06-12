@@ -251,6 +251,8 @@ yellow = "#f9e2af"
 
 Color values accept hex, named colors, `rgb(r,g,b)`, or reset aliases like `reset`, `default`, `none`, and `transparent`.
 
+`divider` colors the sidebar's divider and separator lines (the vertical hairline next to the pane area and the horizontal section separators). It defaults to `surface_dim`; set it explicitly if your theme's `surface_dim` is too close to the terminal background to see.
+
 ## UI and sidebar
 
 The sidebar is the main Herdr dashboard. It shows workspaces, tabs, panes, and agent state.
@@ -262,6 +264,7 @@ Common options:
 sidebar_width = 32
 sidebar_min_width = 18
 sidebar_max_width = 36
+sidebar_row_gap = 1
 mobile_width_threshold = 64
 mouse_capture = true
 right_click_passthrough_modifier = ""
@@ -271,14 +274,23 @@ confirm_close = true
 prompt_new_tab_name = true
 show_agent_labels_on_pane_borders = false
 agent_panel_scope = "all"
+servers_panel_scope = "all"
+spaces_panel_scope = "all"
+server_state_mark = "counts"
 accent = "cyan"
 ```
 
 `sidebar_min_width` and `sidebar_max_width` control the expanded sidebar's resize bounds in columns. The defaults are 18 and 36.
 
+`sidebar_row_gap` controls the blank rows between entries in the sidebar's workspace and agent lists. The default is 1; set 0 for a denser sidebar. Values above 3 are clamped.
+
 `mobile_width_threshold` controls the terminal width at or below which Herdr uses the mobile single-column layout. The default is 64 columns; increase it for foldables, tablets, or wide phone terminals.
 
 `agent_panel_scope` can be `all` or `current`. Use `current` if you only want the agent panel to show agents in the active workspace.
+
+`servers_panel_scope` can be `all` or `current`. With `current`, the servers section shows only the machine you are attached to (plus the way-home row when you are attached to a remote server). `spaces_panel_scope` can be `all` or `current`. With `current`, the spaces list shows only the focused workspace's space group. Both default to `all`, and clicking the `all`/`current` label in each section header toggles and saves the setting — exactly like the agents panel.
+
+`server_state_mark` controls the leading state mark on each server row. The default `counts` renders fixed red/yellow/green agent-count columns (`0 2 1 mba22` — blocked, working, calm), zeros muted, with a band-global digit width so one busy server aligns every row. `medallion_sextant` / `medallion_quadrant` render the rectangular state medallion instead (nested bands of the worst three states; quadrant for fonts without Symbols for Legacy Computing). Unreachable servers ghost their row: greyed italic name (struck through), a broken-link icon with the outage age, and the last-known stats greyed in place.
 
 `confirm_close` controls whether closing a workspace asks for confirmation. `prompt_new_tab_name` controls whether new tabs ask for a label first.
 

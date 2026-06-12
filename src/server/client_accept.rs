@@ -53,10 +53,13 @@ pub(crate) fn accept_pending_client_connections(
 ///
 /// During live handoff the old server must not let clients sit in the Unix
 /// listener backlog waiting for a welcome frame that will never be sent.
+/// Each drained connection gets a rejection `Welcome` carrying the
+/// live-handoff notice so the client retries the attach with backoff
+/// instead of bailing on an opaque EOF (#38).
 pub(crate) fn reject_pending_client_connections(listener: &UnixListener) -> io::Result<()> {
     loop {
         match listener.accept() {
-            Ok((_stream, _addr)) => {}
+            Ok((stream, _addr)) => send_live_handoff_refusal(stream),
             Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => break,
             Err(err) => {
                 error!(err = %err, "client listener reject failed");
@@ -66,4 +69,65 @@ pub(crate) fn reject_pending_client_connections(listener: &UnixListener) -> io::
     }
 
     Ok(())
+}
+
+/// Best-effort write of the live-handoff rejection `Welcome` before the
+/// connection is dropped. Runs on the server main loop, so the write is
+/// bounded by a short timeout; the frame is tiny and lands in the socket
+/// buffer immediately in practice.
+fn send_live_handoff_refusal(mut stream: std::os::unix::net::UnixStream) {
+    let welcome = crate::protocol::ServerMessage::Welcome {
+        version: crate::protocol::PROTOCOL_VERSION,
+        encoding: crate::protocol::RenderEncoding::SemanticFrame,
+        error: Some(crate::protocol::LIVE_HANDOFF_ATTACH_NOTICE.to_owned()),
+    };
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(200)));
+    if let Err(err) = crate::protocol::write_message(&mut stream, &welcome) {
+        debug!(err = %err, "failed to send live-handoff refusal to pending client");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    #[test]
+    fn rejected_connections_receive_the_live_handoff_notice() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("hca-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket_path = dir.join("client.sock");
+
+        let listener = UnixListener::bind(&socket_path).expect("bind test listener");
+        listener.set_nonblocking(true).expect("nonblocking");
+
+        let mut client = UnixStream::connect(&socket_path).expect("connect");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout");
+
+        reject_pending_client_connections(&listener).expect("reject");
+        let welcome: crate::protocol::ServerMessage =
+            crate::protocol::read_message(&mut client, crate::protocol::MAX_FRAME_SIZE)
+                .expect("read refusal welcome");
+        match welcome {
+            crate::protocol::ServerMessage::Welcome { error, version, .. } => {
+                assert_eq!(version, crate::protocol::PROTOCOL_VERSION);
+                assert_eq!(
+                    error.as_deref(),
+                    Some(crate::protocol::LIVE_HANDOFF_ATTACH_NOTICE),
+                    "pending clients must learn the handoff is in progress"
+                );
+            }
+            other => panic!("expected Welcome, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

@@ -1,0 +1,81 @@
+# Fork-only: keep gerchowl/herdr tracking upstream (ogulcancelik/herdr).
+#
+# Daily: fast-forward master from upstream, then merge master into the
+# long-lived fork branch. On merge conflict it opens (or refreshes) an
+# issue instead of pushing anything broken.
+#
+# Dependabot can't do this — it only tracks dependency manifests, not an
+# upstream remote. This scheduled job is the fork-sync equivalent.
+name: upstream-sync
+
+on:
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+# Fork-only guard: never run on upstream if this file ever lands there.
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: https://github.com/ogulcancelik/herdr
+  FORK_BRANCH: feat/sidebar-row-gap
+
+jobs:
+  sync:
+    if: github.repository == 'gerchowl/herdr'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # default GITHUB_TOKEN is enough to push to this repo
+      - name: Configure git identity
+        run: |
+          git config user.name "upstream-sync[bot]"
+          git config user.email "upstream-sync@users.noreply.github.com"
+      - name: Fast-forward master from upstream
+        id: master
+        run: |
+          git remote add upstream "$UPSTREAM"
+          git fetch upstream master
+          git checkout master
+          BEFORE=$(git rev-parse HEAD)
+          git merge --ff-only upstream/master
+          AFTER=$(git rev-parse HEAD)
+          git push origin master
+          echo "moved=$([ "$BEFORE" != "$AFTER" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: Merge master into fork branch
+        id: merge
+        if: steps.master.outputs.moved == 'true'
+        run: |
+          git checkout "$FORK_BRANCH"
+          if git merge --no-edit master; then
+            git push origin "$FORK_BRANCH"
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            git merge --abort
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Open conflict issue
+        if: steps.merge.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="upstream-sync: merge conflict on $FORK_BRANCH"
+          EXISTING=$(gh issue list --state open --search "in:title \"$TITLE\"" --json number -q '.[0].number')
+          BODY="Automatic merge of \`master\` into \`$FORK_BRANCH\` hit conflicts at $(date -u +%FT%TZ). Resolve locally:
+
+          \`\`\`sh
+          git fetch origin && git checkout $FORK_BRANCH && git merge origin/master
+          \`\`\`"
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "$BODY"
+          else
+            gh issue create --title "$TITLE" --body "$BODY"
+          fi

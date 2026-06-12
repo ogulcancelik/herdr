@@ -11,6 +11,7 @@ use crate::api::schema::{
 mod agent;
 mod integration;
 mod pane;
+mod peers;
 mod server;
 mod status;
 mod tab;
@@ -43,6 +44,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "agent" => agent::run_agent_command(&args[2..])?,
         "terminal" => run_terminal_command(&args[2..])?,
         "pane" => pane::run_pane_command(&args[2..])?,
+        "peers" => peers::run_peers_command(&args[2..])?,
         "wait" => run_wait_command(&args[2..])?,
         "integration" => integration::run_integration_command(&args[2..])?,
         "session" => run_session_command(&args[2..])?,

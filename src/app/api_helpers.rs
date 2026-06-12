@@ -80,6 +80,57 @@ pub(super) fn pane_agent_status(
     }
 }
 
+/// Cap reported prompts to a sane size and strip control characters that
+/// could corrupt the float rendering. Newlines and tabs survive.
+pub(super) fn sanitize_reported_prompt(prompt: &str) -> String {
+    const MAX_PROMPT_LEN: usize = 16 * 1024;
+    // Drop full ANSI CSI/OSC escape sequences, then any leftover controls.
+    let mut cleaned = String::with_capacity(prompt.len().min(MAX_PROMPT_LEN + 8));
+    let mut chars = prompt.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    // CSI: consume through the final byte (@..~).
+                    for follow in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&follow) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    // OSC: consume through BEL or ESC\.
+                    while let Some(follow) = chars.next() {
+                        if follow == '\u{7}' {
+                            break;
+                        }
+                        if follow == '\u{1b}' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+        if !c.is_control() || c == '\n' || c == '\t' {
+            cleaned.push(c);
+        }
+    }
+    if cleaned.len() > MAX_PROMPT_LEN {
+        let mut cut = MAX_PROMPT_LEN;
+        while !cleaned.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        cleaned.truncate(cut);
+        cleaned.push('\u{2026}');
+    }
+    cleaned.trim().to_string()
+}
+
 pub(super) fn normalize_reported_agent_label(agent: &str) -> Option<String> {
     let trimmed = agent.trim();
     if trimmed.is_empty() {

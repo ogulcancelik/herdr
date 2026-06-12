@@ -229,12 +229,44 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         &mut invalid_sections,
         |section| config.remote = section,
     );
+    load_live_section(
+        table,
+        "peers",
+        "peers config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.peers = section,
+    );
+    validate_peers(&mut config.peers, &mut diagnostics);
 
     Ok(LoadedConfig {
         config,
         diagnostics,
         invalid_sections,
     })
+}
+
+/// Drop unusable `[[peers]]` entries (no name) and duplicate names, keeping
+/// the first occurrence; each drop produces a diagnostic.
+fn validate_peers(
+    peers: &mut Vec<crate::config::model::PeerConfig>,
+    diagnostics: &mut Vec<String>,
+) {
+    let mut seen = std::collections::HashSet::new();
+    peers.retain(|peer| {
+        if peer.name.trim().is_empty() {
+            diagnostics.push("invalid [[peers]] entry: missing name; entry ignored".to_string());
+            return false;
+        }
+        if !seen.insert(peer.name.clone()) {
+            diagnostics.push(format!(
+                "duplicate [[peers]] name \"{}\"; later entry ignored",
+                peer.name
+            ));
+            return false;
+        }
+        true
+    });
 }
 
 fn load_live_section<T>(
@@ -500,6 +532,54 @@ resume_agents_on_restore = true
         assert!(loaded.config.session.resume_agents_on_restore);
         assert!(loaded.diagnostics.is_empty());
         assert!(loaded.invalid_sections.is_empty());
+    }
+
+    #[test]
+    fn load_live_config_parses_peers_entries() {
+        let loaded = load_live_config_from_str(
+            r#"
+[[peers]]
+name = "anvil"
+
+[[peers]]
+name = "sage"
+ssh = "sage.tail22bd7c.ts.net"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(loaded.config.peers.len(), 2);
+        assert_eq!(loaded.config.peers[0].name, "anvil");
+        assert_eq!(loaded.config.peers[0].ssh_target(), "anvil");
+        assert_eq!(
+            loaded.config.peers[1].ssh_target(),
+            "sage.tail22bd7c.ts.net"
+        );
+        assert!(loaded.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn load_live_config_drops_invalid_peer_entries() {
+        let loaded = load_live_config_from_str(
+            r#"
+[[peers]]
+ssh = "nameless"
+
+[[peers]]
+name = "anvil"
+
+[[peers]]
+name = "anvil"
+ssh = "anvil-dev"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(loaded.config.peers.len(), 1);
+        assert_eq!(loaded.config.peers[0].ssh_target(), "anvil");
+        assert_eq!(loaded.diagnostics.len(), 2);
+        assert!(loaded.diagnostics[0].contains("missing name"));
+        assert!(loaded.diagnostics[1].contains("duplicate"));
     }
 
     #[test]

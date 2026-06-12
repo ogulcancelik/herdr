@@ -1,11 +1,15 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RgbColor {
     pub r: u8,
     pub g: u8,
     pub b: u8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Host terminal default colors. Serialized positionally (bincode) inside the
+/// client `Hello`, so the field order here is wire format — do not reorder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TerminalTheme {
     pub foreground: Option<RgbColor>,
     pub background: Option<RgbColor>,

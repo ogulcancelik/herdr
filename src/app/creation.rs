@@ -68,6 +68,13 @@ impl App {
 
     pub(crate) fn create_tab(&mut self) {
         let custom_name = self.state.requested_new_tab_name.take();
+        // Workspace-as-unit mode (#25): "new tab" spawns a sibling workspace
+        // in the same space group instead of a tab. Branching here covers both
+        // event loops — the App and headless request consumers both call this.
+        if self.state.tab_mode == crate::config::TabModeConfig::Workspace {
+            self.create_sibling_workspace(custom_name);
+            return;
+        }
         let follow_cwd = self
             .state
             .active
@@ -90,6 +97,48 @@ impl App {
             }
             Err(e) => {
                 error!(err = %e, "failed to create tab");
+            }
+        }
+    }
+
+    /// Workspace-as-unit creation (#25): spawn a sibling workspace of the
+    /// active one. Space membership is cloned EXPLICITLY — sidebar grouping is
+    /// keyed by `WorktreeSpaceMembership`, not cwd — and the cwd pins to the
+    /// membership's checkout path so group identity survives a root-pane `cd`
+    /// across restarts. Without membership this degrades to a plain new
+    /// workspace seeded like a tab would have been.
+    fn create_sibling_workspace(&mut self, custom_name: Option<String>) {
+        let source = self
+            .state
+            .active
+            .and_then(|ws_idx| self.state.workspaces.get(ws_idx));
+        let (membership, pinned_cwd) = sibling_spawn_seed(source);
+        let initial_cwd = match pinned_cwd {
+            Some(path) => path,
+            None => {
+                let follow_cwd = self
+                    .state
+                    .active
+                    .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx));
+                self.resolve_new_terminal_cwd(follow_cwd)
+            }
+        };
+        match self.create_workspace_with_options(initial_cwd, true) {
+            Ok(idx) => {
+                if membership.is_some() {
+                    self.state.workspaces[idx].worktree_space = membership;
+                }
+                if let Some(name) = custom_name {
+                    self.state.workspaces[idx].set_custom_name(name);
+                }
+                // Second (load-bearing) save: create_workspace_with_options
+                // scheduled one BEFORE membership/name were stamped above; the
+                // debounced saver must capture the stamped state or a crash in
+                // the window would restore the sibling ungrouped.
+                self.schedule_session_save();
+            }
+            Err(e) => {
+                error!(err = %e, "failed to create sibling workspace");
             }
         }
     }
@@ -350,7 +399,23 @@ impl App {
     }
 }
 
-fn terminal_agent_session_info(
+/// (membership to stamp, pinned cwd) for a sibling workspace of `source`.
+/// Pure seam for the workspace-as-unit creation path (#25): membership is the
+/// grouping key and must be cloned explicitly; when present, the sibling's cwd
+/// pins to the checkout path (NOT the source's live root-pane cwd, which can
+/// drift via `cd`).
+pub(crate) fn sibling_spawn_seed(
+    source: Option<&Workspace>,
+) -> (
+    Option<crate::workspace::WorktreeSpaceMembership>,
+    Option<PathBuf>,
+) {
+    let membership = source.and_then(|ws| ws.worktree_space().cloned());
+    let pinned_cwd = membership.as_ref().map(|space| space.checkout_path.clone());
+    (membership, pinned_cwd)
+}
+
+pub(super) fn terminal_agent_session_info(
     terminal: &crate::terminal::TerminalState,
 ) -> Option<crate::api::schema::AgentSessionInfo> {
     if let Some(authority) = terminal.hook_authority.as_ref() {
@@ -373,4 +438,59 @@ fn terminal_agent_session_info(
             kind: session.session_ref.kind,
             value: session.session_ref.value.clone(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspace::WorktreeSpaceMembership;
+
+    fn workspace_with_membership() -> Workspace {
+        let mut ws = Workspace::test_new("parent");
+        ws.worktree_space = Some(WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr-worktrees/feature".into(),
+            is_linked_worktree: true,
+        });
+        ws
+    }
+
+    #[test]
+    fn sibling_seed_clones_membership_and_pins_cwd_to_checkout() {
+        let ws = workspace_with_membership();
+
+        let (membership, pinned) = sibling_spawn_seed(Some(&ws));
+
+        let membership = membership.expect("membership cloned");
+        assert_eq!(membership.key, "repo-key");
+        assert_eq!(
+            pinned.as_deref(),
+            Some(std::path::Path::new("/repo/herdr-worktrees/feature")),
+            "cwd pins to the checkout path, not the live root-pane cwd"
+        );
+    }
+
+    #[test]
+    fn sibling_seed_without_membership_yields_no_pin() {
+        let ws = Workspace::test_new("plain");
+        assert_eq!(sibling_spawn_seed(Some(&ws)), (None, None));
+        assert_eq!(sibling_spawn_seed(None), (None, None));
+    }
+
+    #[test]
+    fn stamped_sibling_groups_with_source_in_sidebar_terms() {
+        // The grouping key the sidebar uses is worktree_space().key — a
+        // stamped sibling must share it with the source workspace.
+        let source = workspace_with_membership();
+        let (membership, _) = sibling_spawn_seed(Some(&source));
+        let mut sibling = Workspace::test_new("sibling");
+        sibling.worktree_space = membership;
+
+        assert_eq!(
+            source.worktree_space().map(|s| s.key.as_str()),
+            sibling.worktree_space().map(|s| s.key.as_str()),
+        );
+    }
 }

@@ -15,6 +15,13 @@ use crate::terminal::TerminalId;
 mod metadata;
 pub use metadata::{AgentMetadata, AgentMetadataReport, EffectivePresentation};
 
+#[path = "header_fields.rs"]
+mod header_fields;
+pub use header_fields::{
+    compact_header_fields, middle_truncate_chars, validate_header_field, HeaderField,
+    HeaderFieldError,
+};
+
 const CLAUDE_WORKING_HOLD: Duration = Duration::from_millis(1200);
 const STALE_HOOK_IDLE_GRACE: Duration = Duration::from_secs(2);
 
@@ -45,6 +52,10 @@ pub struct EffectiveStateChange {
 pub struct TerminalStateMutation {
     pub effective_state_change: Option<EffectiveStateChange>,
     pub session_ref_changed: bool,
+    /// Session ref a report just attached to this terminal. A session id is
+    /// unique to one live agent process, so the caller evicts the same ref
+    /// from every other terminal (mis-deliveries from stale pane-id envs).
+    pub applied_session_ref: Option<crate::agent_resume::AgentSessionRef>,
 }
 
 /// Pure state for a server-owned terminal.
@@ -61,6 +72,23 @@ pub struct TerminalState {
     fallback_visible_idle: bool,
     fallback_visible_working: bool,
     fallback_observed_at: Option<Instant>,
+    /// The last user prompt submitted to this pane's agent, reported by the
+    /// integration hook (Claude's UserPromptSubmit). Shown in the pane header.
+    pub last_prompt: Option<String>,
+    /// Session-promoted header fields ("chips": containers, progress, custom
+    /// KV), insertion-ordered, optionally TTL-expiring. Ephemeral by design —
+    /// never persisted into session snapshots.
+    pub header_fields: Vec<HeaderField>,
+    /// Latched once an agent is ever seen in this pane: keeps the pane header
+    /// reservation stable so the PTY doesn't resize on detection flaps.
+    pub header_reserved: bool,
+    /// When the effective agent state last transitioned. Drives the
+    /// oldest-first ordering of the attention queue.
+    pub state_changed_at: Option<Instant>,
+    /// Free-text activity from the agent's own status line while Working
+    /// (e.g. Claude's "Implementing the parser"). Cleared by the detector
+    /// when the agent stops working.
+    pub live_activity: Option<String>,
     stale_hook_idle_since: Option<Instant>,
     pub hook_authority: Option<HookAuthority>,
     pub agent_metadata: HashMap<String, AgentMetadata>,
@@ -87,6 +115,11 @@ impl TerminalState {
             fallback_visible_idle: false,
             fallback_visible_working: false,
             fallback_observed_at: None,
+            last_prompt: None,
+            header_fields: Vec::new(),
+            header_reserved: false,
+            state_changed_at: None,
+            live_activity: None,
             stale_hook_idle_since: None,
             hook_authority: None,
             agent_metadata: HashMap::new(),
@@ -119,6 +152,23 @@ impl TerminalState {
     ) -> Self {
         self.pending_agent_resume_plan = Some(plan);
         self
+    }
+
+    /// Update the scraped spinner activity, holding the last value through
+    /// transient scrape misses while the agent is still working.
+    ///
+    /// The detector republishes whenever the spinner text changes, and a line
+    /// caught mid-redraw (or between verb changes) scrapes as `None`. Writing
+    /// that `None` straight through clears `live_activity` for a frame, so the
+    /// sidebar status row flickers between the spinner text ("the original")
+    /// and the bare state label ("ours"). Hold the last activity until the
+    /// agent actually leaves the working state.
+    pub fn update_live_activity(&mut self, activity: Option<String>, detected_state: AgentState) {
+        if activity.is_some() {
+            self.live_activity = activity;
+        } else if detected_state != AgentState::Working {
+            self.live_activity = None;
+        }
     }
 
     #[cfg(test)]
@@ -184,6 +234,9 @@ impl TerminalState {
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let previous_detected_agent = self.detected_agent;
         let previous_session = self.current_session_identity_for_persistence();
+        if agent.is_some() {
+            self.header_reserved = true;
+        }
         self.detected_agent = agent;
         self.fallback_state = fallback_state;
         self.fallback_visible_blocker = visible_blocker && fallback_state == AgentState::Blocked;
@@ -231,6 +284,7 @@ impl TerminalState {
             ),
             session_ref_changed: previous_session
                 != self.current_session_identity_for_persistence(),
+            applied_session_ref: None,
         }
     }
 
@@ -315,6 +369,8 @@ impl TerminalState {
             return None;
         }
         self.persisted_agent_session = None;
+        self.header_reserved = true;
+        let applied_session_ref = session_ref.clone();
         self.hook_authority = Some(HookAuthority {
             source,
             agent_label,
@@ -335,6 +391,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed: previous_session != current_session,
+            applied_session_ref,
         })
     }
 
@@ -435,6 +492,7 @@ impl TerminalState {
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
         seq: Option<u64>,
     ) -> Option<TerminalStateMutation> {
+        self.header_reserved = true;
         let session_ref = session_ref?;
         if !self.accept_hook_report(&source, seq) {
             return None;
@@ -444,6 +502,7 @@ impl TerminalState {
         }
 
         let previous_session = self.current_session_identity_for_persistence();
+        let applied_session_ref = session_ref.clone();
         self.persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
             source,
             agent: agent_label,
@@ -453,7 +512,34 @@ impl TerminalState {
         Some(TerminalStateMutation {
             effective_state_change: None,
             session_ref_changed: previous_session != current_session,
+            applied_session_ref: Some(applied_session_ref),
         })
+    }
+
+    /// Drop any agent session identity equal to `session_ref`. A session id
+    /// belongs to exactly one live agent process; when an ancestry-verified
+    /// report lands that ref on another terminal, every other holder was a
+    /// mis-delivery from an environment carrying a stale pane id.
+    pub fn evict_session_ref(
+        &mut self,
+        session_ref: &crate::agent_resume::AgentSessionRef,
+    ) -> bool {
+        let mut changed = false;
+        if let Some(authority) = self.hook_authority.as_mut() {
+            if authority.session_ref.as_ref() == Some(session_ref) {
+                authority.session_ref = None;
+                changed = true;
+            }
+        }
+        if self
+            .persisted_agent_session
+            .as_ref()
+            .is_some_and(|session| &session.session_ref == session_ref)
+        {
+            self.persisted_agent_session = None;
+            changed = true;
+        }
+        changed
     }
 
     fn known_agent_label_conflicts_with_detected_agent(&self, agent_label: &str) -> bool {
@@ -532,6 +618,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed: previous_session.is_some(),
+            applied_session_ref: None,
         })
     }
 
@@ -592,6 +679,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed: previous_session.is_some(),
+            applied_session_ref: None,
         })
     }
 
@@ -702,6 +790,7 @@ impl TerminalState {
         self.fallback_visible_working = false;
         self.fallback_observed_at = None;
         self.stale_hook_idle_since = None;
+        self.live_activity = None;
         self.hook_authority = None;
         self.persisted_agent_session = None;
         self.agent_metadata.clear();
@@ -764,6 +853,9 @@ impl TerminalState {
             return None;
         }
 
+        if previous_state != state {
+            self.state_changed_at = Some(now);
+        }
         self.state = state;
         Some(EffectiveStateChange {
             previous_agent_label,
@@ -839,6 +931,27 @@ mod tests {
     }
 
     #[test]
+    fn live_activity_survives_transient_scrape_miss_while_working() {
+        let mut terminal = test_terminal();
+
+        terminal.update_live_activity(Some("Cogitating".into()), AgentState::Working);
+        assert_eq!(terminal.live_activity.as_deref(), Some("Cogitating"));
+
+        // A frame caught mid-redraw scrapes as None, but the agent is still
+        // working — hold the last activity instead of flickering to the label.
+        terminal.update_live_activity(None, AgentState::Working);
+        assert_eq!(terminal.live_activity.as_deref(), Some("Cogitating"));
+
+        // A fresh scrape replaces it.
+        terminal.update_live_activity(Some("Manifesting".into()), AgentState::Working);
+        assert_eq!(terminal.live_activity.as_deref(), Some("Manifesting"));
+
+        // Once the agent genuinely leaves working, a None clears it.
+        terminal.update_live_activity(None, AgentState::Idle);
+        assert_eq!(terminal.live_activity, None);
+    }
+
+    #[test]
     fn claude_working_is_sticky_for_short_gap() {
         let now = std::time::Instant::now();
         let mut last_working = None;
@@ -887,6 +1000,7 @@ mod tests {
             AgentState::Working,
             AgentDetection {
                 state: AgentState::Idle,
+                activity: None,
                 skip_state_update: false,
                 visible_blocker: false,
                 visible_idle: false,
@@ -910,6 +1024,7 @@ mod tests {
             AgentState::Working,
             AgentDetection {
                 state: AgentState::Idle,
+                activity: None,
                 skip_state_update: false,
                 visible_blocker: false,
                 visible_idle: true,

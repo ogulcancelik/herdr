@@ -8,9 +8,11 @@ pub(crate) mod actions;
 mod agent_resume;
 mod agents;
 mod api;
+pub(crate) use api::peers::short_host_name;
 mod api_helpers;
 mod config_io;
 mod creation;
+pub(crate) mod float;
 mod ids;
 mod input;
 mod runtime;
@@ -87,6 +89,13 @@ pub struct App {
     pub state: AppState,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
     pub event_tx: mpsc::Sender<AppEvent>,
+    /// Peer PID of the API request currently being handled; lets pane
+    /// reports resolve by process ancestry when env pane-ids are stale.
+    pub(crate) current_api_peer_pid: Option<u32>,
+    /// Test-only override for pane child PIDs so ancestry reconciliation can
+    /// be exercised without spawning real PTYs.
+    #[cfg(test)]
+    pub(crate) test_pane_child_pids: std::collections::HashMap<crate::layout::PaneId, u32>,
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
     pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
     pub(crate) event_hub: crate::api::EventHub,
@@ -95,6 +104,7 @@ pub struct App {
     pub(crate) input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
     pub(crate) last_terminal_size: Option<(u16, u16)>,
     pub(crate) config_diagnostic_deadline: Option<Instant>,
+    pub(crate) action_notice_deadline: Option<Instant>,
     pub(crate) toast_deadline: Option<Instant>,
     pub(crate) copy_feedback_deadline: Option<Instant>,
     pub(crate) last_git_remote_status_refresh: Instant,
@@ -181,12 +191,17 @@ fn auto_updates_enabled(no_session: bool) -> bool {
     !no_session && !cfg!(debug_assertions)
 }
 
-fn agent_panel_scope_from_config(
-    scope: crate::config::AgentPanelScopeConfig,
-) -> state::AgentPanelScope {
+fn agent_panel_scope_from_config(scope: crate::config::PanelScopeConfig) -> state::AgentPanelScope {
     match scope {
-        crate::config::AgentPanelScopeConfig::Current => state::AgentPanelScope::CurrentWorkspace,
-        crate::config::AgentPanelScopeConfig::All => state::AgentPanelScope::AllWorkspaces,
+        crate::config::PanelScopeConfig::Current => state::AgentPanelScope::CurrentWorkspace,
+        crate::config::PanelScopeConfig::All => state::AgentPanelScope::AllWorkspaces,
+    }
+}
+
+fn panel_scope_from_config(scope: crate::config::PanelScopeConfig) -> state::PanelScope {
+    match scope {
+        crate::config::PanelScopeConfig::Current => state::PanelScope::Current,
+        crate::config::PanelScopeConfig::All => state::PanelScope::All,
     }
 }
 
@@ -256,6 +271,42 @@ impl App {
         let (prefix_code, prefix_mods) = config.prefix_key();
         crate::kitty_graphics::set_enabled(config.experimental.kitty_graphics);
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(APP_EVENT_CHANNEL_CAPACITY);
+        crate::system_stats::spawn_sampler(event_tx.clone());
+        {
+            // Slow PR-state poll tick: the shared event handler collects the
+            // worktree branches and spawns the actual gh worker.
+            let pr_tick_tx = event_tx.clone();
+            std::thread::Builder::new()
+                .name("pr-state-tick".into())
+                .spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(120));
+                    if pr_tick_tx.blocking_send(AppEvent::PrStatePollDue).is_err() {
+                        return;
+                    }
+                })
+                .expect("pr-state tick thread should spawn");
+        }
+        {
+            // Peer-summary poll tick: the shared event handler snapshots the
+            // configured [[peers]] and spawns the SSH fetch workers.
+            let peer_tick_tx = event_tx.clone();
+            std::thread::Builder::new()
+                .name("peer-summary-tick".into())
+                .spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(
+                        crate::peers::PEER_POLL_INITIAL_DELAY_SECS,
+                    ));
+                    loop {
+                        if peer_tick_tx.blocking_send(AppEvent::PeerPollDue).is_err() {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(
+                            crate::peers::PEER_POLL_INTERVAL_SECS,
+                        ));
+                    }
+                })
+                .expect("peer-summary tick thread should spawn");
+        }
         let render_notify = Arc::new(Notify::new());
         let render_dirty = Arc::new(AtomicBool::new(false));
 
@@ -401,6 +452,7 @@ impl App {
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
+            floats: std::collections::HashMap::new(),
             workspaces,
             active,
             previous_pane_focus: None,
@@ -412,6 +464,24 @@ impl App {
             request_new_workspace: false,
             request_new_tab: false,
             request_new_linked_worktree: None,
+            request_branch_session: None,
+            request_kill_worktree: None,
+            attention_all_clear_chimed: false,
+            pending_attention_chime: false,
+            action_notice: None,
+            agent_aliases: config.ui.agent_aliases.clone(),
+            adopt_external_worktrees: config.worktrees.adopt_external,
+            peers: config.peers.clone(),
+            peer_summaries: config
+                .peers
+                .iter()
+                .map(crate::peers::PeerSummaryState::new)
+                .collect(),
+            fleet_snapshot: None,
+            request_peer_switch: None,
+            servers_panel_scope: panel_scope_from_config(config.ui.servers_panel_scope),
+            spaces_panel_scope: panel_scope_from_config(config.ui.spaces_panel_scope),
+            server_filter: None,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
             request_remove_linked_worktree: None,
@@ -455,7 +525,11 @@ impl App {
                 layout: state::ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
+                remote_card_areas: Vec::new(),
+                server_card_areas: Vec::new(),
+                servers_header_rect: Rect::default(),
                 tab_bar_rect: Rect::default(),
+                status_line_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),
                 tab_scroll_right_hit_area: Rect::default(),
@@ -488,6 +562,18 @@ impl App {
             sidebar_min_width,
             sidebar_max_width,
             mobile_width_threshold: config.ui.mobile_width_threshold,
+            sidebar_row_gap: crate::config::validated_sidebar_row_gap(config.ui.sidebar_row_gap),
+            sidebar_pane_gap: crate::config::validated_sidebar_pane_gap(config.ui.sidebar_pane_gap),
+            prompt_float_lines: crate::config::validated_prompt_float_lines(
+                config.ui.prompt_float_lines,
+            ),
+            auto_collapse_groups: config.ui.auto_collapse_groups,
+            tab_mode: config.ui.tab_mode,
+            server_state_mark: config.ui.server_state_mark,
+            pane_header: config.ui.pane_header,
+            status_line: config.ui.status_line,
+            system_stats: None,
+            expanded_prompt_pane: None,
             sidebar_width_source,
             sidebar_width_auto: false,
             sidebar_collapsed: false,
@@ -499,6 +585,7 @@ impl App {
             redraw_on_focus_gained: config.ui.redraw_on_focus_gained,
             mouse_scroll_lines: config.ui.mouse_scroll_lines(),
             confirm_close: config.ui.confirm_close,
+            confirm_close_whole_space: false,
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
             pane_history_persistence: config.experimental.pane_history,
@@ -566,11 +653,15 @@ impl App {
 
         Self {
             config_diagnostic_deadline: None,
+            action_notice_deadline: None,
             toast_deadline: None,
             copy_feedback_deadline: None,
             state,
             terminal_runtimes: restored_terminal_runtimes,
             event_tx,
+            current_api_peer_pid: None,
+            #[cfg(test)]
+            test_pane_child_pids: std::collections::HashMap::new(),
             event_rx,
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
             git_refresh_in_flight: false,
@@ -644,6 +735,8 @@ impl App {
             .selected
             .min(app.state.workspaces.len().saturating_sub(1));
         app.state.agent_panel_scope = snapshot.agent_panel_scope;
+        app.state.servers_panel_scope = snapshot.servers_panel_scope;
+        app.state.spaces_panel_scope = snapshot.spaces_panel_scope;
         if let Some(width) = snapshot.sidebar_width {
             app.state.sidebar_width = width;
             app.state.sidebar_width_source = state::SidebarWidthSource::Persisted;
@@ -764,6 +857,21 @@ impl App {
                 needs_render = true;
             }
 
+            if let Some(ws_idx) = self.state.request_branch_session.take() {
+                self.open_branch_session_dialog(ws_idx);
+                needs_render = true;
+            }
+
+            if let Some(request) = self.state.request_peer_switch.take() {
+                // Monolithic --no-session mode has no client to re-point.
+                self.show_action_notice(match request {
+                    // No client ever attaches here, so no origin exists.
+                    crate::app::state::PeerSwitchRequest::Home => "already home",
+                    _ => "peer switch requires client/server mode (run without --no-session)",
+                });
+                needs_render = true;
+            }
+
             if let Some(ws_idx) = self.state.request_open_existing_worktree.take() {
                 self.open_existing_worktree_dialog(ws_idx);
                 needs_render = true;
@@ -780,6 +888,18 @@ impl App {
             if let Some(ws_idx) = self.state.request_remove_linked_worktree.take() {
                 self.open_remove_linked_worktree_confirmation(ws_idx);
                 needs_render = true;
+            }
+
+            if let Some(ws_idx) = self.state.request_kill_worktree.take() {
+                self.open_kill_worktree_confirmation(ws_idx);
+                needs_render = true;
+            }
+
+            if self.state.pending_attention_chime {
+                self.state.pending_attention_chime = false;
+                if self.state.sound_enabled() {
+                    crate::sound::play(crate::sound::Sound::AllClear, &self.state.sound);
+                }
             }
 
             if self.state.request_submit_worktree_create {
@@ -1141,6 +1261,35 @@ impl App {
                 self.state.sidebar_min_width = config.ui.sidebar_min_width;
                 self.state.sidebar_max_width = config.ui.sidebar_max_width;
                 self.state.mobile_width_threshold = config.ui.mobile_width_threshold;
+                self.state.sidebar_row_gap =
+                    crate::config::validated_sidebar_row_gap(config.ui.sidebar_row_gap);
+                self.state.sidebar_pane_gap =
+                    crate::config::validated_sidebar_pane_gap(config.ui.sidebar_pane_gap);
+                self.state.prompt_float_lines =
+                    crate::config::validated_prompt_float_lines(config.ui.prompt_float_lines);
+                self.state.auto_collapse_groups = config.ui.auto_collapse_groups;
+                self.state.tab_mode = config.ui.tab_mode;
+                self.state.server_state_mark = config.ui.server_state_mark;
+                self.state.pane_header = config.ui.pane_header;
+                self.state.status_line = config.ui.status_line;
+                self.state.agent_aliases = config.ui.agent_aliases.clone();
+                self.state.adopt_external_worktrees = config.worktrees.adopt_external;
+                if self.state.peers != config.peers {
+                    // Keep polled data for peers that survive the reload.
+                    self.state.peer_summaries = config
+                        .peers
+                        .iter()
+                        .map(|peer| {
+                            self.state
+                                .peer_summaries
+                                .iter()
+                                .find(|summary| summary.peer == peer.name)
+                                .cloned()
+                                .unwrap_or_else(|| crate::peers::PeerSummaryState::new(peer))
+                        })
+                        .collect();
+                    self.state.peers = config.peers.clone();
+                }
                 // Re-clamp the live width to the new bounds. No source guard — bounds
                 // always apply, including to widths owned by Persisted or Manual.
                 self.state.sidebar_width = self
@@ -1162,6 +1311,11 @@ impl App {
                 self.state.agent_panel_scope =
                     agent_panel_scope_from_config(config.ui.agent_panel_scope);
                 self.state.agent_panel_scroll = 0;
+                self.state.servers_panel_scope =
+                    panel_scope_from_config(config.ui.servers_panel_scope);
+                self.state.spaces_panel_scope =
+                    panel_scope_from_config(config.ui.spaces_panel_scope);
+                self.state.workspace_scroll = 0;
                 self.state.accent = crate::config::parse_color(&config.ui.accent);
                 if !self.state.local_sound_playback && self.state.sound != config.ui.sound {
                     self.state.request_client_config_reload = true;
@@ -1317,28 +1471,18 @@ impl App {
                 }
                 crate::raw_input::RawInputEvent::Paste(text) => {
                     if self.state.mode == Mode::Terminal {
-                        if let Some(ws_idx) = self.state.active {
-                            if let Some(ws) = self.state.workspaces.get(ws_idx) {
-                                if let Some(focused) = ws.focused_pane_id() {
-                                    if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
-                                        &self.terminal_runtimes,
-                                        ws_idx,
-                                        focused,
-                                    ) {
-                                        let _ = runtime.try_send_bytes(bytes::Bytes::from(
-                                            if runtime
-                                                .input_state()
-                                                .map(|s| s.bracketed_paste)
-                                                .unwrap_or(false)
-                                            {
-                                                format!("\x1b[200~{text}\x1b[201~")
-                                            } else {
-                                                text
-                                            },
-                                        ));
-                                    }
-                                }
-                            }
+                        if let Some(runtime) = self.terminal_input_runtime() {
+                            let _ = runtime.try_send_bytes(bytes::Bytes::from(
+                                if runtime
+                                    .input_state()
+                                    .map(|s| s.bracketed_paste)
+                                    .unwrap_or(false)
+                                {
+                                    format!("\x1b[200~{text}\x1b[201~")
+                                } else {
+                                    text
+                                },
+                            ));
                         }
                     }
                 }
@@ -1777,7 +1921,7 @@ mod tests {
     #[test]
     fn startup_uses_configured_agent_panel_scope() {
         let mut config = Config::default();
-        config.ui.agent_panel_scope = crate::config::AgentPanelScopeConfig::Current;
+        config.ui.agent_panel_scope = crate::config::PanelScopeConfig::Current;
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
@@ -2062,6 +2206,84 @@ mod tests {
 
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
         assert_eq!(app.state.mobile_width_threshold, 96);
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_config_updates_sidebar_pane_gap() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-sidebar-pane-gap");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        assert_eq!(
+            app.state.sidebar_pane_gap,
+            crate::config::DEFAULT_SIDEBAR_PANE_GAP
+        );
+
+        std::fs::write(
+            &path,
+            "[ui]
+sidebar_pane_gap = 2
+",
+        )
+        .unwrap();
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.state.sidebar_pane_gap, 2);
+
+        // Out-of-range values clamp instead of producing absurd layouts.
+        std::fs::write(
+            &path,
+            "[ui]
+sidebar_pane_gap = 99
+",
+        )
+        .unwrap();
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(
+            app.state.sidebar_pane_gap,
+            crate::config::MAX_SIDEBAR_PANE_GAP
+        );
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_config_updates_sidebar_row_gap() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-sidebar-row-gap");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        assert_eq!(
+            app.state.sidebar_row_gap,
+            crate::config::DEFAULT_SIDEBAR_ROW_GAP
+        );
+
+        std::fs::write(&path, "[ui]\nsidebar_row_gap = 0\n").unwrap();
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.state.sidebar_row_gap, 0);
+
+        // Out-of-range values clamp instead of producing absurd layouts.
+        std::fs::write(&path, "[ui]\nsidebar_row_gap = 9\n").unwrap();
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(
+            app.state.sidebar_row_gap,
+            crate::config::MAX_SIDEBAR_ROW_GAP
+        );
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -3261,6 +3483,7 @@ mod tests {
             pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Working,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3286,6 +3509,7 @@ mod tests {
             pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Idle,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,

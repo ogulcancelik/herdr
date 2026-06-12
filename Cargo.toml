@@ -16,7 +16,7 @@ base64 = "0.22.1"
 bincode = { version = "2", features = ["serde"] }
 bytes = "1"
 crossterm = "0.29"
-ctrlc = "3"
+ctrlc = { version = "3", features = ["termination"] }
 libc = "0.2"
 portable-pty = "0.9"
 png = "0.17"
@@ -30,3 +30,4 @@ toml = "0.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 unicode-width = "0.2"
+sysinfo = "0.39.3"

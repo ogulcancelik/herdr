@@ -3,7 +3,7 @@ use ratatui::layout::Rect;
 
 use crate::{
     app::{
-        state::{AppState, ExperimentSetting, SettingsSection, THEME_NAMES},
+        state::{AppState, ExperimentSetting, SettingsSection, SidebarGapSetting, THEME_NAMES},
         App, Mode,
     },
     config::ToastDelivery,
@@ -17,9 +17,21 @@ pub(super) enum SettingsAction {
     SaveSound(bool),
     SaveToastDelivery(ToastDelivery),
     SaveAgentBorderLabels(bool),
+    SaveSidebarRowGap(u16),
+    SaveSidebarPaneGap(u16),
     SavePaneHistory(bool),
     SaveSwitchAsciiInputSourceInPrefix(bool),
     InstallRecommendedIntegrations,
+}
+
+/// Map a Sidebar row index to the cycle action that steps its value.
+fn sidebar_gap_cycle_action(state: &AppState, idx: usize) -> Option<SettingsAction> {
+    let setting = SidebarGapSetting::ALL.get(idx).copied()?;
+    let next = setting.next_value(state);
+    Some(match setting {
+        SidebarGapSetting::RowGap => SettingsAction::SaveSidebarRowGap(next),
+        SidebarGapSetting::PaneGap => SettingsAction::SaveSidebarPaneGap(next),
+    })
 }
 
 /// Map an Experiments row index to the toggle action that flips it.
@@ -47,6 +59,8 @@ impl App {
                 SettingsAction::SaveAgentBorderLabels(enabled) => {
                     self.save_agent_border_labels(enabled)
                 }
+                SettingsAction::SaveSidebarRowGap(gap) => self.save_sidebar_row_gap(gap),
+                SettingsAction::SaveSidebarPaneGap(gap) => self.save_sidebar_pane_gap(gap),
                 SettingsAction::SavePaneHistory(enabled) => {
                     self.save_pane_history_persistence(enabled)
                 }
@@ -234,6 +248,30 @@ pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Opti
                 state.settings.list.selected = toast_delivery_index(state.toast_delivery());
             }
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+                state.settings.section = SettingsSection::Sidebar;
+                state.settings.list.selected = 0;
+            }
+            _ => {
+                if let Some(super::modal::ModalAction::Close) =
+                    super::modal::modal_action_from_key(&key, super::modal::SETTINGS_ACTIONS)
+                {
+                    cancel_settings(state);
+                }
+            }
+        },
+        SettingsSection::Sidebar => match key.code {
+            KeyCode::Up | KeyCode::Char('k') => state.settings.list.move_prev(),
+            KeyCode::Down | KeyCode::Char('j') => {
+                state.settings.list.move_next(SidebarGapSetting::ALL.len())
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                return sidebar_gap_cycle_action(state, state.settings.list.selected);
+            }
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+                state.settings.section = SettingsSection::PaneLabels;
+                state.settings.list.selected = usize::from(!state.agent_border_labels_enabled());
+            }
+            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
                 state.settings.section = SettingsSection::Integrations;
                 state.settings.list.selected = 0;
             }
@@ -274,8 +312,8 @@ pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Opti
                 return Some(SettingsAction::InstallRecommendedIntegrations);
             }
             KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
-                state.settings.section = SettingsSection::PaneLabels;
-                state.settings.list.selected = usize::from(!state.agent_border_labels_enabled());
+                state.settings.section = SettingsSection::Sidebar;
+                state.settings.list.selected = 0;
             }
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
                 state.settings.section = SettingsSection::Experiments;
@@ -305,6 +343,7 @@ pub(crate) fn open_settings_at(state: &mut AppState, section: SettingsSection) {
         SettingsSection::Sound => usize::from(!state.sound_enabled()),
         SettingsSection::Toast => toast_delivery_index(state.toast_delivery()),
         SettingsSection::PaneLabels => usize::from(!state.agent_border_labels_enabled()),
+        SettingsSection::Sidebar => 0,
         SettingsSection::Experiments => 0,
         SettingsSection::Integrations => 0,
     };
@@ -395,6 +434,14 @@ impl AppState {
                     None
                 }
             }
+            SettingsSection::Sidebar => {
+                let list_y = area.y + 3;
+                if row >= list_y && row < list_y + SidebarGapSetting::ALL.len() as u16 {
+                    Some((row - list_y) as usize)
+                } else {
+                    None
+                }
+            }
             SettingsSection::Experiments => {
                 let list_y = area.y + 3;
                 if row >= list_y && row < list_y + ExperimentSetting::ALL.len() as u16 {
@@ -419,6 +466,7 @@ impl AppState {
                         SettingsSection::PaneLabels => {
                             usize::from(!self.agent_border_labels_enabled())
                         }
+                        SettingsSection::Sidebar => 0,
                         SettingsSection::Experiments => 0,
                         SettingsSection::Integrations => 0,
                     });
@@ -443,6 +491,7 @@ impl AppState {
                             let enabled = idx == 0;
                             Some(SettingsAction::SaveAgentBorderLabels(enabled))
                         }
+                        SettingsSection::Sidebar => sidebar_gap_cycle_action(self, idx),
                         SettingsSection::Experiments => experiment_toggle_action(self, idx),
                         SettingsSection::Integrations => None,
                     };
@@ -578,6 +627,12 @@ mod tests {
             &mut state,
             KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
         );
+        assert_eq!(state.settings.section, SettingsSection::Sidebar);
+
+        update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
+        );
         assert_eq!(state.settings.section, SettingsSection::Integrations);
 
         update_settings_state(
@@ -603,6 +658,77 @@ mod tests {
             KeyEvent::new(KeyCode::BackTab, KeyModifiers::empty()),
         );
         assert_eq!(state.settings.section, SettingsSection::Integrations);
+
+        update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::empty()),
+        );
+        assert_eq!(state.settings.section, SettingsSection::Sidebar);
+    }
+
+    #[test]
+    fn settings_sidebar_enter_cycles_row_gap_and_wraps() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_settings_at(&mut state, SettingsSection::Sidebar);
+        assert_eq!(state.settings.list.selected, 0);
+
+        // Default row gap is 1 -> next is 2.
+        let action = update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert_eq!(action, Some(SettingsAction::SaveSidebarRowGap(2)));
+
+        // At the max the cycle wraps back to 0.
+        state.sidebar_row_gap = crate::config::MAX_SIDEBAR_ROW_GAP;
+        let action = update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert_eq!(action, Some(SettingsAction::SaveSidebarRowGap(0)));
+        assert_eq!(state.mode, Mode::Settings);
+    }
+
+    #[test]
+    fn settings_sidebar_second_row_cycles_pane_gap() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_settings_at(&mut state, SettingsSection::Sidebar);
+
+        update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+        );
+        assert_eq!(state.settings.list.selected, 1);
+
+        // Default pane gap is 0 -> next is 1.
+        let action = update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert_eq!(action, Some(SettingsAction::SaveSidebarPaneGap(1)));
+
+        state.sidebar_pane_gap = crate::config::MAX_SIDEBAR_PANE_GAP;
+        let action = update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert_eq!(action, Some(SettingsAction::SaveSidebarPaneGap(0)));
+    }
+
+    #[test]
+    fn settings_mouse_click_cycles_sidebar_pane_gap_row() {
+        let mut app = app_for_mouse_test();
+        open_settings_at(&mut app.state, SettingsSection::Sidebar);
+
+        let area = app.state.settings_content_rect();
+        let action = app.state.handle_settings_mouse(mouse(
+            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            area.x + 2,
+            area.y + 4,
+        ));
+
+        assert_eq!(action, Some(SettingsAction::SaveSidebarPaneGap(1)));
+        assert_eq!(app.state.settings.list.selected, 1);
     }
 
     #[test]

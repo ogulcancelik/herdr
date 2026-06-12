@@ -242,6 +242,12 @@ impl PaneTerminal {
         self.ghostty.apply_host_terminal_theme(theme);
     }
 
+    /// Host terminal theme last written into this pane's emulator.
+    #[cfg(test)]
+    pub fn test_host_terminal_theme(&self) -> crate::terminal_theme::TerminalTheme {
+        self.ghostty.test_host_terminal_theme()
+    }
+
     pub fn has_transient_default_color_override(&self) -> bool {
         self.ghostty.has_transient_default_color_override()
     }
@@ -361,6 +367,15 @@ impl GhosttyPaneTerminal {
             core.child_default_background_changed = false;
             write_host_terminal_theme(&mut core.terminal, theme);
         }
+    }
+
+    /// Host terminal theme last written into this pane's emulator.
+    #[cfg(test)]
+    pub fn test_host_terminal_theme(&self) -> crate::terminal_theme::TerminalTheme {
+        self.core
+            .lock()
+            .map(|core| core.host_terminal_theme)
+            .unwrap_or_default()
     }
 
     pub fn has_transient_default_color_override(&self) -> bool {
@@ -2294,6 +2309,47 @@ mod tests {
         let encoded = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
 
         assert_eq!(encoded, b"\x1b[27;2;13~");
+    }
+
+    #[test]
+    fn ghostty_legacy_pane_receives_numpad_5_as_plain_digit() {
+        // The host terminal reports numpad 5 as a distinct kitty functional
+        // codepoint. A pane without its own kitty keyboard sees a plain '5'.
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let key = crate::input::parse_terminal_key_sequence("\x1b[57404;1u").unwrap();
+        let encoded = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
+
+        assert_eq!(encoded, b"5");
+    }
+
+    #[test]
+    fn ghostty_legacy_pane_receives_numpad_enter_as_cr() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let key = crate::input::parse_terminal_key_sequence("\x1b[57414;1u").unwrap();
+        let encoded = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
+
+        assert_eq!(encoded, b"\r");
+    }
+
+    #[test]
+    fn ghostty_kitty_pane_receives_native_numpad_5_codepoint() {
+        // A pane that HAS negotiated kitty keyboard can distinguish the keypad,
+        // so it receives the native KP_5 functional codepoint.
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let key = crate::input::parse_terminal_key_sequence("\x1b[57404;1u").unwrap();
+        let encoded =
+            pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Kitty { flags: 1 });
+
+        assert_eq!(encoded, b"\x1b[57404;1u");
     }
 
     #[test]

@@ -24,7 +24,7 @@ use self::git::git_ahead_behind;
 pub use self::{
     git::{
         derive_label_from_cwd, git_branch, git_space_metadata, git_status_cache_key,
-        GitSpaceMetadata, GitStatusCacheEntry,
+        project_key_for_common_dir, GitSpaceMetadata, GitStatusCacheEntry,
     },
     tab::Tab,
 };
@@ -93,8 +93,15 @@ pub struct Workspace {
     pub(crate) cached_git_branch: Option<String>,
     /// Cached ahead/behind counts for the workspace repo's current branch upstream.
     pub(crate) cached_git_ahead_behind: Option<(usize, usize)>,
+    /// GitHub PR state for the current branch (background gh poller).
+    pub(crate) pr_state: Option<crate::worktree::PrStateInfo>,
     /// Cached derived Git repo metadata for worktree actions and status display.
     pub(crate) cached_git_space: Option<GitSpaceMetadata>,
+    /// Whether a git identity probe has completed for this workspace (the
+    /// async status sweep, or the synchronous restore-time check). Until it
+    /// has, a workspace without git metadata is "pending", not non-git —
+    /// the sidebar must not flash it into the `misc` section (#33).
+    pub(crate) git_identity_resolved: bool,
     /// Explicit Herdr-managed worktree grouping provenance.
     pub worktree_space: Option<WorktreeSpaceMembership>,
     /// Stable-ish public pane numbers within this workspace.
@@ -223,7 +230,9 @@ impl Workspace {
                 identity_cwd: initial_cwd.clone(),
                 cached_git_branch: git_branch(&initial_cwd),
                 cached_git_ahead_behind: None,
+                pr_state: None,
                 cached_git_space: None,
+                git_identity_resolved: false,
                 worktree_space: None,
                 public_pane_numbers,
                 next_public_pane_number: 2,
@@ -615,6 +624,14 @@ impl Workspace {
         self.cached_git_branch.clone()
     }
 
+    pub fn ahead_behind(&self) -> Option<(usize, usize)> {
+        self.cached_git_ahead_behind
+    }
+
+    pub fn pr_state(&self) -> Option<crate::worktree::PrStateInfo> {
+        self.pr_state
+    }
+
     pub fn git_ahead_behind(&self) -> Option<(usize, usize)> {
         self.cached_git_ahead_behind
     }
@@ -623,8 +640,55 @@ impl Workspace {
         self.cached_git_space.as_ref()
     }
 
+    /// Identity of this workspace's repo family: the canonical git common
+    /// dir, shared by the main checkout and every linked worktree. Sourced
+    /// from worktree membership first, then live git metadata.
+    pub fn repo_group_key(&self) -> Option<&str> {
+        self.worktree_space
+            .as_ref()
+            .map(|space| space.key.as_str())
+            .or_else(|| {
+                self.cached_git_space
+                    .as_ref()
+                    .map(|space| space.key.as_str())
+            })
+    }
+
     pub fn worktree_space(&self) -> Option<&WorktreeSpaceMembership> {
         self.worktree_space.as_ref()
+    }
+
+    /// Whether this checkout is a linked git worktree (vs the repo's main
+    /// checkout): explicit membership provenance first, then live git
+    /// metadata. The main checkout is the project section's primary row (#33).
+    pub fn is_linked_checkout(&self) -> bool {
+        self.worktree_space
+            .as_ref()
+            .map(|space| space.is_linked_worktree)
+            .or_else(|| {
+                self.cached_git_space
+                    .as_ref()
+                    .map(|space| space.is_linked_worktree)
+            })
+            .unwrap_or(false)
+    }
+
+    /// True while the workspace has no git identity AND no probe has
+    /// finished — it may still turn out to be a git checkout. Distinct
+    /// from "resolved non-git", which files under `misc` (#33).
+    pub(crate) fn git_identity_pending(&self) -> bool {
+        !self.git_identity_resolved
+            && self.worktree_space.is_none()
+            && self.cached_git_space.is_none()
+    }
+
+    /// Machine-independent project identity (normalized origin URL or
+    /// "dir:<name>" fallback) used to fold checkouts of the same project
+    /// across federated peer servers. See [[peers]] config.
+    pub fn project_key(&self) -> Option<&str> {
+        self.cached_git_space
+            .as_ref()
+            .map(|space| space.project_key.as_str())
     }
 
     #[cfg(test)]
@@ -633,6 +697,7 @@ impl Workspace {
         self.cached_git_branch = cwd.as_deref().and_then(git_branch);
         self.cached_git_ahead_behind = cwd.as_deref().and_then(git_ahead_behind);
         self.cached_git_space = cwd.as_deref().and_then(git_space_metadata);
+        self.git_identity_resolved = true;
     }
 
     pub fn git_status_snapshot_for_cwd_with_cache(
@@ -751,7 +816,9 @@ impl Workspace {
             identity_cwd: identity_cwd.clone(),
             cached_git_branch: git_branch(&identity_cwd),
             cached_git_ahead_behind: None,
+            pr_state: None,
             cached_git_space: None,
+            git_identity_resolved: false,
             worktree_space: None,
             public_pane_numbers,
             next_public_pane_number: 2,

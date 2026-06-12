@@ -31,10 +31,15 @@ impl App {
                 &self.terminal_runtimes,
                 self.state.active,
                 self.state.selected,
-                self.state.agent_panel_scope,
+                self.state.panel_scopes(),
                 self.state.sidebar_width,
                 self.state.sidebar_section_split,
                 self.state.collapsed_space_keys.clone(),
+                self.state
+                    .pane_id_aliases
+                    .iter()
+                    .map(|(old, pane)| (*old, pane.raw()))
+                    .collect(),
             );
             let history = self.persist_pane_history.then(|| {
                 crate::persist::capture_history(&self.state.workspaces, &self.terminal_runtimes)

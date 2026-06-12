@@ -19,6 +19,12 @@ pub struct PaneDetail {
     pub seen: bool,
     pub custom_status: Option<String>,
     pub state_labels: HashMap<String, String>,
+    /// Session-promoted header fields (chips), non-expired, insertion order.
+    pub header_fields: Vec<(String, String)>,
+    /// Live status-line activity while Working (e.g. "Implementing the parser").
+    pub live_activity: Option<String>,
+    /// When the effective agent state last transitioned.
+    pub state_changed_at: Option<std::time::Instant>,
 }
 
 impl Tab {
@@ -57,27 +63,30 @@ impl Tab {
                     seen: pane.seen,
                     custom_status: presentation.custom_status,
                     state_labels: presentation.state_labels,
+                    header_fields: terminal.active_header_fields(),
+                    live_activity: (terminal.state == AgentState::Working)
+                        .then(|| terminal.live_activity.clone())
+                        .flatten(),
+                    state_changed_at: terminal.state_changed_at,
                 })
             })
             .collect()
     }
 }
 
-fn pane_attention_priority(state: AgentState, seen: bool) -> u8 {
-    match (state, seen) {
-        (AgentState::Blocked, _) => 4,
-        (AgentState::Idle, false) => 3,
-        (AgentState::Working, _) => 2,
-        (AgentState::Idle, true) => 1,
-        (AgentState::Unknown, _) => 0,
-    }
+/// Attention priority of a pane state: the shared severity ladder
+/// ([`crate::ui::state_signal::StateClass`]) — blocked > done-unseen >
+/// working > settled idle > none.
+fn pane_attention_priority(state: AgentState, seen: bool) -> crate::ui::state_signal::StateClass {
+    crate::ui::state_signal::StateClass::of(state, seen)
 }
 
 impl Workspace {
-    pub fn aggregate_state(
-        &self,
-        terminals: &HashMap<TerminalId, TerminalState>,
-    ) -> (AgentState, bool) {
+    /// (state, seen) for every pane in the workspace with a live terminal.
+    pub fn pane_states<'a>(
+        &'a self,
+        terminals: &'a HashMap<TerminalId, TerminalState>,
+    ) -> impl Iterator<Item = (AgentState, bool)> + 'a {
         self.tabs
             .iter()
             .flat_map(|tab| tab.panes.values())
@@ -86,6 +95,13 @@ impl Workspace {
                     .get(&pane.attached_terminal_id)
                     .map(|terminal| (terminal.state, pane.seen))
             })
+    }
+
+    pub fn aggregate_state(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+    ) -> (AgentState, bool) {
+        self.pane_states(terminals)
             .max_by_key(|(state, seen)| pane_attention_priority(*state, *seen))
             .unwrap_or((AgentState::Unknown, true))
     }
@@ -201,6 +217,33 @@ mod tests {
         assert_eq!(
             labels,
             vec![("planner".into(), "planner".into(), Some(Agent::Pi))]
+        );
+    }
+
+    #[test]
+    fn pane_details_carry_active_header_fields_in_insertion_order() {
+        let ws = Workspace::test_new("test");
+        let root_pane = ws.tabs[0].root_pane;
+        let mut terminals = HashMap::new();
+        let mut terminal = terminal_for_pane(&ws, root_pane);
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_header_field("build", "73%", None).unwrap();
+        terminal.set_header_field("pg", "up", None).unwrap();
+        // An already-expired field (zero TTL) must not ride PaneDetail.
+        terminal
+            .set_header_field("stale", "gone", Some(std::time::Duration::ZERO))
+            .unwrap();
+        terminals.insert(terminal.id.clone(), terminal);
+
+        let details = ws.pane_details(&terminals);
+
+        assert_eq!(details.len(), 1);
+        assert_eq!(
+            details[0].header_fields,
+            vec![
+                ("build".to_string(), "73%".to_string()),
+                ("pg".to_string(), "up".to_string()),
+            ]
         );
     }
 

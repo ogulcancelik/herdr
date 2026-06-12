@@ -37,6 +37,7 @@ mod kitty_graphics;
 mod layout;
 mod logging;
 mod pane;
+mod peers;
 mod persist;
 mod platform;
 mod product_announcements;
@@ -50,6 +51,7 @@ mod selection;
 mod server;
 mod session;
 mod sound;
+mod system_stats;
 mod terminal;
 mod terminal_notify;
 mod terminal_theme;
@@ -117,6 +119,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # help = "prefix+?"
 # settings = "prefix+s"
 # detach = "prefix+q"
+# switch_home = ""  # optional, unset by default; leap back to the launching host
 # reload_config = "prefix+shift+r"
 # open_notification_target = "prefix+o"
 # workspace_picker = "prefix+w"
@@ -138,6 +141,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # next_tab = "prefix+n"
 # switch_tab = "prefix+1..9"
 # switch_workspace = ""   # optional indexed binding, e.g. "prefix+shift+1..9"
+# switch_space = ""        # optional: jump to the Nth project section, e.g. "ctrl+1..9"
 # close_tab = "prefix+shift+x"
 # rename_pane = "prefix+shift+p"
 # edit_scrollback = "prefix+e"
@@ -226,6 +230,16 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Agent panel scope: "current" or "all". Toggling it in the sidebar saves this setting.
 # agent_panel_scope = "all"
 
+# Servers section scope: "all" shows every server row, "current" only this
+# machine (plus the home row when attached remotely). Toggling it in the
+# sidebar saves this setting.
+# servers_panel_scope = "all"
+
+# Spaces section scope: "all" shows the full workspace list, "current" only
+# the focused workspace's space group. Toggling it in the sidebar saves this
+# setting.
+# spaces_panel_scope = "all"
+
 # Accent color for highlights, borders, and navigation UI.
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"
@@ -265,6 +279,18 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # your ssh config unchanged — this does not force keepalive off, it only stops
 # herdr from adding its own.
 # manage_ssh_config = true
+
+[slots]
+# Connection slots (#65): a multi-connection client that holds one framed
+# connection per fleet server and FLIPS between them in process on a switch —
+# the terminal is never released, so warm switches are instant with no blip and
+# no relaunch. At start the client background-dials every configured peer (plus
+# the carried fleet snapshot on a spoke); home is always warm. Down servers
+# ghost as today and are gently re-dialed. When disabled (default), the client
+# keeps the exit-and-relaunch leg model.
+# enabled = false
+# Generous sanity cap on concurrently warmed slots (incl. home + active).
+# max = 8
 
 [experimental]
 # Allow launching herdr from inside a herdr-managed pane.
@@ -326,6 +352,231 @@ fn exit_if_nested_disabled(config: &config::Config) {
         eprintln!();
         eprintln!("\x1b[2m\"{}\"\x1b[0m", random_nested_message());
         std::process::exit(1);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AttachLeg {
+    /// Local server/client attach (auto-detect launch).
+    Local,
+    /// Remote attach over the SSH bridge.
+    Remote(remote::RemoteLaunch),
+}
+
+/// Run attach legs until the client exits without requesting a server
+/// switch. A leg's client records its switch target (a federated peer's SSH
+/// destination, from a sidebar remote row) in the switch file; each recorded
+/// target chains into a fresh `--remote` leg.
+///
+/// Every leg — local in-process and remote via the spawned `herdr client`
+/// subprocess — funnels into `client::run_client_with_mode`, which retries
+/// attaches refused with the live-handoff notice (#38) and re-captures the
+/// host terminal theme per leg for the attach handshake (#47). A SwitchServer
+/// relaunch racing a handoff therefore waits inside the leg instead of
+/// bailing here.
+fn run_attach_legs(first: AttachLeg) -> io::Result<()> {
+    let switch_file = std::env::temp_dir().join(format!("herdr-switch-{}", std::process::id()));
+    // Inherited by the (possibly nested) client process of every leg.
+    std::env::set_var(client::SWITCH_FILE_ENV_VAR, &switch_file);
+
+    let mut leg = first;
+    // The leg to bounce back to if the NEXT one fails to establish (#63): the
+    // server the user switched away from. While set, a leg that dies before
+    // its client attaches re-attaches `previous` with a failure notice instead
+    // of stranding the user at a raw shell.
+    let mut previous: Option<(AttachLeg, String)> = None;
+    // Whether some leg held the alternate screen for a seamless swap (#63).
+    // Once a switch fires, a dying chain must reclaim the host terminal.
+    let mut handoff_held = false;
+    loop {
+        // A leg chained in after a seamless switch inherits the previous leg's
+        // held terminal (frozen frame, raw mode) until it repaints (#69). Tell
+        // it so an abnormal exit in its retry window reclaims the terminal
+        // instead of stranding the user behind the frame. Cleared otherwise so
+        // a first/clean leg never thinks it inherited a hold.
+        if handoff_held {
+            std::env::set_var(client::HELD_TERMINAL_ENV_VAR, "1");
+        } else {
+            std::env::remove_var(client::HELD_TERMINAL_ENV_VAR);
+        }
+        let result = match &leg {
+            AttachLeg::Local => server::autodetect::auto_detect_launch(),
+            AttachLeg::Remote(launch) => remote::run_remote(launch.clone()),
+        };
+        // The notice (if any) was a one-shot for this leg's attach; consume it
+        // so a later switch off this leg does not re-show it.
+        std::env::remove_var(client::SWITCH_NOTICE_ENV_VAR);
+
+        let switch = client::take_switch_target(&switch_file);
+        // An origin-workspace row going home (#66) carries the workspace to
+        // focus once the home leg attaches. The next leg's server is the
+        // local one (it may still be starting up), so fire a detached helper
+        // that retries `workspace focus` against the local socket — the same
+        // post-attach focus a config-peer leap does via ssh, but home-bound.
+        if let Some(focus) = switch.as_ref().and_then(|s| s.focus_workspace.clone()) {
+            spawn_home_focus(focus);
+        }
+        match decide_next_leg(&leg, switch, result, previous.take(), handoff_held) {
+            LegStep::Switch {
+                next,
+                previous: prev,
+            } => {
+                handoff_held = true;
+                previous = Some(prev);
+                leg = next;
+            }
+            LegStep::FallBack {
+                to,
+                notice,
+                previous: prev,
+            } => {
+                std::env::set_var(client::SWITCH_NOTICE_ENV_VAR, notice);
+                previous = prev;
+                leg = to;
+            }
+            LegStep::Finish {
+                result,
+                restore_terminal,
+            } => {
+                // A switch may have held the alternate screen for the seamless
+                // swap (#63). If the chain dies with nothing left to reclaim
+                // the screen, restore the host terminal so the user is not
+                // stranded in a frozen alt-screen with raw mode on.
+                if restore_terminal {
+                    client::force_restore_host_terminal();
+                }
+                return result;
+            }
+        }
+    }
+}
+
+/// What the leg loop does after one leg ends. Pure decision — no I/O — so the
+/// switch / fall-back / finish branching (#63) is unit-testable.
+enum LegStep {
+    /// The leg requested a switch: run `next`, remembering `previous` to fall
+    /// back to if `next` fails to establish.
+    Switch {
+        next: AttachLeg,
+        previous: (AttachLeg, String),
+    },
+    /// The switch leg failed to establish: re-attach `to` (the previous
+    /// server) with `notice` so the user lands back, told why.
+    FallBack {
+        to: AttachLeg,
+        notice: String,
+        previous: Option<(AttachLeg, String)>,
+    },
+    /// The chain is done (clean exit, or a failure with nowhere to fall back).
+    Finish {
+        result: io::Result<()>,
+        restore_terminal: bool,
+    },
+}
+
+fn decide_next_leg(
+    current: &AttachLeg,
+    switch: Option<client::RecordedSwitch>,
+    result: io::Result<()>,
+    previous: Option<(AttachLeg, String)>,
+    handoff_held: bool,
+) -> LegStep {
+    match switch {
+        // The reserved home target re-attaches locally: the way home from a
+        // spoke is client knowledge, not server-side ssh config.
+        Some(switch) if switch.target == protocol::HOME_SWITCH_TARGET => LegStep::Switch {
+            previous: (current.clone(), switch_failure_label(&AttachLeg::Local)),
+            next: AttachLeg::Local,
+        },
+        Some(switch) => {
+            let keybindings = match current {
+                AttachLeg::Remote(launch) => launch.keybindings,
+                // Match the CLI's --remote-keybindings default.
+                AttachLeg::Local => remote::RemoteKeybindings::Local,
+            };
+            let next = AttachLeg::Remote(remote::RemoteLaunch {
+                target: switch.target,
+                keybindings,
+                live_handoff: false,
+                fleet: switch.fleet,
+            });
+            LegStep::Switch {
+                previous: (current.clone(), switch_failure_label(&next)),
+                next,
+            }
+        }
+        // No switch requested: the leg exited cleanly or FAILED to establish.
+        // A failure with a previous leg on hand is a failed switch — bounce
+        // back with the reason as a top-right notice (#63), never strand at a
+        // shell. A clean exit, or a failure with nowhere to fall back, ends.
+        None => match (result, previous) {
+            (Err(err), Some((fallback, target_label))) => LegStep::FallBack {
+                notice: format!(
+                    "switch to {target_label} failed: {}",
+                    switch_failure_reason(&err)
+                ),
+                to: fallback,
+                previous: None,
+            },
+            (result, _) => LegStep::Finish {
+                // A held alt-screen (a switch fired earlier in the chain) that
+                // ends on an error has no leg left to reclaim the screen.
+                restore_terminal: result.is_err() && handoff_held,
+                result,
+            },
+        },
+    }
+}
+
+/// Display name of a switch target for the failure notice (#63): the remote
+/// ssh target, or "home" for the reserved local re-attach.
+fn switch_failure_label(leg: &AttachLeg) -> String {
+    match leg {
+        AttachLeg::Local => "home".to_string(),
+        AttachLeg::Remote(launch) => launch.target.clone(),
+    }
+}
+
+/// Focus a workspace on the local server once it comes up after a home
+/// re-attach from an origin-workspace row (#66). The home leg is about to
+/// (re)start the local server, so a detached thread retries the focus over
+/// the local API socket until it lands or the budget runs out — the spoke
+/// has no route to drive the hub, so the focus must fire here. Best-effort:
+/// a failure just lands home on whatever workspace was last focused.
+fn spawn_home_focus(workspace_id: String) {
+    use crate::api::schema::{Method, Request, WorkspaceTarget};
+    std::thread::spawn(move || {
+        // ~10s budget: covers a cold local-server start; cheap if already up.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let request = Request {
+            id: "launcher:home-focus".to_string(),
+            method: Method::WorkspaceFocus(WorkspaceTarget {
+                workspace_id: workspace_id.clone(),
+            }),
+        };
+        loop {
+            if crate::api::client::ApiClient::local()
+                .request(request.clone())
+                .is_ok()
+            {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    });
+}
+
+/// A concise, single-line reason from a failed leg launch for the notice.
+fn switch_failure_reason(err: &io::Error) -> String {
+    let text = err.to_string();
+    let line = text.lines().next().unwrap_or(&text).trim();
+    if line.is_empty() {
+        "connection failed".to_string()
+    } else {
+        line.to_string()
     }
 }
 
@@ -566,7 +817,7 @@ fn main() -> io::Result<()> {
     }
 
     if let Some(remote_launch) = remote_launch {
-        return remote::run_remote(remote_launch);
+        return run_attach_legs(AttachLeg::Remote(remote_launch));
     }
 
     let loaded_config = config::Config::load();
@@ -577,7 +828,7 @@ fn main() -> io::Result<()> {
     // Auto-detect launch: when --no-session is NOT set, use server/client mode.
     // Check if a server is running, spawn one if needed, then attach as client.
     if !no_session {
-        if let Err(err) = server::autodetect::auto_detect_launch() {
+        if let Err(err) = run_attach_legs(AttachLeg::Local) {
             eprintln!("herdr: {err}");
             std::process::exit(1);
         }
@@ -713,6 +964,121 @@ mod tests {
     fn nested_herdr_blocks_when_env_is_set() {
         let config = config::Config::default();
         assert!(should_block_nested_for_env(&config, Some(HERDR_ENV_VALUE)));
+    }
+
+    #[test]
+    fn switch_failure_label_names_the_target() {
+        assert_eq!(switch_failure_label(&AttachLeg::Local), "home");
+        let leg = AttachLeg::Remote(remote::RemoteLaunch {
+            target: "lars@sage".to_string(),
+            keybindings: remote::RemoteKeybindings::Local,
+            live_handoff: false,
+            fleet: None,
+        });
+        assert_eq!(switch_failure_label(&leg), "lars@sage");
+    }
+
+    #[test]
+    fn switch_failure_reason_is_a_single_trimmed_line() {
+        let err = io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            "connection refused\nIs herdr server running?",
+        );
+        assert_eq!(switch_failure_reason(&err), "connection refused");
+
+        let empty = io::Error::other("");
+        assert_eq!(switch_failure_reason(&empty), "connection failed");
+    }
+
+    fn remote_leg(target: &str) -> AttachLeg {
+        AttachLeg::Remote(remote::RemoteLaunch {
+            target: target.to_string(),
+            keybindings: remote::RemoteKeybindings::Local,
+            live_handoff: false,
+            fleet: None,
+        })
+    }
+
+    #[test]
+    fn decide_next_leg_chains_into_requested_switch() {
+        let switch = Some(client::RecordedSwitch {
+            target: "lars@sage".to_string(),
+            fleet: None,
+            focus_workspace: None,
+        });
+        match decide_next_leg(&AttachLeg::Local, switch, Ok(()), None, false) {
+            LegStep::Switch { next, previous } => {
+                assert_eq!(next, remote_leg("lars@sage"));
+                // Falls back to where we came from, labeled by the target.
+                assert_eq!(previous.0, AttachLeg::Local);
+                assert_eq!(previous.1, "lars@sage");
+            }
+            _ => panic!("expected Switch"),
+        }
+    }
+
+    #[test]
+    fn decide_next_leg_falls_back_with_notice_on_failed_switch() {
+        // The switch leg (sage) died before its client attached: no switch
+        // recorded, an error, and a previous leg to bounce back to.
+        let err = io::Error::other("connection refused\nis herdr running?");
+        let previous = Some((AttachLeg::Local, "lars@sage".to_string()));
+        match decide_next_leg(&remote_leg("lars@sage"), None, Err(err), previous, true) {
+            LegStep::FallBack { to, notice, .. } => {
+                assert_eq!(to, AttachLeg::Local);
+                assert_eq!(notice, "switch to lars@sage failed: connection refused");
+            }
+            _ => panic!("expected FallBack"),
+        }
+    }
+
+    #[test]
+    fn decide_next_leg_clean_exit_finishes_without_restore() {
+        match decide_next_leg(&AttachLeg::Local, None, Ok(()), None, false) {
+            LegStep::Finish {
+                result,
+                restore_terminal,
+            } => {
+                assert!(result.is_ok());
+                assert!(!restore_terminal);
+            }
+            _ => panic!("expected Finish"),
+        }
+    }
+
+    #[test]
+    fn decide_next_leg_failed_initial_leg_finishes_without_restore() {
+        // First leg failed to launch, no switch ever fired: plain error, no
+        // held alt-screen to reclaim.
+        let err = io::Error::other("no server");
+        match decide_next_leg(&AttachLeg::Local, None, Err(err), None, false) {
+            LegStep::Finish {
+                result,
+                restore_terminal,
+            } => {
+                assert!(result.is_err());
+                assert!(!restore_terminal, "nothing was held; no restore");
+            }
+            _ => panic!("expected Finish"),
+        }
+    }
+
+    #[test]
+    fn decide_next_leg_failed_fallback_restores_terminal() {
+        // The fall-back leg ALSO failed: `previous` was already consumed
+        // (None), but a switch fired earlier (handoff_held), so the chain must
+        // reclaim the alt-screen instead of stranding the user.
+        let err = io::Error::other("still unreachable");
+        match decide_next_leg(&AttachLeg::Local, None, Err(err), None, true) {
+            LegStep::Finish {
+                result,
+                restore_terminal,
+            } => {
+                assert!(result.is_err());
+                assert!(restore_terminal, "a held alt-screen must be reclaimed");
+            }
+            _ => panic!("expected Finish"),
+        }
     }
 
     #[test]

@@ -1,0 +1,36 @@
+# Fork-only: maintain the `latest` distribution channel for Nix users.
+#
+# Every push to the integration branch builds the flake package — exactly
+# what `github:gerchowl/herdr/latest` consumers will get — and fast-forwards
+# `latest` only on success. Pin `latest` for newest-green, a tag/rev for
+# immutable, or the integration branch for bleeding edge.
+name: latest-branch
+
+on:
+  push:
+    branches: [feat/sidebar-row-gap]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: latest-branch
+  cancel-in-progress: true
+
+jobs:
+  build-and-advance:
+    if: github.repository == 'gerchowl/herdr'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Nix
+        uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31.10.6
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            always-allow-substitutes = true
+      - name: Build the flake package consumers receive
+        run: nix build .#default --print-build-logs
+      - name: Fast-forward latest
+        run: git push --force origin "$GITHUB_SHA:refs/heads/latest"

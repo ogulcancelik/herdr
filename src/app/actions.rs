@@ -118,6 +118,23 @@ impl AppState {
         })
     }
 
+    /// Toggle the full-prompt header expansion for the focused pane — the
+    /// keyboard twin of clicking the pane header.
+    pub(crate) fn toggle_focused_prompt_expand(&mut self) {
+        let Some(pane_id) = self
+            .active
+            .and_then(|idx| self.workspaces.get(idx))
+            .and_then(|ws| ws.focused_pane_id())
+        else {
+            return;
+        };
+        self.expanded_prompt_pane = if self.expanded_prompt_pane == Some(pane_id) {
+            None
+        } else {
+            Some(pane_id)
+        };
+    }
+
     fn pane_focus_target_indices(&self, target: &PaneFocusTarget) -> Option<(usize, usize)> {
         let ws_idx = self
             .workspaces
@@ -197,6 +214,11 @@ impl AppState {
         self.navigator.selected = self.current_navigator_row_index().unwrap_or(0);
         self.ensure_navigator_selection_visible();
     }
+
+    /// Per-surface width budget for promoted header field values: the pane
+    /// header gets the full cap, the agent panel less, the navigator list
+    /// the least (header > agent panel > nav list).
+    pub(crate) const NAVIGATOR_HEADER_FIELD_VALUE_COLS: usize = 16;
 
     pub(crate) fn navigator_rows(&self) -> Vec<NavigatorRow> {
         let query = self.navigator.query.trim().to_lowercase();
@@ -369,11 +391,22 @@ impl AppState {
             let status = custom_status
                 .or(status_label)
                 .or_else(|| agent_label.map(|_| state_label_text(state, pane.seen).to_string()));
-            let meta = match (agent_label, status.as_deref()) {
+            let mut meta = match (agent_label, status.as_deref()) {
                 (Some(agent_label), Some(status)) => format!("{agent_label} · {status}"),
                 (Some(agent_label), None) => agent_label.to_string(),
                 (None, _) => "shell".to_string(),
             };
+            // Promoted header fields make "which pane has the build at 73%?"
+            // answerable (and searchable) from the navigator list. Narrowest
+            // surface, tightest value budget.
+            if let Some(fields) = terminal.map(|terminal| terminal.active_header_fields()) {
+                if let Some(summary) = crate::terminal::compact_header_fields(
+                    &fields,
+                    Self::NAVIGATOR_HEADER_FIELD_VALUE_COLS,
+                ) {
+                    meta = format!("{meta} · {summary}");
+                }
+            }
             let is_current = self.is_active_pane(ws_idx, tab_idx, pane_id);
             let search_text = format!("{label} {meta}").to_lowercase();
             rows.push(NavigatorRow {
@@ -672,10 +705,18 @@ fn activity_summary_for_panes<'a>(
 // ---------------------------------------------------------------------------
 
 impl AppState {
+    /// Earliest deadline the shared scheduled tick must fire at: agent
+    /// metadata TTLs and session-promoted header field TTLs ride the same
+    /// timer in both event loops.
     pub(crate) fn next_agent_metadata_expiry(&self) -> Option<std::time::Instant> {
         self.terminals
             .values()
             .filter_map(|terminal| terminal.next_agent_metadata_expiry())
+            .chain(
+                self.terminals
+                    .values()
+                    .filter_map(|terminal| terminal.next_header_field_expiry()),
+            )
             .min()
     }
 
@@ -684,6 +725,12 @@ impl AppState {
         scheduled_deadline: std::time::Instant,
         now: std::time::Instant,
     ) -> Vec<PaneStateUpdate> {
+        // Header field chips expire on the same sweep. They carry no agent
+        // state, so they produce no PaneStateUpdate — the caller already
+        // marks the frame dirty whenever the deadline fires.
+        for terminal in self.terminals.values_mut() {
+            terminal.expire_header_fields_at(now);
+        }
         let pane_terminals: Vec<_> = self
             .workspaces
             .iter()
@@ -741,12 +788,249 @@ impl AppState {
             .is_some_and(|tab_idx| tab_idx == self.workspaces[ws_idx].active_tab)
     }
 
+    /// One project-section key per workspace — THE local grouping notion of
+    /// the git-first sidebar (#33), converging the issue's key duality:
+    ///
+    /// - Rows group by `project_key` (normalized origin URL — the identity
+    ///   remote rows carry) whenever any member of the repo family has
+    ///   resolved one, so linked worktrees, plain same-repo checkouts, and
+    ///   federated rows all land in one section. The `dir:<name>` fallback
+    ///   for origin-less repos deliberately does NOT merge across repo
+    ///   families — it would conflate unrelated same-named repos.
+    /// - The section's canonical KEY string prefers the first worktree-space
+    ///   membership key among its members: memberships restore from the
+    ///   snapshot before async git metadata lands, so collapse state keyed
+    ///   on it stays stable across restarts AND across the moment metadata
+    ///   resolves mid-session.
+    /// - `None` = no git identity (pending probe or resolved non-git).
+    pub(crate) fn project_section_keys(&self) -> Vec<Option<String>> {
+        // Machine-local repo family per workspace: membership key first,
+        // then the cached git common dir (`repo_group_key`).
+        let families: Vec<Option<&str>> = self
+            .workspaces
+            .iter()
+            .map(|ws| ws.repo_group_key())
+            .collect();
+
+        // family key -> machine-independent project key, where resolvable.
+        let mut project_of_family = std::collections::HashMap::<&str, &str>::new();
+        for ws in &self.workspaces {
+            let Some(space) = ws.git_space() else {
+                continue;
+            };
+            if space.project_key.starts_with("dir:") {
+                continue;
+            }
+            project_of_family
+                .entry(space.key.as_str())
+                .or_insert(space.project_key.as_str());
+            if let Some(membership) = ws.worktree_space() {
+                project_of_family
+                    .entry(membership.key.as_str())
+                    .or_insert(space.project_key.as_str());
+            }
+        }
+
+        // Group id per workspace: project key when resolvable, else family.
+        let group_ids: Vec<Option<&str>> = families
+            .iter()
+            .map(|family| {
+                family.map(|family| project_of_family.get(family).copied().unwrap_or(family))
+            })
+            .collect();
+
+        // Canonical key per group: the first membership key in storage
+        // order, else the group id itself.
+        let mut canonical = std::collections::HashMap::<&str, &str>::new();
+        for (ws_idx, group_id) in group_ids.iter().enumerate() {
+            if let (Some(group_id), Some(membership)) =
+                (group_id, self.workspaces[ws_idx].worktree_space())
+            {
+                canonical.entry(group_id).or_insert(membership.key.as_str());
+            }
+        }
+
+        group_ids
+            .into_iter()
+            .map(|group_id| {
+                group_id.map(|group_id| {
+                    canonical
+                        .get(group_id)
+                        .copied()
+                        .unwrap_or(group_id)
+                        .to_string()
+                })
+            })
+            .collect()
+    }
+
+    /// The section key of one workspace's project group, if it has one.
+    pub(crate) fn project_section_key(&self, ws_idx: usize) -> Option<String> {
+        self.project_section_keys().into_iter().nth(ws_idx)?
+    }
+
+    /// Keys of every project section rendered as a collapsible sidebar group:
+    /// at least two member workspaces. It does NOT require the main checkout to
+    /// be present (#62): closing main must not disband the space — the surviving
+    /// members keep it grouped on their shared project-section key. Grouping is
+    /// the base's project-section notion (origin-key folds plain same-repo
+    /// checkouts + federated rows in), not the narrower worktree-membership key.
+    pub(crate) fn collapsible_space_keys(&self) -> std::collections::HashSet<String> {
+        let keys = self.project_section_keys();
+        let mut counts = std::collections::HashMap::<String, usize>::new();
+        for key in keys.into_iter().flatten() {
+            *counts.entry(key).or_insert(0) += 1;
+        }
+        counts
+            .into_iter()
+            .filter(|(_, count)| *count >= 2)
+            .map(|(key, _)| key)
+            .collect()
+    }
+
+    /// Collapse every sidebar worktree group at once; if all are already
+    /// collapsed, expand them all instead.
+    pub(crate) fn toggle_all_space_groups(&mut self) {
+        let keys = self.collapsible_space_keys();
+        if keys.is_empty() {
+            return;
+        }
+        let all_collapsed = keys
+            .iter()
+            .all(|key| self.collapsed_space_keys.contains(key));
+        let mut changed = false;
+        for key in keys {
+            if all_collapsed {
+                changed |= self.collapsed_space_keys.remove(&key);
+            } else {
+                changed |= self.collapsed_space_keys.insert(key);
+            }
+        }
+        if changed {
+            self.mark_session_dirty();
+        }
+    }
+
+    /// Single chokepoint for workspace-focus changes; reacts with sidebar
+    /// auto-collapse when `[ui] auto_collapse_groups` is enabled.
+    pub(crate) fn set_active_workspace(&mut self, idx: Option<usize>) {
+        let changed = self.active != idx;
+        self.active = idx;
+        if changed && self.auto_collapse_groups {
+            self.auto_collapse_inactive_groups();
+        }
+    }
+
+    /// Collapse every project group except the focused workspace's own.
+    fn auto_collapse_inactive_groups(&mut self) {
+        let focused_key = self
+            .active
+            .filter(|idx| *idx < self.workspaces.len())
+            .and_then(|idx| self.project_section_key(idx));
+        let mut changed = false;
+        for key in self.collapsible_space_keys() {
+            if focused_key.as_deref() == Some(key.as_str()) {
+                changed |= self.collapsed_space_keys.remove(&key);
+            } else {
+                changed |= self.collapsed_space_keys.insert(key);
+            }
+        }
+        if changed {
+            self.mark_session_dirty();
+        }
+    }
+
+    /// Whether the tab bar is the session-member switcher (#33): workspace
+    /// tab-mode with an active workspace. In tabs mode the strip — and every
+    /// key acting on it — behaves exactly as upstream.
+    pub(crate) fn tab_strip_shows_members(&self) -> bool {
+        self.tab_mode == crate::config::TabModeConfig::Workspace && self.active.is_some()
+    }
+
+    /// The member tab-strip content (#33): the active workspace's project
+    /// section in sidebar visual order — primary first, then the remaining
+    /// members in storage order. Local rows only (selecting a remote row is
+    /// a server switch, not a member switch) and collapse state is ignored:
+    /// the strip always shows the whole session. Sectionless workspaces
+    /// (pending probe, misc) get a single-member strip.
+    pub(crate) fn workspace_strip_members(&self) -> Vec<usize> {
+        let Some(active) = self.active.filter(|idx| *idx < self.workspaces.len()) else {
+            return Vec::new();
+        };
+        let keys = self.project_section_keys();
+        let Some(key) = keys.get(active).cloned().flatten() else {
+            return vec![active];
+        };
+        let members: Vec<usize> = (0..self.workspaces.len())
+            .filter(|idx| keys[*idx].as_deref() == Some(key.as_str()))
+            .collect();
+        let Some(primary) = members
+            .iter()
+            .copied()
+            .find(|idx| !self.workspaces[*idx].is_linked_checkout())
+        else {
+            return members;
+        };
+        std::iter::once(primary)
+            .chain(members.into_iter().filter(|idx| *idx != primary))
+            .collect()
+    }
+
+    /// The primary row (main checkout) of the ACTIVE workspace's project
+    /// section — the sidebar's second highlight level (#33): the session
+    /// stays marked on the primary row while any member is focused, the
+    /// same always-on currency idiom as the current-server row.
+    pub(crate) fn active_section_primary(&self) -> Option<usize> {
+        let active = self.active.filter(|idx| *idx < self.workspaces.len())?;
+        let keys = self.project_section_keys();
+        let key = keys.get(active).cloned().flatten()?;
+        (0..self.workspaces.len()).find(|idx| {
+            keys[*idx].as_deref() == Some(key.as_str())
+                && !self.workspaces[*idx].is_linked_checkout()
+        })
+    }
+
+    /// Switch to the strip member at `idx` (0-based strip position, i.e.
+    /// the rendered `<ID>` minus one). Returns false when the strip is not
+    /// the member switcher or the member doesn't exist, so keyboard callers
+    /// can mirror upstream's "missing tab is a kept-mode no-op".
+    pub(crate) fn switch_strip_member(&mut self, idx: usize) -> bool {
+        if !self.tab_strip_shows_members() {
+            return false;
+        }
+        let Some(ws_idx) = self.workspace_strip_members().get(idx).copied() else {
+            return false;
+        };
+        self.switch_workspace(ws_idx);
+        true
+    }
+
+    /// Cycle the strip's members by `delta` (#33). Returns true when the
+    /// member strip consumed the action — including the single-member
+    /// no-op, so workspace mode never falls back to cycling invisible tabs.
+    fn cycle_strip_member(&mut self, delta: isize) -> bool {
+        if !self.tab_strip_shows_members() {
+            return false;
+        }
+        let members = self.workspace_strip_members();
+        if members.len() < 2 {
+            return true;
+        }
+        let current = self
+            .active
+            .and_then(|active| members.iter().position(|idx| *idx == active))
+            .unwrap_or(0);
+        let target = (current as isize + delta).rem_euclid(members.len() as isize) as usize;
+        self.switch_workspace(members[target]);
+        true
+    }
+
     pub fn switch_workspace(&mut self, idx: usize) {
         if idx < self.workspaces.len() {
             let previous_focus = self.current_pane_focus_target();
             self.selection = None;
             self.selection_autoscroll = None;
-            self.active = Some(idx);
+            self.set_active_workspace(Some(idx));
             self.selected = idx;
             let workspace_id = self.workspaces[idx].id.clone();
             crate::logging::workspace_focused(&workspace_id);
@@ -786,7 +1070,7 @@ impl AppState {
         let workspace_changed = self.active != Some(ws_idx);
         self.selection = None;
         self.selection_autoscroll = None;
-        self.active = Some(ws_idx);
+        self.set_active_workspace(Some(ws_idx));
         self.selected = ws_idx;
         let workspace_id = self.workspaces[ws_idx].id.clone();
         if workspace_changed {
@@ -893,6 +1177,14 @@ impl AppState {
     }
 
     pub fn switch_tab(&mut self, idx: usize) {
+        // #33: in workspace tab-mode the strip's tabs ARE the active
+        // project's member workspaces — one branch point serves strip
+        // clicks and the prefix+N keys alike (the #29 resolution: the
+        // mode split lives in this fork-owned body, never in dispatch).
+        if self.tab_strip_shows_members() {
+            self.switch_strip_member(idx);
+            return;
+        }
         if let Some(ws_idx) = self.active {
             let previous_focus = self.current_pane_focus_target();
             self.selection = None;
@@ -936,8 +1228,11 @@ impl AppState {
     pub(crate) fn visible_workspace_order(&self) -> Vec<usize> {
         let order = crate::ui::workspace_list_entries(self)
             .into_iter()
-            .map(|entry| match entry {
-                crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } => ws_idx,
+            .filter_map(|entry| match entry {
+                crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } => Some(ws_idx),
+                // Remote rows are mouse targets only; keyboard navigation
+                // cycles local workspaces.
+                crate::ui::WorkspaceListEntry::Remote { .. } => None,
             })
             .collect::<Vec<_>>();
         if order.is_empty() {
@@ -949,6 +1244,68 @@ impl AppState {
 
     pub(crate) fn workspace_at_visible_position(&self, position: usize) -> Option<usize> {
         self.visible_workspace_order().get(position).copied()
+    }
+
+    /// The unindented section heads of the spaces list, in render order (#62):
+    /// one per project group (its primary/anchor row) plus each ungrouped
+    /// standalone workspace. This is the index space `switch_space` jumps over.
+    pub(crate) fn space_section_heads(&self) -> Vec<usize> {
+        crate::ui::workspace_list_entries(self)
+            .into_iter()
+            .filter_map(|entry| match entry {
+                crate::ui::WorkspaceListEntry::Workspace {
+                    ws_idx,
+                    indented: false,
+                } => Some(ws_idx),
+                // Skip indented members and remote rows — keyboard
+                // space-switching cycles local project sections only
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Resolve `switch_space(position)` to the workspace to focus: the Nth
+    /// project section's active member when one is live, else the section's
+    /// primary head (the local main checkout when present — already what
+    /// `workspace_list_entries` emits as the unindented head — else its
+    /// most-recent / first member). Returns `None` when there is no Nth
+    /// section.
+    pub(crate) fn space_switch_target(&self, position: usize) -> Option<usize> {
+        let heads = self.space_section_heads();
+        let head_idx = heads.get(position).copied()?;
+
+        // The project key this section groups on (None for an ungrouped
+        // standalone, which is its own single-member section).
+        let Some(section_key) = self
+            .workspaces
+            .get(head_idx)
+            .and_then(|ws| ws.worktree_space())
+            .map(|space| space.key.clone())
+        else {
+            return Some(head_idx);
+        };
+
+        // Members of this section, in workspace order.
+        let members: Vec<usize> = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .filter(|(_, ws)| {
+                ws.worktree_space()
+                    .is_some_and(|space| space.key == section_key)
+            })
+            .map(|(idx, _)| idx)
+            .collect();
+
+        // Preserve muscle memory: if the active workspace already belongs to
+        // this section, keep it focused (re-pressing the section index is a
+        // no-op rather than yanking focus to main).
+        if let Some(active) = self.active.filter(|idx| members.contains(idx)) {
+            return Some(active);
+        }
+        // Otherwise the section head — main when present, else its first
+        // member — exactly the row the sidebar draws as the section.
+        Some(head_idx)
     }
 
     pub(crate) fn move_selected_workspace_by_visible_delta(&mut self, delta: isize) {
@@ -1017,7 +1374,9 @@ impl AppState {
         .min(self.workspaces.len());
         self.workspaces.insert(target_idx, workspace);
 
-        self.active = active_id.and_then(|id| self.workspaces.iter().position(|ws| ws.id == id));
+        let resolved_active =
+            active_id.and_then(|id| self.workspaces.iter().position(|ws| ws.id == id));
+        self.set_active_workspace(resolved_active);
         self.selected = selected_id
             .and_then(|id| self.workspaces.iter().position(|ws| ws.id == id))
             .unwrap_or(0);
@@ -1047,6 +1406,10 @@ impl AppState {
     }
 
     pub fn next_tab(&mut self) {
+        // #33: workspace tab-mode cycles the member strip instead.
+        if self.cycle_strip_member(1) {
+            return;
+        }
         if let Some(ws) = self.active.and_then(|i| self.workspaces.get(i)) {
             if !ws.tabs.is_empty() {
                 let next = (ws.active_tab + 1) % ws.tabs.len();
@@ -1056,6 +1419,10 @@ impl AppState {
     }
 
     pub fn previous_tab(&mut self) {
+        // #33: workspace tab-mode cycles the member strip instead.
+        if self.cycle_strip_member(-1) {
+            return;
+        }
         if let Some(ws) = self.active.and_then(|i| self.workspaces.get(i)) {
             if !ws.tabs.is_empty() {
                 let prev = if ws.active_tab == 0 {
@@ -1070,6 +1437,128 @@ impl AppState {
 
     pub fn next_agent(&mut self) {
         self.cycle_agent_entry(true);
+    }
+
+    /// Jump to the agent most in need of attention: blocked agents first
+    /// (oldest transition first), then unseen-done agents (oldest first),
+    /// cycling through the queue on repeated presses. With an empty queue it
+    /// chimes once (all clear) and falls back to cycling the remaining
+    /// agents like next_agent.
+    pub(crate) fn focus_attention_agent(&mut self) {
+        self.focus_attention_agent_in_direction(true, false)
+    }
+
+    pub(crate) fn focus_attention_agent_previous(&mut self) {
+        self.focus_attention_agent_in_direction(false, false)
+    }
+
+    /// Project-scoped attention: same priority queue, restricted to the
+    /// active workspace's repo family — the main checkout plus every
+    /// worktree workspace of the same git repo (matched by the canonical
+    /// git common dir). The empty-queue fallback cycles the family's agent
+    /// panes. Never chimes — a scoped all-clear says nothing about other
+    /// projects.
+    pub(crate) fn focus_attention_project(&mut self) {
+        self.focus_attention_agent_in_direction(true, true)
+    }
+
+    pub(crate) fn focus_attention_project_previous(&mut self) {
+        self.focus_attention_agent_in_direction(false, true)
+    }
+
+    /// Workspace indices in the active workspace's repo family; the active
+    /// workspace alone when it has no git identity.
+    fn project_scope_indices(&self) -> Vec<usize> {
+        let Some(active) = self.active else {
+            return Vec::new();
+        };
+        let scope_key = self
+            .workspaces
+            .get(active)
+            .and_then(crate::workspace::Workspace::repo_group_key)
+            .map(str::to_string);
+        match scope_key {
+            None => vec![active],
+            Some(key) => self
+                .workspaces
+                .iter()
+                .enumerate()
+                .filter(|(idx, ws)| *idx == active || ws.repo_group_key() == Some(key.as_str()))
+                .map(|(idx, _)| idx)
+                .collect(),
+        }
+    }
+
+    fn focus_attention_agent_in_direction(&mut self, forward: bool, project_only: bool) {
+        let mut attention: Vec<(usize, crate::layout::PaneId, u8, Option<std::time::Instant>)> =
+            Vec::new();
+        let project_scope = if project_only {
+            Some(self.project_scope_indices())
+        } else {
+            None
+        };
+        for (ws_idx, ws) in self.workspaces.iter().enumerate() {
+            if let Some(scope) = &project_scope {
+                if !scope.contains(&ws_idx) {
+                    continue;
+                }
+            }
+            for detail in ws.pane_details(&self.terminals) {
+                let group = match (detail.state, detail.seen) {
+                    (AgentState::Blocked, _) => Some(0u8),
+                    (AgentState::Idle, false) => Some(1u8),
+                    _ => None,
+                };
+                if let Some(group) = group {
+                    attention.push((ws_idx, detail.pane_id, group, detail.state_changed_at));
+                }
+            }
+        }
+        attention.sort_by(|a, b| {
+            a.2.cmp(&b.2)
+                .then_with(|| match (a.3, b.3) {
+                    // No timestamp means the state predates tracking: oldest.
+                    (None, None) => std::cmp::Ordering::Equal,
+                    (None, Some(_)) => std::cmp::Ordering::Less,
+                    (Some(_), None) => std::cmp::Ordering::Greater,
+                    (Some(x), Some(y)) => x.cmp(&y),
+                })
+                .then_with(|| a.0.cmp(&b.0))
+        });
+
+        if attention.is_empty() {
+            if let Some(scope) = project_scope {
+                self.cycle_agent_in_scope(&scope, forward);
+            } else {
+                if !self.attention_all_clear_chimed {
+                    self.attention_all_clear_chimed = true;
+                    self.pending_attention_chime = true;
+                }
+                self.cycle_agent_entry(forward);
+            }
+            return;
+        }
+        if !project_only {
+            self.attention_all_clear_chimed = false;
+        }
+
+        let focused = self
+            .active
+            .and_then(|idx| self.workspaces.get(idx))
+            .and_then(crate::workspace::Workspace::focused_pane_id);
+        let target = match focused
+            .and_then(|pane_id| attention.iter().position(|entry| entry.1 == pane_id))
+        {
+            Some(idx) if forward => attention[(idx + 1) % attention.len()],
+            Some(idx) => attention[(idx + attention.len() - 1) % attention.len()],
+            None => attention[0],
+        };
+        if self.focus_pane_in_workspace(target.0, target.1) {
+            let entries = crate::ui::agent_panel_entries(self);
+            if let Some(idx) = entries.iter().position(|entry| entry.pane_id == target.1) {
+                self.ensure_agent_panel_entry_visible(idx);
+            }
+        }
     }
 
     pub fn previous_agent(&mut self) {
@@ -1095,6 +1584,38 @@ impl AppState {
             return true;
         }
         false
+    }
+
+    /// Cycle through AGENT panes across the given workspaces. The unit is
+    /// agents, not panes — shells are skipped, and a single agent in scope
+    /// correctly has nowhere to go.
+    fn cycle_agent_in_scope(&mut self, scope: &[usize], forward: bool) {
+        let mut panes: Vec<(usize, crate::layout::PaneId)> = Vec::new();
+        for &ws_idx in scope {
+            if let Some(ws) = self.workspaces.get(ws_idx) {
+                panes.extend(
+                    ws.pane_details(&self.terminals)
+                        .into_iter()
+                        .map(|detail| (ws_idx, detail.pane_id)),
+                );
+            }
+        }
+        if panes.is_empty() {
+            return;
+        }
+        let focused = self
+            .active
+            .and_then(|idx| self.workspaces.get(idx))
+            .and_then(crate::workspace::Workspace::focused_pane_id)
+            .zip(self.active);
+        let current =
+            focused.and_then(|(pane, ws_idx)| panes.iter().position(|p| *p == (ws_idx, pane)));
+        let target = match current {
+            Some(idx) if forward => panes[(idx + 1) % panes.len()],
+            Some(idx) => panes[(idx + panes.len() - 1) % panes.len()],
+            None => panes[0],
+        };
+        self.focus_pane_in_workspace(target.0, target.1);
     }
 
     fn cycle_agent_entry(&mut self, forward: bool) {
@@ -1128,6 +1649,7 @@ impl AppState {
         let (_, detail_area) = crate::ui::expanded_sidebar_sections(
             self.view.sidebar_rect,
             self.sidebar_section_split,
+            self.sidebar_pane_gap,
         );
         let metrics = crate::ui::agent_panel_scroll_metrics(self, detail_area);
         let visible = metrics.viewport_rows;
@@ -1150,12 +1672,21 @@ impl AppState {
         &self,
         ws_idx: usize,
     ) -> Vec<crate::terminal::TerminalId> {
+        // The workspace's float terminal (if any) is part of its teardown
+        // set — floats live outside tab.panes, so without this the close
+        // paths would orphan the float's PTY.
+        let float_terminal = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| self.floats.get(&ws.id))
+            .map(|float| float.terminal_id.clone());
         self.workspaces
             .get(ws_idx)
             .into_iter()
             .flat_map(|ws| &ws.tabs)
             .flat_map(|tab| tab.panes.values())
             .map(|pane| pane.attached_terminal_id.clone())
+            .chain(float_terminal)
             .collect()
     }
 
@@ -1188,6 +1719,21 @@ impl AppState {
         &mut self,
         terminal_ids: impl IntoIterator<Item = crate::terminal::TerminalId>,
     ) {
+        // Floats are keyed by workspace id; drop entries whose workspace is
+        // gone so a closed workspace's float doesn't linger (and so its
+        // terminal below counts as unattached and gets reaped).
+        let live_workspace_ids: std::collections::HashSet<&str> =
+            self.workspaces.iter().map(|ws| ws.id.as_str()).collect();
+        let dead_floats: Vec<String> = self
+            .floats
+            .keys()
+            .filter(|ws_id| !live_workspace_ids.contains(ws_id.as_str()))
+            .cloned()
+            .collect();
+        drop(live_workspace_ids);
+        for ws_id in dead_floats {
+            self.floats.remove(&ws_id);
+        }
         for terminal_id in terminal_ids {
             let still_attached = self.workspaces.iter().any(|ws| {
                 ws.tabs.iter().any(|tab| {
@@ -1195,7 +1741,10 @@ impl AppState {
                         .values()
                         .any(|pane| pane.attached_terminal_id == terminal_id)
                 })
-            });
+            }) || self
+                .floats
+                .values()
+                .any(|float| float.terminal_id == terminal_id);
             if !still_attached
                 && self.terminals.remove(&terminal_id).is_some()
                 && !self.terminal_runtime_shutdowns.contains(&terminal_id)
@@ -1206,17 +1755,29 @@ impl AppState {
     }
 
     pub fn close_selected_workspace(&mut self) {
+        // Close ONLY the selected workspace (#62): closing the main checkout no
+        // longer tears down the whole space — the remaining worktree members and
+        // remote rows keep the space alive on their own membership keys. The
+        // close-whole-space affordance lives on the space row's context menu
+        // (`close_selected_space`).
         if self.workspaces.is_empty() {
             return;
         }
-        self.selection = None;
-        self.selection_autoscroll = None;
-        self.mark_session_dirty();
-        let close_indices = self
+        self.close_workspace_indices(vec![self.selected]);
+    }
+
+    /// Close every member of the selected workspace's space (#62) — the
+    /// explicit close-whole-space affordance from the space row's context menu.
+    /// Falls back to closing just the selected workspace when it has no space
+    /// membership.
+    pub fn close_selected_space(&mut self) {
+        if self.workspaces.is_empty() {
+            return;
+        }
+        let indices = self
             .workspaces
             .get(self.selected)
             .and_then(|ws| ws.worktree_space())
-            .filter(|space| !space.is_linked_worktree)
             .map(|space| {
                 self.workspaces
                     .iter()
@@ -1228,8 +1789,21 @@ impl AppState {
                     })
                     .collect::<Vec<_>>()
             })
-            .filter(|indices| indices.len() >= 2)
+            .filter(|indices| !indices.is_empty())
             .unwrap_or_else(|| vec![self.selected]);
+        self.close_workspace_indices(indices);
+    }
+
+    /// Remove the given workspace indices, dropping their unattached terminals
+    /// and re-anchoring selection/active/scroll. Shared by single-workspace and
+    /// whole-space closes (#62).
+    fn close_workspace_indices(&mut self, close_indices: Vec<usize>) {
+        if close_indices.is_empty() {
+            return;
+        }
+        self.selection = None;
+        self.selection_autoscroll = None;
+        self.mark_session_dirty();
 
         let mut terminal_ids = Vec::new();
         for idx in &close_indices {
@@ -1238,12 +1812,15 @@ impl AppState {
                 crate::logging::workspace_closed(&workspace_id);
             }
         }
+        let mut close_indices = close_indices;
+        close_indices.sort_unstable();
+        close_indices.dedup();
         for idx in close_indices.iter().rev() {
             self.workspaces.remove(*idx);
         }
         self.remove_unattached_terminal_ids(terminal_ids);
         if self.workspaces.is_empty() {
-            self.active = None;
+            self.set_active_workspace(None);
             self.selected = 0;
             self.workspace_scroll = 0;
             self.tab_scroll = 0;
@@ -1252,7 +1829,7 @@ impl AppState {
             if self.selected >= self.workspaces.len() {
                 self.selected = self.workspaces.len() - 1;
             }
-            self.active = Some(self.selected);
+            self.set_active_workspace(Some(self.selected));
             self.workspace_scroll = self
                 .workspace_scroll
                 .min(self.workspaces.len().saturating_sub(1));
@@ -1264,7 +1841,7 @@ impl AppState {
 
     fn refresh_tab_bar_view(&mut self) {
         let area = self.view.tab_bar_rect;
-        let Some(ws) = self.active.and_then(|idx| self.workspaces.get(idx)) else {
+        let Some(active_idx) = self.active.filter(|idx| *idx < self.workspaces.len()) else {
             self.tab_scroll = 0;
             self.view.tab_hit_areas.clear();
             self.view.tab_scroll_left_hit_area = ratatui::layout::Rect::default();
@@ -1273,13 +1850,25 @@ impl AppState {
             return;
         };
 
-        let layout = crate::ui::compute_tab_bar_view(
-            ws,
-            area,
-            self.tab_scroll,
-            self.tab_scroll_follow_active,
-            self.mouse_capture,
-        );
+        // #33: workspace tab-mode lays the strip out over the session's
+        // members, not the workspace's tabs.
+        let layout = if self.tab_strip_shows_members() {
+            crate::ui::compute_member_strip_view(
+                self,
+                area,
+                self.tab_scroll,
+                self.tab_scroll_follow_active,
+                self.mouse_capture,
+            )
+        } else {
+            crate::ui::compute_tab_bar_view(
+                &self.workspaces[active_idx],
+                area,
+                self.tab_scroll,
+                self.tab_scroll_follow_active,
+                self.mouse_capture,
+            )
+        };
         self.tab_scroll = layout.scroll;
         self.view.tab_hit_areas = layout.tab_hit_areas;
         self.view.tab_scroll_left_hit_area = layout.scroll_left_hit_area;
@@ -1942,6 +2531,63 @@ fn is_trailing_token_wrapper(ch: char) -> bool {
 // ---------------------------------------------------------------------------
 
 impl AppState {
+    /// Infer worktree membership for workspaces sitting in linked git
+    /// worktrees that Herdr didn't create (agent-made, manual, other tools):
+    /// they get the managed worktree actions and group under their parent
+    /// repo workspace when it is open. Pure inference from cached git
+    /// metadata — no directory registry.
+    pub(crate) fn adopt_external_worktrees(&mut self) -> bool {
+        if !self.adopt_external_worktrees {
+            return false;
+        }
+        let mut changed = false;
+        for idx in 0..self.workspaces.len() {
+            if self.workspaces[idx].worktree_space().is_some() {
+                continue;
+            }
+            let Some(space) = self.workspaces[idx].git_space().cloned() else {
+                continue;
+            };
+            if !space.is_linked_worktree {
+                continue;
+            }
+            let main_root =
+                crate::worktree::main_root_from_common_dir(std::path::Path::new(&space.key));
+            self.workspaces[idx].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+                key: space.key.clone(),
+                label: space.label.clone(),
+                repo_root: main_root.clone(),
+                checkout_path: space.repo_root.clone(),
+                is_linked_worktree: true,
+            });
+            changed = true;
+            // Give the open parent checkout its parent-side membership so the
+            // sidebar renders the group.
+            for parent_idx in 0..self.workspaces.len() {
+                if parent_idx == idx || self.workspaces[parent_idx].worktree_space().is_some() {
+                    continue;
+                }
+                let is_parent = self.workspaces[parent_idx]
+                    .git_space()
+                    .is_some_and(|parent| !parent.is_linked_worktree && parent.key == space.key);
+                if is_parent {
+                    self.workspaces[parent_idx].worktree_space =
+                        Some(crate::workspace::WorktreeSpaceMembership {
+                            key: space.key.clone(),
+                            label: space.label.clone(),
+                            repo_root: main_root.clone(),
+                            checkout_path: main_root.clone(),
+                            is_linked_worktree: false,
+                        });
+                }
+            }
+        }
+        if changed {
+            self.mark_session_dirty();
+        }
+        changed
+    }
+
     pub fn apply_workspace_git_statuses(
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
@@ -1962,6 +2608,15 @@ impl AppState {
                 .as_ref()
                 != Some(&result.resolved_identity_cwd)
             {
+                // The probe still SETTLES pending-vs-misc (#33): a workspace
+                // whose cwd drifted (or never resolves again) must not hold a
+                // "pending" sidebar position forever — only the cached git
+                // fields are too stale to apply.
+                let ws = &mut self.workspaces[ws_idx];
+                if !ws.git_identity_resolved {
+                    ws.git_identity_resolved = true;
+                    changed = true;
+                }
                 continue;
             }
 
@@ -1976,6 +2631,12 @@ impl AppState {
             }
             if ws.cached_git_space != result.space {
                 ws.cached_git_space = result.space;
+                changed = true;
+            }
+            // A completed probe settles the pending-vs-misc question for
+            // the sidebar's sectioning (#33), even when nothing changed.
+            if !ws.git_identity_resolved {
+                ws.git_identity_resolved = true;
                 changed = true;
             }
         }
@@ -2013,6 +2674,7 @@ impl AppState {
                 pane_id,
                 agent,
                 state,
+                activity,
                 visible_blocker,
                 visible_idle,
                 visible_working,
@@ -2020,6 +2682,7 @@ impl AppState {
                 observed_at,
             } => self
                 .update_terminal_state(pane_id, |terminal| {
+                    terminal.update_live_activity(activity.clone(), state);
                     Some(terminal.set_detected_state_with_screen_signals_at(
                         agent,
                         state,
@@ -2029,6 +2692,46 @@ impl AppState {
                         process_exited,
                         observed_at,
                     ))
+                })
+                .into_iter()
+                .collect(),
+            AppEvent::SystemStatsUpdated(stats) => {
+                self.system_stats = Some(stats);
+                Vec::new()
+            }
+            // Handled in the shared api.rs preprocessing before reaching here.
+            // Consumed by the shared preprocessing in app/api.rs before this
+            // match runs in either loop.
+            AppEvent::PrStatePollDue
+            | AppEvent::PrStatesUpdated(_)
+            | AppEvent::PeerPollDue
+            | AppEvent::PeerSummaryFetched(_) => Vec::new(),
+            AppEvent::HookPromptReported { pane_id, prompt } => self
+                .update_terminal_state(pane_id, |terminal| {
+                    terminal.last_prompt = Some(prompt.clone());
+                    None
+                })
+                .into_iter()
+                .collect(),
+            AppEvent::PaneHeaderFieldSet {
+                pane_id,
+                key,
+                value,
+                ttl,
+            } => self
+                .update_terminal_state(pane_id, |terminal| {
+                    // Validation and the cap were already checked by the RPC
+                    // handler (same thread, same tick); enforce again
+                    // silently so the invariant holds for every caller.
+                    let _ = terminal.set_header_field(&key, &value, ttl);
+                    None
+                })
+                .into_iter()
+                .collect(),
+            AppEvent::PaneHeaderFieldCleared { pane_id, key } => self
+                .update_terminal_state(pane_id, |terminal| {
+                    terminal.clear_header_field(&key);
+                    None
                 })
                 .into_iter()
                 .collect(),
@@ -2151,6 +2854,8 @@ impl AppState {
             }
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
+            AppEvent::WorktreeKillGateFinished(_) => Vec::new(),
+            AppEvent::WorktreeBranchDeleteFinished(_) => Vec::new(),
         }
     }
 
@@ -2171,6 +2876,9 @@ impl AppState {
             let terminal = self.terminals.get_mut(&terminal_id)?;
             update(terminal)?
         };
+        if let Some(applied_ref) = mutation.applied_session_ref.as_ref() {
+            self.evict_duplicate_session_refs(&terminal_id, applied_ref);
+        }
         if mutation.session_ref_changed {
             self.mark_session_dirty();
         }
@@ -2191,6 +2899,32 @@ impl AppState {
             presentation: change.presentation.clone(),
         };
         Some(update)
+    }
+
+    /// Enforce session-id uniqueness across terminals: a session ref just
+    /// verified onto `keep_terminal_id` is dropped from every other terminal,
+    /// where it can only be a leftover mis-delivery from a stale pane-id env.
+    fn evict_duplicate_session_refs(
+        &mut self,
+        keep_terminal_id: &crate::terminal::TerminalId,
+        session_ref: &crate::agent_resume::AgentSessionRef,
+    ) {
+        let mut changed = false;
+        for (terminal_id, terminal) in self.terminals.iter_mut() {
+            if terminal_id == keep_terminal_id {
+                continue;
+            }
+            if terminal.evict_session_ref(session_ref) {
+                tracing::info!(
+                    terminal_id = ?terminal_id,
+                    "evicted duplicate agent session ref"
+                );
+                changed = true;
+            }
+        }
+        if changed {
+            self.mark_session_dirty();
+        }
     }
 
     fn apply_pane_state_change(
@@ -2296,7 +3030,7 @@ impl AppState {
             self.workspaces.remove(ws_idx);
             self.remove_unattached_terminal_ids(workspace_terminal_ids);
             if self.workspaces.is_empty() {
-                self.active = None;
+                self.set_active_workspace(None);
                 self.selected = 0;
                 if self.mode == Mode::Terminal {
                     self.mode = Mode::Navigate;
@@ -2304,7 +3038,7 @@ impl AppState {
             } else {
                 if let Some(active) = self.active {
                     if active >= self.workspaces.len() {
-                        self.active = Some(self.workspaces.len() - 1);
+                        self.set_active_workspace(Some(self.workspaces.len() - 1));
                     }
                 }
                 if self.selected >= self.workspaces.len() {
@@ -2514,7 +3248,7 @@ mod tests {
             ("render_status_line(app, area)", "app", "app"),
             ("render_status_line(app, area)", "area", "area"),
             ("if !enabled {", "enabled", "enabled"),
-            ("println!(\"hi\")", "println", "println"),
+            ("println!(\"hi\")", "println", "println"), // guardrails-ok: test fixture string, not a call
             ("( master)$", "master", "master"),
             ("regex foo$", "foo", "foo$"),
         ];
@@ -2548,6 +3282,225 @@ mod tests {
         ] {
             assert_selects_nothing(row, click);
         }
+    }
+
+    #[test]
+    fn focus_attention_prefers_oldest_blocked_then_unseen_done() {
+        let mut state = app_with_workspaces(&["a", "b", "c"]);
+        state.ensure_test_terminals();
+        state.active = Some(2);
+
+        let now = std::time::Instant::now();
+        let set = |state: &mut AppState, ws: usize, agent_state, changed_at| {
+            let pane = state.workspaces[ws].tabs[0].root_pane;
+            let tid = state.workspaces[ws].terminal_id(pane).cloned().unwrap();
+            let terminal = state.terminals.get_mut(&tid).unwrap();
+            terminal.set_detected_state(Some(Agent::Claude), agent_state);
+            terminal.state_changed_at = changed_at;
+        };
+        // b blocked older than a; c is an unseen-done workspace.
+        set(&mut state, 0, AgentState::Blocked, Some(now));
+        set(
+            &mut state,
+            1,
+            AgentState::Blocked,
+            Some(now - std::time::Duration::from_secs(60)),
+        );
+        set(&mut state, 2, AgentState::Idle, Some(now));
+        // mark c's pane unseen (done while away)
+        let pane_c = state.workspaces[2].tabs[0].root_pane;
+        state.workspaces[2].panes.get_mut(&pane_c).unwrap().seen = false;
+
+        state.focus_attention_agent();
+        assert_eq!(state.active, Some(1), "oldest blocked first");
+
+        state.focus_attention_agent();
+        assert_eq!(state.active, Some(0), "next blocked");
+
+        state.focus_attention_agent();
+        assert_eq!(state.active, Some(2), "then unseen done");
+        assert!(!state.pending_attention_chime);
+    }
+
+    #[test]
+    fn focus_attention_previous_walks_queue_backwards() {
+        let mut state = app_with_workspaces(&["a", "b"]);
+        state.ensure_test_terminals();
+        state.active = Some(0);
+
+        let now = std::time::Instant::now();
+        for (ws, age) in [(0usize, 60u64), (1, 0)] {
+            let pane = state.workspaces[ws].tabs[0].root_pane;
+            let tid = state.workspaces[ws].terminal_id(pane).cloned().unwrap();
+            let terminal = state.terminals.get_mut(&tid).unwrap();
+            terminal.set_detected_state(Some(Agent::Claude), AgentState::Blocked);
+            terminal.state_changed_at = Some(now - std::time::Duration::from_secs(age));
+        }
+
+        // Forward from a (queue head) goes to b; previous returns to a.
+        state.focus_attention_agent();
+        assert_eq!(state.active, Some(1));
+        state.focus_attention_agent_previous();
+        assert_eq!(state.active, Some(0));
+    }
+
+    #[test]
+    fn focus_attention_project_spans_repo_family() {
+        let mut state = app_with_workspaces(&["main", "wt", "other"]);
+        state.ensure_test_terminals();
+        state.active = Some(0);
+
+        // main + wt share a repo key; other is a different project.
+        let space = |key: &str, linked: bool| crate::workspace::GitSpaceMetadata {
+            key: key.into(),
+            checkout_key: format!("{key}-co-{linked}"),
+            label: "repo".into(),
+            repo_root: "/repo".into(),
+            is_linked_worktree: linked,
+            project_key: format!("dir:{key}"),
+        };
+        state.workspaces[0].cached_git_space = Some(space("family", false));
+        state.workspaces[1].cached_git_space = Some(space("family", true));
+        state.workspaces[2].cached_git_space = Some(space("elsewhere", false));
+
+        for ws in 0..3 {
+            let pane = state.workspaces[ws].tabs[0].root_pane;
+            let tid = state.workspaces[ws].terminal_id(pane).cloned().unwrap();
+            state
+                .terminals
+                .get_mut(&tid)
+                .unwrap()
+                .set_detected_state(Some(Agent::Claude), AgentState::Working);
+        }
+
+        // Family cycle: main -> wt -> main; never 'other'.
+        state.focus_attention_project();
+        assert_eq!(state.active, Some(1));
+        state.focus_attention_project();
+        assert_eq!(state.active, Some(0));
+
+        // Blocked agent in the family wins over cycling.
+        let pane_wt = state.workspaces[1].tabs[0].root_pane;
+        let tid = state.workspaces[1].terminal_id(pane_wt).cloned().unwrap();
+        state
+            .terminals
+            .get_mut(&tid)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Blocked);
+        state.focus_attention_project();
+        assert_eq!(state.active, Some(1));
+
+        // Blocked agent in ANOTHER project is invisible to the scoped queue.
+        state.active = Some(2);
+        let pane_other = state.workspaces[2].tabs[0].root_pane;
+        let tid = state.workspaces[2]
+            .terminal_id(pane_other)
+            .cloned()
+            .unwrap();
+        state
+            .terminals
+            .get_mut(&tid)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Working);
+        state.focus_attention_project();
+        assert_eq!(state.active, Some(2), "single-agent project: nowhere to go");
+    }
+
+    #[test]
+    fn focus_attention_workspace_cycles_agents_and_skips_shells() {
+        let mut state = app_with_workspaces(&["a"]);
+        let shell = state.workspaces[0].tabs[0].root_pane;
+        let agent_one = state.workspaces[0].test_split(Direction::Horizontal);
+        let agent_two = state.workspaces[0].test_split(Direction::Vertical);
+        state.ensure_test_terminals();
+        state.active = Some(0);
+
+        for pane in [agent_one, agent_two] {
+            let tid = state.workspaces[0].terminal_id(pane).cloned().unwrap();
+            state
+                .terminals
+                .get_mut(&tid)
+                .unwrap()
+                .set_detected_state(Some(Agent::Claude), AgentState::Working);
+        }
+
+        // From agent_two the cycle moves between agents only — the shell
+        // pane is never a stop.
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(agent_two));
+        state.focus_attention_project();
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(agent_one));
+        state.focus_attention_project();
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(agent_two));
+        assert_ne!(state.workspaces[0].focused_pane_id(), Some(shell));
+    }
+
+    #[test]
+    fn focus_attention_workspace_noops_with_single_agent() {
+        let mut state = app_with_workspaces(&["a"]);
+        let agent = state.workspaces[0].test_split(Direction::Horizontal);
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        let tid = state.workspaces[0].terminal_id(agent).cloned().unwrap();
+        state
+            .terminals
+            .get_mut(&tid)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Working);
+
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(agent));
+        state.focus_attention_project();
+        assert_eq!(
+            state.workspaces[0].focused_pane_id(),
+            Some(agent),
+            "one agent in the space: nowhere to cycle"
+        );
+    }
+
+    #[test]
+    fn focus_attention_workspace_ignores_other_workspaces_and_never_chimes() {
+        let mut state = app_with_workspaces(&["a", "b"]);
+        state.ensure_test_terminals();
+        state.active = Some(1);
+
+        // Workspace a has a blocked agent; b (active) has nothing urgent.
+        let pane_a = state.workspaces[0].tabs[0].root_pane;
+        let tid = state.workspaces[0].terminal_id(pane_a).cloned().unwrap();
+        state
+            .terminals
+            .get_mut(&tid)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Blocked);
+
+        state.focus_attention_project();
+
+        // Scoped: stays in b (cycles within it), ignores a's blocked agent,
+        // and stays silent — a scoped all-clear says nothing globally.
+        assert_eq!(state.active, Some(1));
+        assert!(!state.pending_attention_chime);
+
+        // Global variant still jumps to a.
+        state.focus_attention_agent();
+        assert_eq!(state.active, Some(0));
+    }
+
+    #[test]
+    fn focus_attention_chimes_once_when_queue_is_empty() {
+        let mut state = app_with_workspaces(&["a"]);
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        // Mark the only pane seen and idle: nothing needs attention.
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        state.workspaces[0].panes.get_mut(&pane).unwrap().seen = true;
+
+        state.focus_attention_agent();
+        assert!(state.pending_attention_chime, "first empty press chimes");
+        state.pending_attention_chime = false;
+
+        state.focus_attention_agent();
+        assert!(
+            !state.pending_attention_chime,
+            "repeat presses stay silent until the queue refills"
+        );
     }
 
     #[test]
@@ -2618,6 +3571,46 @@ mod tests {
             row.target,
             crate::app::state::NavigatorTarget::Pane { pane_id, .. } if pane_id == agent
         ) && row.meta.contains("claude")));
+    }
+
+    /// "Which pane has the build at 73%?" must be answerable — and
+    /// searchable — from the navigator pane list.
+    #[test]
+    fn navigator_pane_rows_surface_promoted_header_fields() {
+        let mut state = app_with_workspaces(&["one"]);
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+
+        let terminal_id = state.workspaces[0].terminal_id(pane).cloned().unwrap();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_header_field("build", "73%", None).unwrap();
+
+        state.open_navigator();
+        let rows = state.navigator_rows();
+        let pane_row = rows
+            .iter()
+            .find(|row| {
+                matches!(
+                    row.target,
+                    crate::app::state::NavigatorTarget::Pane { pane_id, .. } if pane_id == pane
+                )
+            })
+            .expect("pane row");
+
+        assert!(
+            pane_row.meta.contains("build 73%"),
+            "meta: {}",
+            pane_row.meta
+        );
+        assert!(pane_row.search_text.contains("build 73%"));
+
+        // The text filter finds the pane by its promoted field.
+        state.navigator.query = "73%".into();
+        assert!(state.navigator_rows().iter().any(|row| matches!(
+            row.target,
+            crate::app::state::NavigatorTarget::Pane { pane_id, .. } if pane_id == pane
+        )));
     }
 
     #[test]
@@ -2816,20 +3809,30 @@ mod tests {
         state.workspaces[0].cached_git_ahead_behind = Some((1, 0));
 
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        let changed = state.apply_workspace_git_statuses(
-            &terminal_runtimes,
+        let stale = |workspace_id: String| {
             vec![WorkspaceGitStatus {
                 workspace_id,
                 resolved_identity_cwd: std::path::PathBuf::from("/definitely/not/current"),
                 branch: Some("main".into()),
                 ahead_behind: Some((0, 1)),
                 space: None,
-            }],
-        );
+            }]
+        };
 
-        assert!(!changed);
+        // First stale probe: cached git fields stay untouched, but the probe
+        // still settles pending-vs-misc (#33) — that transition reports
+        // changed once.
+        let changed =
+            state.apply_workspace_git_statuses(&terminal_runtimes, stale(workspace_id.clone()));
+        assert!(changed, "pending -> settled fires once");
+        assert!(state.workspaces[0].git_identity_resolved);
         assert_eq!(state.workspaces[0].branch().as_deref(), Some("old"));
         assert_eq!(state.workspaces[0].git_ahead_behind(), Some((1, 0)));
+
+        // Subsequent stale probes are pure no-ops.
+        let changed = state.apply_workspace_git_statuses(&terminal_runtimes, stale(workspace_id));
+        assert!(!changed);
+        assert_eq!(state.workspaces[0].branch().as_deref(), Some("old"));
     }
 
     #[test]
@@ -2879,6 +3882,7 @@ mod tests {
                     label: "other".into(),
                     repo_root: "/other/repo".into(),
                     is_linked_worktree: false,
+                    project_key: "dir:other".into(),
                 }),
             }],
         );
@@ -3052,6 +4056,87 @@ mod tests {
         state.switch_workspace(2);
         assert_eq!(state.active, Some(2));
         assert_eq!(state.selected, 2);
+    }
+
+    /// A three-member project section (#33): main checkout first, then two
+    /// linked worktrees, plus an unrelated flat workspace.
+    fn app_with_member_strip() -> AppState {
+        let mut state = app_with_workspaces(&["main", "wt-one", "wt-two", "other"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree(&mut state, 1);
+        mark_linked_worktree(&mut state, 2);
+        state.tab_mode = crate::config::TabModeConfig::Workspace;
+        state
+    }
+
+    #[test]
+    fn workspace_strip_members_run_primary_first_in_sidebar_order() {
+        let mut state = app_with_member_strip();
+        state.switch_workspace(1);
+        assert_eq!(state.workspace_strip_members(), vec![0, 1, 2]);
+
+        // A sectionless workspace gets a single-member strip.
+        state.switch_workspace(3);
+        assert_eq!(state.workspace_strip_members(), vec![3]);
+
+        // Collapse does not hide strip members: the strip always shows the
+        // whole session.
+        state.switch_workspace(1);
+        state.collapsed_space_keys.insert("repo-key".into());
+        assert_eq!(state.workspace_strip_members(), vec![0, 1, 2]);
+    }
+
+    /// #33/#29 — in workspace tab-mode, switch_tab acts on the strip's
+    /// members (the mouse-click path), even though every workspace has a
+    /// single real tab; out-of-range indices no-op.
+    #[test]
+    fn workspace_mode_switch_tab_switches_strip_members() {
+        let mut state = app_with_member_strip();
+        state.switch_tab(2);
+        assert_eq!(state.active, Some(2));
+        state.switch_tab(0);
+        assert_eq!(state.active, Some(0));
+        state.switch_tab(9);
+        assert_eq!(state.active, Some(0));
+    }
+
+    /// Tabs mode stays byte-identical: switch_tab keeps acting on tabs.
+    #[test]
+    fn tabs_mode_switch_tab_still_acts_on_tabs() {
+        let mut state = app_with_member_strip();
+        state.tab_mode = crate::config::TabModeConfig::Tabs;
+        let second_tab = state.workspaces[0].test_add_tab(Some("logs"));
+        state.switch_tab(second_tab);
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.workspaces[0].active_tab, second_tab);
+    }
+
+    /// #33/#29 — next_tab/previous_tab cycle the member strip in sidebar
+    /// visual order in workspace tab-mode.
+    #[test]
+    fn workspace_mode_next_tab_cycles_strip_members() {
+        let mut state = app_with_member_strip();
+        state.next_tab();
+        assert_eq!(state.active, Some(1));
+        state.next_tab();
+        assert_eq!(state.active, Some(2));
+        state.next_tab();
+        assert_eq!(state.active, Some(0), "cycling wraps to the primary");
+        state.previous_tab();
+        assert_eq!(state.active, Some(2));
+    }
+
+    /// #33 — a single-member strip consumes the cycle keys: workspace mode
+    /// never falls back to cycling tabs the strip doesn't show.
+    #[test]
+    fn workspace_mode_single_member_strip_consumes_tab_cycling() {
+        let mut state = app_with_member_strip();
+        let hidden_tab = state.workspaces[3].test_add_tab(Some("logs"));
+        state.workspaces[3].switch_tab(0);
+        state.switch_workspace(3);
+        state.next_tab();
+        assert_eq!(state.active, Some(3));
+        assert_ne!(state.workspaces[3].active_tab, hidden_tab);
     }
 
     #[test]
@@ -3254,7 +4339,9 @@ mod tests {
     }
 
     #[test]
-    fn close_parent_worktree_workspace_closes_group() {
+    fn close_main_checkout_keeps_the_space_alive() {
+        // #62: closing the main checkout closes ONLY main — the worktree member
+        // survives and keeps the space; the unrelated "notes" workspace stays.
         let mut state = app_with_workspaces(&["main", "issue", "notes"]);
         state.workspaces[0].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
             key: "repo-key".into(),
@@ -3275,10 +4362,63 @@ mod tests {
 
         state.close_selected_workspace();
 
+        assert_eq!(state.workspaces.len(), 2);
+        assert_eq!(state.workspaces[0].display_name(), "issue");
+        assert_eq!(state.workspaces[1].display_name(), "notes");
+        // The surviving worktree still anchors a (now single-member) space.
+        assert!(state.workspaces[0].worktree_space().is_some());
+    }
+
+    #[test]
+    fn close_selected_space_closes_every_member() {
+        // #62: the explicit whole-space affordance closes all members of the
+        // selected workspace's space, leaving unrelated workspaces intact.
+        let mut state = app_with_workspaces(&["main", "issue", "notes"]);
+        state.workspaces[0].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr".into(),
+            is_linked_worktree: false,
+        });
+        state.workspaces[1].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr-issue".into(),
+            is_linked_worktree: true,
+        });
+        state.selected = 0;
+        state.active = Some(0);
+
+        state.close_selected_space();
+
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "notes");
-        assert_eq!(state.active, Some(0));
-        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn close_selected_space_from_a_worktree_member_after_main_closed() {
+        // Main already gone: the space lives on its worktree members. Closing
+        // the space from a surviving worktree still closes all members.
+        let mut state = app_with_workspaces(&["issue", "fix", "notes"]);
+        for idx in [0usize, 1] {
+            state.workspaces[idx].worktree_space =
+                Some(crate::workspace::WorktreeSpaceMembership {
+                    key: "repo-key".into(),
+                    label: "herdr".into(),
+                    repo_root: "/repo/herdr".into(),
+                    checkout_path: format!("/repo/herdr-{idx}").into(),
+                    is_linked_worktree: true,
+                });
+        }
+        state.selected = 0;
+        state.active = Some(0);
+
+        state.close_selected_space();
+
+        assert_eq!(state.workspaces.len(), 1);
+        assert_eq!(state.workspaces[0].display_name(), "notes");
     }
 
     #[test]
@@ -3403,6 +4543,7 @@ mod tests {
             pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Working,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3441,6 +4582,7 @@ mod tests {
             pane_id: bg_pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Idle,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3471,6 +4613,7 @@ mod tests {
             pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Idle,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3494,6 +4637,7 @@ mod tests {
             pane_id: bg_pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Idle,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3530,6 +4674,63 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_session_refs_are_evicted_from_other_terminals() {
+        let mut state = app_with_workspaces(&["one", "two"]);
+        let pane_one = *state.workspaces[0].panes.keys().next().unwrap();
+        let pane_two = *state.workspaces[1].panes.keys().next().unwrap();
+        let terminal_one = state.workspaces[0]
+            .panes
+            .get(&pane_one)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        let terminal_two = state.workspaces[1]
+            .panes
+            .get(&pane_two)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+
+        let report = |pane_id| AppEvent::AgentSessionReported {
+            pane_id,
+            source: "herdr:claude".into(),
+            agent_label: "claude".into(),
+            seq: Some(1),
+            session_ref: crate::agent_resume::AgentSessionRef::id("session-123"),
+        };
+
+        // Mis-delivered first (stale env id), then the ancestry-verified
+        // report lands the same session on its true pane.
+        state.handle_app_event(report(pane_one));
+        assert!(state
+            .terminals
+            .get(&terminal_one)
+            .unwrap()
+            .persisted_agent_session
+            .is_some());
+
+        state.handle_app_event(report(pane_two));
+        assert!(
+            state
+                .terminals
+                .get(&terminal_two)
+                .unwrap()
+                .persisted_agent_session
+                .is_some(),
+            "true pane keeps the session"
+        );
+        assert!(
+            state
+                .terminals
+                .get(&terminal_one)
+                .unwrap()
+                .persisted_agent_session
+                .is_none(),
+            "stale holder is evicted"
+        );
+    }
+
+    #[test]
     fn background_waiting_sets_attention_toast() {
         let mut state = app_with_workspaces(&["active", "background"]);
         state.active = Some(0);
@@ -3540,6 +4741,7 @@ mod tests {
             pane_id: bg_pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3594,6 +4796,7 @@ mod tests {
             pane_id: bg_pane_id,
             agent: Some(Agent::Codex),
             state: AgentState::Idle,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3614,6 +4817,7 @@ mod tests {
             pane_id: bg_pane_id,
             agent: Some(Agent::Codex),
             state: AgentState::Blocked,
+            activity: None,
             visible_blocker: true,
             visible_idle: false,
             visible_working: false,
@@ -3645,6 +4849,7 @@ mod tests {
             pane_id,
             agent: Some(Agent::Claude),
             state: AgentState::Working,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3670,6 +4875,7 @@ mod tests {
             pane_id,
             agent: Some(Agent::Claude),
             state: AgentState::Idle,
+            activity: None,
             visible_blocker: false,
             visible_idle: true,
             visible_working: false,
@@ -3697,6 +4903,7 @@ mod tests {
             pane_id,
             agent: Some(Agent::Claude),
             state: AgentState::Working,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: true,
@@ -3767,6 +4974,7 @@ mod tests {
             pane_id: bg_pane_id,
             agent: Some(Agent::Droid),
             state: AgentState::Idle,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3797,6 +5005,7 @@ mod tests {
             pane_id: bg_pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3824,6 +5033,7 @@ mod tests {
             pane_id: bg_pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3848,6 +5058,7 @@ mod tests {
             pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -3870,6 +5081,7 @@ mod tests {
             pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
+            activity: None,
             visible_blocker: false,
             visible_idle: false,
             visible_working: false,
@@ -4114,7 +5326,9 @@ mod tests {
     }
 
     #[test]
-    fn close_pane_last_pane_in_parent_worktree_group_closes_when_confirmation_disabled() {
+    fn close_pane_last_pane_in_main_checkout_closes_only_that_workspace() {
+        // #62: closing the last pane of the main checkout closes only main —
+        // the worktree child survives (keeping the space) and "notes" stays.
         let mut state = app_with_workspaces(&["parent", "child", "notes"]);
         mark_parent_worktree(&mut state, 0);
         mark_linked_worktree(&mut state, 1);
@@ -4125,7 +5339,154 @@ mod tests {
         let deferred = state.close_pane();
 
         assert!(!deferred);
-        assert_eq!(state.workspaces.len(), 1);
-        assert_eq!(state.workspaces[0].display_name(), "notes");
+        assert_eq!(state.workspaces.len(), 2);
+        assert_eq!(state.workspaces[0].display_name(), "child");
+        assert_eq!(state.workspaces[1].display_name(), "notes");
+    }
+
+    #[test]
+    fn closing_workspace_reaps_its_float_even_when_hidden() {
+        let mut state = app_with_workspaces(&["doomed", "other"]);
+        state.selected = 0;
+        let ws_id = state.workspaces[0].id.clone();
+        let float_terminal = crate::terminal::TerminalState::new(
+            crate::terminal::TerminalId::alloc(),
+            "/tmp".into(),
+        );
+        let float_tid = float_terminal.id.clone();
+        state.terminals.insert(float_tid.clone(), float_terminal);
+        state.floats.insert(
+            ws_id,
+            crate::app::float::FloatPane {
+                pane_id: crate::layout::PaneId::from_raw(9999),
+                terminal_id: float_tid.clone(),
+                visible: false, // hidden floats must be reaped too
+            },
+        );
+
+        state.close_selected_workspace();
+
+        assert!(state.floats.is_empty(), "float entry removed");
+        assert!(
+            !state.terminals.contains_key(&float_tid),
+            "float terminal removed"
+        );
+        assert!(
+            state.terminal_runtime_shutdowns.contains(&float_tid),
+            "float PTY scheduled for shutdown"
+        );
+    }
+
+    #[test]
+    fn collapsible_space_keys_needs_two_members() {
+        let mut state = app_with_workspaces(&["parent", "child"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree(&mut state, 1);
+
+        let keys = state.collapsible_space_keys();
+        assert_eq!(keys.len(), 1);
+        assert!(keys.contains("repo-key"));
+    }
+
+    #[test]
+    fn collapsible_space_keys_group_survives_without_a_parent() {
+        // #62: two linked worktrees sharing a key but no non-linked parent
+        // (main closed) STILL group — the space lives on members alone.
+        let mut state = app_with_workspaces(&["child-a", "child-b"]);
+        mark_linked_worktree(&mut state, 0);
+        mark_linked_worktree(&mut state, 1);
+
+        let keys = state.collapsible_space_keys();
+        assert_eq!(keys.len(), 1);
+        assert!(keys.contains("repo-key"));
+    }
+
+    #[test]
+    fn collapsible_space_keys_excludes_lone_parent() {
+        let mut state = app_with_workspaces(&["parent"]);
+        mark_parent_worktree(&mut state, 0);
+
+        assert!(state.collapsible_space_keys().is_empty());
+    }
+
+    #[test]
+    fn toggle_all_space_groups_collapses_then_expands() {
+        let mut state = app_with_workspaces(&["parent", "child"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree(&mut state, 1);
+
+        state.toggle_all_space_groups();
+        assert!(state.collapsed_space_keys.contains("repo-key"));
+
+        // Second invocation, with everything collapsed, expands all again.
+        state.toggle_all_space_groups();
+        assert!(!state.collapsed_space_keys.contains("repo-key"));
+    }
+
+    #[test]
+    fn toggle_all_space_groups_is_noop_without_groups() {
+        let mut state = app_with_workspaces(&["solo"]);
+        state.toggle_all_space_groups();
+        assert!(state.collapsed_space_keys.is_empty());
+    }
+
+    #[test]
+    fn set_active_workspace_auto_collapses_inactive_groups_when_enabled() {
+        // Two distinct groups; focusing one collapses the other, never its own.
+        let mut state = app_with_workspaces(&["a-parent", "a-child", "b-parent", "b-child"]);
+        for (idx, key, linked) in [
+            (0, "key-a", false),
+            (1, "key-a", true),
+            (2, "key-b", false),
+            (3, "key-b", true),
+        ] {
+            state.workspaces[idx].worktree_space =
+                Some(crate::workspace::WorktreeSpaceMembership {
+                    key: key.into(),
+                    label: "herdr".into(),
+                    repo_root: "/repo/herdr".into(),
+                    checkout_path: format!("/repo/ws-{idx}").into(),
+                    is_linked_worktree: linked,
+                });
+        }
+        state.auto_collapse_groups = true;
+        state.active = Some(2); // start focused on group b
+
+        state.set_active_workspace(Some(0)); // focus group a
+
+        assert!(
+            !state.collapsed_space_keys.contains("key-a"),
+            "focused group stays expanded"
+        );
+        assert!(
+            state.collapsed_space_keys.contains("key-b"),
+            "inactive group collapses"
+        );
+    }
+
+    #[test]
+    fn set_active_workspace_does_not_auto_collapse_when_disabled() {
+        let mut state = app_with_workspaces(&["parent", "child"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree(&mut state, 1);
+        state.auto_collapse_groups = false;
+        state.active = Some(1);
+
+        state.set_active_workspace(Some(0));
+
+        assert!(state.collapsed_space_keys.is_empty());
+    }
+
+    #[test]
+    fn toggle_focused_prompt_expand_round_trips_for_focused_pane() {
+        let mut state = app_with_workspaces(&["a"]);
+        state.active = Some(0);
+        let pane = state.workspaces[0].focused_pane_id().expect("focused pane");
+
+        assert_eq!(state.expanded_prompt_pane, None);
+        state.toggle_focused_prompt_expand();
+        assert_eq!(state.expanded_prompt_pane, Some(pane));
+        state.toggle_focused_prompt_expand();
+        assert_eq!(state.expanded_prompt_pane, None);
     }
 }

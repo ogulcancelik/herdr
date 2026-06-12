@@ -13,8 +13,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Deserialize;
 use support::{
-    cleanup_test_base, client_handshake, encode_varint_u16, encode_varint_u32, frame_message,
-    read_server_message, register_runtime_dir, register_spawned_herdr_pid,
+    cleanup_test_base, client_handshake, encode_live_handoff_refusal, encode_varint_u16,
+    encode_varint_u32, frame_message, read_server_message, register_runtime_dir,
+    register_spawned_herdr_pid, send_input, send_set_frame_subscription,
     unregister_spawned_herdr_pid, wait_for_file, wait_for_message_variant, wait_for_socket,
     wait_until,
 };
@@ -274,8 +275,8 @@ fn client_connects_and_receives_frame() {
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
     let (version, error) =
-        client_handshake(&mut stream, 12, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 12, "server should report protocol version 12");
+        client_handshake(&mut stream, 18, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 18, "server should report protocol version 18");
     assert!(
         error.is_none(),
         "handshake should not have error: {:?}",
@@ -284,6 +285,131 @@ fn client_connects_and_receives_frame() {
 
     read_next_frame_payload(&mut stream, Duration::from_secs(10))
         .expect("should receive a frame from server");
+
+    cleanup_spawned_herdr(spawned, base);
+}
+
+#[test]
+fn pause_subscription_stops_frames_and_resume_redraws() {
+    // Connection slots (#65): a warm slot pauses frames with
+    // SetFrameSubscription { enabled: false }; the server stops streaming to it.
+    // Resuming (enabled: true) triggers a full redraw so the slot repaints.
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_file(&client_socket, Duration::from_secs(10));
+
+    let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
+    let (version, error) =
+        client_handshake(&mut stream, 18, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 18);
+    assert!(error.is_none(), "handshake error: {error:?}");
+
+    // Baseline: the active subscription streams frames.
+    read_next_frame_payload(&mut stream, Duration::from_secs(10))
+        .expect("active client should receive a frame");
+
+    // Pause: become a warm slot. Drain any frames already queued, then assert
+    // that fresh input produces NO frame within a window — the server stopped
+    // streaming to this paused client.
+    send_set_frame_subscription(&mut stream, false).expect("pause");
+    support::drain_messages(&mut stream);
+    // Input that on an active client forces a post-input frame.
+    for _ in 0..5 {
+        send_input(&mut stream, b"j").expect("send input");
+        thread::sleep(Duration::from_millis(40));
+    }
+    let got_frame_while_paused =
+        read_next_frame_payload(&mut stream, Duration::from_millis(800)).is_ok();
+    assert!(
+        !got_frame_while_paused,
+        "a paused slot must not receive frames"
+    );
+
+    // Resume: the server sends a full redraw, so a frame arrives again.
+    send_set_frame_subscription(&mut stream, true).expect("resume");
+    read_next_frame_payload(&mut stream, Duration::from_secs(10))
+        .expect("resumed slot should receive a full-redraw frame");
+
+    cleanup_spawned_herdr(spawned, base);
+}
+
+/// ClientMessage::Resize is positional variant 3. Re-asserting geometry to a
+/// just-activated slot is exactly this message.
+fn send_resize(stream: &mut UnixStream, cols: u16, rows: u16) -> std::io::Result<()> {
+    let mut payload = encode_varint_u32(3); // variant 3 = Resize
+    payload.extend_from_slice(&encode_varint_u16(cols));
+    payload.extend_from_slice(&encode_varint_u16(rows));
+    payload.extend_from_slice(&encode_varint_u32(0)); // cell_width_px
+    payload.extend_from_slice(&encode_varint_u32(0)); // cell_height_px
+    stream.write_all(&frame_message(&payload))?;
+    stream.flush()
+}
+
+#[test]
+fn resume_reasserts_geometry_so_panes_render_at_new_width() {
+    // #77 layer 1: a server switch resumes a WARM slot whose server only learned
+    // this client's size at dial time. On switch the client re-asserts its true
+    // geometry with a Resize; the server must then lay every pane out at the new
+    // width. This models that sequence end-to-end: dial-time width A, pause
+    // (warm), the terminal grows to width B, then resume + Resize(B), and the
+    // very next rendered frame must come back at width B — not the stale A.
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_file(&client_socket, Duration::from_secs(10));
+
+    // Dial-time width A = 80 (the size the warm slot's server first learned).
+    let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
+    let (version, error) =
+        client_handshake(&mut stream, 18, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 18);
+    assert!(error.is_none(), "handshake error: {error:?}");
+
+    let baseline = read_next_frame_payload(&mut stream, Duration::from_secs(10))
+        .and_then(|p| decode_frame_payload(&p).map_err(|e| e.to_string()))
+        .expect("active client should receive a frame at width A");
+    assert_eq!(
+        baseline.width, 80,
+        "baseline frame should render at width A"
+    );
+
+    // Become a warm slot: frames pause. The terminal then grows to B = 120 while
+    // paused — the stale-geometry window the bug lived in (the warm server never
+    // saw this resize because it only reached the then-active leg).
+    send_set_frame_subscription(&mut stream, false).expect("pause");
+    support::drain_messages(&mut stream);
+
+    // Switch back: resume, then re-assert geometry to width B. After this the
+    // server must repaint EVERY pane at B; we assert via the frame width, which
+    // is the whole-layout geometry the panes are sized against.
+    send_set_frame_subscription(&mut stream, true).expect("resume");
+    send_resize(&mut stream, 120, 40).expect("re-assert geometry on switch");
+
+    let reasserted = wait_until(Duration::from_secs(5), Duration::from_millis(50), || {
+        match read_next_frame_payload(&mut stream, Duration::from_millis(400)) {
+            Ok(p) => decode_frame_payload(&p)
+                .map(|f| f.width == 120)
+                .unwrap_or(false),
+            Err(_) => false,
+        }
+    });
+    assert!(
+        reasserted,
+        "after resume + geometry re-assert the server must render panes at width B (120)"
+    );
 
     cleanup_spawned_herdr(spawned, base);
 }
@@ -342,8 +468,8 @@ fn client_sees_headless_startup_config_diagnostic() {
 
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
     let (version, error) =
-        client_handshake(&mut stream, 12, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 12);
+        client_handshake(&mut stream, 18, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 18);
     assert!(error.is_none(), "{:?}", error);
 
     stream
@@ -391,8 +517,8 @@ fn client_input_forwarded_to_pane() {
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
     let (version, error) =
-        client_handshake(&mut stream, 12, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 12);
+        client_handshake(&mut stream, 18, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 18);
     assert!(error.is_none(), "{:?}", error);
 
     // Send an Input message containing "echo hello\n".
@@ -445,8 +571,8 @@ fn client_resize_sends_message() {
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
     let (version, error) =
-        client_handshake(&mut stream, 12, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 12);
+        client_handshake(&mut stream, 18, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 18);
     assert!(error.is_none(), "{:?}", error);
 
     // Drain the initial frame(s).
@@ -504,8 +630,8 @@ fn server_shutdown_sends_message_to_client() {
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
     let (version, error) =
-        client_handshake(&mut stream, 12, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 12);
+        client_handshake(&mut stream, 18, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 18);
     assert!(error.is_none(), "{:?}", error);
 
     // Send SIGINT so the server takes the graceful shutdown path and
@@ -621,7 +747,10 @@ fn server_crash_after_attach_causes_lost_connection_error() {
     // terminal setup paths are exercised.
     let mut thin_client = spawn_client_process(&config_home, &runtime_dir, &api_socket);
 
-    // Prove attached before kill by waiting for at least one frame message.
+    // Prove attached before kill by waiting for rendered frame content. Any
+    // single byte is not enough: the client emits its OSC 10/11 host theme
+    // query to the PTY before it even connects, so the heuristic must match
+    // actual frame output like the cross-area crash test does.
     let mut thin_reader = thin_client
         ._master
         .as_ref()
@@ -636,7 +765,11 @@ fn server_crash_after_attach_causes_lost_connection_error() {
             match thin_reader.read(&mut buf) {
                 Ok(n) if n > 0 => {
                     let out = String::from_utf8_lossy(&buf[..n]);
-                    if !out.is_empty() {
+                    if out.contains('\u{2500}')
+                        || out.contains("workspace")
+                        || out.contains("pane")
+                        || out.contains("terminal")
+                    {
                         seen = true;
                         break;
                     }
@@ -736,8 +869,8 @@ fn client_receives_frame_after_pane_output() {
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
     let (version, error) =
-        client_handshake(&mut stream, 12, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 12);
+        client_handshake(&mut stream, 18, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 18);
     assert!(error.is_none(), "{:?}", error);
 
     read_next_frame_payload(&mut stream, Duration::from_secs(10))
@@ -783,8 +916,8 @@ fn navigate_mode_keybind_dispatch_in_server() {
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
     let (version, error) =
-        client_handshake(&mut stream, 12, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 12);
+        client_handshake(&mut stream, 18, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 18);
     assert!(error.is_none(), "{:?}", error);
 
     // Drain initial frames.
@@ -901,8 +1034,8 @@ fn graceful_shutdown_sends_server_shutdown_to_client() {
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
     let (version, error) =
-        client_handshake(&mut stream, 12, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 12);
+        client_handshake(&mut stream, 18, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 18);
     assert!(error.is_none(), "{:?}", error);
 
     // Drain initial frame(s).
@@ -1000,8 +1133,8 @@ fn client_receives_notify_on_agent_state_change() {
     // Connect as a client and perform handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect");
     let (version, error) =
-        client_handshake(&mut stream, 12, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 12);
+        client_handshake(&mut stream, 18, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 18);
     assert!(error.is_none(), "{:?}", error);
 
     // Drain initial frame(s).
@@ -1168,5 +1301,201 @@ fn client_receives_notify_on_agent_state_change() {
         "client should receive a Sound Notify with 'agent done' when background pane transitions Working→Idle"
     );
 
+    cleanup_spawned_herdr(spawned, base);
+}
+
+// ---------------------------------------------------------------------------
+// Held-handoff restore + visible retry progress (#69)
+// ---------------------------------------------------------------------------
+
+/// A stand-in server that refuses every connecting client with the
+/// live-handoff notice, keeping the real `herdr client` spinning in its #52
+/// retry window. Returns a flag the caller can flip to stop the accept loop.
+fn spawn_refusing_server(client_socket: PathBuf) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    use std::os::unix::net::UnixListener;
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_thread = stop.clone();
+    let listener = UnixListener::bind(&client_socket).expect("bind refusing client socket");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    thread::spawn(move || {
+        // Connections we have refused but keep open. A real mid-handoff server
+        // does not slam the socket shut the instant it writes the refusal
+        // Welcome; if we did, the client's post-read `set_read_timeout(None)`
+        // would hit EINVAL on the half-closed fd and mis-report the refusal as
+        // a bare connection failure. Holding each refused stream open keeps the
+        // client in its live-handoff retry loop, which is what #69 exercises.
+        let mut held: Vec<std::os::unix::net::UnixStream> = Vec::new();
+        while !stop_thread.load(std::sync::atomic::Ordering::Acquire) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    // Drain the client's Hello frame, then refuse.
+                    stream
+                        .set_read_timeout(Some(Duration::from_millis(500)))
+                        .ok();
+                    let mut len = [0u8; 4];
+                    if stream.read_exact(&mut len).is_ok() {
+                        let n = u32::from_le_bytes(len) as usize;
+                        if n <= 64 * 1024 {
+                            let mut payload = vec![0u8; n];
+                            let _ = stream.read_exact(&mut payload);
+                        }
+                    }
+                    let _ = stream.write_all(&encode_live_handoff_refusal(16));
+                    let _ = stream.flush();
+                    held.push(stream);
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Err(_) => break,
+            }
+        }
+        drop(held);
+    });
+    stop
+}
+
+/// Reads from the PTY master into a shared buffer until `stop` is set. Lets the
+/// test poll the cumulative client output for restore sequences.
+fn drain_master_into(
+    mut reader: Box<dyn Read + Send>,
+    sink: std::sync::Arc<Mutex<Vec<u8>>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while !stop.load(std::sync::atomic::Ordering::Acquire) {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    sink.lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .extend_from_slice(&buf[..n]);
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+#[test]
+fn killing_a_client_mid_held_handoff_restores_the_terminal() {
+    // Repro of #69: a leg chained in after a seamless switch INHERITS a held
+    // host terminal (frozen frame, raw mode). It then lands on a server still
+    // mid-live-handoff and spins in the #52 retry window. The user ctrl-c's the
+    // "hung" client. The terminal MUST be reclaimed — leave alt-screen, raw
+    // off, pop kitty flags — not left unusable.
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    fs::create_dir_all(config_home.join("herdr")).unwrap();
+    fs::create_dir_all(&runtime_dir).unwrap();
+    register_runtime_dir(&runtime_dir);
+    fs::write(
+        config_home.join("herdr/config.toml"),
+        "onboarding = false\n",
+    )
+    .unwrap();
+
+    let server_stop = spawn_refusing_server(client_socket.clone());
+
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    cmd.arg("client");
+    cmd.env("HERDR_DISABLE_SOUND", "1");
+    cmd.env("XDG_CONFIG_HOME", &config_home);
+    cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
+    cmd.env("HERDR_SOCKET_PATH", &api_socket);
+    cmd.env("HERDR_CLIENT_SOCKET_PATH", &client_socket);
+    // Pretend a previous leg handed us a held terminal (the switch-handoff case).
+    cmd.env("HERDR_TERMINAL_HELD", "1");
+    cmd.env("SHELL", "/bin/sh");
+    cmd.env_remove("HERDR_ENV");
+    cmd.env_remove("TMUX");
+
+    let reader = pair.master.try_clone_reader().unwrap();
+    let child = pair.slave.spawn_command(cmd).unwrap();
+    let pid = child.process_id();
+    register_spawned_herdr_pid(pid);
+    drop(pair.slave);
+    let mut spawned = SpawnedHerdr {
+        _master: Some(pair.master),
+        child,
+    };
+
+    let output = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
+    let drain_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    drain_master_into(reader, output.clone(), drain_stop.clone());
+
+    // The client should paint a VISIBLE reconnect status on the held screen —
+    // not sit silent behind the frozen frame.
+    let saw_status = wait_until(Duration::from_secs(10), Duration::from_millis(50), || {
+        let buf = output.lock().unwrap_or_else(|p| p.into_inner());
+        let text = String::from_utf8_lossy(&buf);
+        text.contains("reconnecting")
+    });
+    let status_text =
+        String::from_utf8_lossy(&output.lock().unwrap_or_else(|p| p.into_inner())).into_owned();
+    assert!(
+        saw_status,
+        "a held-handoff reconnect must paint visible progress, got: {status_text:?}"
+    );
+    // The progress must be painted ON the held screen, not flushed to a stderr
+    // line that lands invisibly behind the frozen frame (#69 outcome 1): the
+    // overlay parks the cursor (DECSC `\x1b7`) at an absolute bottom row
+    // (`\x1b[9999;1H`) before drawing, and carries a live elapsed-seconds
+    // counter so the wait reads as progress rather than a frozen hang.
+    assert!(
+        status_text.contains("\x1b7\x1b[9999;1H"),
+        "held-handoff progress must be overlaid on the held screen (cursor-parked bottom row); output: {status_text:?}"
+    );
+    assert!(
+        status_text.contains("reconnecting… (") && status_text.contains("s)"),
+        "held-handoff progress must show a live elapsed-seconds counter; output: {status_text:?}"
+    );
+
+    // ctrl-c the "hung" client.
+    if let Some(pid) = pid {
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGINT);
+        }
+    }
+
+    // After the kill, the restore sequence must hit the wire: leave alt-screen,
+    // show cursor, pop kitty keyboard flags.
+    let restored = wait_until(Duration::from_secs(10), Duration::from_millis(50), || {
+        let buf = output.lock().unwrap_or_else(|p| p.into_inner());
+        let text = String::from_utf8_lossy(&buf);
+        text.contains("\x1b[?1049l") && text.contains("\x1b[?25h")
+    });
+    let final_text =
+        String::from_utf8_lossy(&output.lock().unwrap_or_else(|p| p.into_inner())).into_owned();
+    assert!(
+        restored,
+        "killing a held-handoff client must leave the alt-screen and show the cursor; output: {final_text:?}"
+    );
+    // crossterm's PopKeyboardEnhancementFlags emits CSI < <n> u (n = pop count).
+    assert!(
+        final_text.contains("\x1b[<1u") || final_text.contains("\x1b[<u"),
+        "the restore must pop kitty keyboard enhancement flags (kitty-flags pop); output: {final_text:?}"
+    );
+
+    drain_stop.store(true, std::sync::atomic::Ordering::Release);
+    server_stop.store(true, std::sync::atomic::Ordering::Release);
+    spawned.close_master();
+    let _ = spawned.child.wait();
     cleanup_spawned_herdr(spawned, base);
 }

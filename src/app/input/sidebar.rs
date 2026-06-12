@@ -4,13 +4,26 @@ use crate::app::state::{AppState, Mode, ViewLayout};
 
 use super::ScrollbarClickTarget;
 
+fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
+    rect.width > 0
+        && col >= rect.x
+        && col < rect.x + rect.width
+        && row >= rect.y
+        && row < rect.y + rect.height
+}
+
 impl AppState {
     pub(super) fn workspace_list_rect(&self) -> Rect {
         let sidebar = self.view.sidebar_rect;
         if self.sidebar_collapsed || sidebar.width <= 1 || sidebar.height == 0 {
             return Rect::default();
         }
-        crate::ui::workspace_list_rect(sidebar, self.sidebar_section_split)
+        crate::ui::workspace_list_rect(
+            sidebar,
+            self.sidebar_section_split,
+            self.sidebar_pane_gap,
+            crate::ui::servers_section_height(self),
+        )
     }
 
     pub(super) fn agent_panel_rect(&self) -> Rect {
@@ -18,8 +31,11 @@ impl AppState {
         if self.sidebar_collapsed || sidebar.width <= 1 || sidebar.height == 0 {
             return Rect::default();
         }
-        let (_, detail_area) =
-            crate::ui::expanded_sidebar_sections(sidebar, self.sidebar_section_split);
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+            sidebar,
+            self.sidebar_section_split,
+            self.sidebar_pane_gap,
+        );
         detail_area
     }
 
@@ -165,7 +181,12 @@ impl AppState {
         }
     }
 
+    /// The spaces section's footer row hosting the `new` entry. Gone (no
+    /// row reserved, no hit-area) in workspace tab-mode (#41).
     pub(crate) fn sidebar_footer_rect(&self) -> Rect {
+        if !self.sidebar_new_entry_visible() {
+            return Rect::default();
+        }
         let ws_area = self.workspace_list_rect();
         if ws_area == Rect::default() {
             return Rect::default();
@@ -176,24 +197,24 @@ impl AppState {
 
     pub(crate) fn sidebar_new_button_rect(&self) -> Rect {
         let footer = self.sidebar_footer_rect();
+        if footer == Rect::default() {
+            return Rect::default();
+        }
         let width = 5u16.min(footer.width.max(1));
         Rect::new(footer.x, footer.y, width, footer.height)
     }
 
+    /// The global-menu launcher's hit-area: the standalone `menu` row
+    /// pinned to the sidebar's last row (#41). The whole row is the click
+    /// target.
     pub(crate) fn global_launcher_rect(&self) -> Rect {
         if self.view.layout == ViewLayout::Mobile {
             return self.view.mobile_menu_hit_area;
         }
-
-        let footer = self.sidebar_footer_rect();
-        let width = if self.global_menu_attention_badge_visible() {
-            8
-        } else {
-            6
+        if self.sidebar_collapsed {
+            return Rect::default();
         }
-        .min(footer.width.max(1));
-        let x = footer.x + footer.width.saturating_sub(width);
-        Rect::new(x, footer.y, width, footer.height)
+        crate::ui::sidebar_menu_row_rect(self.view.sidebar_rect, self.sidebar_pane_gap)
     }
 
     pub(crate) fn global_menu_labels(&self) -> Vec<&'static str> {
@@ -266,7 +287,10 @@ impl AppState {
 
     pub(super) fn set_manual_sidebar_width(&mut self, divider_col: u16) {
         let sidebar = self.view.sidebar_rect;
-        let width = divider_col.saturating_sub(sidebar.x).saturating_add(1);
+        let width = divider_col
+            .saturating_sub(sidebar.x)
+            .saturating_add(1)
+            .saturating_sub(self.sidebar_pane_gap);
         self.sidebar_width = width.clamp(self.sidebar_min_width, self.sidebar_max_width);
         self.sidebar_width_source = crate::app::state::SidebarWidthSource::Manual;
         self.mark_session_dirty();
@@ -279,6 +303,7 @@ impl AppState {
         let rect = crate::ui::sidebar_section_divider_rect(
             self.view.sidebar_rect,
             self.sidebar_section_split,
+            self.sidebar_pane_gap,
         );
         rect.width > 0
             && col >= rect.x
@@ -289,7 +314,10 @@ impl AppState {
 
     pub(super) fn set_sidebar_section_split(&mut self, row: u16) {
         let sidebar = self.view.sidebar_rect;
-        let content_height = sidebar.height;
+        // The split divides the rows above the pinned menu band.
+        let content_height = sidebar
+            .height
+            .saturating_sub(crate::ui::SIDEBAR_MENU_BAND_ROWS);
         if content_height < 6 {
             return;
         }
@@ -300,8 +328,7 @@ impl AppState {
     }
 
     pub(super) fn workspace_at_row(&self, row: u16) -> Option<usize> {
-        let footer = self.sidebar_footer_rect();
-        if footer == Rect::default() {
+        if self.workspace_list_rect() == Rect::default() {
             return None;
         }
 
@@ -321,7 +348,8 @@ impl AppState {
             return None;
         }
 
-        let (ws_area, _, _) = crate::ui::collapsed_sidebar_sections(self.view.sidebar_rect);
+        let (ws_area, _, _) =
+            crate::ui::collapsed_sidebar_sections(self.view.sidebar_rect, self.sidebar_pane_gap);
         if ws_area == Rect::default() || row < ws_area.y || row >= ws_area.y + ws_area.height {
             return None;
         }
@@ -356,7 +384,8 @@ impl AppState {
             return None;
         }
 
-        let (_, _, detail_area) = crate::ui::collapsed_sidebar_sections(self.view.sidebar_rect);
+        let (_, _, detail_area) =
+            crate::ui::collapsed_sidebar_sections(self.view.sidebar_rect, self.sidebar_pane_gap);
         let detail_content_area = Rect::new(
             detail_area.x,
             detail_area.y,
@@ -380,8 +409,12 @@ impl AppState {
 
     pub(super) fn workspace_drop_index_at_row(&self, row: u16) -> Option<usize> {
         let area = self.workspace_list_rect();
-        let footer = self.sidebar_footer_rect();
-        if area == Rect::default() || row < area.y || row >= footer.y {
+        if area == Rect::default() {
+            return None;
+        }
+        let body =
+            crate::ui::workspace_list_body_rect(area, false, self.sidebar_new_entry_visible());
+        if row < area.y || row >= body.y + body.height {
             return None;
         }
 
@@ -394,18 +427,16 @@ impl AppState {
             return Some(0);
         }
 
+        let section_keys = self.project_section_keys();
         let mut insert_indices = Vec::with_capacity(cards.len() + 1);
         for (idx, card) in cards.iter().enumerate() {
-            let card_group = self
-                .workspaces
+            let card_group = section_keys
                 .get(card.ws_idx)
-                .and_then(|ws| ws.worktree_space())
-                .map(|space| space.key.as_str());
+                .and_then(|section| section.as_deref());
             let previous_group = idx.checked_sub(1).and_then(|prev_idx| {
-                self.workspaces
+                section_keys
                     .get(cards[prev_idx].ws_idx)
-                    .and_then(|ws| ws.worktree_space())
-                    .map(|space| space.key.as_str())
+                    .and_then(|section| section.as_deref())
             });
             let inside_group_gap = card_group.is_some() && card_group == previous_group;
             if !inside_group_gap {
@@ -416,8 +447,12 @@ impl AppState {
 
         let mut best: Option<(usize, u16)> = None;
         for insert_idx in insert_indices {
-            let Some(slot_row) = crate::ui::workspace_drop_indicator_row(&cards, area, insert_idx)
-            else {
+            let Some(slot_row) = crate::ui::workspace_drop_indicator_row(
+                &cards,
+                area,
+                insert_idx,
+                self.sidebar_new_entry_visible(),
+            ) else {
                 continue;
             };
             let distance = row.abs_diff(slot_row);
@@ -432,6 +467,8 @@ impl AppState {
         best.map(|(insert_idx, _)| insert_idx)
     }
 
+    /// The agents header's scope toggle hit-area: the entire header row
+    /// (title word included), not just the right-aligned scope label (#41).
     pub(super) fn on_agent_panel_scope_toggle(&self, col: u16, row: u16) -> bool {
         if self.sidebar_collapsed {
             return false;
@@ -440,19 +477,68 @@ impl AppState {
         let (_, detail_area) = crate::ui::expanded_sidebar_sections(
             self.view.sidebar_rect,
             self.sidebar_section_split,
+            self.sidebar_pane_gap,
         );
-        let rect = crate::ui::agent_panel_toggle_rect(detail_area, self.agent_panel_scope);
-        rect.width > 0
-            && col >= rect.x
-            && col < rect.x + rect.width
-            && row >= rect.y
-            && row < rect.y + rect.height
+        // Row 0 is the section divider; the ` agents` header sits below it.
+        if detail_area.width == 0 || detail_area.height < 2 {
+            return false;
+        }
+        let header = Rect::new(detail_area.x, detail_area.y + 1, detail_area.width, 1);
+        rect_contains(header, col, row)
     }
 
-    pub(super) fn agent_detail_target_at(
+    /// The servers header's scope toggle hit-area: the whole header row —
+    /// clicking ` servers` toggles just like clicking the scope label (#41).
+    pub(super) fn on_servers_panel_scope_toggle(&self, col: u16, row: u16) -> bool {
+        if self.sidebar_collapsed {
+            return false;
+        }
+
+        rect_contains(self.view.servers_header_rect, col, row)
+    }
+
+    /// The spaces filter a right-clicked servers-band slot stands for
+    /// (#46): the self row narrows to local workspaces, peer rows (config
+    /// or snapshot) to their remote rows. The home row maps to nothing —
+    /// the origin's own workspaces are never in this list.
+    pub(super) fn server_filter_for_band_slot(
         &self,
-        row: u16,
-    ) -> Option<(usize, usize, crate::layout::PaneId)> {
+        slot: Option<crate::app::state::PeerSwitchRequest>,
+    ) -> Option<crate::app::state::ServerFilter> {
+        use crate::app::state::{PeerSwitchRequest, ServerFilter};
+        let peer = match slot {
+            None => return Some(ServerFilter::Local),
+            Some(PeerSwitchRequest::Home) => return None,
+            Some(PeerSwitchRequest::ConfigPeer { peer_idx, .. }) => {
+                self.remote_peer(crate::app::state::RemotePeerRef::Config { peer_idx })
+            }
+            Some(PeerSwitchRequest::SnapshotPeer { entry_idx }) => {
+                self.remote_peer(crate::app::state::RemotePeerRef::Snapshot { entry_idx })
+            }
+            // Origin-workspace rows are spaces-list folds, never band slots,
+            // so there's no server filter to derive for one.
+            Some(PeerSwitchRequest::OriginWorkspace { .. }) => return None,
+        };
+        peer.map(|peer| ServerFilter::Peer {
+            ssh_target: peer.ssh_target.clone(),
+        })
+    }
+
+    /// The spaces header's scope toggle hit-area: the whole header row (#41).
+    pub(super) fn on_spaces_panel_scope_toggle(&self, col: u16, row: u16) -> bool {
+        let area = self.workspace_list_rect();
+        if area == Rect::default() || area.height == 0 {
+            return false;
+        }
+        let header = Rect::new(area.x, area.y, area.width, 1);
+        rect_contains(header, col, row)
+    }
+
+    /// Resolve the agents-panel row at `row` to its activation target. Local
+    /// rows focus a pane in the workspace; remote rows (#62) request the same
+    /// server switch their workspace row would. Entries are single-row (#62),
+    /// so each occupies one row plus the inter-row gap.
+    pub(super) fn agent_detail_target_at(&self, row: u16) -> Option<AgentDetailTarget> {
         if self.sidebar_collapsed {
             return None;
         }
@@ -463,7 +549,7 @@ impl AppState {
             detail_area,
             crate::ui::should_show_scrollbar(metrics),
         );
-        if body.height < 2 || row < body.y || row >= body.y + body.height {
+        if body.height < 1 || row < body.y || row >= body.y + body.height {
             return None;
         }
 
@@ -472,19 +558,36 @@ impl AppState {
             .into_iter()
             .skip(self.agent_panel_scroll)
         {
-            if row_y.saturating_add(1) >= body.y + body.height {
+            if row_y >= body.y + body.height {
                 break;
             }
-            if row == row_y || row == row_y + 1 {
-                return Some((detail.ws_idx, detail.tab_idx, detail.pane_id));
+            if row == row_y {
+                return Some(match detail.remote {
+                    Some((peer, ws_idx)) => AgentDetailTarget::Remote(peer.switch_request(ws_idx)),
+                    None => AgentDetailTarget::Local {
+                        ws_idx: detail.ws_idx,
+                        pane_id: detail.pane_id,
+                    },
+                });
             }
-            row_y = row_y.saturating_add(2);
+            row_y = row_y.saturating_add(1);
             if row_y < body.y + body.height {
-                row_y = row_y.saturating_add(1);
+                row_y = row_y.saturating_add(self.sidebar_row_gap);
             }
         }
         None
     }
+}
+
+/// What clicking an agents-panel row does: focus a local pane, or request a
+/// switch to a remote peer's workspace (#62).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentDetailTarget {
+    Local {
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+    },
+    Remote(crate::app::state::PeerSwitchRequest),
 }
 
 #[cfg(test)]
@@ -495,8 +598,9 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::super::{app_for_mouse_test, capture_snapshot, mouse, unique_temp_path};
+    use super::AgentDetailTarget;
     use crate::{
-        app::state::{AgentPanelScope, DragTarget, Mode},
+        app::state::{AgentPanelScope, DragTarget, Mode, PanelScope},
         detect::Agent,
         workspace::Workspace,
     };
@@ -504,15 +608,40 @@ mod tests {
     #[test]
     fn clicking_launcher_opens_global_menu() {
         let mut app = app_for_mouse_test();
+
+        // The pinned menu row is the sidebar's very last row and the whole
+        // row is the launcher's hit-area (#41).
         let rect = app.state.global_launcher_rect();
+        let sidebar = app.state.view.sidebar_rect;
+        assert_eq!(rect.y, sidebar.y + sidebar.height - 1);
+        assert_eq!(rect.x, sidebar.x);
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            rect.x + rect.width.saturating_sub(1),
+            rect.x,
             rect.y,
         ));
 
         assert_eq!(app.state.mode, Mode::GlobalMenu);
+    }
+
+    #[test]
+    fn sidebar_collapse_toggle_wins_over_menu_row() {
+        // With pane gap 0 the collapse toggle's cell sits inside the menu
+        // row — clicking it must still collapse, not open the menu.
+        let mut app = app_for_mouse_test();
+        let toggle = crate::ui::expanded_sidebar_toggle_rect(app.state.view.sidebar_rect);
+        let launcher = app.state.global_launcher_rect();
+        assert_eq!(toggle.y, launcher.y);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+
+        assert!(app.state.sidebar_collapsed);
+        assert_ne!(app.state.mode, Mode::GlobalMenu);
     }
 
     #[test]
@@ -694,7 +823,20 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
 
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 16));
+        // Single-row entries (#62): the second agent row sits one row + the
+        // inter-row gap below the first. Click it directly.
+        let detail_area = app.state.agent_panel_rect();
+        let metrics = crate::ui::agent_panel_scroll_metrics(&app.state, detail_area);
+        let body = crate::ui::agent_panel_body_rect(
+            detail_area,
+            crate::ui::should_show_scrollbar(metrics),
+        );
+        let second_row = body.y + 1 + app.state.sidebar_row_gap;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            2,
+            second_row,
+        ));
 
         assert_eq!(app.state.workspaces[0].active_tab, 1);
         assert_eq!(
@@ -711,6 +853,54 @@ mod tests {
     }
 
     #[test]
+    fn agent_detail_target_row_stride_follows_sidebar_row_gap() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let first_pane = ws.tabs[0].root_pane;
+        let second_tab = ws.test_add_tab(Some("logs"));
+        let second_pane = ws.tabs[second_tab].root_pane;
+        app.state.workspaces = vec![ws];
+        app.state.ensure_test_terminals();
+        for (tab_idx, pane) in [(0, first_pane), (second_tab, second_pane)] {
+            let terminal_id = app.state.workspaces[0].tabs[tab_idx].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .detected_agent = Some(Agent::Claude);
+        }
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let detail_area = app.state.agent_panel_rect();
+        let metrics = crate::ui::agent_panel_scroll_metrics(&app.state, detail_area);
+        let body = crate::ui::agent_panel_body_rect(
+            detail_area,
+            crate::ui::should_show_scrollbar(metrics),
+        );
+
+        let second = AgentDetailTarget::Local {
+            ws_idx: 0,
+            pane_id: second_pane,
+        };
+        let _ = second_tab;
+
+        // Default gap 1: single-row entries (#62) are 1 row + 1 blank, so the
+        // second entry starts at body.y + 2 and body.y + 1 is the blank row.
+        assert_eq!(
+            app.state.agent_detail_target_at(body.y + 2),
+            Some(second.clone())
+        );
+        assert_eq!(app.state.agent_detail_target_at(body.y + 1), None);
+
+        // Gap 0: rows pack, second entry starts at body.y + 1.
+        app.state.sidebar_row_gap = 0;
+        assert_eq!(app.state.agent_detail_target_at(body.y + 1), Some(second));
+    }
+
+    #[test]
     fn clicking_agent_panel_toggle_switches_scope() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("test")];
@@ -722,6 +912,7 @@ mod tests {
         let (_, detail_area) = crate::ui::expanded_sidebar_sections(
             app.state.view.sidebar_rect,
             app.state.sidebar_section_split,
+            app.state.sidebar_pane_gap,
         );
         let toggle = crate::ui::agent_panel_toggle_rect(detail_area, app.state.agent_panel_scope);
         app.handle_mouse(mouse(
@@ -740,6 +931,137 @@ mod tests {
             snapshot.agent_panel_scope,
             AgentPanelScope::CurrentWorkspace
         );
+
+        // The whole ` agents` header row toggles too (#41) — the title word
+        // sits one row below the section divider.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            detail_area.x + 1,
+            detail_area.y + 1,
+        ));
+        assert_eq!(app.state.agent_panel_scope, AgentPanelScope::AllWorkspaces);
+
+        // The divider row above the header is the section-split drag
+        // handle, not the toggle.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            detail_area.x + 1,
+            detail_area.y,
+        ));
+        assert_eq!(app.state.agent_panel_scope, AgentPanelScope::AllWorkspaces);
+    }
+
+    #[test]
+    fn clicking_servers_header_toggle_switches_servers_scope() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let mut peer = crate::peers::PeerSummaryState::new(&crate::config::PeerConfig {
+            name: "anvil".into(),
+            ..Default::default()
+        });
+        peer.last_ok = Some(std::time::Instant::now());
+        app.state.peer_summaries = vec![peer];
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 30));
+
+        let header = app.state.view.servers_header_rect;
+        assert_ne!(header, Rect::default());
+
+        // The whole header row is the toggle's hit-area (#41): clicking the
+        // ` servers` title word flips the scope and persists it.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            header.x + 1,
+            header.y,
+        ));
+        assert_eq!(app.state.servers_panel_scope, PanelScope::Current);
+        let snapshot = capture_snapshot(&app.state);
+        assert_eq!(snapshot.servers_panel_scope, PanelScope::Current);
+
+        // Clicking the right-aligned label keeps working and returns to all.
+        let toggle = crate::ui::panel_scope_toggle_rect(header, app.state.servers_panel_scope);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+        assert_eq!(app.state.servers_panel_scope, PanelScope::All);
+
+        // The row below the header is a server row, not the toggle.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            header.x + 1,
+            header.y + 1,
+        ));
+        assert_eq!(app.state.servers_panel_scope, PanelScope::All);
+    }
+
+    #[test]
+    fn clicking_spaces_header_toggle_switches_spaces_scope() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.workspace_scroll = 3;
+
+        let list_area = app.state.workspace_list_rect();
+        assert_ne!(list_area, Rect::default());
+        let header = Rect::new(list_area.x, list_area.y, list_area.width, 1);
+        let toggle = crate::ui::panel_scope_toggle_rect(header, app.state.spaces_panel_scope);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+
+        assert_eq!(app.state.spaces_panel_scope, PanelScope::Current);
+        assert_eq!(app.state.workspace_scroll, 0);
+        let snapshot = capture_snapshot(&app.state);
+        assert_eq!(snapshot.spaces_panel_scope, PanelScope::Current);
+
+        // The whole header row toggles (#41): clicking the ` spaces` title
+        // word returns to all.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            header.x + 1,
+            header.y,
+        ));
+        assert_eq!(app.state.spaces_panel_scope, PanelScope::All);
+    }
+
+    #[test]
+    fn workspace_tab_mode_removes_the_new_entry_hit_area() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        // Default tabs mode: the footer hosts the `new` button.
+        let new_button = app.state.sidebar_new_button_rect();
+        assert_ne!(new_button, Rect::default());
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            new_button.x,
+            new_button.y,
+        ));
+        assert!(app.state.request_new_workspace);
+
+        // Workspace mode (#41): the entry does not exist — no rect, no
+        // footer slot, and the old click position is a no-op.
+        app.state.request_new_workspace = false;
+        app.state.tab_mode = crate::config::TabModeConfig::Workspace;
+        assert_eq!(app.state.sidebar_new_button_rect(), Rect::default());
+        assert_eq!(app.state.sidebar_footer_rect(), Rect::default());
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            new_button.x,
+            new_button.y,
+        ));
+        assert!(!app.state.request_new_workspace);
     }
 
     #[test]
@@ -774,14 +1096,19 @@ mod tests {
         app.state.mode = Mode::Terminal;
         app.state.agent_panel_scope = AgentPanelScope::AllWorkspaces;
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
-            app.state.view.sidebar_rect,
-            app.state.sidebar_section_split,
+        let detail_area = app.state.agent_panel_rect();
+        // Single-row entries (#62): the second agent row is one row + gap below
+        // the first. Click it directly rather than at a fixed two-line offset.
+        let metrics = crate::ui::agent_panel_scroll_metrics(&app.state, detail_area);
+        let body = crate::ui::agent_panel_body_rect(
+            detail_area,
+            crate::ui::should_show_scrollbar(metrics),
         );
+        let second_row = body.y + 1 + app.state.sidebar_row_gap;
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            detail_area.x + 2,
-            detail_area.y + 6,
+            body.x + 2,
+            second_row,
         ));
 
         assert_eq!(app.state.active, Some(1));
@@ -944,8 +1271,10 @@ mod tests {
         app.state.view.sidebar_rect = Rect::new(0, 0, 4, 20);
         app.state.view.terminal_area = Rect::new(4, 0, 80, 20);
 
-        let (_, _, detail_area) =
-            crate::ui::collapsed_sidebar_sections(app.state.view.sidebar_rect);
+        let (_, _, detail_area) = crate::ui::collapsed_sidebar_sections(
+            app.state.view.sidebar_rect,
+            app.state.sidebar_pane_gap,
+        );
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             detail_area.x,
@@ -1143,6 +1472,7 @@ mod tests {
             &app.state.view.workspace_card_areas,
             app.state.workspace_list_rect(),
             0,
+            true,
         )
         .unwrap();
 
@@ -1335,7 +1665,7 @@ mod tests {
     }
 
     #[test]
-    fn top_drop_slot_is_distinct_from_gap_below_first_workspace() {
+    fn workspace_drop_slot_maps_card_rows_to_insert_indices() {
         let mut app = app_for_mouse_test();
         let first_repo = temp_git_repo("main");
         let second_repo = temp_git_repo("main");
@@ -1366,10 +1696,21 @@ mod tests {
             .cwd = second_repo.clone();
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
 
-        assert_eq!(app.state.workspace_drop_index_at_row(0), Some(0));
-        assert_eq!(app.state.workspace_drop_index_at_row(1), Some(0));
-        assert_eq!(app.state.workspace_drop_index_at_row(2), Some(0));
-        assert_eq!(app.state.workspace_drop_index_at_row(3), Some(1));
+        // Single-line rows (#62). The drop indicator for inserting before a
+        // card sits on the row just above it, so the row above card 0 resolves
+        // to drop-index 0, and the row just below card 1 (its trailing slot)
+        // resolves to the append index (2).
+        let card0 = app.state.view.workspace_card_areas[0].rect;
+        let card1 = app.state.view.workspace_card_areas[1].rect;
+        assert_eq!(card0.height, 1);
+        if let Some(above) = card0.y.checked_sub(1) {
+            assert_eq!(app.state.workspace_drop_index_at_row(above), Some(0));
+        }
+        assert_eq!(
+            app.state
+                .workspace_drop_index_at_row(card1.y + card1.height),
+            Some(2)
+        );
 
         let _ = fs::remove_dir_all(first_repo);
         let _ = fs::remove_dir_all(second_repo);
@@ -1390,12 +1731,13 @@ mod tests {
             cards,
             app.state.workspace_list_rect(),
             cards.len(),
+            true,
         )
         .unwrap();
 
         let last = cards.last().unwrap().rect;
         assert_eq!(bottom_slot, last.y + last.height);
-        assert!(bottom_slot < app.state.sidebar_footer_rect().y.saturating_sub(1));
+        assert!(bottom_slot < app.state.sidebar_footer_rect().y);
     }
 
     #[test]
@@ -1418,7 +1760,12 @@ mod tests {
 
         assert_eq!(app.state.workspace_drop_index_at_row(issue.rect.y), Some(1));
         assert_eq!(
-            crate::ui::workspace_drop_indicator_row(cards, app.state.workspace_list_rect(), 2),
+            crate::ui::workspace_drop_indicator_row(
+                cards,
+                app.state.workspace_list_rect(),
+                2,
+                true
+            ),
             Some(normal.rect.y + normal.rect.height)
         );
     }
@@ -1447,6 +1794,7 @@ mod tests {
             &app.state.view.workspace_card_areas,
             app.state.workspace_list_rect(),
             0,
+            true,
         )
         .unwrap();
 
@@ -1528,6 +1876,7 @@ mod tests {
         let divider = crate::ui::sidebar_section_divider_rect(
             app.state.view.sidebar_rect,
             app.state.sidebar_section_split,
+            app.state.sidebar_pane_gap,
         );
 
         app.handle_mouse(mouse(

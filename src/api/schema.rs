@@ -52,6 +52,8 @@ pub enum Method {
     TabRename(TabRenameParams),
     #[serde(rename = "tab.close")]
     TabClose(TabTarget),
+    #[serde(rename = "peers.summary")]
+    PeersSummary(EmptyParams),
     #[serde(rename = "agent.list")]
     AgentList(EmptyParams),
     #[serde(rename = "agent.get")]
@@ -86,8 +88,14 @@ pub enum Method {
     PaneReportAgent(PaneReportAgentParams),
     #[serde(rename = "pane.report_agent_session")]
     PaneReportAgentSession(PaneReportAgentSessionParams),
+    #[serde(rename = "pane.report_prompt")]
+    PaneReportPrompt(PaneReportPromptParams),
     #[serde(rename = "pane.report_metadata")]
     PaneReportMetadata(PaneReportMetadataParams),
+    #[serde(rename = "pane.set_header_field")]
+    PaneSetHeaderField(PaneSetHeaderFieldParams),
+    #[serde(rename = "pane.clear_header_field")]
+    PaneClearHeaderField(PaneClearHeaderFieldParams),
     #[serde(rename = "pane.clear_agent_authority")]
     PaneClearAgentAuthority(PaneClearAgentAuthorityParams),
     #[serde(rename = "pane.release_agent")]
@@ -356,6 +364,17 @@ pub struct PaneReportAgentParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneReportPromptParams {
+    pub pane_id: String,
+    pub source: String,
+    pub agent: String,
+    /// The user prompt as submitted to the agent.
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneReportAgentSessionParams {
     pub pane_id: String,
     pub source: String,
@@ -396,6 +415,23 @@ pub struct PaneReportMetadataParams {
     pub seq: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneSetHeaderFieldParams {
+    pub pane_id: String,
+    pub key: String,
+    pub value: String,
+    /// Auto-expire the field after this many seconds (progress that stops
+    /// updating shouldn't lie).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneClearHeaderFieldParams {
+    pub pane_id: String,
+    pub key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -658,6 +694,18 @@ pub enum ResponseResult {
         protocol: u32,
         #[serde(default)]
         capabilities: Option<ServerCapabilities>,
+    },
+    PeersSummary {
+        /// Short hostname of the answering server.
+        host: String,
+        /// herdr version string of the answering server (spot un-deployed peers).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+        /// Machine health snapshot, piggybacked from the peer's existing
+        /// status-line sampler (no extra sampling cost).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system: Option<PeerSystemSummary>,
+        workspaces: Vec<PeerWorkspaceSummary>,
     },
     WorkspaceInfo {
         workspace: WorkspaceInfo,
@@ -1028,6 +1076,55 @@ pub enum PaneAgentState {
     Working,
     Blocked,
     Unknown,
+}
+
+/// Machine health for a federated peer's `servers` sidebar row. Sourced from
+/// the peer's existing 2s status-line sampler — no extra measurement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerSystemSummary {
+    /// Global CPU utilization, 0..=100 (rounded; keeps the response `Eq`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_used: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_total: Option<u64>,
+    /// Free space on the volume holding $HOME, in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_free: Option<u64>,
+}
+
+/// One workspace in a federated peer's `peers.summary` response: just enough
+/// for the sidebar's project-folded remote rows and cross-server attention.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerWorkspaceSummary {
+    /// Workspace id on the peer server (e.g. "ws_3"), used to focus it
+    /// remotely during switch-on-select.
+    #[serde(default)]
+    pub id: String,
+    /// Workspace display name (custom name or derived label).
+    pub workspace: String,
+    /// Machine-independent project identity (normalized origin URL or
+    /// "dir:<name>"), used to fold remote rows into local project groups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_key: Option<String>,
+    /// Repo folder name, labels remote-only project groups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub is_linked_worktree: bool,
+    /// Short agent label of the workspace's attention-leading pane (e.g. "cc").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    pub status: AgentStatus,
+    /// Seconds since the leading pane's state last changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_age_secs: Option<u64>,
+    /// Live status-line activity while Working (e.g. "Implementing the parser").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

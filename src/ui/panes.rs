@@ -98,6 +98,52 @@ fn stable_scrollbar_gutter(rt: &TerminalRuntime, pane_inner: Rect) -> (Rect, Opt
 }
 
 /// Resize every visible runtime in a tab to the geometry it would receive if the tab were selected.
+/// Rows reserved for the pane header (context line + prompt section) of this
+/// terminal, or 0 when the header is disabled / the pane never hosted an
+/// agent / the pane is too small to give up rows.
+fn pane_header_rows(
+    app: &AppState,
+    terminal_id: Option<&crate::terminal::TerminalId>,
+    pane_inner: Rect,
+) -> u16 {
+    if !app.pane_header {
+        return 0;
+    }
+    let Some(terminal) = terminal_id.and_then(|id| app.terminals.get(id)) else {
+        return 0;
+    };
+    if !terminal.header_reserved {
+        return 0;
+    }
+    // context + prompt rows + a hairline divider separating header from content
+    let rows = 2 + app.prompt_float_lines;
+    // Keep a usable PTY: the header never claims more than it leaves behind.
+    if pane_inner.height < rows.saturating_mul(2).saturating_add(4) {
+        return 0;
+    }
+    rows
+}
+
+/// Split `pane_inner` into (header strip, remaining content area).
+fn carve_pane_header(
+    app: &AppState,
+    terminal_id: Option<&crate::terminal::TerminalId>,
+    pane_inner: Rect,
+) -> (Option<Rect>, Rect) {
+    let rows = pane_header_rows(app, terminal_id, pane_inner);
+    if rows == 0 {
+        return (None, pane_inner);
+    }
+    let header = Rect::new(pane_inner.x, pane_inner.y, pane_inner.width, rows);
+    let content = Rect::new(
+        pane_inner.x,
+        pane_inner.y + rows,
+        pane_inner.width,
+        pane_inner.height - rows,
+    );
+    (Some(header), content)
+}
+
 pub(super) fn resize_tab_panes(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -111,6 +157,7 @@ pub(super) fn resize_tab_panes(
         let focused_id = tab.layout.focused();
         if let Some((terminal_id, rt)) = runtime_for_tab_pane(terminal_runtimes, tab, focused_id) {
             let pane_inner = pane_inner_rect(area, multi_pane);
+            let (_, pane_inner) = carve_pane_header(app, Some(terminal_id), pane_inner);
             let inner_rect = stable_terminal_inner_rect(pane_inner);
             if !app.direct_attach_resize_locks.contains(terminal_id) {
                 rt.resize(
@@ -132,6 +179,7 @@ pub(super) fn resize_tab_panes(
         };
 
         if let Some((terminal_id, rt)) = runtime_for_tab_pane(terminal_runtimes, tab, info.id) {
+            let (_, pane_inner) = carve_pane_header(app, Some(terminal_id), pane_inner);
             let inner_rect = stable_terminal_inner_rect(pane_inner);
             if !app.direct_attach_resize_locks.contains(terminal_id) {
                 rt.resize(
@@ -166,6 +214,8 @@ pub(super) fn compute_pane_infos(
     if ws.zoomed {
         let focused_id = ws.layout.focused();
         let pane_inner = pane_inner_rect(area, multi_pane);
+        let (header_rect, pane_inner) =
+            carve_pane_header(app, ws.terminal_id(focused_id), pane_inner);
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, focused_id) {
@@ -188,6 +238,7 @@ pub(super) fn compute_pane_infos(
             rect: area,
             inner_rect,
             scrollbar_rect,
+            header_rect,
             is_focused: true,
         }];
     }
@@ -209,6 +260,7 @@ pub(super) fn compute_pane_infos(
             area
         };
 
+        let (header_rect, pane_inner) = carve_pane_header(app, ws.terminal_id(info.id), pane_inner);
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
@@ -229,6 +281,7 @@ pub(super) fn compute_pane_infos(
 
         info.inner_rect = inner_rect;
         info.scrollbar_rect = scrollbar_rect;
+        info.header_rect = header_rect;
     }
 
     pane_infos
@@ -255,21 +308,12 @@ pub(super) fn render_panes(
     for info in &app.view.pane_infos {
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
             if multi_pane {
-                let (border_style, border_set) = if info.is_focused && terminal_active {
-                    (
-                        Style::default().fg(app.palette.accent),
-                        ratatui::symbols::border::THICK,
-                    )
-                } else if info.is_focused {
-                    (
-                        Style::default().fg(app.palette.accent),
-                        ratatui::symbols::border::PLAIN,
-                    )
+                let border_style =
+                    Style::default().fg(pane_focus_color(info.is_focused, &app.palette));
+                let border_set = if info.is_focused && terminal_active {
+                    ratatui::symbols::border::THICK
                 } else {
-                    (
-                        Style::default().fg(app.palette.overlay0),
-                        ratatui::symbols::border::PLAIN,
-                    )
+                    ratatui::symbols::border::PLAIN
                 };
 
                 let mut block = Block::default()
@@ -315,8 +359,363 @@ pub(super) fn render_panes(
                 app.host_terminal_theme,
             );
             render_copy_mode_cursor(app, frame, info);
+            render_pane_header(app, ws, frame, info);
         }
     }
+}
+
+/// Render the reserved pane header: a context line (project · worktree ·
+/// branch) and the last submitted prompt, middle-collapsed into the
+/// remaining header rows.
+/// SSoT for "does this pane have focus" coloring: the pane borders and the
+/// header hairline divider speak the same language — accent for the focused
+/// pane (a single pane is focused by construction, so it always reads
+/// active), the muted overlay for the rest.
+fn pane_focus_color(is_focused: bool, p: &crate::app::state::Palette) -> ratatui::style::Color {
+    if is_focused {
+        p.accent
+    } else {
+        p.overlay0
+    }
+}
+
+fn render_pane_header(
+    app: &AppState,
+    ws: &crate::workspace::Workspace,
+    frame: &mut Frame,
+    info: &PaneInfo,
+) {
+    let Some(header) = info.header_rect else {
+        return;
+    };
+    let terminal = ws
+        .pane_state(info.id)
+        .and_then(|pane| app.terminals.get(&pane.attached_terminal_id));
+
+    let p = &app.palette;
+    let bar_bg = Style::default();
+    let buf = frame.buffer_mut();
+    for y in header.y..header.y + header.height {
+        for x in header.x..header.x + header.width {
+            buf[(x, y)].set_symbol(" ");
+            buf[(x, y)].set_style(bar_bg);
+        }
+    }
+    // Hairline divider — same visual language as the sidebar separators.
+    let divider_y = header.y + header.height - 1;
+    // Same focus language as the pane borders (accent = focused; a single
+    // pane is always focused, so its header always reads active).
+    let divider_style = Style::default().fg(pane_focus_color(info.is_focused, p));
+    for x in header.x..header.x + header.width {
+        buf[(x, divider_y)].set_symbol("\u{2500}");
+        buf[(x, divider_y)].set_style(divider_style);
+    }
+
+    // Context line: owner/project · worktree · branch.
+    let mut spans: Vec<Span> = vec![Span::styled(" ", bar_bg)];
+    let project_label = ws
+        .worktree_space()
+        .map(|space| space.label.clone())
+        .unwrap_or_else(|| ws.display_name());
+    let project = owner_qualified_project(ws.repo_group_key(), &project_label);
+    spans.push(Span::styled(
+        project,
+        Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+    ));
+    if let Some(worktree_dir) = ws
+        .worktree_space()
+        .filter(|space| space.is_linked_worktree)
+        .and_then(|space| space.checkout_path.file_name())
+        .map(|name| name.to_string_lossy().to_string())
+    {
+        spans.push(Span::styled(" \u{b7} ", Style::default().fg(p.overlay0)));
+        spans.push(Span::styled(worktree_dir, Style::default().fg(p.mauve)));
+    }
+    if let Some(branch) = ws.branch() {
+        spans.push(Span::styled(" \u{b7} ", Style::default().fg(p.overlay0)));
+        spans.push(Span::styled(
+            format!("\u{e0a0} {branch}"),
+            Style::default().fg(p.green),
+        ));
+        if let Some((ahead, behind)) = ws.ahead_behind() {
+            if ahead > 0 {
+                spans.push(Span::styled(
+                    format!(" \u{2191}{ahead}"),
+                    Style::default().fg(p.yellow),
+                ));
+            }
+            if behind > 0 {
+                spans.push(Span::styled(
+                    format!(" \u{2193}{behind}"),
+                    Style::default().fg(p.peach),
+                ));
+            }
+        }
+        if let Some(pr) = ws.pr_state() {
+            let (glyph, color) = crate::ui::state_signal::pr_state_glyph(pr.state, p);
+            spans.push(Span::styled(
+                format!(" #{} {glyph}", pr.number),
+                Style::default().fg(color),
+            ));
+        }
+    }
+    // Session-promoted header field chips, AFTER branch/PR: the project and
+    // branch segments win the width fight; chips fit into what remains, in
+    // insertion order, middle-truncating the value under pressure.
+    if let Some(terminal) = terminal {
+        let chips = terminal.active_header_fields();
+        if !chips.is_empty() {
+            let base_width: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+            let avail = (header.width as usize).saturating_sub(base_width);
+            for (key, value) in fit_header_field_chips(&chips, avail) {
+                spans.push(Span::styled(" \u{b7} ", Style::default().fg(p.overlay0)));
+                spans.push(Span::styled(
+                    format!("{key} "),
+                    Style::default().fg(p.overlay0),
+                ));
+                spans.push(Span::styled(value, Style::default().fg(p.text)));
+            }
+        }
+    }
+    buf.set_line(header.x, header.y, &Line::from(spans), header.width);
+
+    // Prompt section. Reserve BOTH the context row above and the hairline
+    // divider row below — the prompt must not render onto the divider's line.
+    let prompt_rows = header.height.saturating_sub(2) as usize;
+    if prompt_rows == 0 {
+        return;
+    }
+    let width = header.width.saturating_sub(2) as usize;
+    let prompt = terminal.and_then(|t| t.last_prompt.as_deref());
+    let lines = match prompt {
+        Some(prompt) => collapse_prompt_lines(prompt, prompt_rows, width),
+        None => Vec::new(),
+    };
+    let prompt_style = Style::default().fg(p.subtext0);
+    let marker_style = Style::default()
+        .bg(p.surface_dim)
+        .fg(p.overlay0)
+        .add_modifier(Modifier::DIM);
+    if lines.is_empty() {
+        buf.set_stringn(
+            header.x + 1,
+            header.y + 1,
+            "\u{276f} \u{2014}",
+            width.max(3),
+            marker_style,
+        );
+        return;
+    }
+    // Expanded: the full prompt REPLACES the collapsed view in place — same
+    // header anchor and colors — extending downward over content, rather than
+    // floating below the still-visible minimized header.
+    if app.expanded_prompt_pane == Some(info.id) {
+        if let Some(prompt) = prompt {
+            let full: Vec<String> = prompt
+                .lines()
+                .map(|line| line.trim_end().to_string())
+                .collect();
+            let first_y = header.y + 1;
+            let bottom = info.inner_rect.y + info.inner_rect.height;
+            let avail = bottom.saturating_sub(first_y);
+            let shown = (full.len() as u16).min(avail);
+            for offset in 0..shown {
+                let y = first_y + offset;
+                for x in header.x..header.x + header.width {
+                    buf[(x, y)].set_symbol(" ");
+                    buf[(x, y)].set_style(bar_bg);
+                }
+                let prefix = if offset == 0 { "\u{276f} " } else { "  " };
+                let mut text = format!("{prefix}{}", full[offset as usize]);
+                if offset == 0 {
+                    text.push_str(" \u{25b4}");
+                }
+                buf.set_stringn(
+                    header.x + 1,
+                    y,
+                    text,
+                    header.width.saturating_sub(1) as usize,
+                    prompt_style,
+                );
+            }
+            if (full.len() as u16) > shown && shown > 0 {
+                buf.set_stringn(
+                    header.x + 1,
+                    first_y + shown - 1,
+                    format!(
+                        "\u{22ef} +{} more lines \u{22ef}",
+                        full.len() as u16 - shown
+                    ),
+                    header.width.saturating_sub(1) as usize,
+                    marker_style,
+                );
+            }
+        }
+        return;
+    }
+
+    let collapsed_content = lines.iter().any(|line| line.is_marker)
+        || lines.iter().any(|line| line.text.contains('\u{2026}'));
+    for (row, line) in lines.iter().enumerate() {
+        let style = if line.is_marker {
+            marker_style
+        } else {
+            prompt_style
+        };
+        let prefix = if row == 0 { "\u{276f} " } else { "  " };
+        let mut text = format!("{prefix}{}", line.text);
+        if row == 0 && collapsed_content {
+            text = format!("{text} \u{25be}");
+        }
+        buf.set_stringn(
+            header.x + 1,
+            header.y + 1 + row as u16,
+            text,
+            header.width.saturating_sub(1) as usize,
+            style,
+        );
+    }
+}
+
+/// "owner/label" when the space key is a normalized origin URL
+/// ("github.com/owner/repo") — surfaces the org|person the repo belongs to in
+/// the header. `dir:`-fallback keys and origin-less repos keep the bare label.
+fn owner_qualified_project(key: Option<&str>, label: &str) -> String {
+    let Some(key) = key else {
+        return label.to_string();
+    };
+    if key.starts_with("dir:") {
+        return label.to_string();
+    }
+    let mut segments = key.split('/');
+    let (Some(_host), Some(owner)) = (segments.next(), segments.next()) else {
+        return label.to_string();
+    };
+    if owner.is_empty() || segments.next().is_none() {
+        return label.to_string();
+    }
+    format!("{owner}/{label}")
+}
+
+/// Minimum columns a chip value must get before the chip is dropped instead
+/// of truncated to nothing.
+const MIN_HEADER_CHIP_VALUE_COLS: usize = 4;
+/// Columns of the " · " separator that precedes every chip.
+const HEADER_CHIP_SEPARATOR_COLS: usize = 3;
+
+/// Fit `key value` chips into `avail` columns. Chips are taken in insertion
+/// order (earlier chips have priority); the first chip that no longer fits
+/// at full width is middle-truncated into the remaining budget when at least
+/// [`MIN_HEADER_CHIP_VALUE_COLS`] columns are left for its value, and
+/// everything after it is dropped. Each returned chip costs
+/// `separator + key + space + value` columns.
+fn fit_header_field_chips(chips: &[(String, String)], avail: usize) -> Vec<(String, String)> {
+    let mut remaining = avail;
+    let mut fitted = Vec::new();
+    for (key, value) in chips {
+        let fixed = HEADER_CHIP_SEPARATOR_COLS + key.chars().count() + 1;
+        let full = fixed + value.chars().count();
+        if full <= remaining {
+            fitted.push((key.clone(), value.clone()));
+            remaining -= full;
+            continue;
+        }
+        if fixed + MIN_HEADER_CHIP_VALUE_COLS <= remaining {
+            let value_budget = remaining - fixed;
+            fitted.push((key.clone(), middle_truncate(value, value_budget)));
+        }
+        break;
+    }
+    fitted
+}
+
+struct PromptFloatLine {
+    text: String,
+    is_marker: bool,
+}
+
+/// Middle-truncate a single line to `width` display columns, keeping the
+/// start and end ("abcdef", 5 -> "ab\u{2026}ef").
+fn middle_truncate(line: &str, width: usize) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    if chars.len() <= width {
+        return line.to_string();
+    }
+    if width <= 1 {
+        return "\u{2026}".to_string();
+    }
+    let keep = width - 1;
+    let head = keep.div_ceil(2);
+    let tail = keep - head;
+    let mut out: String = chars[..head].iter().collect();
+    out.push('\u{2026}');
+    out.extend(chars[chars.len() - tail..].iter());
+    out
+}
+
+/// Collapse a prompt to at most `max_lines` rows of `width` columns: when the
+/// prompt has more logical lines than fit, the MIDDLE is elided symmetrically
+/// (head lines, a "+N lines" marker, tail lines) — the start and the end of
+/// the prompt both survive. Overlong individual lines are middle-truncated.
+fn collapse_prompt_lines(prompt: &str, max_lines: usize, width: usize) -> Vec<PromptFloatLine> {
+    if max_lines == 0 || width == 0 {
+        return Vec::new();
+    }
+    // The first rendered row carries a 2-col prompt marker prefix.
+    let text_width = width.saturating_sub(2).max(1);
+    let logical: Vec<&str> = prompt
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .skip_while(|line| line.is_empty())
+        .collect();
+    let logical: Vec<&str> = {
+        let mut lines = logical;
+        while lines.last().is_some_and(|line| line.is_empty()) {
+            lines.pop();
+        }
+        lines
+    };
+    if logical.is_empty() {
+        return Vec::new();
+    }
+
+    let truncated = |line: &str| PromptFloatLine {
+        text: middle_truncate(line, text_width),
+        is_marker: false,
+    };
+
+    if logical.len() <= max_lines {
+        return logical.iter().map(|line| truncated(line)).collect();
+    }
+    if max_lines == 1 {
+        // No room for a marker: fuse start and end of the whole prompt.
+        let joined = format!(
+            "{} \u{2026} {}",
+            logical.first().unwrap_or(&""),
+            logical.last().unwrap_or(&"")
+        );
+        return vec![truncated(&joined)];
+    }
+
+    let budget = max_lines - 1; // one row for the elision marker
+    let head = budget.div_ceil(2);
+    let tail = budget - head;
+    let elided = logical.len() - head - tail;
+
+    let mut out: Vec<PromptFloatLine> = Vec::with_capacity(max_lines);
+    out.extend(logical[..head].iter().map(|line| truncated(line)));
+    out.push(PromptFloatLine {
+        text: format!("\u{22ef} +{elided} lines \u{22ef}"),
+        is_marker: true,
+    });
+    out.extend(
+        logical[logical.len() - tail..]
+            .iter()
+            .map(|line| truncated(line)),
+    );
+    out
 }
 
 fn render_copy_mode_cursor(app: &AppState, frame: &mut Frame, info: &PaneInfo) {
@@ -512,6 +911,61 @@ mod tests {
     use crate::selection::Selection;
     use crate::terminal::TerminalRuntime;
     use crate::workspace::Workspace;
+
+    fn chips(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn header_chips_fit_in_insertion_order_within_budget() {
+        let chips = chips(&[("build", "73%"), ("pg", "up")]);
+        // " · build 73%" (12) + " · pg up" (8) = 20 columns.
+        assert_eq!(
+            fit_header_field_chips(&chips, 20),
+            vec![
+                ("build".to_string(), "73%".to_string()),
+                ("pg".to_string(), "up".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn header_chips_truncate_the_overflowing_value_and_drop_the_rest() {
+        let chips = chips(&[("model", "claude-fable-5-20260120"), ("pg", "up")]);
+        // fixed cost for "model" chip: 3 (sep) + 5 (key) + 1 = 9; budget 19
+        // leaves 10 columns for the value -> middle-truncated.
+        assert_eq!(
+            fit_header_field_chips(&chips, 19),
+            vec![("model".to_string(), "claud\u{2026}0120".to_string())]
+        );
+        // Earlier chips have priority: when the first chip cannot get even
+        // its minimum value columns, later chips never jump the queue.
+        assert_eq!(fit_header_field_chips(&chips, 10), Vec::new());
+        // No budget at all -> no chips.
+        assert_eq!(fit_header_field_chips(&chips, 0), Vec::new());
+    }
+
+    #[test]
+    fn owner_qualified_project_parses_origin_keys() {
+        assert_eq!(
+            owner_qualified_project(Some("github.com/gerchowl/herdr"), "herdr"),
+            "gerchowl/herdr"
+        );
+        // gitlab nested groups: top-level org qualifies
+        assert_eq!(
+            owner_qualified_project(Some("gitlab.com/group/sub/repo"), "repo"),
+            "group/repo"
+        );
+        // origin-less / dir-fallback / missing keys keep the bare label
+        assert_eq!(owner_qualified_project(Some("dir:notes"), "notes"), "notes");
+        assert_eq!(owner_qualified_project(None, "scratch"), "scratch");
+        // host-only or host/owner (no repo segment) stays bare
+        assert_eq!(owner_qualified_project(Some("github.com"), "x"), "x");
+        assert_eq!(owner_qualified_project(Some("github.com/solo"), "x"), "x");
+    }
 
     #[test]
     fn pane_border_title_trims_and_truncates() {
@@ -754,5 +1208,112 @@ mod tests {
             panic!("selection background should resolve to rgb");
         };
         assert!(relative_luminance((r, g, b)) > relative_luminance((12, 14, 16)));
+    }
+    #[test]
+    fn collapse_keeps_short_prompts_verbatim() {
+        let lines = collapse_prompt_lines("fix the parser bug", 3, 40);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "fix the parser bug");
+        assert!(!lines[0].is_marker);
+    }
+
+    #[test]
+    fn collapse_elides_the_middle_not_the_end() {
+        let prompt = "line one\nline two\nline three\nline four\nline five";
+        let lines = collapse_prompt_lines(prompt, 3, 40);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].text, "line one");
+        assert!(lines[1].is_marker);
+        assert!(lines[1].text.contains("+3 lines"));
+        assert_eq!(lines[2].text, "line five");
+    }
+
+    #[test]
+    fn collapse_distributes_head_heavy_for_even_budgets() {
+        let prompt = (1..=10)
+            .map(|i| format!("l{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lines = collapse_prompt_lines(&prompt, 4, 40);
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0].text, "l1");
+        assert_eq!(lines[1].text, "l2");
+        assert!(lines[2].is_marker);
+        assert_eq!(lines[3].text, "l10");
+    }
+
+    #[test]
+    fn collapse_single_row_fuses_start_and_end() {
+        let prompt = "first ask\nmiddle\nfinal ask";
+        let lines = collapse_prompt_lines(prompt, 1, 60);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].text.starts_with("first ask"));
+        assert!(lines[0].text.ends_with("final ask"));
+    }
+
+    #[test]
+    fn middle_truncate_keeps_both_ends_of_long_lines() {
+        let out = middle_truncate("abcdefghijklmnopqrstuvwxyz", 11);
+        assert_eq!(out.chars().count(), 11);
+        assert!(out.starts_with("abcde"));
+        assert!(out.ends_with("vwxyz"));
+        assert!(out.contains('\u{2026}'));
+    }
+
+    #[test]
+    fn collapse_trims_blank_padding_lines() {
+        let lines = collapse_prompt_lines("\n\n  do the thing  \n\n", 3, 40);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "  do the thing");
+    }
+    #[test]
+    fn header_carve_reserves_rows_only_for_latched_agent_panes() {
+        let mut app = AppState::test_new();
+        app.pane_header = true;
+        app.prompt_float_lines = 3;
+        let ws = crate::workspace::Workspace::test_new("main");
+        let pane_id = ws.focused_pane_id().unwrap();
+        let terminal_id = ws.pane_state(pane_id).unwrap().attached_terminal_id.clone();
+        let terminal = crate::terminal::TerminalState::new(terminal_id.clone(), "/tmp".into());
+        let pane_inner = Rect::new(0, 0, 80, 30);
+
+        // Not latched: no reservation.
+        app.terminals.insert(terminal_id.clone(), terminal);
+        let (header, content) = carve_pane_header(&app, Some(&terminal_id), pane_inner);
+        assert!(header.is_none());
+        assert_eq!(content, pane_inner);
+
+        // Latched: context row + prompt rows reserved, content shifts down.
+        app.terminals.get_mut(&terminal_id).unwrap().header_reserved = true;
+        let (header, content) = carve_pane_header(&app, Some(&terminal_id), pane_inner);
+        let header = header.expect("header should be reserved");
+        assert_eq!(header.height, 5);
+        assert_eq!(content.y, pane_inner.y + 5);
+        assert_eq!(content.height, pane_inner.height - 5);
+
+        // Disabled config: nothing reserved.
+        app.pane_header = false;
+        let (header, content) = carve_pane_header(&app, Some(&terminal_id), pane_inner);
+        assert!(header.is_none());
+        assert_eq!(content, pane_inner);
+    }
+
+    #[test]
+    fn header_carve_skips_tiny_panes() {
+        let mut app = AppState::test_new();
+        app.pane_header = true;
+        app.prompt_float_lines = 3;
+        let ws = crate::workspace::Workspace::test_new("main");
+        let pane_id = ws.focused_pane_id().unwrap();
+        let terminal_id = ws.pane_state(pane_id).unwrap().attached_terminal_id.clone();
+        let mut terminal = crate::terminal::TerminalState::new(terminal_id.clone(), "/tmp".into());
+        terminal.header_reserved = true;
+        app.terminals.insert(terminal_id.clone(), terminal);
+
+        // 12 rows < 2*5+4: the pane keeps everything.
+        let tiny = Rect::new(0, 0, 80, 12);
+        let (header, content) = carve_pane_header(&app, Some(&terminal_id), tiny);
+        assert!(header.is_none());
+        assert_eq!(content, tiny);
     }
 }

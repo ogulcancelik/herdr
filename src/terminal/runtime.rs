@@ -19,6 +19,11 @@ impl TerminalRuntime {
         self.0.shutdown();
     }
 
+    /// PID of the pane's direct child process, when alive.
+    pub fn child_pid(&self) -> Option<u32> {
+        self.0.child_pid()
+    }
+
     #[cfg(unix)]
     pub fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
         self.0.duplicate_handoff_fd()
@@ -191,6 +196,12 @@ impl TerminalRuntime {
 
     pub fn apply_host_terminal_theme(&self, theme: crate::terminal_theme::TerminalTheme) {
         self.0.apply_host_terminal_theme(theme);
+    }
+
+    /// Host terminal theme last written into this pane's emulator.
+    #[cfg(test)]
+    pub fn test_host_terminal_theme(&self) -> crate::terminal_theme::TerminalTheme {
+        self.0.test_host_terminal_theme()
     }
 
     pub fn begin_graceful_release(&self, agent: crate::detect::Agent) {

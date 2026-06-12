@@ -40,6 +40,8 @@ pub struct CustomThemeColors {
     pub blue: Option<String>,
     pub teal: Option<String>,
     pub peach: Option<String>,
+    /// Sidebar divider/separator lines. Defaults to `surface_dim`.
+    pub divider: Option<String>,
 }
 
 /// Parse a color string into a ratatui Color.
@@ -152,6 +154,20 @@ red = "rgb(255, 85, 85)"
         assert_eq!(custom.accent.as_deref(), Some("#ff79c6"));
         assert_eq!(custom.red.as_deref(), Some("rgb(255, 85, 85)"));
         assert!(custom.green.is_none());
+    }
+
+    #[test]
+    fn theme_custom_divider_parses_and_defaults_to_none() {
+        let toml = r##"
+[theme.custom]
+divider = "#3c3c3c"
+"##;
+        let config: Config = toml::from_str(toml).unwrap();
+        let custom = config.theme.custom.as_ref().unwrap();
+        assert_eq!(custom.divider.as_deref(), Some("#3c3c3c"));
+
+        let config: Config = toml::from_str("[theme.custom]\naccent = \"#ff79c6\"\n").unwrap();
+        assert!(config.theme.custom.as_ref().unwrap().divider.is_none());
     }
 
     #[test]

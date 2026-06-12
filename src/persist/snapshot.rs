@@ -23,11 +23,20 @@ pub struct SessionSnapshot {
     #[serde(default)]
     pub agent_panel_scope: crate::app::state::AgentPanelScope,
     #[serde(default)]
+    pub servers_panel_scope: crate::app::state::PanelScope,
+    #[serde(default)]
+    pub spaces_panel_scope: crate::app::state::PanelScope,
+    #[serde(default)]
     pub sidebar_width: Option<u16>,
     #[serde(default)]
     pub sidebar_section_split: Option<f32>,
     #[serde(default)]
     pub collapsed_space_keys: std::collections::HashSet<String>,
+    /// Raw pane-id aliases (ancient env id -> current raw id) carried across
+    /// live handoffs so HERDR_PANE_ID baked into long-lived pane environments
+    /// keeps resolving no matter how many handoffs happened since spawn.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub pane_id_aliases: std::collections::HashMap<u32, u32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -93,6 +102,10 @@ pub struct PaneSnapshot {
     pub cwd: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub header_reserved: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -169,11 +182,17 @@ struct RawSessionSnapshot {
     #[serde(default)]
     agent_panel_scope: crate::app::state::AgentPanelScope,
     #[serde(default)]
+    servers_panel_scope: crate::app::state::PanelScope,
+    #[serde(default)]
+    spaces_panel_scope: crate::app::state::PanelScope,
+    #[serde(default)]
     sidebar_width: Option<u16>,
     #[serde(default)]
     sidebar_section_split: Option<f32>,
     #[serde(default)]
     collapsed_space_keys: std::collections::HashSet<String>,
+    #[serde(default)]
+    pane_id_aliases: std::collections::HashMap<u32, u32>,
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
@@ -187,8 +206,11 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         active: raw.active,
         selected: raw.selected,
         agent_panel_scope: raw.agent_panel_scope,
+        servers_panel_scope: raw.servers_panel_scope,
+        spaces_panel_scope: raw.spaces_panel_scope,
         sidebar_width: raw.sidebar_width,
         sidebar_section_split: raw.sidebar_section_split,
+        pane_id_aliases: raw.pane_id_aliases,
         collapsed_space_keys: raw.collapsed_space_keys,
     })
 }
@@ -249,10 +271,11 @@ pub fn capture(
     terminal_runtimes: &TerminalRuntimeRegistry,
     active: Option<usize>,
     selected: usize,
-    agent_panel_scope: crate::app::state::AgentPanelScope,
+    panel_scopes: crate::app::state::PanelScopes,
     sidebar_width: u16,
     sidebar_section_split: f32,
     collapsed_space_keys: std::collections::HashSet<String>,
+    pane_id_aliases: std::collections::HashMap<u32, u32>,
 ) -> SessionSnapshot {
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
@@ -262,10 +285,13 @@ pub fn capture(
             .collect(),
         active,
         selected,
-        agent_panel_scope,
+        agent_panel_scope: panel_scopes.agent,
+        servers_panel_scope: panel_scopes.servers,
+        spaces_panel_scope: panel_scopes.spaces,
         sidebar_width: Some(sidebar_width),
         sidebar_section_split: Some(sidebar_section_split),
         collapsed_space_keys,
+        pane_id_aliases,
     }
 }
 
@@ -345,11 +371,19 @@ fn capture_tab(
                         }
                     })
                 });
+        let (last_prompt, header_reserved) = tab
+            .panes
+            .get(id)
+            .and_then(|pane| terminals.get(&pane.attached_terminal_id))
+            .map(|terminal| (terminal.last_prompt.clone(), terminal.header_reserved))
+            .unwrap_or((None, false));
         panes.insert(
             id.raw(),
             PaneSnapshot {
                 cwd,
                 label,
+                last_prompt,
+                header_reserved,
                 agent_name,
                 agent_session,
                 launch_argv,
@@ -469,7 +503,10 @@ mod tests {
     use ratatui::layout::{Direction, Rect};
 
     use super::*;
-    use crate::app::{state::AgentPanelScope, AppState, Mode};
+    use crate::app::{
+        state::{AgentPanelScope, PanelScope},
+        AppState, Mode,
+    };
     use crate::layout::NavDirection;
     use crate::workspace::Workspace;
 
@@ -515,10 +552,11 @@ mod tests {
             terminal_runtimes,
             state.active,
             state.selected,
-            state.agent_panel_scope,
+            state.panel_scopes(),
             state.sidebar_width,
             state.sidebar_section_split,
             state.collapsed_space_keys.clone(),
+            std::collections::HashMap::new(),
         )
     }
 
@@ -544,9 +582,12 @@ mod tests {
             active: None,
             selected: 0,
             agent_panel_scope: AgentPanelScope::CurrentWorkspace,
+            servers_panel_scope: Default::default(),
+            spaces_panel_scope: Default::default(),
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            pane_id_aliases: std::collections::HashMap::new(),
         };
         let json = serde_json::to_string(&snap).unwrap();
         let restored = parse_snapshot(&json).unwrap();
@@ -586,6 +627,8 @@ mod tests {
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/herdr"),
                 label: None,
+                last_prompt: None,
+                header_reserved: false,
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
@@ -596,6 +639,8 @@ mod tests {
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/website"),
                 label: Some("website".into()),
+                last_prompt: None,
+                header_reserved: false,
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
@@ -626,10 +671,13 @@ mod tests {
             active: Some(0),
             selected: 0,
             agent_panel_scope: AgentPanelScope::CurrentWorkspace,
+            servers_panel_scope: Default::default(),
+            spaces_panel_scope: Default::default(),
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
             version: SNAPSHOT_VERSION,
+            pane_id_aliases: std::collections::HashMap::new(),
         };
 
         let json = serde_json::to_string_pretty(&snap).unwrap();
@@ -704,6 +752,45 @@ mod tests {
         assert_eq!(restored.agent_panel_scope, AgentPanelScope::AllWorkspaces);
         assert_eq!(restored.sidebar_width, None);
         assert_eq!(restored.sidebar_section_split, None);
+    }
+
+    #[test]
+    fn old_snapshot_defaults_servers_and_spaces_panel_scopes() {
+        // A pre-#41 session file (no scope fields) must restore unchanged:
+        // both new scopes default to All.
+        let json = serde_json::json!({
+            "version": SNAPSHOT_VERSION,
+            "workspaces": [],
+            "active": null,
+            "selected": 0,
+            "agent_panel_scope": "CurrentWorkspace"
+        })
+        .to_string();
+
+        let restored = parse_snapshot(&json).unwrap();
+
+        assert_eq!(restored.servers_panel_scope, PanelScope::All);
+        assert_eq!(restored.spaces_panel_scope, PanelScope::All);
+        assert_eq!(
+            restored.agent_panel_scope,
+            AgentPanelScope::CurrentWorkspace
+        );
+    }
+
+    #[test]
+    fn capture_round_trips_servers_and_spaces_panel_scopes() {
+        let mut state = state_with_workspaces(&["one"]);
+        state.servers_panel_scope = PanelScope::Current;
+        state.spaces_panel_scope = PanelScope::Current;
+
+        let snap = capture_from_state(&state);
+        assert_eq!(snap.servers_panel_scope, PanelScope::Current);
+        assert_eq!(snap.spaces_panel_scope, PanelScope::Current);
+
+        let json = serde_json::to_string(&snap).unwrap();
+        let restored = parse_snapshot(&json).unwrap();
+        assert_eq!(restored.servers_panel_scope, PanelScope::Current);
+        assert_eq!(restored.spaces_panel_scope, PanelScope::Current);
     }
 
     #[test]
@@ -823,6 +910,59 @@ mod tests {
         assert_eq!(snapshot.sidebar_section_split, Some(0.4));
         assert_eq!(snapshot.agent_panel_scope, AgentPanelScope::AllWorkspaces);
         assert!(snapshot.collapsed_space_keys.contains("repo-key"));
+    }
+
+    #[test]
+    fn worktree_space_membership_survives_serialize_parse_round_trip() {
+        // Sibling workspaces (#25) group purely via stamped membership — a
+        // snapshot round-trip must preserve it or restore loses grouping.
+        let snap = SessionSnapshot {
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("wsib".to_string()),
+                custom_name: Some("sibling".to_string()),
+                identity_cwd: PathBuf::from("/repo/wt/feature"),
+                worktree_space: Some(crate::workspace::WorktreeSpaceMembership {
+                    key: "github.com/gerchowl/herdr".into(),
+                    label: "herdr".into(),
+                    repo_root: "/repo/herdr".into(),
+                    checkout_path: "/repo/wt/feature".into(),
+                    is_linked_worktree: true,
+                }),
+                tabs: vec![TabSnapshot {
+                    custom_name: None,
+                    layout: LayoutSnapshot::Pane(0),
+                    panes: HashMap::new(),
+                    zoomed: false,
+                    focused: Some(0),
+                    root_pane: Some(0),
+                }],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            agent_panel_scope: AgentPanelScope::CurrentWorkspace,
+            servers_panel_scope: Default::default(),
+            spaces_panel_scope: Default::default(),
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: std::collections::HashSet::new(),
+            version: SNAPSHOT_VERSION,
+            pane_id_aliases: std::collections::HashMap::new(),
+        };
+
+        let json = serde_json::to_string_pretty(&snap).unwrap();
+        let restored = parse_snapshot(&json).unwrap();
+
+        let space = restored.workspaces[0]
+            .worktree_space
+            .as_ref()
+            .expect("membership survives the round trip");
+        assert_eq!(space.key, "github.com/gerchowl/herdr");
+        assert_eq!(
+            space.checkout_path,
+            PathBuf::from("/repo/wt/feature"),
+            "identity pin target preserved"
+        );
     }
 
     #[test]
@@ -1089,6 +1229,31 @@ mod tests {
         assert_eq!(agent_session.value, "opencode-session");
     }
 
+    /// Promoted header fields are ephemeral by design (a restored session's
+    /// containers and progress are unknown): they must never leak into the
+    /// session snapshot.
+    #[test]
+    fn capture_contract_excludes_session_header_fields() {
+        let mut state = state_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_header_field("snap-probe-key", "snapshot-probe-value", None)
+            .unwrap();
+
+        let snapshot = capture_from_state(&state);
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+
+        assert!(!encoded.contains("snap-probe-key"));
+        assert!(!encoded.contains("snapshot-probe-value"));
+    }
+
     #[test]
     fn old_unversioned_snapshot_loads_as_version_0() {
         let json = r#"{"workspaces":[],"active":null,"selected":0}"#;
@@ -1117,6 +1282,8 @@ mod tests {
             PaneSnapshot {
                 cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test"),
                 label: None,
+                last_prompt: None,
+                header_reserved: false,
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
@@ -1129,6 +1296,8 @@ mod tests {
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| PathBuf::from("/tmp")),
                 label: None,
+                last_prompt: None,
+                header_reserved: false,
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
@@ -1160,9 +1329,12 @@ mod tests {
             active: Some(0),
             selected: 0,
             agent_panel_scope: AgentPanelScope::CurrentWorkspace,
+            servers_panel_scope: Default::default(),
+            spaces_panel_scope: Default::default(),
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            pane_id_aliases: std::collections::HashMap::new(),
         };
 
         let json = serde_json::to_string(&snap).unwrap();

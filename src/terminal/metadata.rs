@@ -229,6 +229,7 @@ impl TerminalState {
         Some(TerminalStateMutation {
             effective_state_change,
             session_ref_changed: false,
+            applied_session_ref: None,
         })
     }
     pub fn effective_custom_status(&self) -> Option<String> {
@@ -316,6 +317,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed: false,
+            applied_session_ref: None,
         })
     }
 

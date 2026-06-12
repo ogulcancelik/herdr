@@ -138,6 +138,33 @@ pub fn frame_message(payload: &[u8]) -> Vec<u8> {
     framed
 }
 
+/// The live-handoff refusal notice a server sends a connecting client while a
+/// live update is in flight (#38). A client that reads it opens its retry
+/// window. Mirror of `protocol::LIVE_HANDOFF_ATTACH_NOTICE`.
+pub const LIVE_HANDOFF_ATTACH_NOTICE: &str =
+    "live update in progress; reconnect after handoff completes";
+
+/// A framed `Welcome { version, encoding: SemanticFrame, error: Some(notice) }`
+/// rejecting the client with the live-handoff notice — the exact bytes a
+/// mid-handoff server writes to a pending client. Used to drive a real `herdr
+/// client` into its #52 retry window from a test stand-in server.
+pub fn encode_live_handoff_refusal(version: u32) -> Vec<u8> {
+    let notice = LIVE_HANDOFF_ATTACH_NOTICE.as_bytes();
+    let mut error_field = vec![1u8]; // Option::Some tag
+    error_field.extend_from_slice(&encode_varint_u32(notice.len() as u32));
+    error_field.extend_from_slice(notice);
+
+    let payload = encode_varint_enum(
+        0, // ServerMessage::Welcome
+        &[
+            &encode_varint_u32(version),
+            &encode_varint_u32(0), // RenderEncoding::SemanticFrame
+            &error_field,
+        ],
+    );
+    frame_message(&payload)
+}
+
 pub fn decode_varint_u32(payload: &[u8], offset: usize) -> Result<(u32, usize), String> {
     if offset >= payload.len() {
         return Err("payload too short for varint".into());
@@ -225,6 +252,52 @@ pub fn client_handshake(
     cols: u16,
     rows: u16,
 ) -> Result<(u32, Option<String>), String> {
+    // fleet: Option<FleetSnapshot> = None (single 0 byte),
+    // host_theme: Option<TerminalTheme> = None (single 0 byte).
+    client_handshake_with_fleet_and_theme(stream, version, cols, rows, &[0], &[0])
+}
+
+/// Handshake whose Hello carries pre-encoded `fleet: Option<FleetSnapshot>`
+/// bytes — e.g. spliced verbatim from a received SwitchServer payload, the
+/// same bytes a switching client would forward.
+pub fn client_handshake_with_fleet(
+    stream: &mut UnixStream,
+    version: u32,
+    cols: u16,
+    rows: u16,
+    fleet_option_bytes: &[u8],
+) -> Result<(u32, Option<String>), String> {
+    client_handshake_with_fleet_and_theme(stream, version, cols, rows, fleet_option_bytes, &[0])
+}
+
+/// Handshake whose Hello carries a `host_theme: Option<TerminalTheme>` with
+/// both default colors set, e.g. `encode_host_theme_option(...)`.
+#[allow(dead_code)]
+pub fn client_handshake_with_theme(
+    stream: &mut UnixStream,
+    version: u32,
+    cols: u16,
+    rows: u16,
+    theme_option_bytes: &[u8],
+) -> Result<(u32, Option<String>), String> {
+    client_handshake_with_fleet_and_theme(stream, version, cols, rows, &[0], theme_option_bytes)
+}
+
+/// Encodes `Some(TerminalTheme { foreground: Some(fg), background: Some(bg) })`
+/// the way bincode lays it out inside the Hello.
+#[allow(dead_code)]
+pub fn encode_host_theme_option(fg: (u8, u8, u8), bg: (u8, u8, u8)) -> Vec<u8> {
+    vec![1, 1, fg.0, fg.1, fg.2, 1, bg.0, bg.1, bg.2]
+}
+
+pub fn client_handshake_with_fleet_and_theme(
+    stream: &mut UnixStream,
+    version: u32,
+    cols: u16,
+    rows: u16,
+    fleet_option_bytes: &[u8],
+    theme_option_bytes: &[u8],
+) -> Result<(u32, Option<String>), String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|e| e.to_string())?;
@@ -240,6 +313,9 @@ pub fn client_handshake(
             &encode_varint_u32(0),  // RenderEncoding::SemanticFrame
             &encode_varint_u32(0),  // ClientKeybindings::Server
             &encode_varint_u32(0),  // ClientLaunchMode::App
+            fleet_option_bytes,
+            theme_option_bytes,
+            &[0], // notice: Option<String> = None (single 0 byte)
         ],
     );
     let framed = frame_message(&hello_payload);
@@ -299,6 +375,22 @@ pub fn send_detach(stream: &mut UnixStream) -> Result<(), String> {
         .write_all(&framed)
         .map_err(|e| format!("write detach: {e}"))?;
     stream.flush().map_err(|e| format!("flush detach: {e}"))?;
+    Ok(())
+}
+
+/// Send `ClientMessage::SetFrameSubscription { enabled }` (#65, proto 18). The
+/// variant is index 7 (the last in `ClientMessage`); the bool is one byte.
+#[allow(dead_code)]
+pub fn send_set_frame_subscription(stream: &mut UnixStream, enabled: bool) -> Result<(), String> {
+    let mut buf = encode_varint_u32(7);
+    buf.push(u8::from(enabled));
+    let framed = frame_message(&buf);
+    stream
+        .write_all(&framed)
+        .map_err(|e| format!("write set-frame-subscription: {e}"))?;
+    stream
+        .flush()
+        .map_err(|e| format!("flush set-frame-subscription: {e}"))?;
     Ok(())
 }
 

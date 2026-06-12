@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 use tracing::{debug, warn};
 
 use crate::{
@@ -7,9 +7,20 @@ use crate::{
     input::TerminalKey,
 };
 
+enum PreparedInputTarget {
+    Pane {
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+    },
+    /// The active workspace's visible floating pane (routed by terminal id:
+    /// floats are not members of any workspace layout).
+    Float {
+        terminal_id: crate::terminal::TerminalId,
+    },
+}
+
 struct PreparedPaneInput {
-    ws_idx: usize,
-    pane_id: crate::layout::PaneId,
+    target: PreparedInputTarget,
     bytes: Bytes,
 }
 
@@ -22,8 +33,41 @@ impl App {
         let Some(input) = self.prepare_terminal_key_forward(key) else {
             return;
         };
-        if let Some(runtime) = self.lookup_runtime_sender(input.ws_idx, input.pane_id) {
+        if let Some(runtime) = self.prepared_input_runtime(&input.target) {
             let _ = runtime.try_send_bytes(input.bytes);
+        }
+    }
+
+    fn prepared_input_runtime(
+        &self,
+        target: &PreparedInputTarget,
+    ) -> Option<&crate::terminal::TerminalRuntime> {
+        match target {
+            PreparedInputTarget::Pane { ws_idx, pane_id } => {
+                self.lookup_runtime_sender(*ws_idx, *pane_id)
+            }
+            PreparedInputTarget::Float { terminal_id } => self.terminal_runtimes.get(terminal_id),
+        }
+    }
+
+    /// Handle a Shift-modified scrollback key (PageUp/PageDown/Home/End) by
+    /// scrolling the focused pane's host scrollback. Returns true if the key
+    /// was a scrollback key and was consumed.
+    fn handle_terminal_scrollback_key(&mut self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::PageUp => self
+                .state
+                .scroll_focused_pane_page(&self.terminal_runtimes, -1),
+            KeyCode::PageDown => self
+                .state
+                .scroll_focused_pane_page(&self.terminal_runtimes, 1),
+            KeyCode::Home => self
+                .state
+                .scroll_focused_pane_edge(&self.terminal_runtimes, true),
+            KeyCode::End => self
+                .state
+                .scroll_focused_pane_edge(&self.terminal_runtimes, false),
+            _ => false,
         }
     }
 
@@ -34,6 +78,42 @@ impl App {
 
         let key_event = key.as_key_event();
 
+        // While the active workspace's float is visible, the toggle keybind
+        // hides it (hide-not-kill) and every other key routes into the
+        // float's shell instead of the focused layout pane. The prefix key
+        // stays intercepted so prefix-dispatched bindings (including a
+        // prefix-bound toggle_float) keep working. Esc is deliberately NOT a
+        // dismiss key: it belongs to whatever runs inside the float.
+        if let Some(float_terminal_id) = self
+            .state
+            .visible_float_for_active_workspace()
+            .map(|float| float.terminal_id.clone())
+        {
+            if self.state.keybinds.toggle_float.matches_direct_key(key) {
+                self.state.hide_active_float();
+                return None;
+            }
+            if self.state.is_prefix_key(key) {
+                self.state.mode = Mode::Prefix;
+                return None;
+            }
+            if is_modifier_only_key(&key_event.code) {
+                return None;
+            }
+            let rt = self.terminal_runtimes.get(&float_terminal_id)?;
+            rt.scroll_reset();
+            let bytes = rt.encode_terminal_key(key);
+            if bytes.is_empty() {
+                return None;
+            }
+            return Some(PreparedPaneInput {
+                target: PreparedInputTarget::Float {
+                    terminal_id: float_terminal_id,
+                },
+                bytes: Bytes::from(bytes),
+            });
+        }
+
         if let Some(action) = super::terminal_direct_navigation_action(&self.state, key) {
             debug!(
                 code = ?key_event.code,
@@ -42,15 +122,21 @@ impl App {
                 action = ?action,
                 "intercepted terminal direct keybinding before forwarding to pane"
             );
-            if action == super::navigate::NavigateAction::EditScrollback {
-                self.launch_focused_scrollback_editor();
-            } else {
-                super::navigate::execute_navigate_action_in_context(
-                    &mut self.state,
-                    &mut self.terminal_runtimes,
-                    action,
-                    super::navigate::ActionContext::Direct,
-                );
+            match action {
+                super::navigate::NavigateAction::EditScrollback => {
+                    self.launch_focused_scrollback_editor();
+                }
+                super::navigate::NavigateAction::ToggleFloat => {
+                    self.toggle_float_pane();
+                }
+                _ => {
+                    super::navigate::execute_navigate_action_in_context(
+                        &mut self.state,
+                        &mut self.terminal_runtimes,
+                        action,
+                        super::navigate::ActionContext::Direct,
+                    );
+                }
             }
             return None;
         }
@@ -73,6 +159,16 @@ impl App {
 
         if self.state.is_prefix_key(key) {
             self.state.mode = Mode::Prefix;
+            return None;
+        }
+
+        // Shift+PageUp/Down/Home/End scroll herdr's own scrollback in the
+        // focused pane, regardless of the app's mouse mode — a deterministic
+        // keyboard path that never gets "stuck" forwarding to the app. Bare
+        // Page/Home/End still go to the app.
+        if key.modifiers.contains(KeyModifiers::SHIFT)
+            && self.handle_terminal_scrollback_key(key.code)
+        {
             return None;
         }
 
@@ -176,8 +272,7 @@ impl App {
         }
 
         Some(PreparedPaneInput {
-            ws_idx,
-            pane_id,
+            target: PreparedInputTarget::Pane { ws_idx, pane_id },
             bytes: Bytes::from(bytes),
         })
     }
@@ -186,7 +281,7 @@ impl App {
         let Some(input) = self.prepare_terminal_key_forward(key) else {
             return;
         };
-        if let Some(runtime) = self.lookup_runtime_sender(input.ws_idx, input.pane_id) {
+        if let Some(runtime) = self.prepared_input_runtime(&input.target) {
             let _ = runtime.send_bytes(input.bytes).await;
         }
     }
@@ -230,6 +325,127 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), col, row));
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+    }
+
+    fn app_with_scrollback(bytes: &[u8]) -> (App, crate::layout::PaneInfo) {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = pane_infos[0].clone();
+        ws.insert_test_runtime(
+            pane_id,
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                64 * 1024,
+                bytes,
+            ),
+        );
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+        (app, info)
+    }
+
+    fn offset_from_bottom(app: &App, pane_id: crate::layout::PaneId) -> usize {
+        app.state
+            .pane_scroll_metrics(&app.terminal_runtimes, pane_id)
+            .map_or(0, |metrics| metrics.offset_from_bottom)
+    }
+
+    fn shift_key(code: KeyCode) -> TerminalKey {
+        TerminalKey::new(code, KeyModifiers::SHIFT)
+    }
+
+    #[tokio::test]
+    async fn shift_page_up_scrolls_host_scrollback_then_shift_end_returns_to_bottom() {
+        let (mut app, info) = app_with_scrollback(&numbered_lines_bytes(200));
+        assert_eq!(offset_from_bottom(&app, info.id), 0);
+
+        app.handle_terminal_key_headless(shift_key(KeyCode::PageUp));
+        let scrolled = offset_from_bottom(&app, info.id);
+        assert!(scrolled > 0, "Shift+PageUp should scroll into history");
+
+        app.handle_terminal_key_headless(shift_key(KeyCode::PageUp));
+        assert!(
+            offset_from_bottom(&app, info.id) > scrolled,
+            "a second Shift+PageUp should page further up"
+        );
+
+        app.handle_terminal_key_headless(shift_key(KeyCode::End));
+        assert_eq!(
+            offset_from_bottom(&app, info.id),
+            0,
+            "Shift+End should snap back to the live bottom"
+        );
+    }
+
+    #[tokio::test]
+    async fn shift_home_jumps_to_top_of_scrollback() {
+        let (mut app, info) = app_with_scrollback(&numbered_lines_bytes(200));
+        let max = app
+            .state
+            .pane_scroll_metrics(&app.terminal_runtimes, info.id)
+            .map_or(0, |metrics| metrics.max_offset_from_bottom);
+        assert!(max > 0);
+
+        app.handle_terminal_key_headless(shift_key(KeyCode::Home));
+        assert_eq!(offset_from_bottom(&app, info.id), max);
+    }
+
+    #[tokio::test]
+    async fn bare_page_up_forwards_to_mouse_app_while_shift_scrolls() {
+        // Mouse-reporting pane (DECSET 1000): bare PageUp forwards to the app
+        // (this is the "stuck" case the user hit in agent chats); Shift+PageUp
+        // must still scroll herdr scrollback.
+        let mut bytes = numbered_lines_bytes(200);
+        bytes.extend_from_slice(b"\x1b[?1000h");
+        let (mut app, info) = app_with_scrollback(&bytes);
+
+        app.handle_terminal_key_headless(TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()));
+        assert_eq!(
+            offset_from_bottom(&app, info.id),
+            0,
+            "bare PageUp must pass through to the mouse-capturing app"
+        );
+
+        app.handle_terminal_key_headless(shift_key(KeyCode::PageUp));
+        assert!(
+            offset_from_bottom(&app, info.id) > 0,
+            "Shift+PageUp must scroll herdr scrollback even in a mouse-reporting pane"
+        );
+    }
+
+    #[tokio::test]
+    async fn shift_wheel_scrolls_host_scrollback_even_when_app_captures_mouse() {
+        // DECSET 1000 enables mouse reporting on the main screen, so a bare
+        // wheel forwards to the app; Shift+wheel must still host-scroll.
+        let mut bytes = numbered_lines_bytes(200);
+        bytes.extend_from_slice(b"\x1b[?1000h");
+        let (mut app, info) = app_with_scrollback(&bytes);
+        let col = info.inner_rect.x + 1;
+        let row = info.inner_rect.y + 1;
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp, col, row));
+        assert_eq!(
+            offset_from_bottom(&app, info.id),
+            0,
+            "bare wheel should forward to the mouse-capturing app, not scroll"
+        );
+
+        app.handle_mouse(modified_mouse(
+            MouseEventKind::ScrollUp,
+            col,
+            row,
+            KeyModifiers::SHIFT,
+        ));
+        assert!(
+            offset_from_bottom(&app, info.id) > 0,
+            "Shift+wheel must scroll herdr scrollback even under mouse capture"
+        );
     }
 
     fn modified_mouse(
@@ -1120,5 +1336,156 @@ mod tests {
             .expect("scroll metrics after PageUp");
         // Forwarded to pane, so test runtime doesn't process it — scroll stays at bottom.
         assert_eq!(end_metrics.offset_from_bottom, 0);
+    }
+
+    /// App with a focused layout pane and a visible float, both backed by
+    /// channel test runtimes so byte routing is observable.
+    fn app_with_visible_float() -> (
+        App,
+        tokio::sync::mpsc::Receiver<Bytes>,
+        tokio::sync::mpsc::Receiver<Bytes>,
+        crate::layout::PaneId,
+    ) {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = pane_infos[0].clone();
+        let (pane_rt, pane_rx) = crate::terminal::TerminalRuntime::test_with_channel(
+            info.inner_rect.width,
+            info.inner_rect.height,
+        );
+        ws.tabs[0].runtimes.insert(pane_id, pane_rt);
+        let ws_id = ws.id.clone();
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+
+        let float_pane = crate::layout::PaneId::from_raw(777_777);
+        let float_terminal = crate::terminal::TerminalId::alloc();
+        let (float_rt, float_rx) = crate::terminal::TerminalRuntime::test_with_channel(60, 12);
+        app.terminal_runtimes
+            .insert(float_terminal.clone(), float_rt);
+        app.state.terminals.insert(
+            float_terminal.clone(),
+            crate::terminal::TerminalState::new(float_terminal.clone(), "/tmp".into()),
+        );
+        app.state.register_float(
+            ws_id,
+            crate::app::float::FloatPane {
+                pane_id: float_pane,
+                terminal_id: float_terminal,
+                visible: true,
+            },
+        );
+        (app, pane_rx, float_rx, float_pane)
+    }
+
+    #[tokio::test]
+    async fn visible_float_owns_terminal_keys_and_toggle_hides_then_reshows() {
+        let (mut app, mut pane_rx, mut float_rx, _) = app_with_visible_float();
+        app.state.keybinds.toggle_float = crate::config::ActionKeybinds::direct("ctrl+alt+f");
+
+        // Keys route into the float, not the focused layout pane.
+        app.handle_terminal_key_headless(TerminalKey::new(
+            KeyCode::Char('x'),
+            KeyModifiers::empty(),
+        ));
+        assert_eq!(float_rx.try_recv().unwrap().as_ref(), b"x");
+        assert!(pane_rx.try_recv().is_err());
+
+        // The toggle keybind hides (does not kill) the float.
+        app.handle_terminal_key_headless(TerminalKey::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ));
+        assert!(app.state.visible_float_for_active_workspace().is_none());
+        assert_eq!(app.state.floats.len(), 1, "hide must not kill the float");
+
+        // Hidden float: keys go back to the focused pane.
+        app.handle_terminal_key_headless(TerminalKey::new(
+            KeyCode::Char('y'),
+            KeyModifiers::empty(),
+        ));
+        assert_eq!(pane_rx.try_recv().unwrap().as_ref(), b"y");
+        assert!(float_rx.try_recv().is_err());
+
+        // Toggling again re-shows the same float (no new spawn).
+        app.handle_terminal_key_headless(TerminalKey::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ));
+        assert!(app.state.visible_float_for_active_workspace().is_some());
+        assert_eq!(app.state.floats.len(), 1);
+        app.handle_terminal_key_headless(TerminalKey::new(
+            KeyCode::Char('z'),
+            KeyModifiers::empty(),
+        ));
+        assert_eq!(float_rx.try_recv().unwrap().as_ref(), b"z");
+    }
+
+    #[tokio::test]
+    async fn esc_forwards_into_the_float_instead_of_dismissing_it() {
+        let (mut app, _pane_rx, mut float_rx, _) = app_with_visible_float();
+        app.state.keybinds.toggle_float = crate::config::ActionKeybinds::direct("ctrl+alt+f");
+
+        app.handle_terminal_key_headless(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()));
+
+        assert!(
+            app.state.visible_float_for_active_workspace().is_some(),
+            "Esc must never dismiss the float"
+        );
+        assert_eq!(float_rx.try_recv().unwrap().as_ref(), b"\x1b");
+    }
+
+    #[tokio::test]
+    async fn prefix_bound_toggle_hides_the_visible_float() {
+        let (mut app, _pane_rx, _float_rx, _) = app_with_visible_float();
+        app.state.keybinds.toggle_float = crate::config::ActionKeybinds::prefix("f");
+
+        // The prefix key stays intercepted while the float is visible…
+        let prefix = TerminalKey::new(app.state.prefix_code, app.state.prefix_mods);
+        app.handle_terminal_key_headless(prefix);
+        assert_eq!(app.state.mode, Mode::Prefix);
+
+        // …so a prefix-dispatched toggle_float hides the float.
+        app.handle_prefix_key(TerminalKey::new(KeyCode::Char('f'), KeyModifiers::empty()));
+        assert!(app.state.visible_float_for_active_workspace().is_none());
+        assert_eq!(app.state.floats.len(), 1);
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn pane_died_for_float_reaps_it_through_the_shared_event_path() {
+        let (mut app, _pane_rx, _float_rx, float_pane) = app_with_visible_float();
+        let float_terminal = app
+            .state
+            .floats
+            .values()
+            .next()
+            .unwrap()
+            .terminal_id
+            .clone();
+        app.state.session_dirty = false;
+
+        app.handle_internal_event(AppEvent::PaneDied {
+            pane_id: float_pane,
+        });
+
+        assert!(app.state.floats.is_empty());
+        assert!(!app.state.terminals.contains_key(&float_terminal));
+        assert!(
+            app.terminal_runtimes.get(&float_terminal).is_none(),
+            "float runtime must be shut down and removed"
+        );
+        assert!(
+            !app.state.session_dirty,
+            "float teardown must not schedule a session save"
+        );
+        // The workspace pane tree is untouched.
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
     }
 }

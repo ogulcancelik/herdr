@@ -27,6 +27,27 @@ pub(crate) const REATTACH_COMMAND_ENV_VAR: &str = "HERDR_REATTACH_COMMAND";
 
 pub(crate) const REMOTE_KEYBINDINGS_ENV_VAR: &str = "HERDR_REMOTE_KEYBINDINGS";
 
+/// JSON-encoded `protocol::FleetSnapshot` the launcher hands to the spawned
+/// client process; the client forwards it in its `Hello` (hub-and-spoke
+/// down-gossip). Set per-child, never exported to the launcher's own env.
+pub(crate) const FLEET_SNAPSHOT_ENV_VAR: &str = "HERDR_FLEET_SNAPSHOT";
+
+/// The ssh target of the server a remote client leg is attaching to, handed to
+/// the spawned client process so its connection-slots manager (#65) knows which
+/// slot is active (the others, incl. home, are warm-dialed). Unset for a local
+/// attach — then home is the active slot.
+pub(crate) const ACTIVE_SSH_TARGET_ENV_VAR: &str = "HERDR_ACTIVE_SSH_TARGET";
+
+/// The actual local-forward socket path of the active leg's ssh-stdio bridge,
+/// handed from the LAUNCHER (`run_remote`, which created the bridge socket
+/// keyed on its own pid) to the spawned client child. The client and launcher
+/// are separate processes, so the client cannot recompute this path from
+/// `std::process::id()` — it must be passed explicitly (the `HERDR_FLEET_SNAPSHOT`
+/// precedent). The connection-slots manager (#65) uses it to warm-dial the
+/// active ssh slot's already-live bridge instead of a path that never exists.
+/// Unset for a local attach (home needs no bridge).
+pub(crate) const ACTIVE_BRIDGE_SOCKET_ENV_VAR: &str = "HERDR_ACTIVE_BRIDGE_SOCKET";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RemoteKeybindings {
     Local,
@@ -55,6 +76,10 @@ pub(crate) struct RemoteLaunch {
     pub(crate) target: String,
     pub(crate) keybindings: RemoteKeybindings,
     pub(crate) live_handoff: bool,
+    /// Fleet snapshot carried from the server the client switched away from
+    /// (`None` for CLI-launched legs; a fresh origin-only snapshot is
+    /// stamped at launch so the remote end always knows the way home).
+    pub(crate) fleet: Option<crate::protocol::FleetSnapshot>,
 }
 
 pub(crate) fn extract_remote_args(
@@ -130,6 +155,7 @@ pub(crate) fn extract_remote_args(
         target,
         keybindings,
         live_handoff,
+        fleet: None,
     });
     if remote.is_none() && keybindings_seen {
         return Err("--remote-keybindings requires --remote".to_string());
@@ -154,6 +180,9 @@ fn validate_remote_target(target: &str) -> Result<&str, String> {
 pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
     let session_name = crate::session::active_name()
         .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
+    // The active ssh target for the spawned client's slot manager (#65),
+    // captured before `remote.target` is moved into the bridge.
+    let active_ssh_target = remote.target.clone();
     let local_socket = local_forward_socket_path(&remote.target, &session_name);
     let program = std::env::args()
         .next()
@@ -186,7 +215,30 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
         manage_ssh_config,
     )?;
 
-    run_client_process(&local_socket, &reattach_command, remote.keybindings)
+    // Every remote leg carries a fleet snapshot: the one handed over by the
+    // previous server (pass-through — keeps the ORIGINAL origin on nested
+    // leaps), or a fresh origin-only stamp for CLI-launched legs so the
+    // remote end always renders the way home.
+    let fleet = remote
+        .fleet
+        .clone()
+        .unwrap_or_else(|| crate::protocol::FleetSnapshot {
+            origin: crate::app::short_host_name(),
+            peers: Vec::new(),
+            // A CLI-launched leg has no App to enumerate workspaces; the home
+            // label is enough. A hub-stamped snapshot (the common path) does
+            // carry the origin's own workspaces (#66).
+            origin_summary: None,
+        });
+
+    run_client_process(
+        &local_socket,
+        &reattach_command,
+        remote.keybindings,
+        &fleet,
+        &active_ssh_target,
+        &local_socket,
+    )
 }
 
 pub(crate) fn run_remote_client_bridge() -> io::Result<()> {
@@ -1602,8 +1654,12 @@ fn run_client_process(
     local_socket: &Path,
     reattach_command: &str,
     keybindings: RemoteKeybindings,
+    fleet: &crate::protocol::FleetSnapshot,
+    active_ssh_target: &str,
+    active_bridge_socket: &Path,
 ) -> io::Result<()> {
     let exe = std::env::current_exe()?;
+    let fleet_json = serde_json::to_string(fleet).map_err(io::Error::other)?;
     let status = Command::new(exe)
         .arg("client")
         .env(
@@ -1613,6 +1669,9 @@ fn run_client_process(
         .env("HERDR_RENDER_ENCODING", "terminal-ansi")
         .env(REATTACH_COMMAND_ENV_VAR, reattach_command)
         .env(REMOTE_KEYBINDINGS_ENV_VAR, keybindings.as_str())
+        .env(FLEET_SNAPSHOT_ENV_VAR, fleet_json)
+        .env(ACTIVE_SSH_TARGET_ENV_VAR, active_ssh_target)
+        .env(ACTIVE_BRIDGE_SOCKET_ENV_VAR, active_bridge_socket)
         .env_remove(crate::api::SOCKET_PATH_ENV_VAR)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -1629,7 +1688,7 @@ fn run_client_process(
     }
 }
 
-fn local_forward_socket_path(target: &str, session_name: &str) -> PathBuf {
+pub(crate) fn local_forward_socket_path(target: &str, session_name: &str) -> PathBuf {
     let pid = std::process::id();
     let target_clean = sanitize_path_component(target);
     let session_clean = sanitize_path_component(session_name);
@@ -1646,7 +1705,7 @@ fn local_forward_socket_path(target: &str, session_name: &str) -> PathBuf {
     // readable name past sun_path's 104-byte ceiling. Fall back to a hashed
     // short name in TMPDIR, then to /tmp as a last resort when TMPDIR itself
     // is longer than the budget. The hash covers the full unsanitized
-    // target/session so uniqueness does not depend on the prefix truncation;
+    // target/session so uniqueness does not depend on the prefix truncation; guardrails-ok
     // the prefix is kept only for debuggability.
     let target_prefix: String = target_clean.chars().take(8).collect();
     let hash = short_socket_hash(target, session_name);

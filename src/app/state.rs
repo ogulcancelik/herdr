@@ -81,6 +81,8 @@ pub struct Palette {
     pub teal: Color,
     /// Interrupted / warning states.
     pub peach: Color,
+    /// Sidebar divider/separator lines. None falls back to `surface_dim`.
+    pub divider: Option<Color>,
 }
 
 impl Palette {
@@ -103,6 +105,7 @@ impl Palette {
             blue: Color::Rgb(137, 180, 250),
             teal: Color::Rgb(148, 226, 213),
             peach: Color::Rgb(250, 179, 135),
+            divider: None,
         }
     }
 
@@ -125,6 +128,7 @@ impl Palette {
             blue: Color::Rgb(30, 102, 245),
             teal: Color::Rgb(23, 146, 153),
             peach: Color::Rgb(254, 100, 11),
+            divider: None,
         }
     }
 
@@ -147,6 +151,7 @@ impl Palette {
             blue: Color::Blue,
             teal: Color::Cyan,
             peach: Color::Yellow,
+            divider: None,
         }
     }
 
@@ -169,6 +174,7 @@ impl Palette {
             blue: Color::Rgb(122, 162, 247),
             teal: Color::Rgb(125, 207, 255),
             peach: Color::Rgb(255, 158, 100),
+            divider: None,
         }
     }
 
@@ -191,6 +197,7 @@ impl Palette {
             blue: Color::Rgb(46, 125, 233),
             teal: Color::Rgb(17, 140, 116),
             peach: Color::Rgb(177, 92, 0),
+            divider: None,
         }
     }
 
@@ -213,6 +220,7 @@ impl Palette {
             blue: Color::Rgb(139, 233, 253), // cyan-ish
             teal: Color::Rgb(139, 233, 253),
             peach: Color::Rgb(255, 184, 108),
+            divider: None,
         }
     }
 
@@ -235,6 +243,7 @@ impl Palette {
             blue: Color::Rgb(129, 161, 193),
             teal: Color::Rgb(143, 188, 187),
             peach: Color::Rgb(208, 135, 112),
+            divider: None,
         }
     }
 
@@ -257,6 +266,7 @@ impl Palette {
             blue: Color::Rgb(131, 165, 152),
             teal: Color::Rgb(142, 192, 124),
             peach: Color::Rgb(254, 128, 25),
+            divider: None,
         }
     }
 
@@ -279,6 +289,7 @@ impl Palette {
             blue: Color::Rgb(7, 102, 120),
             teal: Color::Rgb(66, 123, 88),
             peach: Color::Rgb(175, 58, 3),
+            divider: None,
         }
     }
 
@@ -301,6 +312,7 @@ impl Palette {
             blue: Color::Rgb(97, 175, 239),
             teal: Color::Rgb(86, 182, 194),
             peach: Color::Rgb(209, 154, 102),
+            divider: None,
         }
     }
 
@@ -323,6 +335,7 @@ impl Palette {
             blue: Color::Rgb(64, 120, 242),
             teal: Color::Rgb(1, 132, 188),
             peach: Color::Rgb(152, 104, 1),
+            divider: None,
         }
     }
 
@@ -345,6 +358,7 @@ impl Palette {
             blue: Color::Rgb(38, 139, 210),
             teal: Color::Rgb(42, 161, 152),
             peach: Color::Rgb(203, 75, 22),
+            divider: None,
         }
     }
 
@@ -367,6 +381,7 @@ impl Palette {
             blue: Color::Rgb(38, 139, 210),
             teal: Color::Rgb(42, 161, 152),
             peach: Color::Rgb(203, 75, 22),
+            divider: None,
         }
     }
 
@@ -389,6 +404,7 @@ impl Palette {
             blue: Color::Rgb(126, 156, 216),
             teal: Color::Rgb(127, 180, 202),
             peach: Color::Rgb(255, 160, 102),
+            divider: None,
         }
     }
 
@@ -411,6 +427,7 @@ impl Palette {
             blue: Color::Rgb(77, 105, 155),
             teal: Color::Rgb(78, 140, 162),
             peach: Color::Rgb(204, 109, 0),
+            divider: None,
         }
     }
 
@@ -432,7 +449,8 @@ impl Palette {
             red: Color::Rgb(235, 111, 146),    // love
             blue: Color::Rgb(49, 116, 143),    // pine
             teal: Color::Rgb(156, 207, 216),   // foam
-            peach: Color::Rgb(234, 154, 151),  // rose
+            peach: Color::Rgb(234, 154, 151),
+            divider: None, // rose
         }
     }
 
@@ -455,6 +473,7 @@ impl Palette {
             blue: Color::Rgb(40, 105, 131),
             teal: Color::Rgb(86, 148, 159),
             peach: Color::Rgb(215, 130, 126),
+            divider: None,
         }
     }
 
@@ -477,6 +496,57 @@ impl Palette {
             blue: Color::Rgb(176, 176, 176),
             teal: Color::Rgb(102, 221, 204),
             peach: Color::Rgb(255, 199, 153),
+            divider: None,
+        }
+    }
+
+    /// Dalton Dark — colorblind-friendly dark palette (blue-yellow primary axis).
+    ///
+    /// Source: gerchowl/dalton-colorscheme (dalton-dark). Token semantics:
+    /// green = done/idle, yellow = working, red = blocked, peach = interrupted,
+    /// blue/teal = notification accents, mauve = branch labels.
+    pub fn dalton() -> Self {
+        Self {
+            accent: Color::Rgb(122, 162, 247),     // clear blue
+            panel_bg: Color::Rgb(40, 40, 40),      // black — raised panel
+            surface0: Color::Rgb(51, 51, 51),      // selection bg
+            surface1: Color::Rgb(60, 60, 60),      // ash — hover/active
+            surface_dim: Color::Rgb(40, 40, 40),   // separators
+            overlay0: Color::Rgb(154, 154, 154),   // cursor gray — muted text
+            overlay1: Color::Rgb(184, 184, 184),   // pale silver
+            text: Color::Rgb(200, 201, 204),       // dalton foreground
+            subtext0: Color::Rgb(184, 184, 184),   // dim labels
+            mauve: Color::Rgb(192, 112, 240),      // hot violet
+            green: Color::Rgb(136, 185, 125),      // soft lime
+            yellow: Color::Rgb(196, 196, 12),      // vivid gold
+            red: Color::Rgb(216, 80, 80),          // punch red
+            blue: Color::Rgb(122, 162, 247),       // clear blue
+            teal: Color::Rgb(102, 145, 167),       // slate blue
+            peach: Color::Rgb(240, 112, 104),      // hot cherry
+            divider: Some(Color::Rgb(60, 60, 60)), // ash hairline
+        }
+    }
+
+    /// Dalton Light — colorblind-friendly light palette (dalton-bright).
+    pub fn dalton_light() -> Self {
+        Self {
+            accent: Color::Rgb(48, 96, 200),          // deep blue
+            panel_bg: Color::Rgb(244, 241, 235),      // warm paper
+            surface0: Color::Rgb(208, 205, 197),      // selection bg
+            surface1: Color::Rgb(232, 229, 223),      // warm white — hover/active
+            surface_dim: Color::Rgb(232, 229, 223),   // separators
+            overlay0: Color::Rgb(112, 112, 122),      // slate gray — muted text
+            overlay1: Color::Rgb(90, 90, 90),         // cursor gray
+            text: Color::Rgb(46, 48, 56),             // dalton-bright foreground
+            subtext0: Color::Rgb(112, 112, 122),      // dim labels
+            mauve: Color::Rgb(120, 48, 168),          // deep violet
+            green: Color::Rgb(58, 117, 48),           // forest
+            yellow: Color::Rgb(122, 109, 0),          // dark gold
+            red: Color::Rgb(184, 48, 48),             // brick red
+            blue: Color::Rgb(48, 96, 200),            // deep blue
+            teal: Color::Rgb(42, 104, 128),           // dark slate
+            peach: Color::Rgb(200, 56, 56),           // bright brick — interrupted
+            divider: Some(Color::Rgb(208, 205, 197)), // selection-tone hairline
         }
     }
 
@@ -501,6 +571,8 @@ impl Palette {
             "rose-pine" | "rosepine" => Some(Self::rose_pine()),
             "rose-pine-dawn" | "rosepine-dawn" | "dawn" => Some(Self::rose_pine_dawn()),
             "vesper" => Some(Self::vesper()),
+            "dalton" | "dalton-dark" => Some(Self::dalton()),
+            "dalton-light" | "dalton-bright" => Some(Self::dalton_light()),
             _ => None,
         }
     }
@@ -556,7 +628,16 @@ impl Palette {
         if let Some(c) = &custom.peach {
             self.peach = parse_color(c);
         }
+        if let Some(c) = &custom.divider {
+            self.divider = Some(parse_color(c));
+        }
         self
+    }
+
+    /// Color for sidebar divider/separator lines. Falls back to `surface_dim`
+    /// when no explicit divider override is set.
+    pub fn divider_color(&self) -> Color {
+        self.divider.unwrap_or(self.surface_dim)
     }
 }
 
@@ -567,8 +648,97 @@ pub struct WorkspaceCardArea {
     pub indented: bool,
 }
 
+/// Where a requested server switch points. Set by sidebar clicks and the
+/// switch_home keybind; consumed by both the monolithic and headless loops.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerSwitchRequest {
+    /// A config-owned peer: (peer_idx, ws_idx) into `peer_summaries`.
+    ConfigPeer { peer_idx: usize, ws_idx: usize },
+    /// A carried fleet-snapshot row: index into `fleet_snapshot.peers`.
+    SnapshotPeer { entry_idx: usize },
+    /// A row from the origin (hub) server's OWN summary (#66): re-attach home
+    /// via the reserved target, carrying the selected workspace as the
+    /// post-attach focus target so the hub lands on that space.
+    OriginWorkspace { ws_idx: usize },
+    /// The origin row / switch_home keybind: re-attach to the client's
+    /// local server via the reserved home target.
+    Home,
+}
+
+/// Hit area of a two-line server row in the `servers` section. Clicking one
+/// requests the switch its `target` describes; clicking the header toggles
+/// the section. The local server's row deliberately has no card: clicking
+/// yourself never requests a server switch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerCardArea {
+    /// Switch request this row stands for (home, snapshot, or config peer).
+    pub target: PeerSwitchRequest,
+    pub rect: Rect,
+}
+
+/// Which cache a federated remote row in the spaces list reads from: a
+/// config-owned peer (live-polled `peer_summaries`) or a carried
+/// fleet-snapshot entry (render-only, freshness just decays). Selecting a
+/// row maps back onto the matching [`PeerSwitchRequest`] variant so both
+/// reuse the same switch path as the servers band.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemotePeerRef {
+    /// Index into `state.peer_summaries`.
+    Config { peer_idx: usize },
+    /// Index into `state.fleet_snapshot.peers`.
+    Snapshot { entry_idx: usize },
+    /// The carried origin (hub) server's OWN summary (#66): its workspaces
+    /// fold into the spaces list like any peer, but selecting one switches
+    /// HOME with that workspace focused, never an ssh dial.
+    Origin,
+}
+
+impl RemotePeerRef {
+    /// The switch request selecting this peer's row emits. Config peers
+    /// carry the workspace index for the best-effort remote pre-focus;
+    /// snapshot rows reuse the band's plain pass-through switch; origin rows
+    /// land home with the workspace as the post-attach focus target.
+    pub(crate) fn switch_request(self, ws_idx: usize) -> PeerSwitchRequest {
+        match self {
+            Self::Config { peer_idx } => PeerSwitchRequest::ConfigPeer { peer_idx, ws_idx },
+            Self::Snapshot { entry_idx } => PeerSwitchRequest::SnapshotPeer { entry_idx },
+            Self::Origin => PeerSwitchRequest::OriginWorkspace { ws_idx },
+        }
+    }
+}
+
+/// Spaces-list narrowing to a single server's workspaces (right-click a
+/// servers-band row, issue #46). Render/selection state only — never
+/// persisted; cleared via the same context menu or by toggling the
+/// spaces scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerFilter {
+    /// Only the local server's workspaces: every remote row hides.
+    Local,
+    /// Only this peer's remote rows. Matched by ssh target so the filter
+    /// stays pinned to the server across config-peer/snapshot re-indexing.
+    Peer { ssh_target: String },
+}
+
+/// Hit area of a federated remote workspace row in the spaces list.
+/// Clicking one requests a server switch instead of a workspace focus.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteCardArea {
+    /// The peer cache entry this row reads from.
+    pub peer: RemotePeerRef,
+    /// Index into that peer's `workspaces` summary vec.
+    pub ws_idx: usize,
+    pub rect: Rect,
+    /// Indented rows fold under a project block; unindented rows lead a
+    /// remote-only project group and carry the project label.
+    pub indented: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeCreateState {
+    /// When set, the created workspace's root pane resumes a fork of this
+    /// agent session instead of starting a shell (branch-session flow).
+    pub branch_plan: Option<crate::agent_resume::AgentResumePlan>,
     pub source_workspace_id: String,
     pub source_checkout_path: std::path::PathBuf,
     pub source_existing_membership: Option<crate::workspace::WorktreeSpaceMembership>,
@@ -583,12 +753,20 @@ pub struct WorktreeCreateState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeRemoveState {
+    /// False when the checkout was adopted ad hoc (not a herdr-managed
+    /// membership): the workspace is closed by id after removal.
+    pub managed: bool,
     pub workspace_id: String,
     pub repo_root: std::path::PathBuf,
     pub path: std::path::PathBuf,
     pub error: Option<String>,
     pub removing: bool,
     pub force_confirmation: bool,
+    /// Kill flow: delete the local branch too once the merge gate passes.
+    pub delete_branch: bool,
+    pub branch: Option<String>,
+    /// None while the merge check is still running (kill flow only).
+    pub merge_gate: Option<crate::worktree::WorktreeMergeGate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -722,7 +900,13 @@ pub struct ViewState {
     pub layout: ViewLayout,
     pub sidebar_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
+    pub remote_card_areas: Vec<RemoteCardArea>,
+    /// Hit areas for peer rows in the `servers` section.
+    pub server_card_areas: Vec<ServerCardArea>,
+    /// Hit area for the `servers` section header (toggles collapse).
+    pub servers_header_rect: Rect,
     pub tab_bar_rect: Rect,
+    pub status_line_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
     pub tab_scroll_left_hit_area: Rect,
     pub tab_scroll_right_hit_area: Rect,
@@ -830,6 +1014,33 @@ pub enum AgentPanelScope {
     AllWorkspaces,
 }
 
+/// Scope of the `servers` and `spaces` sidebar sections: everything, or only
+/// what belongs to the current machine / focused space group. Mirrors
+/// [`AgentPanelScope`] for the agents panel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PanelScope {
+    Current,
+    #[default]
+    All,
+}
+
+impl PanelScope {
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Current => Self::All,
+            Self::All => Self::Current,
+        }
+    }
+}
+
+/// The three sidebar section scopes captured/persisted together.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PanelScopes {
+    pub agent: AgentPanelScope,
+    pub servers: PanelScope,
+    pub spaces: PanelScope,
+}
+
 // ---------------------------------------------------------------------------
 // Settings UI state
 // ---------------------------------------------------------------------------
@@ -841,6 +1052,7 @@ pub enum SettingsSection {
     Sound,
     Toast,
     PaneLabels,
+    Sidebar,
     Experiments,
     Integrations,
 }
@@ -851,6 +1063,7 @@ impl SettingsSection {
         Self::Sound,
         Self::Toast,
         Self::PaneLabels,
+        Self::Sidebar,
         Self::Integrations,
         Self::Experiments,
     ];
@@ -861,6 +1074,7 @@ impl SettingsSection {
             Self::Sound => "sound",
             Self::Toast => "toasts",
             Self::PaneLabels => "pane labels",
+            Self::Sidebar => "sidebar",
             Self::Experiments => "experiments",
             Self::Integrations => "integrations",
         }
@@ -895,6 +1109,47 @@ impl ExperimentSetting {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidebarGapSetting {
+    RowGap,
+    PaneGap,
+}
+
+impl SidebarGapSetting {
+    pub(crate) const ALL: [Self; 2] = [Self::RowGap, Self::PaneGap];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::RowGap => "blank rows between sidebar entries",
+            Self::PaneGap => "blank columns around the pane divider",
+        }
+    }
+
+    pub(crate) fn value(self, state: &AppState) -> u16 {
+        match self {
+            Self::RowGap => state.sidebar_row_gap,
+            Self::PaneGap => state.sidebar_pane_gap,
+        }
+    }
+
+    pub(crate) fn max(self) -> u16 {
+        match self {
+            Self::RowGap => crate::config::MAX_SIDEBAR_ROW_GAP,
+            Self::PaneGap => crate::config::MAX_SIDEBAR_PANE_GAP,
+        }
+    }
+
+    /// Next value in the enter/click cycle, wrapping back to 0 past the max.
+    pub(crate) fn next_value(self, state: &AppState) -> u16 {
+        let current = self.value(state);
+        if current >= self.max() {
+            0
+        } else {
+            current + 1
+        }
+    }
+}
+
 /// All built-in theme names in display order.
 pub const THEME_NAMES: &[&str] = &[
     "catppuccin",
@@ -915,6 +1170,8 @@ pub const THEME_NAMES: &[&str] = &[
     "rose-pine",
     "rose-pine-dawn",
     "vesper",
+    "dalton",
+    "dalton-light",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1055,6 +1312,17 @@ pub enum ContextMenuKind {
         pane_id: PaneId,
         has_manual_label: bool,
     },
+    /// A servers-band row (#46): offers the per-server spaces filter.
+    Server {
+        /// The filter this row stands for (local server or one peer).
+        filter: ServerFilter,
+        /// This row's filter is the active one: the menu only offers the
+        /// clear.
+        is_filtered: bool,
+        /// Some server filter is active (possibly another row's): the menu
+        /// adds the clear entry alongside the narrowing.
+        any_filter: bool,
+    },
 }
 
 /// Right-click context menu state.
@@ -1074,10 +1342,44 @@ impl ContextMenuState {
                 has_worktree_children: false,
                 ..
             } => &["Rename", "Close", "New worktree", "Open worktree..."],
+            // A linked worktree that is ALSO the space head (#62): main was
+            // closed, this member now anchors the space. It keeps its own
+            // worktree actions AND the close-whole-space / collapse affordances.
+            ContextMenuKind::GitWorkspace {
+                is_linked_worktree: true,
+                has_worktree_children: true,
+                collapsed: true,
+                ..
+            } => &[
+                "Rename",
+                "Close",
+                "Close group",
+                "Delete worktree checkout...",
+                "Kill worktree & branch...",
+                "Expand",
+            ],
+            ContextMenuKind::GitWorkspace {
+                is_linked_worktree: true,
+                has_worktree_children: true,
+                collapsed: false,
+                ..
+            } => &[
+                "Rename",
+                "Close",
+                "Close group",
+                "Delete worktree checkout...",
+                "Kill worktree & branch...",
+                "Collapse",
+            ],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: true,
                 ..
-            } => &["Rename", "Close", "Delete worktree checkout..."],
+            } => &[
+                "Rename",
+                "Close",
+                "Delete worktree checkout...",
+                "Kill worktree & branch...",
+            ],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: true,
@@ -1124,6 +1426,13 @@ impl ContextMenuState {
                 "Zoom",
                 "Close pane",
             ],
+            ContextMenuKind::Server {
+                is_filtered: true, ..
+            } => &["Show all servers"],
+            ContextMenuKind::Server {
+                any_filter: true, ..
+            } => &["Show only this server", "Show all servers"],
+            ContextMenuKind::Server { .. } => &["Show only this server"],
         }
     }
 }
@@ -1195,6 +1504,10 @@ pub struct AppState {
     /// Terminal ids whose size is currently owned by a direct attach client.
     pub direct_attach_resize_locks: std::collections::HashSet<crate::terminal::TerminalId>,
     pub(crate) pane_id_aliases: std::collections::HashMap<u32, PaneId>,
+    /// Per-workspace ephemeral floating panes, keyed by workspace id.
+    /// Floats live outside the workspace/tab/pane tree: never persisted,
+    /// never enumerated by pane walkers, reaped when their process exits.
+    pub floats: std::collections::HashMap<String, crate::app::float::FloatPane>,
     pub workspaces: Vec<Workspace>,
     pub active: Option<usize>,
     pub(crate) previous_pane_focus: Option<PaneFocusTarget>,
@@ -1209,6 +1522,42 @@ pub struct AppState {
     pub request_new_workspace: bool,
     pub request_new_tab: bool,
     pub request_new_linked_worktree: Option<usize>,
+    pub request_branch_session: Option<usize>,
+    pub request_kill_worktree: Option<usize>,
+    /// One-shot guard so the attention all-clear chime fires once per
+    /// empty-queue episode instead of on every keypress.
+    pub attention_all_clear_chimed: bool,
+    /// Chime due: consumed by the App/headless loops (the headless server
+    /// forwards it to the foreground client, which owns audio).
+    pub pending_attention_chime: bool,
+    /// Transient feedback for a rejected/era action (rendered verbatim,
+    /// auto-expires) — unlike config_diagnostic, which is for config problems.
+    pub action_notice: Option<String>,
+    /// Sidebar display aliases for agent labels ([ui] agent_aliases).
+    pub agent_aliases: std::collections::HashMap<String, String>,
+    /// Auto-adopt external linked worktrees into managed groups.
+    pub adopt_external_worktrees: bool,
+    /// Configured federated peer servers ([[peers]]), config-owned.
+    pub peers: Vec<crate::config::PeerConfig>,
+    /// Latest polled summary per configured peer (sidebar remote rows).
+    pub peer_summaries: Vec<crate::peers::PeerSummaryState>,
+    /// Fleet snapshot carried by the attached client's handshake
+    /// (hub-and-spoke down-gossip): origin/home label + render-only peer
+    /// rows. None when the client attached locally — no home row then.
+    pub fleet_snapshot: Option<crate::peers::FleetSnapshotState>,
+    /// A server row was selected (or switch_home pressed): switch the
+    /// client to this target. Consumed by both loops.
+    pub request_peer_switch: Option<PeerSwitchRequest>,
+    /// Scope of the `servers` sidebar section: all server rows, or only the
+    /// current machine (plus the home row when attached remotely).
+    pub servers_panel_scope: PanelScope,
+    /// Scope of the `spaces` sidebar section: the full workspace list, or
+    /// only the focused workspace's space group.
+    pub spaces_panel_scope: PanelScope,
+    /// Spaces list narrowed to one server (right-click a servers-band
+    /// row). Never persisted — cleared via the same context menu or by
+    /// toggling the spaces scope.
+    pub server_filter: Option<ServerFilter>,
     pub request_open_existing_worktree: Option<usize>,
     pub request_new_workspace_cwd: Option<std::path::PathBuf>,
     pub request_remove_linked_worktree: Option<usize>,
@@ -1270,6 +1619,26 @@ pub struct AppState {
     pub sidebar_min_width: u16,
     pub sidebar_max_width: u16,
     pub mobile_width_threshold: u16,
+    /// Blank rows between sidebar list entries (workspaces and agents).
+    pub sidebar_row_gap: u16,
+    /// Blank columns on each side of the sidebar/pane divider.
+    pub sidebar_pane_gap: u16,
+    /// Max height of the prompt section in the pane header. 0 = context only.
+    pub prompt_float_lines: u16,
+    /// Auto-collapse every sidebar worktree group except the focused one.
+    pub auto_collapse_groups: bool,
+    /// What `new_tab` creates: a tab, or a sibling workspace (spike #25).
+    pub tab_mode: crate::config::TabModeConfig,
+    /// Servers-band state-medallion raster (#42): sextant or quadrant.
+    pub server_state_mark: crate::config::ServerStateMarkConfig,
+    /// Reserve the agent pane header strip.
+    pub pane_header: bool,
+    /// Show the global machine status line.
+    pub status_line: bool,
+    /// Latest sampler snapshot for the status line.
+    pub system_stats: Option<crate::system_stats::SystemStats>,
+    /// Pane whose header prompt is click-expanded to the full text.
+    pub expanded_prompt_pane: Option<PaneId>,
     pub sidebar_width_source: SidebarWidthSource,
     pub sidebar_width_auto: bool,
     pub sidebar_collapsed: bool,
@@ -1284,6 +1653,10 @@ pub struct AppState {
     pub redraw_on_focus_gained: bool,
     pub mouse_scroll_lines: usize,
     pub confirm_close: bool,
+    /// The pending confirm-close is the whole-space affordance (#62): close
+    /// every member, not just the selected workspace. Set when opening the
+    /// confirm for "Close group"; cleared on accept/cancel.
+    pub confirm_close_whole_space: bool,
     pub prompt_new_tab_name: bool,
     pub show_agent_labels_on_pane_borders: bool,
     pub pane_history_persistence: bool,
@@ -1340,12 +1713,101 @@ impl AppState {
         self.session_dirty = true;
     }
 
+    /// Whether the sidebar reserves its `new` footer entry. Hidden in
+    /// workspace tab-mode (#41) where it is redundant by construction —
+    /// creation flows through prefix+c siblings / branch_session — so the
+    /// footer slot returns to the spaces list. Default tabs mode keeps it.
+    pub(crate) fn sidebar_new_entry_visible(&self) -> bool {
+        self.tab_mode == crate::config::TabModeConfig::Tabs
+    }
+
+    /// The sidebar section scopes, bundled for session-snapshot capture.
+    /// The server filter deliberately stays out: it is transient view
+    /// state, never persisted.
+    pub(crate) fn panel_scopes(&self) -> PanelScopes {
+        PanelScopes {
+            agent: self.agent_panel_scope,
+            servers: self.servers_panel_scope,
+            spaces: self.spaces_panel_scope,
+        }
+    }
+
+    /// Federated peers feeding the spaces list's remote rows: every config
+    /// peer (live-polled), then carried fleet-snapshot entries not shadowed
+    /// by a config peer — dedup by ssh target, the polled entry wins. A
+    /// spoke has no config peers, so its whole carried fleet folds in;
+    /// render-only either way, snapshot freshness just decays (#46).
+    pub(crate) fn remote_peers(&self) -> Vec<(RemotePeerRef, &crate::peers::PeerSummaryState)> {
+        let mut peers: Vec<(RemotePeerRef, &crate::peers::PeerSummaryState)> = self
+            .peer_summaries
+            .iter()
+            .enumerate()
+            .map(|(peer_idx, peer)| (RemotePeerRef::Config { peer_idx }, peer))
+            .collect();
+        if let Some(snapshot) = self.fleet_snapshot.as_ref() {
+            // The hub's OWN workspaces (#66) fold first, ahead of carried
+            // peers — the home spaces are the most relevant on a spoke.
+            if let Some(origin) = snapshot.origin_summary.as_ref() {
+                peers.push((RemotePeerRef::Origin, origin));
+            }
+            peers.extend(
+                snapshot
+                    .peers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, entry)| {
+                        !self
+                            .peer_summaries
+                            .iter()
+                            .any(|config| config.ssh_target == entry.ssh_target)
+                    })
+                    .map(|(entry_idx, entry)| (RemotePeerRef::Snapshot { entry_idx }, entry)),
+            );
+        }
+        peers
+    }
+
+    /// Resolve a remote-row peer reference back to its cached summary.
+    pub(crate) fn remote_peer(
+        &self,
+        peer: RemotePeerRef,
+    ) -> Option<&crate::peers::PeerSummaryState> {
+        match peer {
+            RemotePeerRef::Config { peer_idx } => self.peer_summaries.get(peer_idx),
+            RemotePeerRef::Snapshot { entry_idx } => {
+                self.fleet_snapshot.as_ref()?.peers.get(entry_idx)
+            }
+            RemotePeerRef::Origin => self.fleet_snapshot.as_ref()?.origin_summary.as_ref(),
+        }
+    }
+
     pub(crate) fn remove_alias_shadowed_by_new_pane(&mut self, pane_id: PaneId) {
         self.pane_id_aliases.remove(&pane_id.raw());
+        // Lazy GC: drop aliases whose target pane no longer exists. Runs on
+        // pane creation, so the map stays bounded by live panes plus their
+        // historical env ids.
+        let live: std::collections::HashSet<u32> = self
+            .workspaces
+            .iter()
+            .flat_map(|ws| ws.tabs.iter())
+            .flat_map(|tab| tab.layout.pane_ids())
+            .map(|pane| pane.raw())
+            .collect();
+        self.pane_id_aliases
+            .retain(|_, target| live.contains(&target.raw()));
     }
 
     pub fn sound_enabled(&self) -> bool {
         self.sound.enabled
+    }
+
+    /// Sidebar display alias for an agent label: config override first,
+    /// then the built-in short code, then the label unchanged.
+    pub(crate) fn agent_alias<'a>(&'a self, label: &'a str) -> &'a str {
+        self.agent_aliases
+            .get(label)
+            .map(String::as_str)
+            .unwrap_or_else(|| crate::detect::short_agent_label(label))
     }
 
     pub fn toast_delivery(&self) -> ToastDelivery {
@@ -1516,6 +1978,7 @@ impl AppState {
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
+            floats: std::collections::HashMap::new(),
             workspaces: Vec::new(),
             active: None,
             previous_pane_focus: None,
@@ -1527,6 +1990,20 @@ impl AppState {
             request_new_workspace: false,
             request_new_tab: false,
             request_new_linked_worktree: None,
+            request_branch_session: None,
+            request_kill_worktree: None,
+            attention_all_clear_chimed: false,
+            pending_attention_chime: false,
+            action_notice: None,
+            agent_aliases: std::collections::HashMap::new(),
+            adopt_external_worktrees: true,
+            peers: Vec::new(),
+            peer_summaries: Vec::new(),
+            fleet_snapshot: None,
+            request_peer_switch: None,
+            servers_panel_scope: PanelScope::All,
+            spaces_panel_scope: PanelScope::All,
+            server_filter: None,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
             request_remove_linked_worktree: None,
@@ -1561,7 +2038,11 @@ impl AppState {
                 layout: ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
+                remote_card_areas: Vec::new(),
+                server_card_areas: Vec::new(),
+                servers_header_rect: Rect::default(),
                 tab_bar_rect: Rect::default(),
+                status_line_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),
                 tab_scroll_right_hit_area: Rect::default(),
@@ -1594,6 +2075,16 @@ impl AppState {
             sidebar_min_width: 18,
             sidebar_max_width: 36,
             mobile_width_threshold: crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD,
+            sidebar_row_gap: crate::config::DEFAULT_SIDEBAR_ROW_GAP,
+            sidebar_pane_gap: crate::config::DEFAULT_SIDEBAR_PANE_GAP,
+            prompt_float_lines: crate::config::DEFAULT_PROMPT_FLOAT_LINES,
+            auto_collapse_groups: false,
+            tab_mode: crate::config::TabModeConfig::Tabs,
+            server_state_mark: crate::config::ServerStateMarkConfig::Counts,
+            pane_header: true,
+            status_line: true,
+            system_stats: None,
+            expanded_prompt_pane: None,
             sidebar_width_source: SidebarWidthSource::ConfigDefault,
             sidebar_width_auto: false,
             sidebar_collapsed: false,
@@ -1605,6 +2096,7 @@ impl AppState {
             redraw_on_focus_gained: true,
             mouse_scroll_lines: crate::config::DEFAULT_MOUSE_SCROLL_LINES,
             confirm_close: true,
+            confirm_close_whole_space: false,
             prompt_new_tab_name: true,
             show_agent_labels_on_pane_borders: false,
             pane_history_persistence: false,
@@ -1684,6 +2176,21 @@ mod tests {
     use crossterm::event::KeyEvent;
 
     #[test]
+    fn divider_color_falls_back_to_surface_dim_and_honors_override() {
+        let palette = Palette::catppuccin();
+        assert_eq!(palette.divider_color(), palette.surface_dim);
+
+        let custom = crate::config::CustomThemeColors {
+            divider: Some("#3c3c3c".into()),
+            ..Default::default()
+        };
+        let palette = Palette::catppuccin().with_overrides(&custom);
+        assert_eq!(palette.divider_color(), Color::Rgb(0x3c, 0x3c, 0x3c));
+        // Other tokens untouched.
+        assert_eq!(palette.surface_dim, Palette::catppuccin().surface_dim);
+    }
+
+    #[test]
     fn built_in_theme_names_resolve() {
         for name in THEME_NAMES {
             assert!(
@@ -1746,7 +2253,12 @@ mod tests {
 
         assert_eq!(
             menu.items(),
-            &["Rename", "Close", "Delete worktree checkout..."]
+            &[
+                "Rename",
+                "Close",
+                "Delete worktree checkout...",
+                "Kill worktree & branch...",
+            ]
         );
     }
 

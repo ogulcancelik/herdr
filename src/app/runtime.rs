@@ -63,7 +63,9 @@ impl App {
     ) -> bool {
         let previous_mode = self.state.mode;
         let changed = crate::api::request_changes_ui(&msg.request);
+        self.current_api_peer_pid = msg.peer_pid;
         let response = self.handle_api_request(msg.request);
+        self.current_api_peer_pid = None;
         let _ = msg.respond_to.send(response);
         self.sync_prefix_input_source(previous_mode);
         changed
@@ -643,6 +645,7 @@ mod tests {
             rect: ratatui::layout::Rect::new(0, 0, 80, 24),
             inner_rect: ratatui::layout::Rect::new(0, 0, 80, 24),
             scrollbar_rect: None,
+            header_rect: None,
             is_focused: true,
         });
         (app, pane_id)
@@ -879,6 +882,7 @@ mod tests {
             rect: ratatui::layout::Rect::new(0, 0, cols, rows),
             inner_rect: ratatui::layout::Rect::new(0, 0, cols, rows),
             scrollbar_rect: None,
+            header_rect: None,
             is_focused: true,
         });
         (app, pane_id)
