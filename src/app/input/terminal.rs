@@ -50,6 +50,65 @@ impl App {
         }
     }
 
+    /// When the prompt-history panel is open over the focused pane, drive it
+    /// with Esc / PageUp / PageDown / Home / End. Wheel routing is in
+    /// `handle_pane_mouse_only`; this is the keyboard twin. Returns true
+    /// when the key was consumed by the panel.
+    fn handle_prompt_history_panel_key(&mut self, key: TerminalKey) -> bool {
+        if !key.modifiers.is_empty() {
+            return false;
+        }
+        let Some(expanded) = self.state.expanded_prompt_pane else {
+            return false;
+        };
+        let Some(ws_idx) = self.state.active else {
+            return false;
+        };
+        let focused = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.focused_pane_id());
+        if focused != Some(expanded) {
+            return false;
+        }
+        let Some(info) = self.state.pane_info_by_id(expanded).cloned() else {
+            return false;
+        };
+        let max_offset = self.state.prompt_history_max_offset_for(&info);
+        let viewport = self
+            .state
+            .prompt_history_panel_rect_for(&info)
+            .map(|rect| rect.height.saturating_sub(2) as i32)
+            .unwrap_or(0)
+            .max(1);
+        match key.code {
+            KeyCode::Esc => {
+                self.state.close_prompt_history_panel();
+                true
+            }
+            KeyCode::PageUp => {
+                self.state.scroll_prompt_history(viewport, max_offset);
+                true
+            }
+            KeyCode::PageDown => {
+                self.state.scroll_prompt_history(-viewport, max_offset);
+                true
+            }
+            KeyCode::Home => {
+                self.state
+                    .scroll_prompt_history(max_offset as i32, max_offset);
+                true
+            }
+            KeyCode::End => {
+                self.state
+                    .scroll_prompt_history(-(max_offset as i32), max_offset);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Handle a Shift-modified scrollback key (PageUp/PageDown/Home/End) by
     /// scrolling the host scrollback of the terminal-input owner (the
     /// visible float when one is up, otherwise the focused layout pane).
@@ -168,6 +227,14 @@ impl App {
 
         if self.state.is_prefix_key(key) {
             self.state.mode = Mode::Prefix;
+            return None;
+        }
+
+        // Prompt-history scrollback panel (#96): when open over the focused
+        // pane, intercept Esc/PageUp/PageDown to drive the panel directly,
+        // matching the wheel routing. Esc closes; PageUp/Down page by the
+        // panel's viewport.
+        if self.handle_prompt_history_panel_key(key) {
             return None;
         }
 

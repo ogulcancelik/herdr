@@ -348,6 +348,14 @@ pub(super) fn render_panes(
             );
             render_copy_mode_cursor(app, frame, info);
             render_pane_header(app, ws, frame, info);
+            // Bounded scrollback panel — draws OVER pane content when the
+            // user has expanded the header (#96).
+            if let Some(terminal) = ws
+                .pane_state(info.id)
+                .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
+            {
+                render_prompt_history_panel(app, frame, info, terminal);
+            }
         }
     }
 }
@@ -497,56 +505,14 @@ fn render_pane_header(
         );
         return;
     }
-    // Expanded: the full prompt REPLACES the collapsed view in place — same
-    // header anchor and colors — extending downward over content, rather than
-    // floating below the still-visible minimized header.
-    if app.expanded_prompt_pane == Some(info.id) {
-        if let Some(prompt) = prompt {
-            let full: Vec<String> = prompt
-                .lines()
-                .map(|line| line.trim_end().to_string())
-                .collect();
-            let first_y = header.y + 1;
-            let bottom = info.inner_rect.y + info.inner_rect.height;
-            let avail = bottom.saturating_sub(first_y);
-            let shown = (full.len() as u16).min(avail);
-            for offset in 0..shown {
-                let y = first_y + offset;
-                for x in header.x..header.x + header.width {
-                    buf[(x, y)].set_symbol(" ");
-                    buf[(x, y)].set_style(bar_bg);
-                }
-                let prefix = if offset == 0 { "\u{276f} " } else { "  " };
-                let mut text = format!("{prefix}{}", full[offset as usize]);
-                if offset == 0 {
-                    text.push_str(" \u{25b4}");
-                }
-                buf.set_stringn(
-                    header.x + 1,
-                    y,
-                    text,
-                    header.width.saturating_sub(1) as usize,
-                    prompt_style,
-                );
-            }
-            if (full.len() as u16) > shown && shown > 0 {
-                buf.set_stringn(
-                    header.x + 1,
-                    first_y + shown - 1,
-                    format!(
-                        "\u{22ef} +{} more lines \u{22ef}",
-                        full.len() as u16 - shown
-                    ),
-                    header.width.saturating_sub(1) as usize,
-                    marker_style,
-                );
-            }
-        }
-        return;
-    }
-
+    // Expanded: the bounded scrollable panel renders OVER the pane content
+    // (#96). The collapsed header line stays put so the panel has a clear
+    // open/close affordance. The panel itself is drawn in a separate pass
+    // after the collapsed rows below so it sits on top.
     let collapsed_content = lines.iter().any(|line| line.is_marker)
         || lines.iter().any(|line| line.text.contains('\u{2026}'));
+    let panel_open = app.expanded_prompt_pane == Some(info.id);
+    let has_history = terminal.is_some_and(|t| !t.prompt_history.is_empty());
     for (row, line) in lines.iter().enumerate() {
         let style = if line.is_marker {
             marker_style
@@ -555,8 +521,10 @@ fn render_pane_header(
         };
         let prefix = if row == 0 { "\u{276f} " } else { "  " };
         let mut text = format!("{prefix}{}", line.text);
-        if row == 0 && collapsed_content {
-            text = format!("{text} \u{25be}");
+        if row == 0 && (collapsed_content || has_history) {
+            // Caret flips while the panel is open so the same click closes it.
+            let caret = if panel_open { "\u{25b4}" } else { "\u{25be}" };
+            text = format!("{text} {caret}");
         }
         buf.set_stringn(
             header.x + 1,
@@ -566,6 +534,161 @@ fn render_pane_header(
             style,
         );
     }
+}
+
+/// Compute the bounded scrollback-panel rect for a pane: bordered, capped at
+/// ~70% of the pane's inner height (and at most the entry-line content + 2
+/// rows of border). Returns `None` when the pane is too small to host one
+/// or when the pane has no history yet. Used by the renderer AND by mouse
+/// routing to decide whether a wheel hits the panel.
+pub(crate) fn prompt_history_panel_rect(
+    app: &AppState,
+    info: &PaneInfo,
+    terminal: Option<&crate::terminal::TerminalState>,
+) -> Option<Rect> {
+    if app.expanded_prompt_pane != Some(info.id) {
+        return None;
+    }
+    let terminal = terminal?;
+    if terminal.prompt_history.is_empty() {
+        return None;
+    }
+    let inner = info.inner_rect;
+    if inner.width < 4 || inner.height < 4 {
+        return None;
+    }
+    // Bounded at ~70% of pane inner height; minimum 4 rows so the bordered
+    // chrome plus one content line always fits.
+    let max_rows = (inner.height as u32 * 7 / 10).max(4) as u16;
+    let max_rows = max_rows.min(inner.height);
+    Some(Rect::new(inner.x, inner.y, inner.width, max_rows))
+}
+
+/// Render the bounded scrollable prompt+recap history panel for `info` when
+/// the user has expanded its header (#96). Drawn AFTER the pane content so it
+/// floats above. Latest entry is pinned at the bottom; older entries sit
+/// above; scrolling moves the window up over older entries.
+pub(super) fn render_prompt_history_panel(
+    app: &AppState,
+    frame: &mut Frame,
+    info: &PaneInfo,
+    terminal: &crate::terminal::TerminalState,
+) {
+    let Some(panel) = prompt_history_panel_rect(app, info, Some(terminal)) else {
+        return;
+    };
+    let p = &app.palette;
+    let buf = frame.buffer_mut();
+
+    // Solid background fill so it sits cleanly over the pane content.
+    let bg = Style::default().bg(p.surface_dim);
+    for y in panel.y..panel.y + panel.height {
+        for x in panel.x..panel.x + panel.width {
+            buf[(x, y)].set_symbol(" ");
+            buf[(x, y)].set_style(bg);
+        }
+    }
+
+    let border_style = Style::default().fg(p.overlay0).bg(p.surface_dim);
+    let title = format!(" prompt history ({}) ", terminal.prompt_history.len());
+    let title_truncated = truncate_label(&title, panel.width.saturating_sub(2) as usize);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(Line::from(Span::styled(title_truncated, border_style)));
+    let inner = block.inner(panel);
+    frame.render_widget(block, panel);
+
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    // Build the flat list of rendered lines (oldest first → newest last).
+    // Each entry contributes a chrome line (kind marker + relative age) then
+    // its body lines.
+    let rendered = build_prompt_history_lines(terminal, app.palette.clone(), inner.width);
+    let total_lines = rendered.len() as u16;
+    let viewport = inner.height;
+
+    // Scroll offset is "lines from the bottom" so 0 keeps the latest pinned.
+    let max_offset = total_lines.saturating_sub(viewport);
+    let offset = app.prompt_history_scroll.min(max_offset);
+
+    // Window: when offset = 0 we show the last `viewport` lines.
+    let end = total_lines.saturating_sub(offset);
+    let start = end.saturating_sub(viewport);
+
+    let buf = frame.buffer_mut();
+    for (row, line_idx) in (start..end).enumerate() {
+        let y = inner.y + row as u16;
+        if let Some(line) = rendered.get(line_idx as usize) {
+            buf.set_line(inner.x, y, line, inner.width);
+        }
+    }
+
+    // Subtle scroll indicators when there is more content above or below.
+    let has_above = offset < max_offset;
+    let has_below = offset > 0;
+    let marker_style = Style::default().fg(p.overlay0).bg(p.surface_dim);
+    if has_above && inner.width >= 1 {
+        let top_y = inner.y;
+        buf[(panel.x + panel.width - 1, top_y)].set_symbol("\u{25b4}");
+        buf[(panel.x + panel.width - 1, top_y)].set_style(marker_style);
+    }
+    if has_below && inner.width >= 1 {
+        let bot_y = inner.y + inner.height - 1;
+        buf[(panel.x + panel.width - 1, bot_y)].set_symbol("\u{25be}");
+        buf[(panel.x + panel.width - 1, bot_y)].set_style(marker_style);
+    }
+}
+
+fn build_prompt_history_lines(
+    terminal: &crate::terminal::TerminalState,
+    palette: Palette,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let now = std::time::Instant::now();
+    let prompt_style = Style::default()
+        .fg(palette.subtext0)
+        .bg(palette.surface_dim);
+    let recap_style = Style::default().fg(palette.mauve).bg(palette.surface_dim);
+    let chrome_style = Style::default()
+        .fg(palette.overlay0)
+        .bg(palette.surface_dim);
+    let width = width as usize;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for entry in &terminal.prompt_history {
+        let age = entry.relative_age(now);
+        let (kind_label, body_style) = match entry.kind {
+            crate::terminal::PromptHistoryKind::Prompt => ("prompt", prompt_style),
+            crate::terminal::PromptHistoryKind::Recap => ("recap", recap_style),
+        };
+        let chrome_text = format!("{kind_label} \u{b7} {age}");
+        let chrome_text = truncate_label(&chrome_text, width.saturating_sub(2));
+        lines.push(Line::from(Span::styled(
+            format!("\u{b7} {chrome_text}"),
+            chrome_style,
+        )));
+
+        let body_lines: Vec<&str> = entry
+            .text
+            .lines()
+            .map(str::trim_end)
+            .skip_while(|line| line.is_empty())
+            .collect();
+        let mut body_lines = body_lines;
+        while body_lines.last().is_some_and(|line| line.is_empty()) {
+            body_lines.pop();
+        }
+        // Empty bodies contribute only the chrome line (matches
+        // `PromptHistoryEntry::rendered_line_count`).
+        for body in body_lines {
+            let body = truncate_label(body, width.saturating_sub(2));
+            lines.push(Line::from(Span::styled(format!("  {body}"), body_style)));
+        }
+    }
+    lines
 }
 
 /// "owner/label" when the space key is a normalized origin URL
@@ -1308,5 +1431,89 @@ mod tests {
         let (header, content) = carve_pane_header(&app, Some(&terminal_id), tiny);
         assert!(header.is_none());
         assert_eq!(content, tiny);
+    }
+
+    fn pane_info_for(rect: Rect, id: crate::layout::PaneId) -> PaneInfo {
+        PaneInfo {
+            id,
+            rect,
+            inner_rect: rect,
+            scrollbar_rect: None,
+            header_rect: None,
+            is_focused: true,
+        }
+    }
+
+    #[test]
+    fn prompt_history_panel_rect_returns_none_when_panel_closed() {
+        let mut app = AppState::test_new();
+        let ws = crate::workspace::Workspace::test_new("main");
+        let pane_id = ws.focused_pane_id().unwrap();
+        let terminal_id = ws.pane_state(pane_id).unwrap().attached_terminal_id.clone();
+        let mut terminal = crate::terminal::TerminalState::new(terminal_id.clone(), "/tmp".into());
+        terminal.record_prompt("hello".into());
+        let history_snapshot = terminal.prompt_history.clone();
+        app.terminals.insert(terminal_id, terminal);
+        let info = pane_info_for(Rect::new(0, 0, 80, 30), pane_id);
+        // Build a probe terminal mirroring the stored one for the helper call.
+        let mut probe = crate::terminal::TerminalState::new(
+            crate::terminal::TerminalId::alloc(),
+            "/tmp".into(),
+        );
+        probe.prompt_history = history_snapshot;
+        assert!(prompt_history_panel_rect(&app, &info, Some(&probe)).is_none());
+
+        app.expanded_prompt_pane = Some(pane_id);
+        let rect = prompt_history_panel_rect(&app, &info, Some(&probe))
+            .expect("panel open and has history");
+        assert!(rect.height >= 4, "panel reserves at least border + content");
+        // 70% of 30 = 21 rows, panel is bounded near that.
+        assert!(rect.height <= 21);
+    }
+
+    #[test]
+    fn prompt_history_panel_keeps_latest_pinned_at_bottom() {
+        let mut app = AppState::test_new();
+        let ws = crate::workspace::Workspace::test_new("main");
+        let pane_id = ws.focused_pane_id().unwrap();
+        let terminal_id = ws.pane_state(pane_id).unwrap().attached_terminal_id.clone();
+        let mut terminal = crate::terminal::TerminalState::new(terminal_id.clone(), "/tmp".into());
+        // Enough entries to overflow a small viewport.
+        for i in 0..8 {
+            terminal.record_prompt(format!("entry-{i}"));
+        }
+        app.terminals.insert(terminal_id.clone(), terminal);
+        app.expanded_prompt_pane = Some(pane_id);
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+
+        let info = pane_info_for(Rect::new(0, 0, 40, 12), pane_id);
+
+        // Build the rendered window directly using the helpers; the bottom
+        // row must always contain the latest entry's body.
+        let panel = prompt_history_panel_rect(&app, &info, app.terminals.get(&terminal_id))
+            .expect("panel rect");
+        let inner_h = panel.height.saturating_sub(2) as usize;
+        let terminal_ref = app.terminals.get(&terminal_id).unwrap();
+        let rendered = build_prompt_history_lines(terminal_ref, app.palette.clone(), panel.width);
+        // With scroll = 0 (pinned), the visible window is rendered.last(inner_h).
+        let end = rendered.len();
+        let start = end.saturating_sub(inner_h);
+        let bottom_line = rendered.get(end - 1).expect("non-empty");
+        let bottom_text: String = bottom_line
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(
+            bottom_text.contains("entry-7"),
+            "latest entry must be pinned at the bottom row, got: {bottom_text:?}"
+        );
+        // Older entries appear above the latest.
+        let above: Vec<String> = rendered[start..end - 1]
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.to_string()).collect())
+            .collect();
+        assert!(above.iter().any(|line| line.contains("entry-")));
     }
 }

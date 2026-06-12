@@ -1229,6 +1229,32 @@ mod tests {
         assert_eq!(agent_session.value, "opencode-session");
     }
 
+    /// Prompt-history scrollback (#96: prompts + recaps) is ephemeral by
+    /// design — a restored session does not own the previous lifecycle's
+    /// conversation. It must never leak into the snapshot. `last_prompt` is
+    /// still captured for backward compatibility with v0 restores.
+    #[test]
+    fn capture_contract_excludes_prompt_history_scrollback() {
+        let mut state = state_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.record_prompt("snap-probe-prompt-text".into());
+        terminal.record_recap("snap-probe-recap-text".into());
+
+        let snapshot = capture_from_state(&state);
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+
+        // The legacy `last_prompt` field IS persisted (v0 contract) — only
+        // the new ring history must be excluded. The recap text never
+        // surfaces in last_prompt so it must not appear at all.
+        assert!(!encoded.contains("snap-probe-recap-text"));
+        assert!(!encoded.contains("prompt_history"));
+    }
+
     /// Promoted header fields are ephemeral by design (a restored session's
     /// containers and progress are unknown): they must never leak into the
     /// session snapshot.

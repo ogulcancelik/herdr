@@ -71,6 +71,13 @@ pub enum AppEvent {
         pane_id: PaneId,
         prompt: String,
     },
+    /// A recap entry reported for an agent pane (e.g. Claude Stop hook). The
+    /// API simply stores it into the pane's prompt history; recaps render
+    /// visually distinct from prompts.
+    HookRecapReported {
+        pane_id: PaneId,
+        recap: String,
+    },
     /// A session promoted (or refreshed) a header field for its own pane.
     PaneHeaderFieldSet {
         pane_id: PaneId,

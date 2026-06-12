@@ -1639,6 +1639,11 @@ pub struct AppState {
     pub system_stats: Option<crate::system_stats::SystemStats>,
     /// Pane whose header prompt is click-expanded to the full text.
     pub expanded_prompt_pane: Option<PaneId>,
+    /// Scroll position of the open prompt-history panel, in lines FROM THE
+    /// BOTTOM (0 = pinned to latest). Reset to 0 whenever the panel closes
+    /// or the focused pane changes. Only meaningful when `expanded_prompt_pane`
+    /// is `Some`.
+    pub prompt_history_scroll: u16,
     pub sidebar_width_source: SidebarWidthSource,
     pub sidebar_width_auto: bool,
     pub sidebar_collapsed: bool,
@@ -2096,6 +2101,7 @@ impl AppState {
             status_line: true,
             system_stats: None,
             expanded_prompt_pane: None,
+            prompt_history_scroll: 0,
             sidebar_width_source: SidebarWidthSource::ConfigDefault,
             sidebar_width_auto: false,
             sidebar_collapsed: false,

@@ -1,8 +1,8 @@
 use crate::api::schema::{
     Method, PaneClearHeaderFieldParams, PaneListParams, PaneReadParams, PaneRenameParams,
-    PaneReportAgentParams, PaneReportMetadataParams, PaneSendInputParams, PaneSendKeysParams,
-    PaneSendTextParams, PaneSetHeaderFieldParams, PaneSplitParams, PaneTarget, ReadFormat,
-    ReadSource, Request,
+    PaneReportAgentParams, PaneReportMetadataParams, PaneReportRecapParams, PaneSendInputParams,
+    PaneSendKeysParams, PaneSendTextParams, PaneSetHeaderFieldParams, PaneSplitParams, PaneTarget,
+    ReadFormat, ReadSource, Request,
 };
 
 pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
@@ -22,6 +22,7 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "send-keys" => pane_send_keys(&args[1..]),
         "report-agent" => pane_report_agent(&args[1..]),
         "report-metadata" => pane_report_metadata(&args[1..]),
+        "report-recap" => pane_report_recap(&args[1..]),
         "set-field" => pane_set_field(&args[1..]),
         "clear-field" => pane_clear_field(&args[1..]),
         "run" => pane_run(&args[1..]),
@@ -607,6 +608,101 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
 const SET_FIELD_USAGE: &str =
     "usage: herdr pane set-field <key> <value> [--ttl <secs>] [--pane <pane_id>]";
 const CLEAR_FIELD_USAGE: &str = "usage: herdr pane clear-field <key> [--pane <pane_id>]";
+const REPORT_RECAP_USAGE: &str =
+    "usage: herdr pane report-recap --source ID --agent LABEL --recap TEXT [--seq N] [--pane <pane_id>]";
+
+/// `herdr pane report-recap`: append a recap entry to the calling pane's
+/// prompt-history scrollback (#96). The pane defaults to the calling pane,
+/// like the other report-* verbs.
+fn pane_report_recap(args: &[String]) -> std::io::Result<i32> {
+    let mut source = None;
+    let mut agent = None;
+    let mut recap = None;
+    let mut seq = None;
+    let mut pane_id = None;
+
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--source" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --source");
+                    return Ok(2);
+                };
+                source = Some(value.clone());
+                index += 2;
+            }
+            "--agent" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --agent");
+                    return Ok(2);
+                };
+                agent = Some(value.clone());
+                index += 2;
+            }
+            "--recap" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --recap");
+                    return Ok(2);
+                };
+                recap = Some(value.clone());
+                index += 2;
+            }
+            "--seq" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --seq");
+                    return Ok(2);
+                };
+                match super::parse_u64_flag("--seq", value) {
+                    Ok(value) => seq = Some(value),
+                    Err(err) => {
+                        eprintln!("{err}");
+                        return Ok(2);
+                    }
+                }
+                index += 2;
+            }
+            "--pane" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --pane");
+                    return Ok(2);
+                };
+                pane_id = Some(super::normalize_pane_id(value));
+                index += 2;
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                eprintln!("{REPORT_RECAP_USAGE}");
+                return Ok(2);
+            }
+        }
+    }
+
+    let Some(source) = source.and_then(|source| {
+        let source = source.trim().to_string();
+        (!source.is_empty()).then_some(source)
+    }) else {
+        eprintln!("missing required --source");
+        return Ok(2);
+    };
+    let Some(agent) = agent else {
+        eprintln!("missing required --agent");
+        return Ok(2);
+    };
+    let Some(recap) = recap else {
+        eprintln!("missing required --recap");
+        return Ok(2);
+    };
+    let pane_id = pane_id.unwrap_or_else(calling_pane_id);
+
+    super::send_ok_request(Method::PaneReportRecap(PaneReportRecapParams {
+        pane_id,
+        source,
+        agent,
+        recap,
+        seq,
+    }))
+}
 
 /// The calling pane's id, like the integration hooks resolve it: the
 /// env-baked HERDR_PANE_ID when present, otherwise an empty claim that the
@@ -699,26 +795,88 @@ fn pane_clear_field(args: &[String]) -> std::io::Result<i32> {
     }))
 }
 
-fn print_pane_help() {
-    eprintln!("herdr pane commands:");
-    eprintln!("  herdr pane list [--workspace <workspace_id>]");
-    eprintln!("  herdr pane get <pane_id>");
-    eprintln!("  herdr pane rename <pane_id> <label>|--clear");
-    eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
-    eprintln!(
+fn pane_help_text() -> String {
+    let mut out = String::new();
+    use std::fmt::Write as _;
+    let _ = writeln!(out, "herdr pane commands:");
+    let _ = writeln!(out, "  herdr pane list [--workspace <workspace_id>]");
+    let _ = writeln!(out, "  herdr pane get <pane_id>");
+    let _ = writeln!(out, "  herdr pane rename <pane_id> <label>|--clear");
+    let _ = writeln!(out, "  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
+    let _ = writeln!(
+        out,
         "  herdr pane split <pane_id> --direction right|down [--cwd PATH] [--focus] [--no-focus]"
     );
-    eprintln!("  herdr pane close <pane_id>");
-    eprintln!("  herdr pane send-text <pane_id> <text>");
-    eprintln!("  herdr pane send-keys <pane_id> <key> [key ...]");
-    eprintln!("  herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--custom-status TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
-    eprintln!("  herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--custom-status TEXT|--clear-custom-status] [--state-label STATUS=TEXT] [--clear-state-labels] [--seq N] [--ttl-ms N]");
-    eprintln!("  herdr pane set-field <key> <value> [--ttl <secs>] [--pane <pane_id>]");
-    eprintln!("  herdr pane clear-field <key> [--pane <pane_id>]");
-    eprintln!("  herdr pane run <pane_id> <command>");
-    eprintln!();
-    eprintln!("set-field promotes a session-specific field (container, progress, custom KV)");
-    eprintln!("into the calling pane's header as a 'key value' chip; --ttl auto-expires it.");
-    eprintln!("The pane defaults to the calling pane ($HERDR_PANE_ID, healed by process");
-    eprintln!("ancestry). Caps: 6 fields per pane, key <= 16 chars, value <= 48 chars.");
+    let _ = writeln!(out, "  herdr pane close <pane_id>");
+    let _ = writeln!(out, "  herdr pane send-text <pane_id> <text>");
+    let _ = writeln!(out, "  herdr pane send-keys <pane_id> <key> [key ...]");
+    let _ = writeln!(out, "  herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--custom-status TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
+    let _ = writeln!(out, "  herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--custom-status TEXT|--clear-custom-status] [--state-label STATUS=TEXT] [--clear-state-labels] [--seq N] [--ttl-ms N]");
+    let _ = writeln!(
+        out,
+        "  herdr pane report-recap --source ID --agent LABEL --recap TEXT [--seq N] [--pane <pane_id>]"
+    );
+    let _ = writeln!(
+        out,
+        "  herdr pane set-field <key> <value> [--ttl <secs>] [--pane <pane_id>]"
+    );
+    let _ = writeln!(out, "  herdr pane clear-field <key> [--pane <pane_id>]");
+    let _ = writeln!(out, "  herdr pane run <pane_id> <command>");
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "set-field promotes a session-specific field (container, progress, custom KV)"
+    );
+    let _ = writeln!(
+        out,
+        "into the calling pane's header as a 'key value' chip; --ttl auto-expires it."
+    );
+    let _ = writeln!(
+        out,
+        "The pane defaults to the calling pane ($HERDR_PANE_ID, healed by process"
+    );
+    let _ = writeln!(
+        out,
+        "ancestry). Caps: 6 fields per pane, key <= 16 chars, value <= 48 chars."
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "report-recap appends a Stop-hook recap to the pane's prompt-history scrollback"
+    );
+    let _ = writeln!(
+        out,
+        "(visible in the expanded header panel). report_prompt is unchanged; both feed"
+    );
+    let _ = writeln!(
+        out,
+        "the same per-pane history ring (cap ~1000 rendered lines, oldest dropped first)."
+    );
+    out
+}
+
+fn print_pane_help() {
+    eprint!("{}", pane_help_text());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pane_help_text;
+
+    #[test]
+    fn pane_help_lists_report_recap_and_history_explanation() {
+        let help = pane_help_text();
+        assert!(
+            help.contains("herdr pane report-recap --source ID --agent LABEL --recap TEXT"),
+            "help should advertise the new report-recap subcommand"
+        );
+        assert!(
+            help.contains("prompt-history scrollback"),
+            "help should explain that report-recap feeds the scrollback"
+        );
+        assert!(
+            help.contains("cap ~1000 rendered lines, oldest dropped first"),
+            "help should explain the cap semantics"
+        );
+    }
 }

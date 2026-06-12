@@ -574,6 +574,7 @@ impl App {
             status_line: config.ui.status_line,
             system_stats: None,
             expanded_prompt_pane: None,
+            prompt_history_scroll: 0,
             sidebar_width_source,
             sidebar_width_auto: false,
             sidebar_collapsed: false,
