@@ -1078,8 +1078,8 @@ mod tests {
         compute_view(&mut app, Rect::new(0, 0, 40, 12));
 
         let info = app.view.pane_infos.first().expect("pane info");
-        // border (2 cols) + scrollbar gutter (1) around the framed pane.
-        assert_eq!(info.inner_rect.width + 3, app.view.terminal_area.width);
+        // border (2 cols) only -- the flush scrollbar reserves no gutter.
+        assert_eq!(info.inner_rect.width + 2, app.view.terminal_area.width);
         assert_eq!(
             info.scrollbar_rect,
             Some(Rect::new(

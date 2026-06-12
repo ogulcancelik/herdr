@@ -174,18 +174,20 @@ pub(super) fn render_pane_scrollbar(
         return;
     };
 
-    let (track_color, thumb_color, thumb_symbol) = if info.is_focused {
-        (app.palette.overlay0, app.palette.overlay1, "▐")
-    } else {
-        (app.palette.surface_dim, app.palette.overlay0, "▕")
+    // Flush scrollbar (#87 always-framed panes): the track IS the border
+    // line, so only the thumb paints -- accent on the focused pane, muted
+    // grey elsewhere (one focus language with the outline).
+    if metrics.max_offset_from_bottom == 0 {
+        return;
+    }
+    let Some(thumb) = scrollbar_thumb(metrics, track) else {
+        return;
     };
-
-    render_scrollbar(
-        frame,
-        metrics,
-        track,
-        track_color,
-        thumb_color,
-        thumb_symbol,
-    );
+    let thumb_color = crate::ui::panes::pane_focus_color(info.is_focused, &app.palette);
+    let buf = frame.buffer_mut();
+    for y in thumb.top..thumb.top + thumb.len {
+        let cell = &mut buf[(track.x, y)];
+        cell.set_symbol("▐");
+        cell.set_style(Style::default().fg(thumb_color));
+    }
 }
