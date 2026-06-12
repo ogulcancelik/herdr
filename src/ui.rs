@@ -776,7 +776,6 @@ mod tests {
             self_title.contains(&crate::app::short_host_name()),
             "{self_title}"
         );
-        assert!(self_title.contains('\u{2726}'), "{self_title}"); // ✦
         let self_health = buffer_row_text(buffer, header, header.y + 2);
         assert!(self_health.contains("\u{f0ee0}  42%"), "{self_health}");
 

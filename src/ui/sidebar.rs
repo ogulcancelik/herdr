@@ -1826,13 +1826,12 @@ fn render_server_rows(frame: &mut Frame, rect: Rect, [title, health]: [Line<'sta
 fn self_server_rows(app: &AppState) -> ServerRowBuild {
     use super::status::{band_battery_style, battery_icon, format_net_io, push_band_metric};
     let p = &app.palette;
-    let name = vec![
-        Span::styled(
-            crate::app::short_host_name(),
-            Style::default().fg(p.text).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" ✦", Style::default().fg(p.accent)),
-    ];
+    // No self marker (user: redundant) — the current-row highlight fill and
+    // band position already say "this is where you are".
+    let name = vec![Span::styled(
+        crate::app::short_host_name(),
+        Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+    )];
 
     let mut title_rest: Vec<Span<'static>> = Vec::new();
     let mut health: Vec<Span<'static>> = Vec::new();
@@ -1878,15 +1877,12 @@ fn home_server_rows(
     snapshot: &crate::peers::FleetSnapshotState,
     p: &crate::app::state::Palette,
 ) -> ServerRowBuild {
-    let name = vec![
-        Span::styled("←", Style::default().fg(p.accent)),
-        Span::styled(" ", Style::default()),
-        Span::styled(
-            snapshot.origin.clone(),
-            Style::default().fg(p.text).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" home", Style::default().fg(p.accent)),
-    ];
+    // The way-home row renders like any server row (user: "I know my home")
+    // — its pinned slot-0 position IS the label; no arrow, no suffix.
+    let name = vec![Span::styled(
+        snapshot.origin.clone(),
+        Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+    )];
     // The carried origin summary (#66) makes the home row live like a peer
     // row: the hub's own machine health below, its workspace tally in the
     // count columns. Falls back to the bare snapshot-age line when no origin
@@ -3017,10 +3013,10 @@ mod tests {
         let row = home_server_rows(&snapshot, &app.palette);
         let name = spans_text(&row.name);
         let health = line_text(&row.health);
-        // Name-first: the arrow + origin + home marker ARE the name field.
-        assert!(name.starts_with('←'), "{name}");
-        assert!(name.contains("mba22"), "{name}");
-        assert!(name.contains("home"), "{name}");
+        // Ornaments kicked: the home row is just the origin name — its
+        // pinned slot-0 position is the label.
+        assert!(name.starts_with("mba22"), "{name}");
+        assert!(!name.contains('←') && !name.contains("home"), "{name}");
         // No counts on the home row; the age line is flush left.
         assert!(row.tally.is_none());
         assert!(health.starts_with("snapshot"), "{health}");
@@ -3063,12 +3059,13 @@ mod tests {
         let name = spans_text(&row.name);
         let rest = spans_text(&row.title_rest);
         let health = line_text(&row.health);
-        // Name-first: host + the ✦ current marker form the name field.
+        // Ornaments kicked: the self row is just the host name — the
+        // current-row highlight carries "you are here".
         assert!(name.starts_with(&crate::app::short_host_name()), "{name}");
-        assert!(name.contains('\u{2726}'), "{name}"); // ✦ current marker
-                                                      // Battery and net trail the counts: the battery is GLYPH ONLY
-                                                      // (level = color, no percent text), then the net glyph with
-                                                      // ▼rx ▲tx.
+        assert!(!name.contains('\u{2726}'), "{name}");
+        // Battery and net trail the counts: the battery is GLYPH ONLY
+        // (level = color, no percent text), then the net glyph with
+        // ▼rx ▲tx.
         assert!(rest.contains('\u{f0079}'), "{rest}");
         assert!(!rest.contains('%'), "battery keeps no percent text: {rest}");
         let battery = row
@@ -4029,7 +4026,7 @@ mod tests {
         // name field pads to the band-wide max display width, so the count
         // columns sit at the same x on every row.
         let host = crate::app::short_host_name();
-        let name_width = spans_display_width(&[Span::raw(format!("{host} ✦"))]).max("anvil".len());
+        let name_width = spans_display_width(&[Span::raw(host.clone())]).max("anvil".len());
         let counts_x = |rect: Rect| rect.x + name_width as u16 + 1;
         for rect in [self_rect, peer_rect] {
             let x = counts_x(rect);
@@ -4138,7 +4135,7 @@ mod tests {
 
         // Counts sit after the padded name field on every row.
         let host = crate::app::short_host_name();
-        let name_width = spans_display_width(&[Span::raw(format!("{host} ✦"))]).max("anvil".len());
+        let name_width = spans_display_width(&[Span::raw(host.clone())]).max("anvil".len());
         // Peer: ` 0 10  0` — the working column hits two digits.
         let peer_title: String = buffer_row_text(&buffer, peer_rect, peer_rect.y)
             .chars()
