@@ -1,0 +1,644 @@
+#!/usr/bin/env python3
+"""herdr-agency — define and run an agent agency on top of herdr.
+
+An *agency* is a roster of agents described by markdown profiles (frontmatter +
+system prompt) plus standard skills, coordinated by a single orchestrator agent.
+This control tool compiles the roster and drives herdr's existing primitives
+(`herdr agent start`, `herdr pane run`, `herdr wait`, ...) to spin agents through
+panes per task.
+
+Stdlib only. The compile/validate/roster/plan commands run without a live herdr
+server; up/submit/status/down talk to a running herdr instance via the `herdr`
+CLI on PATH.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:  # pragma: no cover - older interpreters
+    tomllib = None
+
+DEFAULT_DIR = Path(".herdr/agency")
+COMPLEXITY_ORDER = {"low": 0, "medium": 1, "high": 2}
+TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
+
+
+# --------------------------------------------------------------------------- #
+# Minimal YAML-subset parser for profile frontmatter.
+# Supports: `key: scalar`, `key: [a, b, c]`, comments, quoted strings.
+# This keeps profiles "like standard skills" (YAML frontmatter) with no deps.
+# --------------------------------------------------------------------------- #
+def _coerce_scalar(raw: str):
+    text = raw.strip()
+    if not text:
+        return ""
+    if (text[0] == text[-1]) and text[0] in "\"'":
+        return text[1:-1]
+    low = text.lower()
+    if low in ("true", "false"):
+        return low == "true"
+    if low in ("null", "~", "none"):
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    return text
+
+
+def _parse_inline_list(raw: str) -> list:
+    inner = raw.strip()[1:-1].strip()
+    if not inner:
+        return []
+    return [_coerce_scalar(part) for part in _split_commas(inner)]
+
+
+def _split_commas(text: str) -> list[str]:
+    parts, buf, quote = [], [], None
+    for ch in text:
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+            buf.append(ch)
+        elif ch == ",":
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    if buf:
+        parts.append("".join(buf))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def parse_frontmatter(text: str) -> tuple[dict, str]:
+    """Return (frontmatter_dict, body). Frontmatter is the leading `---` block."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}, text
+    fm: dict = {}
+    end = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            end = i
+            break
+        line = lines[i]
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip()
+        value = value.strip()
+        # strip trailing inline comment for unquoted scalars
+        if value and value[0] not in "\"'[" and "#" in value:
+            value = value.split("#", 1)[0].strip()
+        if value.startswith("["):
+            close = value.find("]")
+            if close != -1:
+                value = value[: close + 1]  # drop any trailing inline comment
+            fm[key] = _parse_inline_list(value)
+        elif value == "":
+            fm[key] = ""
+        else:
+            fm[key] = _coerce_scalar(value)
+    body = "\n".join(lines[end + 1:]) if end is not None else ""
+    return fm, body.strip()
+
+
+# --------------------------------------------------------------------------- #
+# Model
+# --------------------------------------------------------------------------- #
+@dataclass
+class Agent:
+    name: str
+    role: str = ""
+    model: str = ""
+    complexity: str = "medium"
+    command: str = ""
+    args: list = field(default_factory=list)
+    skills: list = field(default_factory=list)
+    tags: list = field(default_factory=list)
+    system_prompt: str = ""
+    is_orchestrator: bool = False
+    source: str = ""
+
+    def argv(self) -> list[str]:
+        """The argv herdr should launch for this agent (command + extra args)."""
+        argv = [self.command] if self.command else []
+        argv += [str(a) for a in self.args]
+        return argv
+
+
+@dataclass
+class Agency:
+    name: str
+    orchestrator: str
+    default_command: str
+    default_model: str
+    workspace: str
+    routing_strategy: str
+    root: Path
+    agents: dict  # name -> Agent
+
+    def orchestrator_agent(self) -> Agent | None:
+        return self.agents.get(self.orchestrator)
+
+    def workers(self) -> list[Agent]:
+        return [a for n, a in self.agents.items() if n != self.orchestrator]
+
+
+class AgencyError(Exception):
+    pass
+
+
+def load_agency(root: Path) -> Agency:
+    manifest_path = root / "agency.toml"
+    if not manifest_path.is_file():
+        raise AgencyError(
+            f"no agency manifest at {manifest_path}. run `herdr-agency init` first"
+        )
+    if tomllib is None:
+        raise AgencyError("python 3.11+ (tomllib) is required to read agency.toml")
+    with manifest_path.open("rb") as fh:
+        manifest = tomllib.load(fh)
+
+    a = manifest.get("agency", {})
+    routing = manifest.get("routing", {})
+    name = a.get("name") or root.resolve().name
+    orchestrator = a.get("orchestrator", "manager")
+    default_command = a.get("default_command", "claude")
+    default_model = a.get("default_model", "")
+    workspace = a.get("workspace", "agency")
+    routing_strategy = routing.get("strategy", "manager")
+
+    agents: dict[str, Agent] = {}
+    agents_dir = root / "agents"
+    if agents_dir.is_dir():
+        for path in sorted(agents_dir.glob("*.md")):
+            agent = _load_agent(path, default_command, default_model)
+            if agent.name in agents:
+                raise AgencyError(
+                    f"duplicate agent name '{agent.name}' ({path})"
+                )
+            agents[agent.name] = agent
+
+    if orchestrator in agents:
+        agents[orchestrator].is_orchestrator = True
+
+    return Agency(
+        name=name,
+        orchestrator=orchestrator,
+        default_command=default_command,
+        default_model=default_model,
+        workspace=workspace,
+        routing_strategy=routing_strategy,
+        root=root,
+        agents=agents,
+    )
+
+
+def _load_agent(path: Path, default_command: str, default_model: str) -> Agent:
+    fm, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+    name = fm.get("name") or path.stem
+    complexity = str(fm.get("complexity", "medium")).lower()
+    if complexity not in COMPLEXITY_ORDER:
+        complexity = "medium"
+    args = fm.get("args", [])
+    if isinstance(args, str):
+        args = args.split()
+    skills = fm.get("skills", []) or []
+    tags = fm.get("tags", []) or []
+    return Agent(
+        name=str(name),
+        role=str(fm.get("role", "")),
+        model=str(fm.get("model", "") or default_model),
+        complexity=complexity,
+        command=str(fm.get("command", "") or default_command),
+        args=list(args),
+        skills=[str(s) for s in skills],
+        tags=[str(t) for t in tags],
+        system_prompt=body,
+        source=str(path),
+    )
+
+
+def validate_agency(agency: Agency) -> list[str]:
+    errors: list[str] = []
+    if not agency.agents:
+        errors.append("no agent profiles found under agents/*.md")
+    if agency.orchestrator not in agency.agents:
+        errors.append(
+            f"orchestrator '{agency.orchestrator}' has no profile "
+            f"(expected agents/{agency.orchestrator}.md)"
+        )
+    for name, agent in agency.agents.items():
+        if not agent.command:
+            errors.append(f"agent '{name}': no command (set command or default_command)")
+        if not agent.role and not agent.is_orchestrator:
+            errors.append(f"agent '{name}': missing role")
+    return errors
+
+
+# --------------------------------------------------------------------------- #
+# Roster compilation
+# --------------------------------------------------------------------------- #
+def compile_roster(agency: Agency) -> dict:
+    return {
+        "agency": agency.name,
+        "orchestrator": agency.orchestrator,
+        "workspace": agency.workspace,
+        "routing": {"strategy": agency.routing_strategy},
+        "agents": [
+            {
+                "name": a.name,
+                "role": a.role,
+                "model": a.model,
+                "complexity": a.complexity,
+                "command": a.command,
+                "argv": a.argv(),
+                "skills": a.skills,
+                "tags": a.tags,
+                "orchestrator": a.is_orchestrator,
+            }
+            for a in agency.agents.values()
+        ],
+    }
+
+
+def plan_task(agency: Agency, task: str) -> dict:
+    """Offline heuristic preview of which agents a task would engage.
+
+    The real routing decision is made by the orchestrator agent at runtime; this
+    is a deterministic, server-free preview for `validate`/CI and for humans.
+    """
+    words = {w.strip(".,!?:;()[]").lower() for w in task.split()}
+    scored = []
+    for agent in agency.workers():
+        tag_hits = [t for t in agent.tags if t.lower() in words]
+        role_hits = [w for w in agent.role.lower().split() if w in words and len(w) > 3]
+        score = len(tag_hits) * 2 + len(role_hits)
+        scored.append((score, agent, tag_hits))
+    scored.sort(key=lambda s: (-s[0], COMPLEXITY_ORDER.get(s[1].complexity, 1)))
+    matched = [
+        {"name": a.name, "score": sc, "matched_tags": hits}
+        for sc, a, hits in scored
+        if sc > 0
+    ]
+    return {
+        "task": task,
+        "orchestrator": agency.orchestrator,
+        "candidates": matched or [
+            {"name": a.name, "score": 0, "matched_tags": []}
+            for _, a, _ in scored
+        ],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# herdr bridge
+# --------------------------------------------------------------------------- #
+def herdr_available() -> bool:
+    return shutil.which("herdr") is not None
+
+
+def run_herdr(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["herdr", *args],
+        check=check,
+        capture_output=True,
+        text=True,
+    )
+
+
+def inbox_path(agency: Agency) -> Path:
+    return agency.root / "inbox.jsonl"
+
+
+def runtime_path(agency: Agency) -> Path:
+    return agency.root / "runtime.json"
+
+
+# --------------------------------------------------------------------------- #
+# Commands
+# --------------------------------------------------------------------------- #
+def cmd_init(args) -> int:
+    dest = Path(args.dir)
+    if dest.exists() and any(dest.iterdir()):
+        if not args.force:
+            print(f"error: {dest} already exists and is not empty (use --force)", file=sys.stderr)
+            return 1
+    if not TEMPLATES_DIR.is_dir():
+        print(f"error: templates not found at {TEMPLATES_DIR}", file=sys.stderr)
+        return 1
+    dest.mkdir(parents=True, exist_ok=True)
+    for item in TEMPLATES_DIR.iterdir():
+        target = dest / item.name
+        if item.is_dir():
+            shutil.copytree(item, target, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, target)
+    print(f"initialized agency at {dest}")
+    print("edit agents/*.md and agency.toml, then run `herdr-agency validate`")
+    return 0
+
+
+def _load_or_die(args) -> Agency:
+    agency = load_agency(Path(args.dir))
+    return agency
+
+
+def cmd_validate(args) -> int:
+    try:
+        agency = _load_or_die(args)
+    except AgencyError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    errors = validate_agency(agency)
+    print(f"agency: {agency.name}")
+    print(f"orchestrator: {agency.orchestrator}")
+    print(f"agents: {len(agency.agents)}")
+    for agent in agency.agents.values():
+        flag = " (orchestrator)" if agent.is_orchestrator else ""
+        argv = " ".join(agent.argv())
+        print(f"  - {agent.name:<16} [{agent.complexity:<6}] {argv}{flag}")
+    if errors:
+        print(file=sys.stderr)
+        for e in errors:
+            print(f"error: {e}", file=sys.stderr)
+        return 1
+    print("ok")
+    return 0
+
+
+def cmd_roster(args) -> int:
+    try:
+        agency = _load_or_die(args)
+    except AgencyError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    roster = compile_roster(agency)
+    if args.json:
+        print(json.dumps(roster, indent=2))
+    else:
+        print(f"# {roster['agency']} (orchestrator: {roster['orchestrator']})")
+        for a in roster["agents"]:
+            tags = ",".join(a["tags"])
+            print(f"{a['name']:<16} {a['complexity']:<6} {a['role']}  [{tags}]")
+    return 0
+
+
+def cmd_plan(args) -> int:
+    try:
+        agency = _load_or_die(args)
+    except AgencyError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    result = plan_task(agency, args.task)
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"task: {result['task']}")
+        print(f"orchestrator: {result['orchestrator']} decides; offline candidates:")
+        for c in result["candidates"]:
+            tags = ",".join(c["matched_tags"])
+            print(f"  {c['name']:<16} score={c['score']} {tags}")
+    return 0
+
+
+def _write_roster_file(agency: Agency) -> Path:
+    roster = compile_roster(agency)
+    path = agency.root / "roster.json"
+    path.write_text(json.dumps(roster, indent=2), encoding="utf-8")
+    return path
+
+
+def _orchestrator_brief(agency: Agency, roster_path: Path, inbox: Path) -> str:
+    orch = agency.orchestrator_agent()
+    prompt = orch.system_prompt if orch else ""
+    return (
+        f"{prompt}\n\n"
+        f"You are the orchestrator of the '{agency.name}' agency, running inside "
+        f"herdr (HERDR_ENV=1). Your roster is at {roster_path} and incoming "
+        f"requests are appended to {inbox} as JSON lines. Use the "
+        f"agency-orchestrator skill: read the roster, and for each request spin "
+        f"the right agents into panes with `herdr agent start`, hand them work "
+        f"with `herdr pane run`, wait with `herdr wait agent-status`, collect "
+        f"results with `herdr agent read`, and report back."
+    ).strip()
+
+
+def cmd_up(args) -> int:
+    try:
+        agency = _load_or_die(args)
+    except AgencyError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    errors = validate_agency(agency)
+    if errors:
+        for e in errors:
+            print(f"error: {e}", file=sys.stderr)
+        return 1
+
+    roster_path = _write_roster_file(agency)
+    inbox = inbox_path(agency)
+    inbox.touch(exist_ok=True)
+    orch = agency.orchestrator_agent()
+    brief = _orchestrator_brief(agency, roster_path, inbox)
+
+    project_cwd = str(Path.cwd())
+    plan = {
+        "create_workspace": {"label": agency.workspace, "cwd": project_cwd},
+        "launch_orchestrator": {
+            "name": agency.orchestrator,
+            "argv": orch.argv() if orch else [],
+            "brief_chars": len(brief),
+        },
+        "roster": str(roster_path),
+        "inbox": str(inbox),
+    }
+
+    if args.dry_run or not herdr_available():
+        if not herdr_available() and not args.dry_run:
+            print("note: `herdr` not on PATH; showing dry-run plan", file=sys.stderr)
+        print(json.dumps(plan, indent=2))
+        return 0
+
+    # Create (or reuse) the agency workspace, rooted at the current project.
+    cwd = project_cwd
+    ws = run_herdr(
+        ["workspace", "create", "--cwd", cwd, "--label", agency.workspace, "--focus"],
+        check=False,
+    )
+    if ws.returncode != 0:
+        print(f"error: workspace create failed: {ws.stderr.strip()}", file=sys.stderr)
+        return 1
+    try:
+        ws_json = json.loads(ws.stdout or "{}")
+    except json.JSONDecodeError:
+        ws_json = {}
+    root_pane = (
+        ws_json.get("result", {}).get("root_pane", {}).get("pane_id")
+    )
+
+    runtime = {
+        "agency": agency.name,
+        "workspace": agency.workspace,
+        "orchestrator_pane": root_pane,
+        "roster": str(roster_path),
+        "inbox": str(inbox),
+        "started_at": int(time.time()),
+    }
+    runtime_path(agency).write_text(json.dumps(runtime, indent=2), encoding="utf-8")
+
+    # Launch the orchestrator agent CLI in the workspace root pane.
+    if root_pane and orch:
+        run_herdr(["pane", "run", root_pane, " ".join(orch.argv())], check=False)
+        time.sleep(1)
+        run_herdr(["pane", "send-text", root_pane, brief], check=False)
+        run_herdr(["pane", "send-keys", root_pane, "Enter"], check=False)
+
+    print(f"agency '{agency.name}' is up in workspace '{agency.workspace}'")
+    print(f"orchestrator pane: {root_pane}")
+    print(f"submit requests with: herdr-agency submit \"<request>\"")
+    return 0
+
+
+def cmd_submit(args) -> int:
+    try:
+        agency = _load_or_die(args)
+    except AgencyError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    inbox = inbox_path(agency)
+    task_id = f"task-{int(time.time()*1000)}"
+    record = {"id": task_id, "request": args.request, "ts": int(time.time())}
+    with inbox.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record) + "\n")
+
+    runtime = {}
+    rp = runtime_path(agency)
+    if rp.is_file():
+        try:
+            runtime = json.loads(rp.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            runtime = {}
+    pane = runtime.get("orchestrator_pane")
+
+    nudged = False
+    if pane and herdr_available() and not args.queue_only:
+        msg = f"new agency request {task_id}: {args.request}"
+        run_herdr(["pane", "send-text", pane, msg], check=False)
+        run_herdr(["pane", "send-keys", pane, "Enter"], check=False)
+        nudged = True
+
+    print(json.dumps({"id": task_id, "queued": True, "nudged_orchestrator": nudged}))
+    return 0
+
+
+def cmd_status(args) -> int:
+    try:
+        agency = _load_or_die(args)
+    except AgencyError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    if not herdr_available():
+        print("error: `herdr` not on PATH", file=sys.stderr)
+        return 1
+    out = run_herdr(["agent", "list"], check=False)
+    print(out.stdout.strip() or out.stderr.strip())
+    rp = runtime_path(agency)
+    if rp.is_file():
+        print("\nruntime:")
+        print(rp.read_text(encoding="utf-8").strip())
+    return 0
+
+
+def cmd_down(args) -> int:
+    try:
+        agency = _load_or_die(args)
+    except AgencyError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    rp = runtime_path(agency)
+    if not rp.is_file():
+        print("agency is not running (no runtime.json)")
+        return 0
+    runtime = json.loads(rp.read_text(encoding="utf-8"))
+    print(f"agency '{runtime.get('agency')}' runtime recorded in workspace "
+          f"'{runtime.get('workspace')}'.")
+    print("close it from herdr (prefix+shift+d) or `herdr workspace close <id>`.")
+    rp.unlink()
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="herdr-agency", description=__doc__)
+    p.add_argument("--dir", default=str(DEFAULT_DIR),
+                   help=f"agency directory (default: {DEFAULT_DIR})")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    sp = sub.add_parser("init", help="scaffold an agency from templates")
+    sp.add_argument("dir", nargs="?", default=str(DEFAULT_DIR))
+    sp.add_argument("--force", action="store_true")
+    sp.set_defaults(func=cmd_init)
+
+    sp = sub.add_parser("validate", help="parse and check profiles + manifest")
+    sp.set_defaults(func=cmd_validate)
+
+    sp = sub.add_parser("roster", help="print the compiled roster")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_roster)
+
+    sp = sub.add_parser("plan", help="offline preview of agents for a task")
+    sp.add_argument("task")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_plan)
+
+    sp = sub.add_parser("up", help="launch the orchestrator in herdr")
+    sp.add_argument("--dry-run", action="store_true")
+    sp.set_defaults(func=cmd_up)
+
+    sp = sub.add_parser("submit", help="forward a request to the running agency")
+    sp.add_argument("request")
+    sp.add_argument("--queue-only", action="store_true",
+                    help="enqueue without nudging the orchestrator pane")
+    sp.set_defaults(func=cmd_submit)
+
+    sp = sub.add_parser("status", help="show agency agents and runtime")
+    sp.set_defaults(func=cmd_status)
+
+    sp = sub.add_parser("down", help="tear down the agency runtime record")
+    sp.set_defaults(func=cmd_down)
+
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    # init must work before --dir resolution; others handle their own loading.
+    if args.command == "init":
+        return cmd_init(args)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

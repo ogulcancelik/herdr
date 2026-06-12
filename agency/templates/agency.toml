@@ -1,0 +1,20 @@
+# herdr agency manifest
+# See ../SPEC.md for the full format.
+
+[agency]
+name = "demo-agency"
+# Which agent profile (agents/<name>.md) acts as the orchestrator/manager.
+orchestrator = "manager"
+# Default agent CLI launched for a profile that does not set its own `command`.
+default_command = "claude"
+# Default model when a profile does not set `model`. Passed by convention via
+# each profile's `args` (e.g. ["--model", "sonnet"]); the orchestrator may also
+# read it from the roster to decide cost/complexity trade-offs.
+default_model = "sonnet"
+# herdr workspace label the agency runs in.
+workspace = "agency"
+
+[routing]
+# "manager": the orchestrator agent decides who handles each request (default).
+# Future strategies (e.g. "tags") can route deterministically without the LLM.
+strategy = "manager"
