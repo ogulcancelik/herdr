@@ -46,6 +46,8 @@ pub enum Subscription {
     PaneClosed {},
     #[serde(rename = "pane.focused")]
     PaneFocused {},
+    #[serde(rename = "pane.moved")]
+    PaneMoved {},
     #[serde(rename = "pane.exited")]
     PaneExited {},
     #[serde(rename = "pane.agent_detected")]
@@ -145,6 +147,9 @@ pub enum EventMatch {
     PaneFocused {
         pane_id: String,
     },
+    PaneMoved {
+        pane_id: String,
+    },
     PaneOutputChanged {
         pane_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -182,6 +187,7 @@ pub enum EventKind {
     PaneCreated,
     PaneClosed,
     PaneFocused,
+    PaneMoved,
     PaneOutputChanged,
     PaneExited,
     PaneAgentDetected,
@@ -207,6 +213,7 @@ pub fn known_event_names() -> &'static [&'static str] {
         "pane.created",
         "pane.closed",
         "pane.focused",
+        "pane.moved",
         "pane.output_changed",
         "pane.exited",
         "pane.agent_detected",
@@ -239,6 +246,7 @@ mod known_event_name_tests {
                 EventKind::PaneCreated => "pane.created",
                 EventKind::PaneClosed => "pane.closed",
                 EventKind::PaneFocused => "pane.focused",
+                EventKind::PaneMoved => "pane.moved",
                 EventKind::PaneOutputChanged => "pane.output_changed",
                 EventKind::PaneExited => "pane.exited",
                 EventKind::PaneAgentDetected => "pane.agent_detected",
@@ -261,6 +269,7 @@ mod known_event_name_tests {
             EventKind::PaneCreated,
             EventKind::PaneClosed,
             EventKind::PaneFocused,
+            EventKind::PaneMoved,
             EventKind::PaneOutputChanged,
             EventKind::PaneExited,
             EventKind::PaneAgentDetected,
@@ -392,6 +401,20 @@ pub enum EventData {
     PaneFocused {
         pane_id: String,
         workspace_id: String,
+    },
+    PaneMoved {
+        previous_pane_id: String,
+        previous_workspace_id: String,
+        previous_tab_id: String,
+        pane: Box<PaneInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_workspace: Option<WorkspaceInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_tab: Option<TabInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        closed_workspace_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        closed_tab_id: Option<String>,
     },
     PaneOutputChanged {
         pane_id: String,

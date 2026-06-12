@@ -3,16 +3,15 @@ use bytes::Bytes;
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, PaneClearAgentAuthorityParams, PaneCurrentParams,
     PaneDirection, PaneEdgesParams, PaneEdgesResult, PaneFocusDirectionParams,
-    PaneFocusDirectionReason, PaneFocusDirectionResult, PaneInfo, PaneLayoutPane,
-    PaneLayoutParams, PaneLayoutRect, PaneLayoutSnapshot, PaneLayoutSplit, PaneListParams,
-    PaneMoveDestination, PaneMoveParams, PaneMoveReason, PaneMoveResult, PaneNeighborParams,
-    PaneNeighborResult, PaneProcessInfo, PaneProcessInfoParams, PaneProcessInfoProcess,
-    PaneReadParams, PaneReadResult, PaneReleaseAgentParams, PaneRenameParams,
-    PaneReportAgentParams, PaneReportAgentSessionParams, PaneReportMetadataParams,
-    PaneResizeParams, PaneResizeReason, PaneResizeResult, PaneSendInputParams, PaneSendKeysParams,
-    PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason, PaneSwapResult,
-    PaneTarget, PaneZoomMode, PaneZoomParams, PaneZoomReason, PaneZoomResult, ReadFormat,
-    ReadSource, ResponseResult,
+    PaneFocusDirectionReason, PaneFocusDirectionResult, PaneInfo, PaneLayoutPane, PaneLayoutParams,
+    PaneLayoutRect, PaneLayoutSnapshot, PaneLayoutSplit, PaneListParams, PaneMoveDestination,
+    PaneMoveParams, PaneMoveReason, PaneMoveResult, PaneNeighborParams, PaneNeighborResult,
+    PaneProcessInfo, PaneProcessInfoParams, PaneProcessInfoProcess, PaneReadParams, PaneReadResult,
+    PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
+    PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
+    PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams,
+    PaneSwapReason, PaneSwapResult, PaneTarget, PaneZoomMode, PaneZoomParams, PaneZoomReason,
+    PaneZoomResult, ReadFormat, ReadSource, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::{App, Mode};
@@ -985,6 +984,7 @@ impl App {
                 event: EventKind::WorkspaceClosed,
                 data: EventData::WorkspaceClosed {
                     workspace_id: closed_workspace_id.clone(),
+                    workspace: None,
                 },
             });
         }

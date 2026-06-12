@@ -1634,6 +1634,7 @@ fn event_kind_name(kind: crate::api::schema::EventKind) -> &'static str {
         crate::api::schema::EventKind::PaneCreated => "pane.created",
         crate::api::schema::EventKind::PaneClosed => "pane.closed",
         crate::api::schema::EventKind::PaneFocused => "pane.focused",
+        crate::api::schema::EventKind::PaneMoved => "pane.moved",
         crate::api::schema::EventKind::PaneOutputChanged => "pane.output_changed",
         crate::api::schema::EventKind::PaneExited => "pane.exited",
         crate::api::schema::EventKind::PaneAgentDetected => "pane.agent_detected",
@@ -2743,6 +2744,53 @@ command = ["sh", "-c", "echo ok"]
         assert!(app.state.plugin_panes.contains_key(&pane_other));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn plugin_pane_record_survives_pane_move() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("plugin-move")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+        app.state.plugin_panes.insert(
+            pane_id,
+            crate::app::state::PluginPaneRecord {
+                plugin_id: "example.pane".into(),
+                entrypoint: "board".into(),
+            },
+        );
+
+        let response = app.handle_api_request(Request {
+            id: "move".into(),
+            method: Method::PaneMove(crate::api::schema::PaneMoveParams {
+                pane_id: public_pane_id,
+                destination: crate::api::schema::PaneMoveDestination::NewTab {
+                    workspace_id: None,
+                    label: Some("moved".into()),
+                },
+                focus: true,
+            }),
+        });
+        let ResponseResult::PaneMove { move_result } = response_result(&response) else {
+            panic!("expected pane move: {response}");
+        };
+        assert!(app.state.plugin_panes.contains_key(&pane_id));
+
+        let focus = app.handle_api_request(Request {
+            id: "focus".into(),
+            method: Method::PluginPaneFocus(PluginPaneFocusParams {
+                pane_id: move_result.pane.pane_id.clone(),
+            }),
+        });
+        let ResponseResult::PluginPaneFocused { plugin_pane } = response_result(&focus) else {
+            panic!("expected plugin pane focus: {focus}");
+        };
+        assert_eq!(plugin_pane.plugin_id, "example.pane");
+        assert_eq!(plugin_pane.entrypoint, "board");
+        assert_eq!(plugin_pane.pane.pane_id, move_result.pane.pane_id);
     }
 
     #[test]

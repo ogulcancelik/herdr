@@ -65,6 +65,11 @@ over the active pane and restores the previous focus and zoom when it closes.
 Use `split`, `tab`, or `zoomed` for real Herdr panes when the UI should remain
 part of the workspace layout.
 
+Plugin panes are normal Herdr panes after they open. Plugins can call standard
+pane APIs such as `pane.move`, `pane.swap`, `pane.resize`, and `pane.zoom`
+through the socket or CLI; Herdr keeps plugin pane ownership attached to the
+underlying pane when it moves across tabs or workspaces.
+
 Bind a key to an installed plugin action:
 
 ```toml

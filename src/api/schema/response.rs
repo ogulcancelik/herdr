@@ -8,8 +8,8 @@ use super::integrations::{
 };
 use super::panes::{
     LayoutDescription, PaneEdgesResult, PaneFocusDirectionResult, PaneInfo, PaneLayoutSnapshot,
-    PaneNeighborResult, PaneProcessInfo, PaneReadResult, PaneResizeResult, PaneSwapResult,
-    PaneZoomResult,
+    PaneMoveResult, PaneNeighborResult, PaneProcessInfo, PaneReadResult, PaneResizeResult,
+    PaneSwapResult, PaneZoomResult,
 };
 use super::plugins::{
     InstalledPluginInfo, PluginActionInfo, PluginCommandLogInfo, PluginInvocationContext,
@@ -111,6 +111,9 @@ pub enum ResponseResult {
     },
     PaneSwap {
         swap: PaneSwapResult,
+    },
+    PaneMove {
+        move_result: PaneMoveResult,
     },
     PaneZoom {
         zoom: PaneZoomResult,
