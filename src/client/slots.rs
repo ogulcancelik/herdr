@@ -171,6 +171,13 @@ impl SlotRegistry {
         self.slots.get(target.key()).map(|s| s.phase)
     }
 
+    /// True if `target` is currently the active slot. Used by the switch
+    /// popup flow (#93) to short-circuit a SwitchServer for the slot we are
+    /// already on without arming a cold dial.
+    pub(crate) fn is_active(&self, target: &SlotTarget) -> bool {
+        self.active.as_deref() == Some(target.key())
+    }
+
     /// Cold targets eligible to be warmed now: under the cap, and past their
     /// backoff if a prior dial failed. The warm-all dialer drives these, then
     /// reports each result back via [`mark_warm`] / [`mark_dial_failed`].
@@ -351,9 +358,21 @@ pub(crate) fn route_slot_event(
 /// stream half plus the slot's target. Frames arrive on the shared loop event
 /// channel (the reader half lives in a spawned thread); a paused slot's server
 /// stops streaming, so the active slot is the only one painting.
+///
+/// An optional `bridge` keeps a client-built ssh-stdio transport (#93 cold
+/// switch dial) alive for the slot's lifetime: when the slot is dropped or
+/// demoted, the bridge's `Drop` tears down the listener thread and removes
+/// the local socket. Slots reached over an already-live transport (home, the
+/// active leg's launcher-owned bridge) leave this `None`.
 pub(crate) struct SlotConnection {
     pub(crate) target: SlotTarget,
     pub(crate) write_stream: UnixStream,
+    /// Kept alive solely for its Drop side effects: tearing down the ssh-stdio
+    /// bridge when the slot is dropped/demoted. The popup-cancel path also
+    /// relies on this — a stale dial's `SlotConnection` going out of scope
+    /// reclaims the bridge transport. Read access is never needed.
+    #[allow(dead_code)]
+    pub(crate) bridge: Option<crate::remote::SshStdioBridge>,
 }
 
 impl SlotConnection {
@@ -613,6 +632,7 @@ mod tests {
             SlotConnection {
                 target: SlotTarget::Home,
                 write_stream: home_local,
+                bridge: None,
             },
             vec![ssh("anvil")],
             8,
@@ -624,6 +644,7 @@ mod tests {
             .add_warm(SlotConnection {
                 target: ssh("anvil"),
                 write_stream: anvil_local,
+                bridge: None,
             })
             .unwrap();
         // anvil received a pause on warm registration.
@@ -716,6 +737,7 @@ mod tests {
             SlotConnection {
                 target: SlotTarget::Home,
                 write_stream: home_local,
+                bridge: None,
             },
             vec![ssh("anvil")],
             8,
@@ -726,6 +748,7 @@ mod tests {
             .add_warm(SlotConnection {
                 target: ssh("anvil"),
                 write_stream: anvil_local,
+                bridge: None,
             })
             .unwrap();
         assert_eq!(manager.registry.phase(&ssh("anvil")), Some(SlotPhase::Warm));
@@ -756,6 +779,7 @@ mod tests {
             SlotConnection {
                 target: SlotTarget::Home,
                 write_stream: home_local,
+                bridge: None,
             },
             vec![ssh("anvil")],
             8,

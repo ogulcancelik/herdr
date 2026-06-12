@@ -1414,7 +1414,7 @@ fn command_failed(context: &str, output: &Output) -> io::Error {
     }
 }
 
-struct SshStdioBridge {
+pub(crate) struct SshStdioBridge {
     local_socket: PathBuf,
     keepalive_ssh_config: Option<PathBuf>,
     should_stop: Arc<AtomicBool>,
@@ -1501,6 +1501,61 @@ impl Drop for SshStdioBridge {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
+}
+
+/// Build a client-side ssh-stdio bridge to `target` for a cold switch dial,
+/// NON-INTERACTIVELY. Used by the slots cold-switch path (#93): the user is
+/// already mid-switch under raw mode, so install prompts are impossible —
+/// the call must succeed using the PATH `herdr` (or an explicit override) or
+/// fail. The returned bridge owns its listener thread and its local-forward
+/// socket file; dropping it tears the transport down (the existing `Drop`
+/// impl above). The launcher-driven `run_remote` keeps using
+/// `prepare_remote_herdr` for the interactive install/upgrade path.
+///
+/// Returns `(bridge, local_socket_path)` so the caller can immediately dial
+/// the framed client socket through the bridge.
+pub(crate) fn start_switch_bridge_noninteractive(
+    target: &str,
+) -> io::Result<(SshStdioBridge, PathBuf)> {
+    let session_name = crate::session::active_name()
+        .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
+    let local_socket = local_forward_socket_path(target, &session_name);
+
+    // Non-interactive remote-herdr discovery: prefer the PATH binary; fall back
+    // to the default `~/.local/bin/herdr` install location. We deliberately do
+    // NOT call into the interactive install/upgrade path — a cold switch under
+    // raw mode cannot prompt the user, and a missing/incompatible remote binary
+    // must surface as a dial failure that the popup shows in plain text.
+    let platform = detect_remote_platform(target)?;
+    let default_remote = RemoteHerdr::for_platform(platform);
+    let path_remote = remote_binary_on_path_any(target, &default_remote)?;
+    let remote_herdr = if let Some(remote) = path_remote
+        .as_ref()
+        .filter(|candidate| remote_binary_matches(target, candidate).unwrap_or(false))
+    {
+        remote.clone()
+    } else if remote_binary_matches(target, &default_remote).unwrap_or(false) {
+        default_remote
+    } else {
+        return Err(io::Error::other(format!(
+            "no compatible herdr {} on {target}; install via `herdr --remote {target}` from an interactive terminal first",
+            current_version()
+        )));
+    };
+
+    let manage_ssh_config = crate::config::Config::load()
+        .config
+        .remote
+        .manage_ssh_config;
+
+    let bridge = SshStdioBridge::start(
+        target.to_string(),
+        remote_herdr,
+        local_socket.clone(),
+        session_name,
+        manage_ssh_config,
+    )?;
+    Ok((bridge, local_socket))
 }
 
 /// Creates a fresh user-only (`0700`) directory under the temp dir for the

@@ -15,7 +15,7 @@
 mod input;
 pub(crate) mod slots;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write as _};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -722,11 +722,25 @@ enum ClientLoopEvent {
     /// so a warm slot's death demotes that slot silently while only the active
     /// slot's death tears the session down.
     ServerDisconnected(String),
-    /// A background warm-all dial succeeded: this slot now holds a paused
-    /// connection (#65). Carries the slot key and the writable stream half.
-    SlotWarmed(String, UnixStream),
-    /// A background warm-all dial failed: keep the slot cold with backoff.
-    SlotDialFailed(String),
+    /// A background warm-all dial OR an on-demand switch dial succeeded: this
+    /// slot now holds a paused connection. Carries the slot key, the writable
+    /// stream half, an optional `SshStdioBridge` that the slot's connection
+    /// must own (so Drop tears down the ssh transport with the slot), and the
+    /// generation counter the dial was spawned with (#93). At apply time the
+    /// loop must compare `gen` against the live pending-switch or warm-sweep
+    /// gen for `key` — a stale event drops its stream so the server sees the
+    /// disconnect and never flips the active slot.
+    SlotWarmed {
+        gen: u64,
+        key: String,
+        stream: UnixStream,
+        bridge: Option<crate::remote::SshStdioBridge>,
+    },
+    /// A background warm-all dial OR an on-demand switch dial failed: keep the
+    /// slot cold with backoff. The generation counter mirrors `SlotWarmed`;
+    /// stale failures are dropped so a re-armed switch's UI is never disturbed
+    /// by an earlier attempt's outcome (#93).
+    SlotDialFailed { gen: u64, key: String, err: String },
     /// Timer tick.
     Timer,
 }
@@ -1387,13 +1401,29 @@ async fn run_client_loop(
         }
     }
 
-    // Connection-slots warm-all dialing bookkeeping (#65): keys of slots a
-    // background dial is currently in flight for, so the periodic dialer never
-    // double-dials. The dialer fires on the timer tick.
-    let mut slot_dials_in_flight: HashSet<String> = HashSet::new();
+    // Connection-slots warm-all dialing bookkeeping (#65/#93): keys of slots a
+    // background dial is currently in flight for, mapped to the generation the
+    // dial was spawned with. The dialer fires on the timer tick; events use
+    // the gen to drop stale outcomes (cancel/re-switch races, #93).
+    let mut slot_dials_in_flight: HashMap<String, u64> = HashMap::new();
     let mut last_slot_dial_sweep = Instant::now()
         .checked_sub(Duration::from_secs(60))
         .unwrap_or_else(Instant::now);
+    // Monotonic generation source for every dial event (warm sweep + cold
+    // switch) so stale outcomes drop their streams instead of flipping the
+    // active slot (#93). Cancel/re-switch bumps it.
+    let mut next_dial_gen: u64 = 1;
+    // Live cancellable switch state (#93). `Some` while a switch is in flight
+    // OR briefly during a success/cancel/failure beat; `None` otherwise. The
+    // popup paints only while `Some`, and Esc is only intercepted while `Some`.
+    let mut pending_switch: Option<PendingSwitch> = None;
+    // Esc-grace: after a successful switch, swallow a lone Esc chunk arriving
+    // within this window so muscle-memory `Esc to cancel` from the popup does
+    // not land as a key inside the new session.
+    let mut esc_grace_until: Option<Instant> = None;
+    // Last popup paint timestamp; throttle to POPUP_REPAINT_INTERVAL so the
+    // Timer-driven repaint never thrashes the host terminal.
+    let mut last_popup_paint: Option<Instant> = None;
 
     // Main event loop.
     let mut stdin_closed = false;
@@ -1414,6 +1444,35 @@ async fn run_client_loop(
 
         match event {
             ClientLoopEvent::StdinInput(data) => {
+                // Cancellable switch popup (#93): Esc is intercepted ONLY while
+                // a switch is pending. A chunk equal to exactly `[0x1b]` is the
+                // bare-Esc keypress; longer sequences starting with `0x1b` are
+                // arrow/function/CSI keys and pass through untouched. Esc-grace
+                // after a successful switch likewise swallows a lone Esc that
+                // arrived too late to mean cancel.
+                if data.as_slice() == [0x1b] {
+                    if pending_switch.is_some() {
+                        // Cancel: bump gen so any in-flight dial's outcome is
+                        // stale-on-arrival, beat `cancelled ✓`, and stay on
+                        // the previous slot (active_slot_key unchanged).
+                        next_dial_gen = next_dial_gen.wrapping_add(1);
+                        if let Some(p) = pending_switch.as_mut() {
+                            p.gen = next_dial_gen;
+                            p.outcome_beat = Some((
+                                Instant::now() + POPUP_CANCEL_BEAT,
+                                "cancelled \u{2713}".to_string(),
+                            ));
+                            paint_switch_popup(p, state.reported_size, Instant::now());
+                        }
+                        continue;
+                    }
+                    if let Some(until) = esc_grace_until {
+                        if Instant::now() < until {
+                            debug!("swallowing post-switch Esc within grace window");
+                            continue;
+                        }
+                    }
+                }
                 let data = if let Some(attach_escape) = &mut state.attach_escape {
                     match attach_escape.filter_input(
                         data,
@@ -1573,86 +1632,112 @@ async fn run_client_loop(
                         fleet,
                         focus_workspace,
                     } => {
-                        // Connection slots (#65): if the target is a WARM slot, flip
-                        // to it in process — pause the old slot, resume the new one
-                        // with a full redraw, rebind input — without ever releasing
-                        // the terminal or exiting. The launcher's switch file is not
-                        // written, so no relaunch leg spawns.
+                        // Slots-enabled path (#93): try a WARM flip first, else
+                        // arm a cancellable cold dial under the popup. The legacy
+                        // exit-and-relaunch path below stays in place for the
+                        // slots-DISABLED branch only — every touchpoint guards
+                        // on `slot_manager` being `Some` (the #76 discipline).
+                        //
+                        // `focus_workspace`: today the slots path has no
+                        // client→server FocusWorkspace message, so we drop it
+                        // here with a note. The legacy legs path keeps focus
+                        // support; the gap closes when the protocol grows a
+                        // focus-after-attach message (tracked alongside #75).
                         if let Some(manager) = slot_manager.as_mut() {
+                            let _ = &focus_workspace;
+                            let _ = &fleet;
                             let target = slots::SlotTarget::from_key(&ssh_target);
                             match manager.flip_to(&target) {
                                 Ok(Some(new_stream)) => {
-                                    // Retire the old active reader and bind a new one
-                                    // to the slot that just became active.
-                                    //
-                                    // The old reader stays blocked in read_message
-                                    // and only checks its per-slot quit flag at loop
-                                    // top — but the old slot is now PAUSED, so no new
-                                    // frames arrive to unblock it, and it ghosts
-                                    // harmlessly. We deliberately do NOT shutdown the
-                                    // old fd's read half: that fd is a clone sharing
-                                    // the underlying socket with the warm slot we
-                                    // keep for a switch-BACK flip, and shutting it
-                                    // down would kill that paused transport. Stale
-                                    // frames already in flight are handled at apply
-                                    // time: the new active_slot_key makes the loop
-                                    // drop any Frame tagged with the old slot's key,
-                                    // so nothing from the old reader paints over the
-                                    // new slot's redraw (#65, blocker 2).
-                                    active_reader_quit.store(true, Ordering::Release);
-                                    let new_quit = Arc::new(AtomicBool::new(false));
-                                    if let Ok(read_clone) = new_stream.try_clone() {
-                                        let new_key = target.key().to_string();
-                                        spawn_slot_reader(
-                                            new_key.clone(),
-                                            read_clone,
-                                            event_tx.clone(),
-                                            should_quit.clone(),
-                                            new_quit.clone(),
-                                            max_frame_size,
-                                        );
-                                        active_reader_quit = new_quit;
-                                        // Flip the active-slot tag BEFORE any further
-                                        // events are applied, so queued frames from
-                                        // the old slot are dropped from here on.
-                                        active_slot_key = new_key;
-                                        write_stream = new_stream;
-                                        let _ = write_stream.set_nonblocking(false);
-                                        // Re-assert our true geometry to the slot we
-                                        // just made active (#77). A warm slot only
-                                        // learned this client's size at dial time and
-                                        // never saw subsequent Resize events (those
-                                        // only went to the then-active write stream),
-                                        // so without this its panes keep the stale
-                                        // dial-time width and fresh output wraps
-                                        // narrow. The server's Resize handler reflows
-                                        // every pane's PTY+VT to the new geometry.
-                                        let (cur_cols, cur_rows) = state.reported_size;
-                                        let (cur_cw, cur_ch) = state.reported_cell_size;
-                                        let resize = ClientMessage::Resize {
-                                            cols: cur_cols,
-                                            rows: cur_rows,
-                                            cell_width_px: cur_cw,
-                                            cell_height_px: cur_ch,
-                                        };
-                                        if let Err(e) = write_to_server(&mut write_stream, &resize)
-                                        {
-                                            return Err(ClientError::ConnectionLost(e));
-                                        }
-                                        // Resume already asked the server for a full
-                                        // redraw; nudge the host surface so the
-                                        // repaint lands cleanly over the old frame.
-                                        state.request_full_redraw();
-                                        continue;
+                                    // Warm flip: apply in-process.
+                                    apply_slot_flip(
+                                        new_stream,
+                                        &target,
+                                        &mut active_reader_quit,
+                                        &mut active_slot_key,
+                                        &mut write_stream,
+                                        &mut state,
+                                        &event_tx,
+                                        &should_quit,
+                                        max_frame_size,
+                                    )?;
+                                    // PopupGuard invariant: if a switch was in
+                                    // flight when the server preempted us with
+                                    // a different warm flip, clear the popup.
+                                    if pending_switch.is_some() {
+                                        pending_switch = None;
+                                        clear_switch_popup(&mut state);
                                     }
+                                    continue;
                                 }
                                 Ok(None) => {
-                                    // Cold/unknown/already-active: fall through to
-                                    // the legacy relaunch-leg path below.
+                                    // Cold/unknown OR already-active. Already-active
+                                    // is a no-op (registry returned AlreadyActive).
+                                    if manager.registry.is_active(&target) {
+                                        continue;
+                                    }
+                                    // Arm a cancellable cold dial under the popup.
+                                    // Cancel/re-switch bumps the gen so any
+                                    // earlier dial's outcome drops at apply time.
+                                    let gen = next_dial_gen;
+                                    next_dial_gen = next_dial_gen.wrapping_add(1);
+                                    let prev_display = slot_display_label(
+                                        &slots::SlotTarget::from_key(&active_slot_key),
+                                    );
+                                    let target_display = slot_display_label(&target);
+                                    pending_switch = Some(PendingSwitch {
+                                        gen,
+                                        target: target.clone(),
+                                        previous_display: prev_display,
+                                        target_display,
+                                        started_at: Instant::now(),
+                                        outcome_beat: None,
+                                    });
+                                    let geometry = (
+                                        state.reported_size.0,
+                                        state.reported_size.1,
+                                        state.reported_cell_size.0,
+                                        state.reported_cell_size.1,
+                                    );
+                                    spawn_switch_dial(
+                                        gen,
+                                        target.clone(),
+                                        geometry,
+                                        negotiated_encoding,
+                                        event_tx.clone(),
+                                    );
+                                    if let Some(p) = pending_switch.as_ref() {
+                                        paint_switch_popup(p, state.reported_size, Instant::now());
+                                    }
+                                    continue;
                                 }
                                 Err(err) => {
-                                    warn!(err = %err, target = %ssh_target, "slot flip failed; demoting and falling back to dial");
+                                    warn!(err = %err, target = %ssh_target, "slot flip failed; demoting");
                                     manager.handle_dead(&target);
+                                    // Surface in the popup as a switch failure
+                                    // beat; the user sees the reason and the
+                                    // active slot is unchanged.
+                                    let prev_display = slot_display_label(
+                                        &slots::SlotTarget::from_key(&active_slot_key),
+                                    );
+                                    let target_display = slot_display_label(&target);
+                                    let beat_until = Instant::now() + POPUP_FAILURE_BEAT;
+                                    pending_switch = Some(PendingSwitch {
+                                        gen: next_dial_gen,
+                                        target: target.clone(),
+                                        previous_display: prev_display,
+                                        target_display: target_display.clone(),
+                                        started_at: Instant::now(),
+                                        outcome_beat: Some((
+                                            beat_until,
+                                            format!("switch to {target_display} failed: {err}"),
+                                        )),
+                                    });
+                                    next_dial_gen = next_dial_gen.wrapping_add(1);
+                                    if let Some(p) = pending_switch.as_ref() {
+                                        paint_switch_popup(p, state.reported_size, Instant::now());
+                                    }
+                                    continue;
                                 }
                             }
                         }
@@ -1723,27 +1808,138 @@ async fn run_client_loop(
                     }
                 }
             }
-            ClientLoopEvent::SlotWarmed(key, stream) => {
-                slot_dials_in_flight.remove(&key);
-                if let Some(manager) = slot_manager.as_mut() {
-                    let target = slots::SlotTarget::from_key(&key);
-                    let conn = slots::SlotConnection {
-                        target,
-                        write_stream: stream,
-                    };
-                    if let Err(err) = manager.add_warm(conn) {
-                        debug!(target = %key, err = %err, "failed to pause newly warmed slot");
-                    } else {
-                        debug!(target = %key, "slot warmed and paused");
+            ClientLoopEvent::SlotWarmed {
+                gen,
+                key,
+                stream,
+                bridge,
+            } => {
+                // Disposition (#93): a SWITCH dial's success — gen matches the
+                // pending switch — applies as a slot flip AND tears the popup
+                // down. A SWEEP dial's success — gen matches the sweep entry
+                // for that key — registers the slot as warm. Any other gen is
+                // STALE: drop the stream (the server sees disconnect) and let
+                // the bridge drop teardown the ssh transport.
+                let is_switch = pending_switch
+                    .as_ref()
+                    .map(|p| p.gen == gen && p.target.key() == key && p.outcome_beat.is_none())
+                    .unwrap_or(false);
+                let sweep_match = slot_dials_in_flight
+                    .get(&key)
+                    .copied()
+                    .map(|g| g == gen)
+                    .unwrap_or(false);
+                if is_switch {
+                    if let Some(manager) = slot_manager.as_mut() {
+                        let target = slots::SlotTarget::from_key(&key);
+                        // Register the new connection as warm (with bridge
+                        // ownership), then flip to it in-process.
+                        let conn = slots::SlotConnection {
+                            target: target.clone(),
+                            write_stream: stream,
+                            bridge,
+                        };
+                        if let Err(err) = manager.add_warm(conn) {
+                            warn!(target = %key, err = %err, "switch-dial warmed slot but pause failed");
+                            // Treat as failure-beat.
+                            if let Some(p) = pending_switch.as_mut() {
+                                p.outcome_beat = Some((
+                                    Instant::now() + POPUP_FAILURE_BEAT,
+                                    format!("switch to {} failed: {err}", p.target_display),
+                                ));
+                                paint_switch_popup(p, state.reported_size, Instant::now());
+                            }
+                            continue;
+                        }
+                        match manager.flip_to(&target) {
+                            Ok(Some(new_stream)) => {
+                                // Teardown popup BEFORE applying further events
+                                // (PopupGuard discipline #93).
+                                pending_switch = None;
+                                clear_switch_popup(&mut state);
+                                esc_grace_until = Some(Instant::now() + ESC_GRACE_AFTER_SUCCESS);
+                                apply_slot_flip(
+                                    new_stream,
+                                    &target,
+                                    &mut active_reader_quit,
+                                    &mut active_slot_key,
+                                    &mut write_stream,
+                                    &mut state,
+                                    &event_tx,
+                                    &should_quit,
+                                    max_frame_size,
+                                )?;
+                            }
+                            Ok(None) | Err(_) => {
+                                // Unexpected — the slot was just registered.
+                                // Surface as a failure beat and clear.
+                                if let Some(p) = pending_switch.as_mut() {
+                                    p.outcome_beat = Some((
+                                        Instant::now() + POPUP_FAILURE_BEAT,
+                                        format!("switch to {} failed", p.target_display),
+                                    ));
+                                    paint_switch_popup(p, state.reported_size, Instant::now());
+                                }
+                            }
+                        }
                     }
+                    // Switch dials are tracked outside the sweep map; nothing
+                    // to remove there.
+                } else if sweep_match {
+                    slot_dials_in_flight.remove(&key);
+                    if let Some(manager) = slot_manager.as_mut() {
+                        let target = slots::SlotTarget::from_key(&key);
+                        let conn = slots::SlotConnection {
+                            target,
+                            write_stream: stream,
+                            bridge,
+                        };
+                        if let Err(err) = manager.add_warm(conn) {
+                            debug!(target = %key, err = %err, "failed to pause newly warmed slot");
+                        } else {
+                            debug!(target = %key, "slot warmed and paused");
+                        }
+                    }
+                } else {
+                    // Stale event: drop the stream + bridge. Plain drop closes
+                    // the socket so the server sees a disconnect (#93).
+                    debug!(target = %key, gen, "stale SlotWarmed; dropping stream");
+                    drop(stream);
+                    drop(bridge);
                 }
             }
-            ClientLoopEvent::SlotDialFailed(key) => {
-                slot_dials_in_flight.remove(&key);
-                if let Some(manager) = slot_manager.as_mut() {
-                    manager
-                        .registry
-                        .mark_dial_failed(&slots::SlotTarget::from_key(&key), Instant::now());
+            ClientLoopEvent::SlotDialFailed { gen, key, err } => {
+                let is_switch = pending_switch
+                    .as_ref()
+                    .map(|p| p.gen == gen && p.target.key() == key && p.outcome_beat.is_none())
+                    .unwrap_or(false);
+                let sweep_match = slot_dials_in_flight
+                    .get(&key)
+                    .copied()
+                    .map(|g| g == gen)
+                    .unwrap_or(false);
+                if is_switch {
+                    if let Some(manager) = slot_manager.as_mut() {
+                        manager
+                            .registry
+                            .mark_dial_failed(&slots::SlotTarget::from_key(&key), Instant::now());
+                    }
+                    if let Some(p) = pending_switch.as_mut() {
+                        p.outcome_beat = Some((
+                            Instant::now() + POPUP_FAILURE_BEAT,
+                            format!("switch to {} failed: {err}", p.target_display),
+                        ));
+                        paint_switch_popup(p, state.reported_size, Instant::now());
+                    }
+                } else if sweep_match {
+                    slot_dials_in_flight.remove(&key);
+                    if let Some(manager) = slot_manager.as_mut() {
+                        manager
+                            .registry
+                            .mark_dial_failed(&slots::SlotTarget::from_key(&key), Instant::now());
+                    }
+                } else {
+                    debug!(target = %key, gen, "stale SlotDialFailed; dropping");
                 }
             }
             ClientLoopEvent::Timer => {
@@ -1767,10 +1963,14 @@ async fn run_client_loop(
                                     continue;
                                 };
                                 let key = target.key().to_string();
-                                if !slot_dials_in_flight.insert(key) {
+                                if slot_dials_in_flight.contains_key(&key) {
                                     continue;
                                 }
+                                let gen = next_dial_gen;
+                                next_dial_gen = next_dial_gen.wrapping_add(1);
+                                slot_dials_in_flight.insert(key, gen);
                                 spawn_warm_dial(
+                                    gen,
                                     target.clone(),
                                     socket_path,
                                     geometry,
@@ -1779,6 +1979,40 @@ async fn run_client_loop(
                                 );
                             }
                         }
+                    }
+                }
+                // Pending-switch upkeep: clear an expired outcome beat OR
+                // repaint the live counter. Repaint is throttled so the loop
+                // never thrashes the host terminal.
+                if let Some(p) = pending_switch.as_ref() {
+                    let now = Instant::now();
+                    if let Some((until, _)) = p.outcome_beat.as_ref() {
+                        if now >= *until {
+                            pending_switch = None;
+                            last_popup_paint = None;
+                            clear_switch_popup(&mut state);
+                        } else if last_popup_paint
+                            .map(|t| now.saturating_duration_since(t) >= POPUP_REPAINT_INTERVAL)
+                            .unwrap_or(true)
+                        {
+                            paint_switch_popup(p, state.reported_size, now);
+                            last_popup_paint = Some(now);
+                        }
+                    } else if last_popup_paint
+                        .map(|t| now.saturating_duration_since(t) >= POPUP_REPAINT_INTERVAL)
+                        .unwrap_or(true)
+                    {
+                        paint_switch_popup(p, state.reported_size, now);
+                        last_popup_paint = Some(now);
+                    }
+                } else {
+                    last_popup_paint = None;
+                }
+                // Esc-grace expiry: just let it lapse — the StdinInput arm
+                // checks `Instant::now() < esc_grace_until` itself.
+                if let Some(until) = esc_grace_until {
+                    if Instant::now() >= until {
+                        esc_grace_until = None;
                     }
                 }
             }
@@ -1791,6 +2025,243 @@ async fn run_client_loop(
     let _ = io::stdout().flush();
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Slot flip success path (shared by warm flip and switch-dial success, #93)
+// ---------------------------------------------------------------------------
+
+/// Apply a successful slot flip: retire the old active reader, bind a new
+/// reader to the slot that just became active, flip the active-slot tag (so
+/// queued stale frames from the old reader are dropped from here on), swap
+/// the write stream, re-assert geometry to the new slot (#77), and request a
+/// full host-surface redraw. Shared by the warm-flip arm and the cold-dial
+/// success arm (#93) so they cannot drift.
+#[allow(clippy::too_many_arguments)]
+fn apply_slot_flip(
+    new_stream: UnixStream,
+    target: &slots::SlotTarget,
+    active_reader_quit: &mut Arc<AtomicBool>,
+    active_slot_key: &mut String,
+    write_stream: &mut UnixStream,
+    state: &mut ClientState,
+    event_tx: &tokio::sync::mpsc::Sender<ClientLoopEvent>,
+    should_quit: &Arc<AtomicBool>,
+    max_frame_size: usize,
+) -> Result<(), ClientError> {
+    active_reader_quit.store(true, Ordering::Release);
+    let new_quit = Arc::new(AtomicBool::new(false));
+    let read_clone = new_stream
+        .try_clone()
+        .map_err(ClientError::ConnectionFailed)?;
+    let new_key = target.key().to_string();
+    spawn_slot_reader(
+        new_key.clone(),
+        read_clone,
+        event_tx.clone(),
+        should_quit.clone(),
+        new_quit.clone(),
+        max_frame_size,
+    );
+    *active_reader_quit = new_quit;
+    // Flip the active-slot tag BEFORE any further events apply, so queued
+    // stale frames from the old reader are dropped from here on (#65).
+    *active_slot_key = new_key;
+    *write_stream = new_stream;
+    let _ = write_stream.set_nonblocking(false);
+    // Re-assert geometry to the slot we just made active (#77).
+    let (cur_cols, cur_rows) = state.reported_size;
+    let (cur_cw, cur_ch) = state.reported_cell_size;
+    let resize = ClientMessage::Resize {
+        cols: cur_cols,
+        rows: cur_rows,
+        cell_width_px: cur_cw,
+        cell_height_px: cur_ch,
+    };
+    if let Err(e) = write_to_server(write_stream, &resize) {
+        return Err(ClientError::ConnectionLost(e));
+    }
+    state.request_full_redraw();
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Cancellable switch popup (#93)
+// ---------------------------------------------------------------------------
+
+/// State for an in-flight cancellable server switch (#93). Lives on the client
+/// loop while the popup is up and clears the moment we land, cancel, or beat
+/// out a failure notice. The popup paints only while this is `Some`; Esc is
+/// intercepted only while this is `Some`; every exit edge MUST clear the popup
+/// + request a full redraw of the active slot (the PopupGuard discipline).
+#[derive(Debug, Clone)]
+struct PendingSwitch {
+    /// Generation counter the dial(s) carry. A SlotWarmed/SlotDialFailed event
+    /// with a different gen is stale (cancel/re-switch superseded it) and is
+    /// dropped — its stream too.
+    gen: u64,
+    /// The slot we are switching to.
+    target: slots::SlotTarget,
+    /// Display label of the slot we will return to on cancel/failure. Used in
+    /// the popup subtitle.
+    previous_display: String,
+    /// Display label of the target we are switching to. Used in the popup
+    /// title.
+    target_display: String,
+    /// When the switch was armed; drives the elapsed-seconds counter and the
+    /// tone schedule (neutral / yellow / "host not responding" / "retry window
+    /// ending soon").
+    started_at: Instant,
+    /// A terminal beat — `cancelled ✓`, `switch to … failed: …` — that the
+    /// popup shows briefly before clearing. When set, the popup repaints this
+    /// instead of the live title until `until` passes.
+    outcome_beat: Option<(Instant, String)>,
+}
+
+/// How often the popup is allowed to repaint. Bounded so a busy loop never
+/// flickers the box; the elapsed counter renders whole seconds anyway, so
+/// 4-5x/sec is plenty.
+const POPUP_REPAINT_INTERVAL: Duration = Duration::from_millis(220);
+
+/// Tone schedule (#93 spec): neutral → yellow → host-not-responding subtitle →
+/// retry-window-ending hint. Switches by elapsed-since-armed.
+const POPUP_YELLOW_AT: Duration = Duration::from_secs(3);
+const POPUP_UNRESPONSIVE_AT: Duration = Duration::from_secs(10);
+const POPUP_RETRY_ENDING_AT: Duration = Duration::from_secs(25);
+
+/// How long after a successful switch a lone Esc chunk is swallowed instead
+/// of being forwarded to the new active server. Catches muscle-memory cancel
+/// presses landing inside the just-arrived session.
+const ESC_GRACE_AFTER_SUCCESS: Duration = Duration::from_millis(150);
+
+/// How long the failure beat stays up before the popup clears.
+const POPUP_FAILURE_BEAT: Duration = Duration::from_secs(2);
+
+/// How long the cancel-confirmation beat stays up.
+const POPUP_CANCEL_BEAT: Duration = Duration::from_millis(600);
+
+/// Render the popup over the active slot's still-live frame. Plain raw-ANSI
+/// box centered via the reported terminal size, cursor saved/restored so the
+/// underlying frame is never disturbed (the #72 show_status_line precedent).
+fn paint_switch_popup(pending: &PendingSwitch, reported_size: (u16, u16), now: Instant) {
+    let (cols, rows) = reported_size;
+    if cols < 12 || rows < 6 {
+        return;
+    }
+    let lines = popup_lines(pending, now);
+    // Box geometry: 50 wide, 4 inner rows (top border + 2 text + bottom).
+    let box_w: u16 = 50.min(cols.saturating_sub(2));
+    let box_h: u16 = 4;
+    let start_col = (cols.saturating_sub(box_w)) / 2 + 1;
+    let start_row = (rows.saturating_sub(box_h)) / 2 + 1;
+
+    // Compose: save cursor, draw 4 rows, restore.
+    let mut out = String::with_capacity(512);
+    out.push_str("\x1b7"); // save cursor
+    out.push_str("\x1b[?25l"); // hide cursor while painting
+                               // Tone selects foreground color.
+    let (border_ansi, text_ansi) = popup_tone_ansi(pending, now);
+    // Top border.
+    let border_w = (box_w as usize).saturating_sub(2);
+    out.push_str(&format!(
+        "\x1b[{};{}H{}┌{:─<border_w$}┐\x1b[0m",
+        start_row, start_col, border_ansi, "",
+    ));
+    // Two text rows. Each row is "│ <content padded> │".
+    let inner_w = (box_w as usize).saturating_sub(4);
+    for (i, line) in lines.iter().take(2).enumerate() {
+        let truncated: String = line.chars().take(inner_w).collect();
+        let pad = inner_w.saturating_sub(truncated.chars().count());
+        let spaces = " ".repeat(pad);
+        out.push_str(&format!(
+            "\x1b[{};{}H{}│\x1b[0m {}{}{} {}│\x1b[0m",
+            start_row + 1 + i as u16,
+            start_col,
+            border_ansi,
+            text_ansi,
+            truncated,
+            spaces,
+            border_ansi
+        ));
+    }
+    // Bottom border.
+    out.push_str(&format!(
+        "\x1b[{};{}H{}└{:─<border_w$}┘\x1b[0m",
+        start_row + box_h - 1,
+        start_col,
+        border_ansi,
+        "",
+    ));
+    out.push_str("\x1b[?25h"); // show cursor
+    out.push_str("\x1b8"); // restore cursor
+    let mut stdout = io::stdout();
+    let _ = stdout.write_all(out.as_bytes());
+    let _ = stdout.flush();
+}
+
+/// The two text lines the popup shows, derived purely from `pending` + `now`.
+/// Pure function so the tone schedule + outcome beats are unit-testable.
+fn popup_lines(pending: &PendingSwitch, now: Instant) -> [String; 2] {
+    if let Some((_, msg)) = pending.outcome_beat.as_ref() {
+        return [msg.clone(), String::new()];
+    }
+    let elapsed = now.saturating_duration_since(pending.started_at);
+    let secs = elapsed.as_secs();
+    let title = format!("switching to {}…  {}s", pending.target_display, secs);
+    let subtitle = if elapsed >= POPUP_RETRY_ENDING_AT {
+        format!(
+            "retry window ending soon — [esc] returns to {}",
+            pending.previous_display
+        )
+    } else if elapsed >= POPUP_UNRESPONSIVE_AT {
+        format!(
+            "host not responding — [esc] returns to {}",
+            pending.previous_display
+        )
+    } else {
+        format!("[esc] cancel · returns to {}", pending.previous_display)
+    };
+    [title, subtitle]
+}
+
+/// Tone-driven ANSI prefixes (border, text). Neutral → yellow ramp at 3s,
+/// 10s+, then the late "retry window ending" hint stays yellow.
+fn popup_tone_ansi(pending: &PendingSwitch, now: Instant) -> (&'static str, &'static str) {
+    if pending.outcome_beat.is_some() {
+        // Beats render in neutral; the message itself is the signal.
+        return ("\x1b[37m", "\x1b[1m");
+    }
+    let elapsed = now.saturating_duration_since(pending.started_at);
+    if elapsed >= POPUP_YELLOW_AT {
+        // Yellow border + bold yellow text from 3s onward (covers 3-10s,
+        // 10s+, and 25s+ subtitle shifts uniformly).
+        ("\x1b[33m", "\x1b[1;33m")
+    } else {
+        // Neutral 0-3s: white border, bold default text.
+        ("\x1b[37m", "\x1b[1m")
+    }
+}
+
+/// Clear the popup region by triggering a full app redraw on the active slot.
+/// We do not selectively erase the box rows: the active slot is still live
+/// under the popup and its next Frame paints over them naturally. The redraw
+/// nudge ensures that next frame is FULL (no diff against the popup overlay).
+fn clear_switch_popup(state: &mut ClientState) {
+    // Erase any overlay residue by repainting a blank region on top first; the
+    // server's full-redraw will then resettle the underlying frame cleanly.
+    let mut out = io::stdout();
+    let _ = write!(out, "\x1b7\x1b[?25l\x1b[2J\x1b[?25h\x1b8");
+    let _ = out.flush();
+    state.request_full_redraw();
+}
+
+/// Display label for a slot target — the ssh destination, or `home` for the
+/// reserved sentinel. Used in the popup's title and `returns to <…>` line.
+fn slot_display_label(target: &slots::SlotTarget) -> String {
+    match target {
+        slots::SlotTarget::Home => "home".to_string(),
+        slots::SlotTarget::Ssh(t) => t.clone(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1885,6 +2356,7 @@ fn build_slot_manager(
     let active_conn = slots::SlotConnection {
         target: active_target,
         write_stream: active_write_stream.try_clone().ok()?,
+        bridge: None,
     };
     Some(slots::SlotManager::new(
         active_conn,
@@ -1901,6 +2373,7 @@ fn build_slot_manager(
 /// any peer whose ssh-stdio bridge socket is already live; a cold peer with no
 /// bridge stays cold and a switch to it falls back to the relaunch leg.
 fn spawn_warm_dial(
+    gen: u64,
     target: slots::SlotTarget,
     socket_path: std::path::PathBuf,
     geometry: (u16, u16, u32, u32),
@@ -1929,14 +2402,133 @@ fn spawn_warm_dial(
             Ok(stream)
         })();
         let event = match dialed {
-            Ok(stream) => ClientLoopEvent::SlotWarmed(key, stream),
+            Ok(stream) => ClientLoopEvent::SlotWarmed {
+                gen,
+                key,
+                stream,
+                bridge: None,
+            },
             Err(err) => {
                 debug!(target = %key, err = %err, "warm-all dial failed; slot stays cold");
-                ClientLoopEvent::SlotDialFailed(key)
+                ClientLoopEvent::SlotDialFailed {
+                    gen,
+                    key,
+                    err: err.to_string(),
+                }
             }
         };
         let _ = event_tx.blocking_send(event);
     });
+}
+
+/// Spawn an on-demand SWITCH dial for a cold slot (#93). Targets with a live
+/// local socket (home, the active ssh leg's bridge) just dial that socket;
+/// bridge-less ssh peers get a NON-INTERACTIVE client-side `SshStdioBridge`
+/// built first, then dial the bridge's forwarded socket. The bridge rides the
+/// success event so the slot's connection owns it for the slot's lifetime —
+/// `SlotConnection::Drop` tears the transport down when the slot dies or is
+/// demoted. On failure (or a stale outcome at apply time) the bridge is
+/// dropped on this thread.
+fn spawn_switch_dial(
+    gen: u64,
+    target: slots::SlotTarget,
+    geometry: (u16, u16, u32, u32),
+    requested_encoding: RenderEncoding,
+    event_tx: tokio::sync::mpsc::Sender<ClientLoopEvent>,
+) {
+    std::thread::spawn(move || {
+        let key = target.key().to_string();
+        let (cols, rows, cell_width_px, cell_height_px) = geometry;
+        let dialed: Result<(UnixStream, Option<crate::remote::SshStdioBridge>), ClientError> =
+            (|| {
+                // Path A: the slot already has a live transport (home, or the
+                // active leg's launcher-owned bridge). Just dial it.
+                if let Some(path) = slot_socket_path(&target) {
+                    let mut stream =
+                        UnixStream::connect(&path).map_err(ClientError::ConnectionFailed)?;
+                    do_handshake(
+                        &mut stream,
+                        cols,
+                        rows,
+                        cell_width_px,
+                        cell_height_px,
+                        requested_encoding,
+                        false,
+                        None,
+                    )?;
+                    return Ok((stream, None));
+                }
+                // Path B: cold ssh peer with no bridge — build one
+                // non-interactively, then dial the forwarded socket. The
+                // bridge is returned to the loop and stored on the slot.
+                match &target {
+                    slots::SlotTarget::Home => Err(ClientError::ConnectionFailed(
+                        io::Error::other("home slot has no socket path"),
+                    )),
+                    slots::SlotTarget::Ssh(t) => {
+                        let (bridge, sock) = crate::remote::start_switch_bridge_noninteractive(t)
+                            .map_err(ClientError::ConnectionFailed)?;
+                        // The bridge listener may need a moment to be ready
+                        // (it binds synchronously, but ssh dial latency hides
+                        // here on first connect). Retry briefly on connect
+                        // refused to avoid spurious failures.
+                        let mut stream = connect_with_brief_retry(&sock)
+                            .map_err(ClientError::ConnectionFailed)?;
+                        do_handshake(
+                            &mut stream,
+                            cols,
+                            rows,
+                            cell_width_px,
+                            cell_height_px,
+                            requested_encoding,
+                            false,
+                            None,
+                        )?;
+                        Ok((stream, Some(bridge)))
+                    }
+                }
+            })();
+        let event = match dialed {
+            Ok((stream, bridge)) => ClientLoopEvent::SlotWarmed {
+                gen,
+                key,
+                stream,
+                bridge,
+            },
+            Err(err) => {
+                debug!(target = %key, err = %err, "switch dial failed");
+                ClientLoopEvent::SlotDialFailed {
+                    gen,
+                    key,
+                    err: err.to_string(),
+                }
+            }
+        };
+        let _ = event_tx.blocking_send(event);
+    });
+}
+
+/// Brief blocking retry around `UnixStream::connect` for a freshly-bound
+/// bridge socket. The listener bind is synchronous but the ssh child takes
+/// time to attach its stdio pair on the first accept — a stale ConnectionRefused
+/// here would mis-classify as a dial failure.
+fn connect_with_brief_retry(path: &std::path::Path) -> io::Result<UnixStream> {
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        match UnixStream::connect(path) {
+            Ok(s) => return Ok(s),
+            Err(e)
+                if e.kind() == io::ErrorKind::ConnectionRefused
+                    || e.kind() == io::ErrorKind::NotFound =>
+            {
+                if Instant::now() >= deadline {
+                    return Err(e);
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Socket path for a slot target with a REAL, already-reachable transport, or
