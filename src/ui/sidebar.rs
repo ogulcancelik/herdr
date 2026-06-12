@@ -792,6 +792,21 @@ fn retain_focused_space_group(
 /// Fold federated peer workspaces into the spaces list: rows whose
 /// project_key matches a local checkout splice in (indented) after that
 /// project's block; remote-only projects trail the list grouped together.
+/// True when any remote (peer or carried-snapshot) workspace folds under the
+/// same project as `ws` -- such a local row HEADS children and must render
+/// the bare leader identity, never the solo `identity · locator` form
+/// (the #92 solo rule counts remote children too).
+fn project_has_remote_rows(app: &AppState, ws: &crate::workspace::Workspace) -> bool {
+    let Some(local_key) = ws.git_space().map(|space| space.project_key.as_str()) else {
+        return false;
+    };
+    app.remote_peers().iter().any(|(_, peer)| {
+        peer.workspaces
+            .iter()
+            .any(|remote| remote.project_key.as_deref() == Some(local_key))
+    })
+}
+
 /// Remote rows of a collapsed local group stay hidden with it. Peers come
 /// from [`AppState::remote_peers`]: config-peer summaries first, then any
 /// carried fleet-snapshot entries a config peer does not shadow (#46).
@@ -2349,7 +2364,7 @@ fn render_workspace_list(
         // so its identity stays visible. Indented members keep the uniform
         // `<server>:<target>` member grammar; local and remote read the same.
         // One place (`grammar`) owns every label form.
-        let label = if group_key.is_some() {
+        let label = if group_key.is_some() || (!card.indented && project_has_remote_rows(app, ws)) {
             super::grammar::leader_label(app, ws, terminal_runtimes)
         } else if card.indented {
             super::grammar::local_member_label(app, ws, terminal_runtimes)
@@ -4372,6 +4387,37 @@ mod tests {
     /// #92: a SOLO local row (one local member, no remote folds, no group)
     /// must carry the project identity — `<owner/repo> · <server>:<branch>` —
     /// mirroring solo remotes (#81). The bare member grammar would erase the
+    /// Law 1 of the spaces grammar: a local row that HEADS remote folds is a
+    /// leader, not a solo -- bare identity, no `· server:branch` suffix
+    /// (the dompt regression: solo-form chosen by local grouping alone).
+    #[test]
+    fn local_row_with_remote_children_renders_bare_leader_identity() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = workspace_with_project_key("dompt", "github.com/nerd-machines/dompt");
+        ws.custom_name = None;
+        ws.cached_git_branch = Some("main".into());
+        app.workspaces = vec![ws];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.mode = crate::app::Mode::Terminal;
+        let mut remote = remote_summary("main", None, None, None);
+        remote.project_key = Some("github.com/nerd-machines/dompt".into());
+        app.peer_summaries = vec![peer_with_workspaces("sage", vec![remote])];
+
+        let area = Rect::new(0, 0, 60, 40);
+        let buffer = render_sidebar_to_buffer(&mut app, area);
+        let card = app.view.workspace_card_areas[0];
+        let row = buffer_row_text(&buffer, card.rect, card.rect.y);
+        assert!(
+            row.contains("nerd-machines/dompt"),
+            "leader keeps the identity: {row:?}"
+        );
+        assert!(
+            !row.contains('\u{00b7}') && !row.contains(":main"),
+            "leader carries NO locator suffix when children fold under it: {row:?}"
+        );
+    }
+
     /// project name from the only place that could carry it.
     #[test]
     fn solo_local_row_renders_project_identity_then_server_branch() {
