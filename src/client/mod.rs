@@ -429,7 +429,11 @@ fn setup_terminal_with_capabilities(
     enable_client_protocols: bool,
     mouse_capture: bool,
 ) -> io::Result<TerminalGuard> {
-    ratatui::init();
+    // try_init, not init: raw-mode/terminal IO can fail on the mid-switch
+    // terminal (held fds, broken mux) and the panicking init() aborted via a
+    // DOUBLE panic (its own hook's eprint also failed) -- #95. A failure here
+    // rides the leg loop's normal error rail instead (relaunch + notice).
+    ratatui::try_init().map_err(|e| io::Error::other(format!("terminal init failed: {e}")))?;
 
     if enable_client_protocols {
         if mouse_capture {
@@ -1184,7 +1188,12 @@ fn run_client_with_mode(
         } else {
             restore_terminal_state(in_tmux);
         }
-        original_hook(info);
+        // Best-effort diagnostic first: if the chained hook dies (ratatui's
+        // hook eprints, and a dead stderr made that a double-panic abort with
+        // NO message -- #95), the user still gets this line when stderr
+        // works, and a hook panic is contained instead of aborting.
+        let _ = writeln!(io::stderr(), "herdr client panic: {info}");
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| original_hook(info)));
     }));
 
     // Create the tokio runtime.
