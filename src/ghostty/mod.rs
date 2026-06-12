@@ -2784,6 +2784,38 @@ mod tests {
     }
 
     #[test]
+    fn resize_reflows_soft_wrapped_scrollback_to_new_width() {
+        // #77 layer 2: the vendored libghostty-vt `ghostty_terminal_resize`
+        // already routes through the reflowing screen/pagelist path (wraparound
+        // is on by default), so widening the terminal must un-wrap history that
+        // was soft-wrapped at the old narrow width — not leave it hard-wrapped.
+        //
+        // Width 6 forces "ABCDEFGHIJKL" to soft-wrap across two rows; trailing
+        // newlines then push that wrapped pair down into scrollback history.
+        let mut terminal = Terminal::new(6, 2, 10_000).unwrap();
+        terminal.write(b"ABCDEFGHIJKL\r\nx\r\ny\r\nz\r\n");
+
+        let wrapped_scrollback = terminal.scrollback_rows().unwrap();
+
+        // Widen past the logical line length: a reflowing resize collapses the
+        // two soft-wrapped scrollback rows back into one, so history shrinks.
+        terminal.resize(20, 2, 0, 0).unwrap();
+        let reflowed_scrollback = terminal.scrollback_rows().unwrap();
+        assert!(
+            reflowed_scrollback < wrapped_scrollback,
+            "expected widen to reflow wrapped history into fewer rows, \
+             got wrapped={wrapped_scrollback}, reflowed={reflowed_scrollback}"
+        );
+
+        // The reflowed history reads back as one unwrapped logical line.
+        let line = terminal.read_text_screen((0, 0), (19, 0), false).unwrap();
+        assert!(
+            line.starts_with("ABCDEFGHIJKL"),
+            "expected reflowed history to read as one line, got {line:?}"
+        );
+    }
+
+    #[test]
     fn terminal_extracts_viewport_hyperlink_uri() {
         let mut terminal = Terminal::new(20, 3, 0).unwrap();
         terminal.write(b"\x1b]8;;https://example.com\x1b\\Link\x1b]8;;\x1b\\");
