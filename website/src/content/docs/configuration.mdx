@@ -56,6 +56,41 @@ You can also open the global menu in Herdr and choose `reload config`.
 
 Reload applies most UI settings without restarting panes. Startup-only settings still need a restart.
 
+## Edit config from inside Herdr
+
+Bind `keys.edit_config` to a key and Herdr will open the live config in `$EDITOR` in a temporary overlay pane.
+
+```toml
+[keys]
+edit_config = "prefix+shift+e"
+```
+
+When the editor exits, Herdr copies the temp back over the target and reloads. If the new config fails to parse or validate, Herdr rolls the file back to its pre-edit contents and shows the diagnostics in a toast — the running config is never broken by a bad edit.
+
+From the CLI:
+
+```bash
+herdr config edit
+```
+
+The CLI opens `$EDITOR` directly (it's already in a terminal) and prints a reminder to run `herdr server reload-config` afterwards.
+
+### Where edits land: the `config.local.toml` overlay
+
+Herdr resolves the editable target by inspecting `config.toml`:
+
+- If it is a real, writable file, edits land there.
+- If it is a symlink (typical nix/Home Manager setup) or missing, edits land in `config.local.toml` next to it, which Herdr loads as an overlay on top of the base config.
+
+The overlay is concatenated AFTER the base text before TOML parse, so:
+
+- It can introduce `[section]` blocks the base does not declare.
+- It can extend a base section with brand-new keys.
+- It cannot override a scalar the base already sets in the same `[section]` — TOML rejects re-declaring a table with a duplicate key. Remove the key from the base if you need to override it.
+- `[[peers]]` arrays APPEND; the overlay cannot remove a peer.
+
+If the overlay is malformed, Herdr keeps the base config loaded and surfaces a diagnostic — it never drops the running config.
+
 ## Terminal defaults
 
 Set the executable Herdr uses for newly created interactive panes:

@@ -10,7 +10,7 @@ mod agents;
 mod api;
 pub(crate) use api::peers::short_host_name;
 mod api_helpers;
-mod config_io;
+pub(crate) mod config_io;
 mod creation;
 pub(crate) mod float;
 mod ids;
