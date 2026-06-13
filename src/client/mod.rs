@@ -3371,6 +3371,129 @@ mod tests {
         assert!(resolve_handshake_fleet(None).is_none());
     }
 
+    /// #103: end-to-end on the slots SWITCH path -- proves the hub's snapshot
+    /// actually reaches the dial's Hello, not just that resolve_handshake_fleet
+    /// would prefer it. Drives spawn_switch_dial (the function the SwitchServer
+    /// arm calls when slots are enabled) against a fake spoke that accepts the
+    /// handshake, captures the wire-decoded Hello, and asserts its fleet origin
+    /// matches the hub. This test FAILS if `spawn_switch_dial` stops threading
+    /// `fleet` into `do_handshake` -- i.e. if someone reintroduces the
+    /// `let _ = &fleet;` discard or drops the `fleet.clone()` at the call site.
+    #[test]
+    fn slots_switch_dial_threads_hub_fleet_into_spoke_handshake() {
+        use std::os::unix::net::UnixListener;
+        use std::path::PathBuf;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let _guard = env_lock().lock().unwrap();
+        // The hub case: the env carry is empty. Without the explicit override
+        // threaded through, the spoke would receive fleet: None -- the #102 bug.
+        let _cleared = EnvVarsRemovedGuard::new(&[
+            crate::remote::FLEET_SNAPSHOT_ENV_VAR,
+            crate::session::SESSION_ENV_VAR,
+            crate::api::SOCKET_PATH_ENV_VAR,
+        ]);
+        crate::session::clear_explicit_session_for_test();
+
+        // Bind a fake "spoke" listener; slot_socket_path(Home) reads
+        // HERDR_CLIENT_SOCKET_PATH (legacy fallback when HERDR_SOCKET_PATH is
+        // absent), so we point Home at our fake socket.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let socket_path = PathBuf::from(format!(
+            "/tmp/herdr-slots-fed-{}-{nanos}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind fake spoke socket");
+        let _client_sock_env = EnvVarGuard::set(
+            crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR,
+            socket_path.to_str().unwrap(),
+        );
+
+        // Spoke side: accept once, deserialize the Hello, write a Welcome so
+        // the dial completes cleanly, then return the captured fleet to the
+        // test thread.
+        let (hello_tx, hello_rx) = std::sync::mpsc::channel::<Option<protocol::FleetSnapshot>>();
+        let spoke = std::thread::spawn(move || {
+            let (mut server_stream, _) = listener.accept().expect("accept slot dial");
+            server_stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let hello: protocol::ClientMessage =
+                protocol::read_message(&mut server_stream, MAX_FRAME_SIZE)
+                    .expect("read Hello on spoke side");
+            let captured = match &hello {
+                protocol::ClientMessage::Hello { fleet, .. } => fleet.clone(),
+                _ => None,
+            };
+            // Welcome so do_handshake returns Ok cleanly.
+            let welcome = protocol::ServerMessage::Welcome {
+                version: PROTOCOL_VERSION,
+                encoding: RenderEncoding::SemanticFrame,
+                error: None,
+            };
+            protocol::write_message(&mut server_stream, &welcome).expect("send Welcome");
+            hello_tx.send(captured).ok();
+            // Keep the stream alive so the dial-side stream doesn't see EOF
+            // before SlotWarmed is emitted; the test drops `spoke` last.
+            std::thread::sleep(Duration::from_millis(200));
+            drop(server_stream);
+        });
+
+        // Hub snapshot the slots arm would forward into the next leg.
+        let hub = sample_snapshot("hub-mba22");
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ClientLoopEvent>(4);
+
+        spawn_switch_dial(
+            1,
+            slots::SlotTarget::Home,
+            (90, 30, 8, 16),
+            RenderEncoding::SemanticFrame,
+            Some(hub.clone()),
+            event_tx,
+        );
+
+        // Wait for the dial outcome to land. SlotWarmed marks success.
+        // SlotDialFailed indicates a setup mismatch and fails the test loudly.
+        let outcome = {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                    .await
+                    .expect("dial event within 5s")
+                    .expect("event channel open")
+            })
+        };
+        match outcome {
+            ClientLoopEvent::SlotWarmed { .. } => {}
+            ClientLoopEvent::SlotDialFailed { err, .. } => {
+                panic!("switch dial failed unexpectedly: {err}");
+            }
+            _ => panic!("unexpected dial event variant"),
+        }
+
+        let captured = hello_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("spoke captured a Hello");
+        spoke.join().ok();
+        let _ = std::fs::remove_file(&socket_path);
+
+        let fleet = captured.expect(
+            "spoke must receive Some(fleet) from the slots switch dial -- \
+             reintroducing `let _ = &fleet;` regresses #102 here",
+        );
+        assert_eq!(
+            fleet.origin, "hub-mba22",
+            "slots dial must carry the hub's snapshot, not env (empty) or None"
+        );
+    }
+
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
