@@ -638,6 +638,23 @@ impl AppState {
                         return None;
                     }
 
+                    // Spaces header `new` (#105): blank top-level workspace
+                    // at $HOME — distinct from the footer's tabs-mode `new`
+                    // (a tab) and from prefix+c (sibling-in-space). Both
+                    // event loops (App + headless deferred-request consumer)
+                    // share `request_new_workspace_cwd`, so we set that
+                    // instead of inventing a new field.
+                    let header_new = self.spaces_header_new_rect();
+                    let on_header_new = header_new.width > 0
+                        && mouse.row >= header_new.y
+                        && mouse.row < header_new.y + header_new.height
+                        && mouse.column >= header_new.x
+                        && mouse.column < header_new.x + header_new.width;
+                    if on_header_new {
+                        self.request_blank_workspace_at_home();
+                        return None;
+                    }
+
                     // Spaces section: the header's all/current label toggles
                     // the scope between the full workspace list and the
                     // focused space group.
@@ -1119,6 +1136,7 @@ impl AppState {
                 }
                 if let Some(idx) = self.workspace_at_row(mouse.row) {
                     self.selected = idx;
+                    let branchable = self.workspace_branchable(idx);
                     let kind = self
                         .workspaces
                         .get(idx)
@@ -1148,9 +1166,13 @@ impl AppState {
                                 collapsed: group_state
                                     .as_ref()
                                     .is_some_and(|(_, collapsed)| *collapsed),
+                                branchable,
                             })
                         })
-                        .unwrap_or(ContextMenuKind::Workspace { ws_idx: idx });
+                        .unwrap_or(ContextMenuKind::Workspace {
+                            ws_idx: idx,
+                            branchable,
+                        });
                     self.context_menu = Some(ContextMenuState {
                         kind,
                         x: mouse.column,
@@ -1172,8 +1194,10 @@ impl AppState {
                     // workspaces — a tab menu doesn't apply; offer the
                     // workspace menu for the (now focused) member instead.
                     let kind = if self.tab_strip_shows_members() {
+                        let member_ws_idx = self.active.unwrap_or(ws_idx);
                         ContextMenuKind::Workspace {
-                            ws_idx: self.active.unwrap_or(ws_idx),
+                            ws_idx: member_ws_idx,
+                            branchable: self.workspace_branchable(member_ws_idx),
                         }
                     } else {
                         ContextMenuKind::Tab { ws_idx, tab_idx }
@@ -2272,7 +2296,7 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Right), col, row));
         assert_eq!(app.state.mode, Mode::ContextMenu);
         let menu = app.state.context_menu.as_ref().expect("server menu opens");
-        assert_eq!(menu.items(), &["Show only this server"]);
+        assert_eq!(menu.items(), vec!["Show only this server"]);
 
         handle_context_menu_key(
             &mut app.state,
@@ -2297,7 +2321,7 @@ mod tests {
         // The same row's menu now offers only the clear.
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Right), col, row));
         let menu = app.state.context_menu.as_ref().expect("server menu opens");
-        assert_eq!(menu.items(), &["Show all servers"]);
+        assert_eq!(menu.items(), vec!["Show all servers"]);
         handle_context_menu_key(
             &mut app.state,
             &mut app.terminal_runtimes,
@@ -2786,7 +2810,10 @@ mod tests {
     fn hovering_context_menu_updates_highlight() {
         let mut app = app_for_mouse_test();
         app.state.context_menu = Some(ContextMenuState {
-            kind: ContextMenuKind::Workspace { ws_idx: 0 },
+            kind: ContextMenuKind::Workspace {
+                ws_idx: 0,
+                branchable: false,
+            },
             x: 2,
             y: 2,
             list: MenuListState::new(0),
@@ -3063,7 +3090,10 @@ mod tests {
         app.state.mode = Mode::Terminal;
 
         app.state.context_menu = Some(ContextMenuState {
-            kind: ContextMenuKind::Workspace { ws_idx: 1 },
+            kind: ContextMenuKind::Workspace {
+                ws_idx: 1,
+                branchable: false,
+            },
             x: 2,
             y: 2,
             list: MenuListState::new(1),

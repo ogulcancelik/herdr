@@ -2251,6 +2251,21 @@ fn render_workspace_list(
                 toggle_rect,
             );
         }
+        // Header `new` affordance (#105): create a blank workspace at $HOME,
+        // its own project section — distinct from the footer's tabs-mode
+        // `new` (which creates a tab) and from prefix+c (which makes a
+        // sibling within a space). Available in BOTH tab modes; click is
+        // wired in input/mouse.rs.
+        let new_rect = app.spaces_header_new_rect();
+        if new_rect != Rect::default() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    " new",
+                    Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+                )),
+                new_rect,
+            );
+        }
     }
 
     let metrics = workspace_list_scroll_metrics(app, area);

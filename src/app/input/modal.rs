@@ -679,13 +679,27 @@ pub(super) fn apply_context_menu_action(
             leave_modal(state);
         }
         (
-            ContextMenuKind::Workspace { ws_idx } | ContextMenuKind::GitWorkspace { ws_idx, .. },
+            ContextMenuKind::Workspace { ws_idx, .. }
+            | ContextMenuKind::GitWorkspace { ws_idx, .. },
             Some("Rename"),
         ) => {
             open_rename_workspace(state, terminal_runtimes, ws_idx);
         }
         (
-            ContextMenuKind::Workspace { ws_idx } | ContextMenuKind::GitWorkspace { ws_idx, .. },
+            ContextMenuKind::Workspace { ws_idx, .. }
+            | ContextMenuKind::GitWorkspace { ws_idx, .. },
+            Some("Branch session"),
+        ) => {
+            // #105: fork THIS row's focused-pane session into a worktree
+            // (not just the active workspace). The deferred-request seam is
+            // already shared with prefix+y (#) — both event loops consume it
+            // the same way.
+            state.request_branch_session = Some(ws_idx);
+            leave_modal(state);
+        }
+        (
+            ContextMenuKind::Workspace { ws_idx, .. }
+            | ContextMenuKind::GitWorkspace { ws_idx, .. },
             Some("Close"),
         ) => {
             state.selected = ws_idx;
@@ -1286,6 +1300,7 @@ mod tests {
                 is_linked_worktree: false,
                 has_worktree_children: true,
                 collapsed: false,
+                branchable: false,
             },
             x: 0,
             y: 0,
@@ -1380,7 +1395,7 @@ mod tests {
         let peer_menu = server_menu(peer_filter.clone(), false, true);
         assert_eq!(
             peer_menu.items(),
-            &["Show only this server", "Show all servers"]
+            vec!["Show only this server", "Show all servers"]
         );
 
         // Item 0 replaces the active filter with this row's.
@@ -1391,8 +1406,39 @@ mod tests {
 
         // The filtered row itself only offers the clear.
         let active_menu = server_menu(peer_filter, true, true);
-        assert_eq!(active_menu.items(), &["Show all servers"]);
+        assert_eq!(active_menu.items(), vec!["Show all servers"]);
         apply_context_menu_action(&mut state, &mut terminal_runtimes, active_menu, 0);
         assert_eq!(state.server_filter, None);
+    }
+
+    #[test]
+    fn workspace_context_menu_branch_session_targets_clicked_row() {
+        // #105: right-click "Branch session" forwards the row's ws_idx into
+        // the deferred-request seam (same one prefix+y uses). Both event
+        // loops consume `request_branch_session` and end up calling
+        // open_branch_session_dialog(ws_idx), so the target is the row's
+        // workspace, not the active one.
+        let mut state = state_with_workspaces(&["a", "b"]);
+        state.active = Some(0);
+        state.selected = 0;
+        let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Workspace {
+                ws_idx: 1,
+                branchable: true,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Branch session")
+            .expect("branchable workspace exposes the entry");
+
+        apply_context_menu_action(&mut state, &mut terminal_runtimes, menu, idx);
+
+        assert_eq!(state.request_branch_session, Some(1));
     }
 }

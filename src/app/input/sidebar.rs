@@ -524,14 +524,55 @@ impl AppState {
         })
     }
 
-    /// The spaces header's scope toggle hit-area: the whole header row (#41).
+    /// The spaces header's scope toggle hit-area: the whole header row (#41)
+    /// EXCEPT the `new` button rect — that one creates a blank workspace
+    /// (#105) and would otherwise be eaten by the all/current toggle.
     pub(super) fn on_spaces_panel_scope_toggle(&self, col: u16, row: u16) -> bool {
         let area = self.workspace_list_rect();
         if area == Rect::default() || area.height == 0 {
             return false;
         }
         let header = Rect::new(area.x, area.y, area.width, 1);
-        rect_contains(header, col, row)
+        if !rect_contains(header, col, row) {
+            return false;
+        }
+        let new_rect = self.spaces_header_new_rect();
+        if rect_contains(new_rect, col, row) {
+            return false;
+        }
+        true
+    }
+
+    /// Spaces-section header `new` affordance (#105): creates a blank
+    /// top-level workspace at $HOME — its own project section, not a
+    /// sibling. Lives in BOTH tab modes (the workspace-mode supersedes the
+    /// old footer's tabs-only `new`, which made siblings, not blanks). The
+    /// rect sits one column left of the all/current scope toggle so the
+    /// label stays right-aligned but the hit-areas never overlap. Hidden
+    /// when the mouse UI is off — keyboard users have prefix+n.
+    pub(crate) fn spaces_header_new_rect(&self) -> Rect {
+        if !self.mouse_capture || self.sidebar_collapsed {
+            return Rect::default();
+        }
+        let area = self.workspace_list_rect();
+        if area == Rect::default() || area.height == 0 {
+            return Rect::default();
+        }
+        let header = Rect::new(area.x, area.y, area.width, 1);
+        let toggle = crate::ui::panel_scope_toggle_rect(header, self.spaces_panel_scope);
+        // Need room for ` new` (4 chars) plus a one-column gap before the toggle.
+        const LABEL_WIDTH: u16 = 4;
+        const GAP: u16 = 1;
+        let toggle_left = if toggle.width == 0 {
+            header.x + header.width
+        } else {
+            toggle.x
+        };
+        if toggle_left < header.x + LABEL_WIDTH + GAP {
+            return Rect::default();
+        }
+        let x = toggle_left.saturating_sub(LABEL_WIDTH + GAP);
+        Rect::new(x, header.y, LABEL_WIDTH, 1)
     }
 
     /// Resolve the agents-panel row at `row` to its activation target. Local
@@ -1062,6 +1103,60 @@ mod tests {
             new_button.y,
         ));
         assert!(!app.state.request_new_workspace);
+    }
+
+    #[test]
+    fn spaces_header_new_button_creates_blank_workspace_at_home_in_both_tab_modes() {
+        // #105: the spaces-header `new` is the BLANK-workspace creator —
+        // distinct from the footer's tabs-mode `new` (which makes a tab) and
+        // from prefix+c (which makes a sibling within a space). It must
+        // exist in BOTH tab modes and stage the cwd as $HOME.
+        let original_home = std::env::var_os("HOME");
+        // Pin HOME for the assertion and restore it. Established pattern in
+        // this crate (mirrors expand_tilde_path tests in worktree.rs).
+        std::env::set_var("HOME", "/tmp/herdr-fake-home");
+        for tab_mode in [
+            crate::config::TabModeConfig::Tabs,
+            crate::config::TabModeConfig::Workspace,
+        ] {
+            let mut app = app_for_mouse_test();
+            app.state.workspaces = vec![Workspace::test_new("test")];
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.mode = Mode::Terminal;
+            app.state.tab_mode = tab_mode;
+
+            let new_rect = app.state.spaces_header_new_rect();
+            assert_ne!(
+                new_rect,
+                Rect::default(),
+                "header `new` is visible in {tab_mode:?}"
+            );
+            // The header rect sits to the left of the scope toggle, on the
+            // same row, never overlapping it.
+            let list_area = app.state.workspace_list_rect();
+            let header = Rect::new(list_area.x, list_area.y, list_area.width, 1);
+            let toggle = crate::ui::panel_scope_toggle_rect(header, app.state.spaces_panel_scope);
+            assert!(new_rect.x + new_rect.width <= toggle.x);
+
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                new_rect.x,
+                new_rect.y,
+            ));
+            assert_eq!(
+                app.state.request_new_workspace_cwd,
+                Some(std::path::PathBuf::from("/tmp/herdr-fake-home")),
+                "header `new` stages $HOME for both event loops in {tab_mode:?}",
+            );
+            // The scope toggle is not collaterally fired by the new-button click.
+            assert_eq!(app.state.spaces_panel_scope, PanelScope::All);
+        }
+        // Restore HOME.
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     #[test]

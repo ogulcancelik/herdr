@@ -1297,12 +1297,18 @@ pub(crate) struct TabPressState {
 pub enum ContextMenuKind {
     Workspace {
         ws_idx: usize,
+        /// The row has a resumable agent session (#105) — surfaces the
+        /// `Branch session` entry. Computed at open time and stashed so the
+        /// item list stays a pure function of the menu kind.
+        branchable: bool,
     },
     GitWorkspace {
         ws_idx: usize,
         is_linked_worktree: bool,
         has_worktree_children: bool,
         collapsed: bool,
+        /// As `Workspace::branchable` (#105).
+        branchable: bool,
     },
     Tab {
         ws_idx: usize,
@@ -1334,14 +1340,28 @@ pub struct ContextMenuState {
 }
 
 impl ContextMenuState {
-    pub fn items(&self) -> &'static [&'static str] {
-        match self.kind {
-            ContextMenuKind::Workspace { .. } => &["Rename", "Close"],
+    pub fn items(&self) -> Vec<&'static str> {
+        // Workspace/GitWorkspace variants tack on "Branch session" (#105) when
+        // the row's focused pane has a resumable agent session — keeps the
+        // entry hidden (vs grayed) so apply_context_menu_action only ever sees
+        // it for a valid target.
+        let branchable_workspace = matches!(
+            self.kind,
+            ContextMenuKind::Workspace {
+                branchable: true,
+                ..
+            } | ContextMenuKind::GitWorkspace {
+                branchable: true,
+                ..
+            }
+        );
+        let mut items: Vec<&'static str> = match self.kind {
+            ContextMenuKind::Workspace { .. } => vec!["Rename", "Close"],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: false,
                 ..
-            } => &["Rename", "Close", "New worktree", "Open worktree..."],
+            } => vec!["Rename", "Close", "New worktree", "Open worktree..."],
             // A linked worktree that is ALSO the space head (#62): main was
             // closed, this member now anchors the space. It keeps its own
             // worktree actions AND the close-whole-space / collapse affordances.
@@ -1350,7 +1370,7 @@ impl ContextMenuState {
                 has_worktree_children: true,
                 collapsed: true,
                 ..
-            } => &[
+            } => vec![
                 "Rename",
                 "Close",
                 "Close group",
@@ -1363,7 +1383,7 @@ impl ContextMenuState {
                 has_worktree_children: true,
                 collapsed: false,
                 ..
-            } => &[
+            } => vec![
                 "Rename",
                 "Close",
                 "Close group",
@@ -1374,7 +1394,7 @@ impl ContextMenuState {
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: true,
                 ..
-            } => &[
+            } => vec![
                 "Rename",
                 "Close",
                 "Delete worktree checkout...",
@@ -1385,7 +1405,7 @@ impl ContextMenuState {
                 has_worktree_children: true,
                 collapsed: true,
                 ..
-            } => &[
+            } => vec![
                 "Rename",
                 "Close group",
                 "New worktree",
@@ -1397,18 +1417,18 @@ impl ContextMenuState {
                 has_worktree_children: true,
                 collapsed: false,
                 ..
-            } => &[
+            } => vec![
                 "Rename",
                 "Close group",
                 "New worktree",
                 "Open worktree...",
                 "Collapse",
             ],
-            ContextMenuKind::Tab { .. } => &["New tab", "Rename", "Close"],
+            ContextMenuKind::Tab { .. } => vec!["New tab", "Rename", "Close"],
             ContextMenuKind::Pane {
                 has_manual_label: true,
                 ..
-            } => &[
+            } => vec![
                 "Rename pane",
                 "Clear pane name",
                 "Split vertical",
@@ -1419,7 +1439,7 @@ impl ContextMenuState {
             ContextMenuKind::Pane {
                 has_manual_label: false,
                 ..
-            } => &[
+            } => vec![
                 "Rename pane",
                 "Split vertical",
                 "Split horizontal",
@@ -1428,12 +1448,16 @@ impl ContextMenuState {
             ],
             ContextMenuKind::Server {
                 is_filtered: true, ..
-            } => &["Show all servers"],
+            } => vec!["Show all servers"],
             ContextMenuKind::Server {
                 any_filter: true, ..
-            } => &["Show only this server", "Show all servers"],
-            ContextMenuKind::Server { .. } => &["Show only this server"],
+            } => vec!["Show only this server", "Show all servers"],
+            ContextMenuKind::Server { .. } => vec!["Show only this server"],
+        };
+        if branchable_workspace {
+            items.push("Branch session");
         }
+        items
     }
 }
 
@@ -1724,6 +1748,49 @@ impl AppState {
     /// footer slot returns to the spaces list. Default tabs mode keeps it.
     pub(crate) fn sidebar_new_entry_visible(&self) -> bool {
         self.tab_mode == crate::config::TabModeConfig::Tabs
+    }
+
+    /// Stage a brand-new top-level workspace whose root pane starts at
+    /// `$HOME` (#105). Distinct from `create_workspace` (which follows the
+    /// `new_terminal_cwd` policy) and from `create_sibling_workspace`
+    /// (which pins to a space's checkout path): a BLANK workspace gets its
+    /// own project section, no sibling membership, and a home cwd. The
+    /// existing `request_new_workspace_cwd` seam is the single chokepoint
+    /// both event loops (`app::mod` and `server::headless`) already consume,
+    /// so callers stay event-loop agnostic.
+    pub(crate) fn request_blank_workspace_at_home(&mut self) {
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("/"));
+        self.request_new_workspace_cwd = Some(home);
+    }
+
+    /// Whether `ws_idx`'s focused pane has a resumable agent session that
+    /// `branch_session` can fork (#105). Mirrors the App-level
+    /// `focused_branch_plan` guard — the right-click menu uses it to surface
+    /// the `Branch session` entry only on rows where the action would
+    /// succeed.
+    pub(crate) fn workspace_branchable(&self, ws_idx: usize) -> bool {
+        let Some(ws) = self.workspaces.get(ws_idx) else {
+            return false;
+        };
+        let Some(pane_id) = ws.focused_pane_id() else {
+            return false;
+        };
+        let Some(pane) = ws.pane_state(pane_id) else {
+            return false;
+        };
+        let Some(terminal) = self.terminals.get(&pane.attached_terminal_id) else {
+            return false;
+        };
+        let Some(info) = crate::app::creation::terminal_agent_session_info(terminal) else {
+            return false;
+        };
+        let session_ref = crate::agent_resume::AgentSessionRef {
+            kind: info.kind,
+            value: info.value,
+        };
+        crate::agent_resume::branch_plan(&info.source, &info.agent, &session_ref).is_some()
     }
 
     /// The sidebar section scopes, bundled for session-snapshot capture.
@@ -2262,6 +2329,7 @@ mod tests {
                 is_linked_worktree: true,
                 has_worktree_children: false,
                 collapsed: false,
+                branchable: false,
             },
             x: 0,
             y: 0,
@@ -2270,7 +2338,7 @@ mod tests {
 
         assert_eq!(
             menu.items(),
-            &[
+            vec![
                 "Rename",
                 "Close",
                 "Delete worktree checkout...",
@@ -2287,6 +2355,7 @@ mod tests {
                 is_linked_worktree: false,
                 has_worktree_children: false,
                 collapsed: false,
+                branchable: false,
             },
             x: 0,
             y: 0,
@@ -2295,7 +2364,7 @@ mod tests {
 
         assert_eq!(
             menu.items(),
-            &["Rename", "Close", "New worktree", "Open worktree..."]
+            vec!["Rename", "Close", "New worktree", "Open worktree..."]
         );
     }
 
@@ -2307,6 +2376,7 @@ mod tests {
                 is_linked_worktree: false,
                 has_worktree_children: true,
                 collapsed: false,
+                branchable: false,
             },
             x: 0,
             y: 0,
@@ -2315,13 +2385,109 @@ mod tests {
 
         assert_eq!(
             menu.items(),
-            &[
+            vec![
                 "Rename",
                 "Close group",
                 "New worktree",
                 "Open worktree...",
                 "Collapse"
             ]
+        );
+    }
+
+    #[test]
+    fn workspace_context_menu_offers_branch_session_when_branchable() {
+        // #105: the row's row-targeted Branch session entry rides on a
+        // resumable-agent flag computed at open time. Without it the entry
+        // stays hidden so apply_context_menu_action can never act on a row
+        // that would just fall through to a "no resumable agent" notice.
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Workspace {
+                ws_idx: 0,
+                branchable: true,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        assert_eq!(menu.items(), vec!["Rename", "Close", "Branch session"]);
+
+        let menu_off = ContextMenuState {
+            kind: ContextMenuKind::Workspace {
+                ws_idx: 0,
+                branchable: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        assert_eq!(menu_off.items(), vec!["Rename", "Close"]);
+    }
+
+    #[test]
+    fn request_blank_workspace_at_home_stages_home_for_both_loops() {
+        // #105: blank workspace creation reuses the existing
+        // `request_new_workspace_cwd` seam — both the App and headless
+        // request consumers already drain it via `create_workspace_with_options`.
+        // No new field, no new event-loop branch.
+        let original_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", "/tmp/herdr-blank-home");
+
+        let mut state = AppState::test_new();
+        assert!(state.request_new_workspace_cwd.is_none());
+
+        state.request_blank_workspace_at_home();
+
+        assert_eq!(
+            state.request_new_workspace_cwd,
+            Some(std::path::PathBuf::from("/tmp/herdr-blank-home")),
+        );
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn workspace_branchable_tracks_persisted_agent_session() {
+        // #105: the right-click menu's Branch session entry is gated on
+        // whether the row's focused pane has a resumable agent session.
+        // Mirrors the App-level focused_branch_plan check so the menu never
+        // surfaces an entry that would just fall through to the
+        // "no resumable agent" notice.
+        let mut state = AppState::test_new();
+        state.workspaces = vec![crate::workspace::Workspace::test_new("main")];
+        state.active = Some(0);
+        state.selected = 0;
+        state.ensure_test_terminals();
+        assert!(
+            !state.workspace_branchable(0),
+            "fresh workspace has no resumable session"
+        );
+
+        let ws = &state.workspaces[0];
+        let pane_id = ws.focused_pane_id().expect("focused pane");
+        let terminal_id = ws
+            .pane_state(pane_id)
+            .expect("pane state")
+            .attached_terminal_id
+            .clone();
+        let terminal = state.terminals.get_mut(&terminal_id).expect("terminal");
+        terminal.persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("sess-1")
+                .expect("session id should validate"),
+        });
+
+        assert!(
+            state.workspace_branchable(0),
+            "row with a resumable session is branchable"
+        );
+        assert!(
+            !state.workspace_branchable(7),
+            "out-of-range ws_idx is not branchable"
         );
     }
 }

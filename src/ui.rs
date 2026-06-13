@@ -82,10 +82,12 @@ pub(crate) use self::{
         WorkspaceListEntry, SIDEBAR_MENU_BAND_ROWS,
     },
 };
-// The scope-label rects are only consulted by hit-area tests now that the
-// whole header row toggles (#41); rendering uses them inside `ui::sidebar`.
+// The scope-label rects are used by hit-area code in app::input::sidebar to
+// carve the spaces-header `new` button (#105) out of the all/current toggle's
+// row, and by tests.
 #[cfg(test)]
-pub(crate) use self::sidebar::{agent_panel_toggle_rect, panel_scope_toggle_rect};
+pub(crate) use self::sidebar::agent_panel_toggle_rect;
+pub(crate) use self::sidebar::panel_scope_toggle_rect;
 pub(crate) use self::{
     keybind_help::keybind_help_lines,
     mobile::{
