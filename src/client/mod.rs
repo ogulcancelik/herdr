@@ -643,6 +643,18 @@ fn requested_keybindings() -> ClientKeybindings {
 ///
 /// Sends Hello with the terminal size and protocol version, reads the Welcome
 /// response. Returns Ok(()) on success, or an error if the server rejects us.
+/// The fleet snapshot a handshake advertises: an explicit override (the slots
+/// switch path passes the hub's server-generated snapshot here) wins over the
+/// env-carried one. On the hub the env carry is empty -- the origin generates
+/// the snapshot and never carries one -- so without honoring the override a
+/// switch to a spoke would hand it `None` and strip its servers band / home
+/// row (#102).
+fn resolve_handshake_fleet(
+    fleet_override: Option<&protocol::FleetSnapshot>,
+) -> Option<protocol::FleetSnapshot> {
+    fleet_override.cloned().or_else(carried_fleet_snapshot)
+}
+
 fn do_handshake(
     stream: &mut UnixStream,
     cols: u16,
@@ -652,6 +664,12 @@ fn do_handshake(
     requested_encoding: RenderEncoding,
     direct_attach_requested: bool,
     host_theme: Option<crate::terminal_theme::TerminalTheme>,
+    // An explicit fleet snapshot to advertise in the Hello, overriding the
+    // env-carried one. The slots switch path MUST pass the hub's
+    // server-generated snapshot here (#102): the env read is empty on the hub
+    // (the origin carries no snapshot), so without this a switch to a spoke
+    // hands it `fleet: None` and the spoke loses its servers band/home row.
+    fleet_override: Option<&protocol::FleetSnapshot>,
 ) -> Result<RenderEncoding, ClientError> {
     stream
         .set_nonblocking(false)
@@ -671,7 +689,7 @@ fn do_handshake(
         } else {
             ClientLaunchMode::App
         },
-        fleet: carried_fleet_snapshot(),
+        fleet: resolve_handshake_fleet(fleet_override),
         host_theme,
         notice: take_attach_notice(),
     };
@@ -1070,6 +1088,7 @@ fn run_attach_attempt(
         requested_encoding,
         attach_request.is_some(),
         host_theme,
+        None, // initial attach: the launcher-carried snapshot (env) is correct
     )
     .map_err(AttachAttemptError::Handshake)?;
 
@@ -1657,7 +1676,6 @@ async fn run_client_loop(
                         // focus-after-attach message (tracked alongside #75).
                         if let Some(manager) = slot_manager.as_mut() {
                             let _ = &focus_workspace;
-                            let _ = &fleet;
                             let target = slots::SlotTarget::from_key(&ssh_target);
                             match manager.flip_to(&target) {
                                 Ok(Some(new_stream)) => {
@@ -1716,6 +1734,7 @@ async fn run_client_loop(
                                         target.clone(),
                                         geometry,
                                         negotiated_encoding,
+                                        fleet.clone(),
                                         event_tx.clone(),
                                     );
                                     if let Some(p) = pending_switch.as_ref() {
@@ -2464,7 +2483,10 @@ fn spawn_warm_dial(
                 UnixStream::connect(&socket_path).map_err(ClientError::ConnectionFailed)?;
             // A warm slot is a full app client, like the active one. It carries
             // no host theme (the active slot owns the host terminal) and no
-            // notice; the handshake just establishes a paused session.
+            // notice; the handshake just establishes a paused session. No fleet
+            // override: a warm pre-dial predates any switch, so the hub
+            // snapshot is unknown here (a genuinely-warm spoke would need a
+            // post-flip snapshot push -- #102 fix-2, deferred).
             do_handshake(
                 &mut stream,
                 cols,
@@ -2473,6 +2495,7 @@ fn spawn_warm_dial(
                 cell_height_px,
                 requested_encoding,
                 false,
+                None,
                 None,
             )?;
             Ok(stream)
@@ -2510,6 +2533,9 @@ fn spawn_switch_dial(
     target: slots::SlotTarget,
     geometry: (u16, u16, u32, u32),
     requested_encoding: RenderEncoding,
+    // The hub's snapshot from the SwitchServer message -- carried into the
+    // spoke's handshake so it renders the servers band / home row (#102).
+    fleet: Option<protocol::FleetSnapshot>,
     event_tx: tokio::sync::mpsc::Sender<ClientLoopEvent>,
 ) {
     std::thread::spawn(move || {
@@ -2531,6 +2557,7 @@ fn spawn_switch_dial(
                         requested_encoding,
                         false,
                         None,
+                        fleet.as_ref(),
                     )?;
                     return Ok((stream, None));
                 }
@@ -2559,6 +2586,7 @@ fn spawn_switch_dial(
                             requested_encoding,
                             false,
                             None,
+                            fleet.as_ref(),
                         )?;
                         Ok((stream, Some(bridge)))
                     }
@@ -3292,6 +3320,55 @@ mod tests {
         let _guard = env_lock().lock().unwrap();
         let _notice = EnvVarGuard::set(SWITCH_NOTICE_ENV_VAR, "");
         assert!(take_attach_notice().is_none());
+    }
+
+    fn sample_snapshot(origin: &str) -> protocol::FleetSnapshot {
+        protocol::FleetSnapshot {
+            origin: origin.to_string(),
+            peers: Vec::new(),
+            origin_summary: None,
+        }
+    }
+
+    /// #102: the slots switch path passes the hub's snapshot explicitly; it
+    /// MUST win over the env carry (empty on the hub), or a switch to a spoke
+    /// hands it None and strips its servers band / home row.
+    #[test]
+    fn resolve_handshake_fleet_prefers_the_explicit_override() {
+        let _guard = env_lock().lock().unwrap();
+        // Even with a DIFFERENT env snapshot present, the explicit override
+        // wins -- this is exactly the hub case the slots dial must honor.
+        let env_snap = sample_snapshot("stale-env");
+        let _env = EnvVarGuard::set(
+            crate::remote::FLEET_SNAPSHOT_ENV_VAR,
+            &serde_json::to_string(&env_snap).unwrap(),
+        );
+        let hub = sample_snapshot("mba22");
+        let resolved = resolve_handshake_fleet(Some(&hub)).expect("override carried");
+        assert_eq!(resolved.origin, "mba22", "explicit override wins over env");
+    }
+
+    /// With no override (the initial attach / legs path), the env carry is the
+    /// source of truth -- the legacy behavior must be preserved.
+    #[test]
+    fn resolve_handshake_fleet_falls_back_to_env_without_override() {
+        let _guard = env_lock().lock().unwrap();
+        let env_snap = sample_snapshot("launcher-carried");
+        let _env = EnvVarGuard::set(
+            crate::remote::FLEET_SNAPSHOT_ENV_VAR,
+            &serde_json::to_string(&env_snap).unwrap(),
+        );
+        let resolved = resolve_handshake_fleet(None).expect("env carry used");
+        assert_eq!(resolved.origin, "launcher-carried");
+    }
+
+    /// Hub with no override AND no env carry: None -- the bug's failure mode,
+    /// now only reachable when the caller genuinely has nothing to send.
+    #[test]
+    fn resolve_handshake_fleet_is_none_when_neither_present() {
+        let _guard = env_lock().lock().unwrap();
+        let _cleared = EnvVarsRemovedGuard::new(&[crate::remote::FLEET_SNAPSHOT_ENV_VAR]);
+        assert!(resolve_handshake_fleet(None).is_none());
     }
 
     fn env_lock() -> &'static Mutex<()> {
