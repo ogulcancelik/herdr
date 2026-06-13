@@ -28,6 +28,16 @@ pub(crate) fn resolve_new_terminal_cwd(
     }
 }
 
+/// Resolve CWD for a specific entity type, falling back to the global policy.
+pub(crate) fn resolve_domain_cwd(
+    domain: &Option<NewTerminalCwdConfig>,
+    global: &NewTerminalCwdConfig,
+    follow_cwd: Option<PathBuf>,
+) -> PathBuf {
+    let policy = domain.as_ref().unwrap_or(global);
+    resolve_new_terminal_cwd(policy, follow_cwd)
+}
+
 impl App {
     pub(super) fn seed_cwd_from_workspace(&self, ws_idx: usize) -> Option<PathBuf> {
         self.state
@@ -36,8 +46,12 @@ impl App {
             .resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)
     }
 
-    pub(super) fn resolve_new_terminal_cwd(&self, follow_cwd: Option<PathBuf>) -> PathBuf {
-        resolve_new_terminal_cwd(&self.state.new_terminal_cwd, follow_cwd)
+    pub(super) fn resolve_domain_cwd(
+        &self,
+        domain: &Option<NewTerminalCwdConfig>,
+        follow_cwd: Option<PathBuf>,
+    ) -> PathBuf {
+        resolve_domain_cwd(domain, &self.state.new_terminal_cwd, follow_cwd)
     }
 
     pub(super) fn workspace_creation_source(&self) -> Option<usize> {
@@ -60,7 +74,8 @@ impl App {
         let follow_cwd = self
             .workspace_creation_source()
             .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx));
-        let initial_cwd = self.resolve_new_terminal_cwd(follow_cwd);
+        let initial_cwd =
+            self.resolve_domain_cwd(&self.state.new_terminal_cwd_workspaces, follow_cwd);
         if let Err(e) = self.create_workspace_with_options(initial_cwd, true) {
             error!(err = %e, "failed to create workspace");
             self.state.mode = Mode::Navigate;
@@ -73,7 +88,7 @@ impl App {
             .state
             .active
             .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx));
-        let initial_cwd = self.resolve_new_terminal_cwd(follow_cwd);
+        let initial_cwd = self.resolve_domain_cwd(&self.state.new_terminal_cwd_tabs, follow_cwd);
         match self.create_tab_with_options(initial_cwd, true) {
             Ok(tab_idx) => {
                 if let Some(name) = custom_name {

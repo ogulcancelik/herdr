@@ -496,7 +496,8 @@ impl AppState {
                 let tab = ws.active_tab()?;
                 tab.cwd_for_pane(tab.layout.focused(), &self.terminals, terminal_runtimes)
             });
-        let cwd = Some(super::creation::resolve_new_terminal_cwd(
+        let cwd = Some(super::creation::resolve_domain_cwd(
+            &self.new_terminal_cwd_panes,
             &self.new_terminal_cwd,
             follow_cwd,
         ));

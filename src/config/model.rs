@@ -197,6 +197,28 @@ impl<'de> Deserialize<'de> for NewTerminalCwdConfig {
     }
 }
 
+/// CWD policy for a specific entity (workspace/tab/pane).
+///
+/// Deserializes `"inherit"` to `None` (use global `new_cwd`), any other value to `Some(...)`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewCwdDomainConfig(pub Option<NewTerminalCwdConfig>);
+
+impl<'de> Deserialize<'de> for NewCwdDomainConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.trim() {
+            "" | "inherit" => Ok(Self(None)),
+            "follow" => Ok(Self(Some(NewTerminalCwdConfig::Follow))),
+            "home" => Ok(Self(Some(NewTerminalCwdConfig::Home))),
+            "current" => Ok(Self(Some(NewTerminalCwdConfig::Current))),
+            _ => Ok(Self(Some(NewTerminalCwdConfig::Path(value)))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShellModeConfig {
@@ -215,6 +237,12 @@ pub struct TerminalConfig {
     pub shell_mode: ShellModeConfig,
     /// CWD policy for new interactive panes, tabs, and workspaces.
     pub new_cwd: NewTerminalCwdConfig,
+    /// CWD policy for new workspaces. None = inherit from `new_cwd`.
+    pub new_cwd_workspaces: NewCwdDomainConfig,
+    /// CWD policy for new tabs. None = inherit from `new_cwd`.
+    pub new_cwd_tabs: NewCwdDomainConfig,
+    /// CWD policy for new panes. None = inherit from `new_cwd`.
+    pub new_cwd_panes: NewCwdDomainConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -779,6 +807,36 @@ new_cwd = "~/Projects"
         assert_eq!(
             config.terminal.new_cwd,
             NewTerminalCwdConfig::Path("~/Projects".into())
+        );
+    }
+
+    #[test]
+    fn new_cwd_domain_defaults_to_inherit() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.terminal.new_cwd_workspaces, NewCwdDomainConfig(None));
+        assert_eq!(config.terminal.new_cwd_tabs, NewCwdDomainConfig(None));
+        assert_eq!(config.terminal.new_cwd_panes, NewCwdDomainConfig(None));
+    }
+
+    #[test]
+    fn new_cwd_domain_inherits_and_overrides() {
+        let config: Config = toml::from_str(
+            r#"
+[terminal]
+new_cwd = "home"
+new_cwd_workspaces = "follow"
+new_cwd_panes = "~/Projects"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.terminal.new_cwd_workspaces,
+            NewCwdDomainConfig(Some(NewTerminalCwdConfig::Follow))
+        );
+        assert_eq!(config.terminal.new_cwd_tabs, NewCwdDomainConfig(None));
+        assert_eq!(
+            config.terminal.new_cwd_panes,
+            NewCwdDomainConfig(Some(NewTerminalCwdConfig::Path("~/Projects".into())))
         );
     }
 

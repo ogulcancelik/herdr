@@ -85,6 +85,8 @@ new_cwd = "follow"
 
 `new_cwd = "follow"` keeps the default behavior and inherits the source pane or workspace. When there is no source workspace, Herdr starts in `$HOME`. Use `"home"` to always start in `$HOME`, `"current"` to use Herdr's process directory, or a fixed path such as `"~/Projects"`. Explicit `--cwd` values from the CLI or socket API still take precedence.
 
+`new_cwd_workspaces`, `new_cwd_tabs`, and `new_cwd_panes` override `new_cwd` for the corresponding entity type. The default `"inherit"` uses the global `new_cwd` value. Set any of them to `"follow"`, `"home"`, `"current"`, or a fixed path to override per entity.
+
 ## Worktrees
 
 Set the root directory Herdr uses for Git worktree checkouts created from the sidebar:

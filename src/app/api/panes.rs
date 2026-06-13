@@ -50,7 +50,7 @@ impl App {
                     &self.terminal_runtimes,
                 )
             });
-            Some(self.resolve_new_terminal_cwd(follow_cwd))
+            Some(self.resolve_domain_cwd(&self.state.new_terminal_cwd_panes, follow_cwd))
         });
         let default_shell = self.state.default_shell.clone();
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;

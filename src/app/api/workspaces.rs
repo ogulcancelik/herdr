@@ -49,7 +49,7 @@ impl App {
             let follow_cwd = self
                 .workspace_creation_source()
                 .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx));
-            self.resolve_new_terminal_cwd(follow_cwd)
+            self.resolve_domain_cwd(&self.state.new_terminal_cwd_workspaces, follow_cwd)
         });
         match self.create_workspace_with_options(cwd, params.focus) {
             Ok(index) => {

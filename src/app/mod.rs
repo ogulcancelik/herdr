@@ -519,6 +519,9 @@ impl App {
             default_shell: config.terminal.default_shell.clone(),
             shell_mode: config.terminal.shell_mode,
             new_terminal_cwd: config.terminal.new_cwd.clone(),
+            new_terminal_cwd_workspaces: config.terminal.new_cwd_workspaces.0.clone(),
+            new_terminal_cwd_tabs: config.terminal.new_cwd_tabs.0.clone(),
+            new_terminal_cwd_panes: config.terminal.new_cwd_panes.0.clone(),
             pane_scrollback_limit_bytes: config.advanced.scrollback_limit_bytes,
             accent: crate::config::parse_color(&config.ui.accent),
             sound: config.ui.sound.clone(),
@@ -972,7 +975,7 @@ impl App {
             previous_mode,
             Mode::ReleaseNotes | Mode::ProductAnnouncement | Mode::Settings
         );
-        let cwd = self.resolve_new_terminal_cwd(None);
+        let cwd = self.resolve_domain_cwd(&self.state.new_terminal_cwd_workspaces, None);
 
         match self.create_workspace_with_options(cwd, true) {
             Ok(_) => {
@@ -1263,6 +1266,9 @@ impl App {
             self.state.default_shell = config.terminal.default_shell.clone();
             self.state.shell_mode = config.terminal.shell_mode;
             self.state.new_terminal_cwd = config.terminal.new_cwd.clone();
+            self.state.new_terminal_cwd_workspaces = config.terminal.new_cwd_workspaces.0.clone();
+            self.state.new_terminal_cwd_tabs = config.terminal.new_cwd_tabs.0.clone();
+            self.state.new_terminal_cwd_panes = config.terminal.new_cwd_panes.0.clone();
         }
 
         if !invalid_section("worktrees") {
@@ -2212,6 +2218,9 @@ mod tests {
             app.state.new_terminal_cwd,
             crate::config::NewTerminalCwdConfig::Home
         );
+        assert_eq!(app.state.new_terminal_cwd_workspaces, None);
+        assert_eq!(app.state.new_terminal_cwd_tabs, None);
+        assert_eq!(app.state.new_terminal_cwd_panes, None);
         assert!(app.state.switch_ascii_input_source_in_prefix);
         assert!(app.state.config_diagnostic.is_none());
         let toast = app.state.toast.as_ref().unwrap();
@@ -2486,12 +2495,21 @@ mod tests {
         let original_default_shell = app.state.default_shell.clone();
         let original_shell_mode = app.state.shell_mode;
         let original_new_cwd = app.state.new_terminal_cwd.clone();
+        let original_new_cwd_workspaces = app.state.new_terminal_cwd_workspaces.clone();
+        let original_new_cwd_tabs = app.state.new_terminal_cwd_tabs.clone();
+        let original_new_cwd_panes = app.state.new_terminal_cwd_panes.clone();
         let report = app.reload_config();
 
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
         assert_eq!(app.state.default_shell, original_default_shell);
         assert_eq!(app.state.shell_mode, original_shell_mode);
         assert_eq!(app.state.new_terminal_cwd, original_new_cwd);
+        assert_eq!(
+            app.state.new_terminal_cwd_workspaces,
+            original_new_cwd_workspaces
+        );
+        assert_eq!(app.state.new_terminal_cwd_tabs, original_new_cwd_tabs);
+        assert_eq!(app.state.new_terminal_cwd_panes, original_new_cwd_panes);
         assert_eq!(
             app.state.toast_config.delivery,
             crate::config::ToastDelivery::Terminal
@@ -2955,6 +2973,31 @@ mod tests {
         );
 
         assert_eq!(cwd, std::path::PathBuf::from("/tmp/herdr-fixed"));
+    }
+
+    #[test]
+    fn new_terminal_cwd_domain_inherit_falls_through_to_global() {
+        let cwd = creation::resolve_domain_cwd(
+            &None,
+            &crate::config::NewTerminalCwdConfig::Home,
+            Some(std::path::PathBuf::from("/tmp/source")),
+        );
+        assert_eq!(
+            cwd,
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap(),
+        );
+    }
+
+    #[test]
+    fn new_terminal_cwd_domain_override_takes_precedence() {
+        let cwd = creation::resolve_domain_cwd(
+            &Some(crate::config::NewTerminalCwdConfig::Follow),
+            &crate::config::NewTerminalCwdConfig::Home,
+            Some(std::path::PathBuf::from("/tmp/source")),
+        );
+        assert_eq!(cwd, std::path::PathBuf::from("/tmp/source"));
     }
 
     #[test]

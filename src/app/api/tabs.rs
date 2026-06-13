@@ -68,7 +68,7 @@ impl App {
                 .state
                 .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
                 .and_then(|rt| rt.cwd());
-            self.resolve_new_terminal_cwd(follow_cwd)
+            self.resolve_domain_cwd(&self.state.new_terminal_cwd_tabs, follow_cwd)
         });
         let (rows, cols) = self.state.estimate_pane_size();
         let default_shell = self.state.default_shell.clone();

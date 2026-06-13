@@ -1361,6 +1361,9 @@ pub struct AppState {
     pub default_shell: String,
     pub shell_mode: crate::config::ShellModeConfig,
     pub new_terminal_cwd: NewTerminalCwdConfig,
+    pub new_terminal_cwd_workspaces: Option<NewTerminalCwdConfig>,
+    pub new_terminal_cwd_tabs: Option<NewTerminalCwdConfig>,
+    pub new_terminal_cwd_panes: Option<NewTerminalCwdConfig>,
     pub pane_scrollback_limit_bytes: usize,
     #[allow(dead_code)] // kept for backward compat; palette.accent is the source of truth
     pub accent: Color,
@@ -1691,6 +1694,9 @@ impl AppState {
             default_shell: String::new(),
             shell_mode: crate::config::ShellModeConfig::Auto,
             new_terminal_cwd: NewTerminalCwdConfig::Follow,
+            new_terminal_cwd_workspaces: None,
+            new_terminal_cwd_tabs: None,
+            new_terminal_cwd_panes: None,
             pane_scrollback_limit_bytes: crate::config::DEFAULT_SCROLLBACK_LIMIT_BYTES,
             accent: Color::Cyan,
             sound: SoundConfig {
