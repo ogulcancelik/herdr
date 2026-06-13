@@ -189,6 +189,7 @@ fn run_config_command(args: &[String]) -> std::io::Result<i32> {
 
     match subcommand {
         "reset-keys" => config_reset_keys(&args[1..]),
+        "edit" => config_edit(&args[1..]),
         "help" | "--help" | "-h" => {
             print_config_help();
             Ok(0)
@@ -198,6 +199,40 @@ fn run_config_command(args: &[String]) -> std::io::Result<i32> {
             Ok(2)
         }
     }
+}
+
+fn config_edit(args: &[String]) -> std::io::Result<i32> {
+    if !args.is_empty() {
+        eprintln!("usage: herdr config edit");
+        return Ok(2);
+    }
+
+    let target = match crate::app::config_io::resolve_write_target() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("herdr config edit: could not resolve write target: {err}");
+            return Ok(1);
+        }
+    };
+
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    // Spawn $EDITOR directly on the target -- the CLI is already in a
+    // terminal, no float/overlay needed (the spike calls this out).
+    let status = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$1\"", editor = editor))
+        .arg("sh")
+        .arg(target.as_os_str())
+        .status()?;
+
+    if !status.success() {
+        eprintln!("herdr config edit: editor exited non-zero, no reload triggered");
+        return Ok(status.code().unwrap_or(1));
+    }
+
+    println!("Edited: {}", target.display());
+    println!("To apply changes in the running server: herdr server reload-config");
+    Ok(0)
 }
 
 fn config_reset_keys(args: &[String]) -> std::io::Result<i32> {
@@ -846,6 +881,7 @@ fn print_session_error(code: &str, message: &str) {
 
 fn print_config_help() {
     eprintln!("herdr config commands:");
+    eprintln!("  herdr config edit        open the live config (or overlay) in $EDITOR");
     eprintln!("  herdr config reset-keys  back up config.toml and remove custom keybindings");
 }
 

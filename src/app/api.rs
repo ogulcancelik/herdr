@@ -418,27 +418,66 @@ impl App {
     }
 
     fn restore_overlay_after_exit(&mut self, overlay: OverlayPaneState) {
+        // Snapshot the post-exit hook BEFORE we tear the overlay down --
+        // it owns paths we need to keep around (backup) past the
+        // temp-file cleanup pass below.
+        let post_exit = overlay.post_exit.clone();
         for temp_file in &overlay.temp_files {
             let _ = std::fs::remove_file(temp_file);
         }
 
-        let Some(ws) = self.state.workspaces.get_mut(overlay.ws_idx) else {
-            return;
-        };
-        if overlay.tab_idx >= ws.tabs.len() {
-            return;
+        if let Some(ws) = self.state.workspaces.get_mut(overlay.ws_idx) {
+            if overlay.tab_idx < ws.tabs.len() {
+                ws.active_tab = overlay.tab_idx;
+                let tab = &mut ws.tabs[overlay.tab_idx];
+                if tab.panes.contains_key(&overlay.previous_focus) {
+                    tab.layout.focus_pane(overlay.previous_focus);
+                }
+                tab.zoomed = overlay.previous_zoomed;
+
+                if self.state.active == Some(overlay.ws_idx) {
+                    self.state.mode = Mode::Terminal;
+                }
+            }
         }
 
-        ws.active_tab = overlay.tab_idx;
-        let tab = &mut ws.tabs[overlay.tab_idx];
-        if tab.panes.contains_key(&overlay.previous_focus) {
-            tab.layout.focus_pane(overlay.previous_focus);
+        if let Some(crate::app::OverlayPostExit::ConfigEdit { target, backup }) = post_exit {
+            self.finish_config_edit(target, backup);
         }
-        tab.zoomed = overlay.previous_zoomed;
+    }
 
-        if self.state.active == Some(overlay.ws_idx) {
-            self.state.mode = Mode::Terminal;
+    /// Called after the config-edit overlay's editor pane exited and the
+    /// shell already cp'd the temp back over `target`. Reload the live
+    /// config; on a Failed apply, restore the pre-edit backup and surface
+    /// the diagnostics via the existing toast channel.
+    pub(crate) fn finish_config_edit(
+        &mut self,
+        target: std::path::PathBuf,
+        backup: std::path::PathBuf,
+    ) {
+        let report = self.apply_config_from_disk(true);
+        if matches!(report.status, crate::config::ConfigReloadStatus::Failed) {
+            if let Ok(backup_content) = std::fs::read_to_string(&backup) {
+                if let Err(err) = std::fs::write(&target, backup_content) {
+                    tracing::warn!(
+                        target = %target.display(),
+                        err = %err,
+                        "config edit rollback write failed"
+                    );
+                }
+            }
+            // Re-apply the now-restored base so the running state is
+            // consistent with the backup we just put back on disk.
+            let _ = self.apply_config_from_disk(false);
+            self.state.toast = Some(crate::app::state::ToastNotification {
+                kind: crate::app::state::ToastKind::NeedsAttention,
+                title: "config rolled back".to_string(),
+                context: crate::config::config_diagnostic_summary(&report.diagnostics)
+                    .unwrap_or_else(|| "edit produced an invalid config".to_string()),
+                target: None,
+            });
         }
+        let _ = std::fs::remove_file(&backup);
     }
 
     fn runtime_exit_action(&self, pane_id: crate::layout::PaneId) -> RuntimeExitAction {

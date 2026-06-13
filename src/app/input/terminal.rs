@@ -194,6 +194,9 @@ impl App {
                 super::navigate::NavigateAction::EditScrollback => {
                     self.launch_focused_scrollback_editor();
                 }
+                super::navigate::NavigateAction::EditConfig => {
+                    self.launch_config_editor();
+                }
                 super::navigate::NavigateAction::ToggleFloat => {
                     self.toggle_float_pane();
                 }

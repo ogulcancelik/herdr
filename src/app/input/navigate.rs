@@ -55,6 +55,10 @@ impl App {
                 let previous_mode = self.state.mode;
                 self.launch_focused_scrollback_editor();
                 finish_action_context(&mut self.state, ActionContext::Prefix, previous_mode);
+            } else if action == NavigateAction::EditConfig {
+                let previous_mode = self.state.mode;
+                self.launch_config_editor();
+                finish_action_context(&mut self.state, ActionContext::Prefix, previous_mode);
             } else if action == NavigateAction::ToggleFloat {
                 let previous_mode = self.state.mode;
                 self.toggle_float_pane();
@@ -95,6 +99,9 @@ impl App {
         if let Some(action) = navigate_mode_action_for_key(&self.state, raw_key) {
             if action == NavigateAction::EditScrollback {
                 self.launch_focused_scrollback_editor();
+            } else if action == NavigateAction::EditConfig {
+                self.launch_config_editor();
+                leave_navigate_mode(&mut self.state);
             } else if action == NavigateAction::ToggleFloat {
                 self.toggle_float_pane();
                 leave_navigate_mode(&mut self.state);
@@ -150,9 +157,9 @@ impl App {
         let previous_toast = self.state.toast.clone();
         let result = match binding.action {
             crate::config::CustomCommandAction::Shell => self.spawn_custom_command(&binding),
-            crate::config::CustomCommandAction::Pane => {
-                self.spawn_pane_command(&binding.command, Vec::new())
-            }
+            crate::config::CustomCommandAction::Pane => self
+                .spawn_pane_command(&binding.command, Vec::new())
+                .map(|_| ()),
         };
         match result {
             Ok(()) => finish_custom_command_context(&mut self.state, context, previous_mode),
@@ -290,11 +297,11 @@ impl App {
         Ok(())
     }
 
-    fn spawn_pane_command(
+    pub(crate) fn spawn_pane_command(
         &mut self,
         command: &str,
         temp_files: Vec<std::path::PathBuf>,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<crate::layout::PaneId> {
         let Some(ws_idx) = self.state.active else {
             return Err(std::io::Error::other("no active workspace"));
         };
@@ -359,11 +366,12 @@ impl App {
                 previous_focus,
                 previous_zoomed,
                 temp_files,
+                post_exit: None,
             },
         );
         self.state.remove_alias_shadowed_by_new_pane(new_pane_id);
         self.state.mode = Mode::Terminal;
-        Ok(())
+        Ok(new_pane_id)
     }
 }
 
@@ -523,6 +531,7 @@ pub(crate) enum NavigateAction {
     SplitHorizontal,
     ClosePane,
     EditScrollback,
+    EditConfig,
     ToggleFloat,
     CopyMode,
     Zoom,
@@ -642,6 +651,7 @@ fn action_for_key(
         (&kb.close_tab, NavigateAction::CloseTab),
         (&kb.rename_pane, NavigateAction::RenamePane),
         (&kb.edit_scrollback, NavigateAction::EditScrollback),
+        (&kb.edit_config, NavigateAction::EditConfig),
         (&kb.toggle_float, NavigateAction::ToggleFloat),
         (&kb.copy_mode, NavigateAction::CopyMode),
         (&kb.focus_pane_left, NavigateAction::FocusPaneLeft),
@@ -900,6 +910,7 @@ pub(super) fn execute_navigate_action_in_context(
         NavigateAction::EditScrollback => {}
         // Handled at the App level (PTY spawn needs event_tx/runtimes),
         // mirroring EditScrollback above.
+        NavigateAction::EditConfig => {}
         NavigateAction::ToggleFloat => {}
         NavigateAction::CopyMode => state.enter_copy_mode(terminal_runtimes),
         NavigateAction::Zoom => {

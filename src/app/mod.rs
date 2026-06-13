@@ -10,7 +10,7 @@ mod agents;
 mod api;
 pub(crate) use api::peers::short_host_name;
 mod api_helpers;
-mod config_io;
+pub(crate) mod config_io;
 mod creation;
 pub(crate) mod float;
 mod ids;
@@ -61,11 +61,26 @@ pub use state::{AppState, Mode, ToastKind, ViewState};
 /// Full application: AppState + runtime concerns (event channels, async I/O).
 #[derive(Debug, Clone)]
 pub(crate) struct OverlayPaneState {
-    ws_idx: usize,
-    tab_idx: usize,
-    previous_focus: crate::layout::PaneId,
-    previous_zoomed: bool,
-    temp_files: Vec<std::path::PathBuf>,
+    pub(crate) ws_idx: usize,
+    pub(crate) tab_idx: usize,
+    pub(crate) previous_focus: crate::layout::PaneId,
+    pub(crate) previous_zoomed: bool,
+    pub(crate) temp_files: Vec<std::path::PathBuf>,
+    /// Post-exit hook -- on PaneDied for a config-edit overlay we reload
+    /// the live config and roll back on a Failed apply. None for plain
+    /// scratch overlays (edit_scrollback, custom pane commands).
+    pub(crate) post_exit: Option<OverlayPostExit>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum OverlayPostExit {
+    /// The user just edited the live config file `target` in a temp copy
+    /// that was already copied back. `backup` is the pre-edit contents we
+    /// restore when the reload fails.
+    ConfigEdit {
+        target: std::path::PathBuf,
+        backup: std::path::PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]

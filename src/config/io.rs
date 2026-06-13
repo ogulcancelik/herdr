@@ -91,6 +91,21 @@ pub fn config_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
+/// Path to the optional user overlay (config.local.toml). Mirrors
+/// `config_path()`'s precedence (HERDR_CONFIG_PATH wins) but only the
+/// file name changes -- the overlay always sits next to the base config.
+/// When HERDR_CONFIG_PATH is set, the overlay sits in the same directory
+/// as that override; otherwise it lives in `config_dir()`.
+pub fn config_overlay_path() -> PathBuf {
+    if let Ok(path) = std::env::var(CONFIG_PATH_ENV_VAR) {
+        let base = PathBuf::from(path);
+        if let Some(parent) = base.parent() {
+            return parent.join("config.local.toml");
+        }
+    }
+    config_dir().join("config.local.toml")
+}
+
 pub fn config_diagnostic_summary(diagnostics: &[String]) -> Option<String> {
     const MAX_VISIBLE_DIAGNOSTICS: usize = 4;
 
@@ -112,17 +127,123 @@ pub fn config_diagnostic_summary(diagnostics: &[String]) -> Option<String> {
 
 pub fn load_live_config() -> Result<LoadedConfig, Vec<String>> {
     let path = config_path();
-    if !path.exists() {
-        return Ok(LoadedConfig {
-            config: Config::default(),
-            diagnostics: Vec::new(),
-            invalid_sections: Vec::new(),
-        });
+    let base = if path.exists() {
+        Some(
+            std::fs::read_to_string(&path)
+                .map_err(|err| vec![format!("config read error: {err}; keeping current config")])?,
+        )
+    } else {
+        None
+    };
+
+    let overlay_path = config_overlay_path();
+    let overlay = if overlay_path.exists() {
+        match std::fs::read_to_string(&overlay_path) {
+            Ok(content) => Some(content),
+            Err(err) => {
+                // Surface the overlay read failure as a non-fatal diagnostic
+                // and continue with just the base config; matches the
+                // per-section keep-current behaviour rather than dropping
+                // the running config wholesale.
+                let diagnostic = format!(
+                    "overlay read error at {}: {err}; keeping base config",
+                    overlay_path.display()
+                );
+                return load_with_overlay_diagnostic(base.as_deref(), Some(diagnostic));
+            }
+        }
+    } else {
+        None
+    };
+
+    load_with_overlay(base.as_deref(), overlay.as_deref(), &overlay_path)
+}
+
+/// Concatenate base + overlay text before TOML parsing.
+///
+/// The overlay's role is to ADD scalar keys the base does not set --
+/// e.g. the base is a read-only nix/HM symlink that omits
+/// `ui.sidebar_row_gap`, and the overlay supplies it.
+///
+/// Caveats:
+///
+/// - toml 0.8 rejects re-declaring a `[section]` table (the strict-spec
+///   reading). So the overlay can only ADD new `[section]` blocks the
+///   base does not already declare, or extend a base section by writing
+///   sub-paths the base never touched -- it CANNOT override a scalar the
+///   base already sets in the same `[section]`. If you need to override
+///   a base-set key, the workable path is to delete the key from the
+///   base.
+/// - `[[peers]]`-style array-of-tables blocks APPEND, so overlays cannot
+///   "replace" peers, only add more.
+///
+/// A malformed overlay falls back to base-only with a diagnostic; the
+/// running config is never dropped.
+fn load_with_overlay(
+    base: Option<&str>,
+    overlay: Option<&str>,
+    overlay_path: &Path,
+) -> Result<LoadedConfig, Vec<String>> {
+    let combined = match (base, overlay) {
+        (Some(b), Some(o)) => {
+            let mut combined = b.to_string();
+            if !combined.ends_with('\n') {
+                combined.push('\n');
+            }
+            combined.push_str(o);
+            combined
+        }
+        (Some(b), None) => b.to_string(),
+        (None, Some(o)) => o.to_string(),
+        (None, None) => {
+            return Ok(LoadedConfig {
+                config: Config::default(),
+                diagnostics: Vec::new(),
+                invalid_sections: Vec::new(),
+            });
+        }
+    };
+
+    if overlay.is_some() {
+        match load_live_config_from_str(&combined) {
+            Ok(loaded) => return Ok(loaded),
+            Err(diagnostics) => {
+                // The overlay made the concatenated text unparseable.
+                // Fall back to the base alone and surface the overlay
+                // failure as a non-fatal diagnostic -- matches the
+                // per-section keep-current contract.
+                let overlay_diag = format!(
+                    "overlay at {} broke parse: {}; ignoring overlay",
+                    overlay_path.display(),
+                    diagnostics.join("; ")
+                );
+                return load_with_overlay_diagnostic(base, Some(overlay_diag));
+            }
+        }
     }
 
-    let content = std::fs::read_to_string(&path)
-        .map_err(|err| vec![format!("config read error: {err}; keeping current config")])?;
-    load_live_config_from_str(&content)
+    load_live_config_from_str(&combined)
+}
+
+fn load_with_overlay_diagnostic(
+    base: Option<&str>,
+    overlay_diagnostic: Option<String>,
+) -> Result<LoadedConfig, Vec<String>> {
+    let base = match base {
+        Some(b) => b,
+        None => {
+            return Ok(LoadedConfig {
+                config: Config::default(),
+                diagnostics: overlay_diagnostic.into_iter().collect(),
+                invalid_sections: Vec::new(),
+            });
+        }
+    };
+    let mut loaded = load_live_config_from_str(base)?;
+    if let Some(diag) = overlay_diagnostic {
+        loaded.diagnostics.push(diag);
+    }
+    Ok(loaded)
 }
 
 fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>> {
@@ -614,6 +735,73 @@ mouse_capture = false
         assert!(!updated.contains("[[keys.command]]"));
         assert!(!updated.contains("[keys.indexed]"));
         assert!(toml::from_str::<toml::Value>(&updated).is_ok());
+    }
+
+    fn unique_test_dir(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("{label}-{}-{}", std::process::id(), nanos));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn overlay_introduces_new_section_when_base_omits_it() {
+        let _lock = crate::config::test_config_env_lock().lock().unwrap();
+        let dir = unique_test_dir("herdr-overlay-new");
+        let base = dir.join("config.toml");
+        let overlay = dir.join("config.local.toml");
+        std::fs::write(&base, "onboarding = false\n").unwrap();
+        std::fs::write(&overlay, "[ui]\nsidebar_row_gap = 3\n").unwrap();
+
+        let previous = std::env::var_os(crate::config::CONFIG_PATH_ENV_VAR);
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &base);
+
+        let loaded = load_live_config().unwrap();
+
+        match previous {
+            Some(value) => std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, value),
+            None => std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR),
+        }
+
+        assert_eq!(loaded.config.ui.sidebar_row_gap, 3);
+        assert_eq!(loaded.config.onboarding, Some(false));
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+    }
+
+    #[test]
+    fn malformed_overlay_keeps_base_and_surfaces_diagnostic() {
+        let _lock = crate::config::test_config_env_lock().lock().unwrap();
+        let dir = unique_test_dir("herdr-overlay");
+        let base = dir.join("config.toml");
+        let overlay = dir.join("config.local.toml");
+        std::fs::write(&base, "[ui]\nsidebar_row_gap = 2\n").unwrap();
+        // Concatenation produces a duplicate-key error (`sidebar_row_gap`
+        // appears twice in the same `[ui]` table).
+        std::fs::write(&overlay, "[ui]\nsidebar_row_gap = 9\n").unwrap();
+
+        let previous = std::env::var_os(crate::config::CONFIG_PATH_ENV_VAR);
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &base);
+
+        let loaded = load_live_config().unwrap();
+
+        match previous {
+            Some(value) => std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, value),
+            None => std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR),
+        }
+
+        // Overlay was rejected, base survived intact.
+        assert_eq!(loaded.config.ui.sidebar_row_gap, 2);
+        assert!(
+            loaded
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("overlay") && d.contains("config.local.toml")),
+            "expected overlay diagnostic, got {:?}",
+            loaded.diagnostics
+        );
     }
 
     #[test]
