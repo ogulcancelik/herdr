@@ -1795,6 +1795,17 @@ mod tests {
         (app, public_pane_id)
     }
 
+    fn app_with_send_key_runtime(
+        capacity: usize,
+    ) -> (App, String, tokio::sync::mpsc::Receiver<bytes::Bytes>) {
+        let (mut app, public_pane_id) = app_with_test_workspace();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let (runtime, rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, capacity);
+        app.state.insert_test_runtime(pane_id, runtime);
+        (app, public_pane_id, rx)
+    }
+
     fn metadata_params(pane_id: String) -> PaneReportMetadataParams {
         PaneReportMetadataParams {
             pane_id,
@@ -1817,6 +1828,131 @@ mod tests {
     fn metadata_error_code(response: &str) -> String {
         let response: ErrorResponse = serde_json::from_str(response).unwrap();
         response.error.code
+    }
+
+    #[tokio::test]
+    async fn api_pane_send_keys_accepts_control_navigation_chords() {
+        let (mut app, pane_id, mut rx) = app_with_send_key_runtime(4);
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
+                pane_id,
+                keys: vec![
+                    "ctrl+h".into(),
+                    "ctrl+j".into(),
+                    "ctrl+k".into(),
+                    "ctrl+l".into(),
+                ],
+            }),
+        });
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.id, "req");
+        assert_eq!(success.result, ResponseResult::Ok {});
+        assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x08]));
+        assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x0a]));
+        assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x0b]));
+        assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x0c]));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn api_pane_send_keys_preserves_legacy_control_c_aliases() {
+        let (mut app, pane_id, mut rx) = app_with_send_key_runtime(3);
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
+                pane_id,
+                keys: vec!["C-c".into(), "c-c".into(), "ctrl+c".into()],
+            }),
+        });
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.id, "req");
+        assert_eq!(success.result, ResponseResult::Ok {});
+        assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x03]));
+        assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x03]));
+        assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x03]));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn api_pane_send_keys_accepts_literal_plus() {
+        let (mut app, pane_id, mut rx) = app_with_send_key_runtime(1);
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
+                pane_id,
+                keys: vec!["+".into()],
+            }),
+        });
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.id, "req");
+        assert_eq!(success.result, ResponseResult::Ok {});
+        assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from_static(b"+"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn api_pane_send_input_keys_accept_key_combo_chords() {
+        let (mut app, pane_id, mut rx) = app_with_send_key_runtime(1);
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::PaneSendInput(PaneSendInputParams {
+                pane_id,
+                text: String::new(),
+                keys: vec!["ctrl+j".into()],
+            }),
+        });
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.id, "req");
+        assert_eq!(success.result, ResponseResult::Ok {});
+        assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x0a]));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn api_pane_send_keys_rejects_invalid_keys_before_writing() {
+        let (mut app, pane_id, mut rx) = app_with_send_key_runtime(2);
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
+                pane_id,
+                keys: vec!["ctrl+h".into(), "not-a-key".into()],
+            }),
+        });
+
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "invalid_key");
+        assert_eq!(error.error.message, "unsupported key not-a-key");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn api_pane_send_input_rejects_prefix_bindings_before_writing_text_or_keys() {
+        let (mut app, pane_id, mut rx) = app_with_send_key_runtime(4);
+        let raw_key = " prefix+h ".to_string();
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::PaneSendInput(PaneSendInputParams {
+                pane_id,
+                text: "hello".into(),
+                keys: vec!["ctrl+h".into(), raw_key.clone()],
+            }),
+        });
+
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "invalid_key");
+        assert_eq!(error.error.message, format!("unsupported key {raw_key}"));
+        assert!(rx.try_recv().is_err());
     }
 
     fn app_with_linked_worktree() -> App {
@@ -2271,6 +2407,9 @@ mod tests {
             .clone();
         let target = app.state.workspaces[1].tabs[0].root_pane;
         seed_terminal_states(&mut app);
+        let source_workspace_id = app.public_workspace_id(0);
+        let target_workspace_id = app.public_workspace_id(1);
+        let target_tab_id = app.public_tab_id(1, 0).unwrap();
         let source_public = app.public_pane_id(0, source).unwrap();
         let target_public = app.public_pane_id(1, target).unwrap();
 
@@ -2294,9 +2433,9 @@ mod tests {
         };
         assert!(move_result.changed);
         assert_eq!(app.state.workspaces.len(), 1);
-        assert_eq!(move_result.closed_workspace_id, Some("w1".into()));
-        assert_eq!(move_result.pane.workspace_id, "w2");
-        assert_eq!(move_result.pane.tab_id, "w2:t1");
+        assert_eq!(move_result.closed_workspace_id, Some(source_workspace_id));
+        assert_eq!(move_result.pane.workspace_id, target_workspace_id);
+        assert_eq!(move_result.pane.tab_id, target_tab_id);
         assert_eq!(move_result.pane.terminal_id, source_terminal.to_string());
         assert_eq!(
             app.state.workspaces[0].tabs[0].terminal_id(source),
@@ -2606,9 +2745,10 @@ mod tests {
             .terminal_id(source)
             .unwrap()
             .clone();
+        let previous_workspace_id = app.public_workspace_id(0);
         let context = PaneMoveRecoveryContext {
             source_ws_idx: 0,
-            previous_workspace_id: app.public_workspace_id(0),
+            previous_workspace_id: previous_workspace_id.clone(),
             previous_workspace_label: app.state.workspaces[0].custom_name.clone(),
             previous_tab_label: app.state.workspaces[0].tabs[0].custom_name.clone(),
             previous_worktree_space: app.state.workspaces[0].worktree_space.clone(),
@@ -2624,12 +2764,15 @@ mod tests {
         app.recover_failed_pane_move(context, taken.moved);
 
         assert_eq!(app.state.workspaces.len(), 1);
-        assert_eq!(app.state.workspaces[0].id, "w1");
+        assert_eq!(app.state.workspaces[0].id, previous_workspace_id);
         assert_eq!(
             app.state.workspaces[0].tabs[0].terminal_id(source),
             Some(&source_terminal)
         );
-        assert_eq!(app.parse_pane_id("w1:p1"), Some((0, source)));
+        assert_eq!(
+            app.parse_pane_id(&format!("{previous_workspace_id}:p1")),
+            Some((0, source))
+        );
     }
 
     #[test]

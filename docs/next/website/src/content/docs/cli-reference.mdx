@@ -145,6 +145,13 @@ herdr pane send-keys <pane_id> <key> [key ...]
 herdr pane run <pane_id> <command>
 ```
 
+`<key>` uses Herdr key-combo syntax: plain printable keys such as `a`,
+special keys such as `enter`, `tab`, `esc`, `backspace`, `left`, `right`,
+`up`, and `down`, modifier chords such as `ctrl+h`, `control+j`, `alt+x`,
+and `shift+tab`, function keys such as `f1`, and named punctuation such as
+`minus`, `plus`, and `backtick`. Legacy `C-c` and `c-c` are accepted as
+aliases for `ctrl+c`.
+
 `pane run` submits text plus Enter atomically. Prefer it over `send-text` plus `send-keys Enter` for commands.
 
 Report agent state from custom hooks:

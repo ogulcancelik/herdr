@@ -99,6 +99,12 @@ Pane control methods use public pane ids such as `w1:p1`. Methods whose
 schema makes `pane_id` optional use the server's active focused pane when it is
 omitted. `pane.move` always requires the source `pane_id`.
 
+`pane.send_keys` and `pane.send_input.keys` accept Herdr key-combo strings:
+plain printable keys, special keys like `enter` and `esc`, modifier chords
+like `ctrl+h`, `control+j`, `alt+x`, and `shift+tab`, function keys like
+`f1`, and named punctuation like `minus` and `plus`. They do not accept
+`prefix+` binding strings.
+
 ```json
 {"id":"req_current","method":"pane.current","params":{"caller_pane_id":"w1:p1"}}
 {"id":"req_layout","method":"pane.layout","params":{"pane_id":"w1:p1"}}

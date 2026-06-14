@@ -9,24 +9,16 @@ pub(super) fn tab_attention_priority(state: crate::detect::AgentState, seen: boo
 }
 
 fn parse_api_key(key: &str) -> Option<crossterm::event::KeyEvent> {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let normalized = normalize_api_key_alias(key.trim());
+    let (code, modifiers) = crate::config::parse_key_combo(normalized)?;
+    Some(crossterm::event::KeyEvent::new(code, modifiers))
+}
 
-    let normalized = key.trim();
-    match normalized {
-        "Enter" | "enter" => Some(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())),
-        "Tab" | "tab" => Some(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty())),
-        "Esc" | "esc" => Some(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())),
-        "Backspace" | "backspace" => Some(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty())),
-        "Up" | "up" => Some(KeyEvent::new(KeyCode::Up, KeyModifiers::empty())),
-        "Down" | "down" => Some(KeyEvent::new(KeyCode::Down, KeyModifiers::empty())),
-        "Left" | "left" => Some(KeyEvent::new(KeyCode::Left, KeyModifiers::empty())),
-        "Right" | "right" => Some(KeyEvent::new(KeyCode::Right, KeyModifiers::empty())),
-        "C-c" | "c-c" | "ctrl+c" => Some(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-        _ if normalized.len() == 1 => normalized
-            .chars()
-            .next()
-            .map(|ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty())),
-        _ => None,
+fn normalize_api_key_alias(key: &str) -> &str {
+    match key {
+        "C-c" | "c-c" => "ctrl+c",
+        "+" => "plus",
+        _ => key,
     }
 }
 

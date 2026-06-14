@@ -967,7 +967,7 @@ fn parse_modifier_combo(s: &str) -> Option<KeyModifiers> {
     }
 }
 
-pub(super) fn parse_key_combo(s: &str) -> Option<KeyCombo> {
+pub(crate) fn parse_key_combo(s: &str) -> Option<KeyCombo> {
     let parts: Vec<&str> = s.split('+').collect();
     let mut modifiers = KeyModifiers::empty();
     let mut key_str: Option<&str> = None;
