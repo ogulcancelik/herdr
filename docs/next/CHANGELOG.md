@@ -17,6 +17,7 @@
   plugin invocation context/env injection, and plugin pane ownership across
   `pane.move`.
 - Added `pane.move` and `herdr pane move` to relocate a running pane into another tab, a new tab, or a new workspace without restarting its terminal process. (#299)
+- Added a right-click context menu on sidebar agents-panel entries to rename an agent or clear a custom name without leaving the UI. The rename targets the clicked agent directly, so it works across workspaces and does not require a unique name.
 
 ### Changed
 - Bumped the client/server protocol version to 14 for `pane.move` compatibility. (#299)

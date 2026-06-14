@@ -351,6 +351,30 @@ pub(super) fn open_rename_pane(state: &mut AppState, pane_id: crate::layout::Pan
     state.mode = Mode::RenamePane;
 }
 
+pub(super) fn open_rename_agent(
+    state: &mut AppState,
+    ws_idx: usize,
+    pane_id: crate::layout::PaneId,
+) {
+    // Target the agent's workspace explicitly rather than `state.active`: the agents
+    // panel lists agents across all workspaces, so the renamed agent may not be active.
+    let Some(ws) = state.workspaces.get(ws_idx) else {
+        return;
+    };
+    let Some(pane) = ws.pane_state(pane_id) else {
+        return;
+    };
+    let terminal = state.terminals.get(&pane.attached_terminal_id);
+    state.creating_new_tab = false;
+    state.requested_new_tab_name = None;
+    state.rename_agent_target = Some((ws_idx, pane_id));
+    state.name_input = terminal
+        .and_then(|t| t.agent_name.clone())
+        .unwrap_or_default();
+    state.name_input_replace_on_type = terminal.and_then(|t| t.agent_name.as_ref()).is_none();
+    state.mode = Mode::RenameAgent;
+}
+
 fn next_new_tab_default_name(state: &AppState) -> String {
     state
         .active
@@ -488,10 +512,33 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                         }
                     }
                 }
+                Mode::RenameAgent => {
+                    // The agent row carries its own workspace, so target it directly
+                    // (no name resolution, no uniqueness check needed).
+                    if let Some((ws_idx, pane_id)) = state.rename_agent_target {
+                        let terminal_id = state
+                            .workspaces
+                            .get(ws_idx)
+                            .and_then(|ws| ws.pane_state(pane_id))
+                            .map(|pane| pane.attached_terminal_id.clone());
+                        if let Some(terminal) =
+                            terminal_id.and_then(|id| state.terminals.get_mut(&id))
+                        {
+                            if new_name.trim().is_empty() {
+                                terminal.clear_agent_name();
+                            } else {
+                                terminal.set_agent_name(new_name.clone());
+                                terminal.set_manual_label(new_name);
+                            }
+                            state.mark_session_dirty();
+                        }
+                    }
+                }
                 _ => {}
             }
             state.creating_new_tab = false;
             state.rename_pane_target = None;
+            state.rename_agent_target = None;
             state.name_input.clear();
             state.name_input_replace_on_type = false;
             leave_modal(state);
@@ -504,6 +551,7 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
             state.creating_new_tab = false;
             state.requested_new_tab_name = None;
             state.rename_pane_target = None;
+            state.rename_agent_target = None;
             state.name_input.clear();
             state.name_input_replace_on_type = false;
             leave_modal(state);
@@ -744,6 +792,34 @@ pub(super) fn apply_context_menu_action(
         }
         (ContextMenuKind::Pane { pane_id, .. }, Some("Rename pane")) => {
             open_rename_pane(state, pane_id);
+        }
+        (
+            ContextMenuKind::Agent {
+                ws_idx, pane_id, ..
+            },
+            Some("Rename"),
+        ) => {
+            open_rename_agent(state, ws_idx, pane_id);
+        }
+        (
+            ContextMenuKind::Agent {
+                ws_idx, pane_id, ..
+            },
+            Some("Clear name"),
+        ) => {
+            if let Some(terminal_id) = state
+                .workspaces
+                .get(ws_idx)
+                .and_then(|ws| ws.pane_state(pane_id))
+                .map(|pane| pane.attached_terminal_id.clone())
+            {
+                if let Some(terminal) = state.terminals.get_mut(&terminal_id) {
+                    terminal.clear_agent_name();
+                    terminal.clear_manual_label();
+                    state.mark_session_dirty();
+                }
+            }
+            leave_modal(state);
         }
         (
             ContextMenuKind::Pane {
@@ -1467,5 +1543,180 @@ mod tests {
         assert_eq!(state.selected, 0);
         assert_eq!(state.mode, Mode::ConfirmClose);
         assert_eq!(state.workspaces.len(), 2);
+    }
+
+    /// Register a `TerminalState` in `state.terminals` for a workspace's root pane so
+    /// agent-name mutations have a real terminal to act on. Returns its pane id.
+    fn register_root_terminal(state: &mut AppState, ws_idx: usize) -> crate::layout::PaneId {
+        let pane_id = state.workspaces[ws_idx].tabs[0].root_pane;
+        let term_id = state.workspaces[ws_idx].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        state.terminals.insert(
+            term_id.clone(),
+            crate::terminal::TerminalState::new(term_id, std::path::PathBuf::from("/tmp")),
+        );
+        pane_id
+    }
+
+    fn root_agent_name(state: &AppState, ws_idx: usize) -> Option<String> {
+        let pane_id = state.workspaces[ws_idx].tabs[0].root_pane;
+        let term_id = &state.workspaces[ws_idx].tabs[0].panes[&pane_id].attached_terminal_id;
+        state
+            .terminals
+            .get(term_id)
+            .and_then(|t| t.agent_name.clone())
+    }
+
+    #[test]
+    fn agent_context_menu_items_depend_on_has_name() {
+        let state = state_with_workspaces(&["main"]);
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        let with_name = ContextMenuState {
+            kind: ContextMenuKind::Agent {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id,
+                has_name: true,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        assert_eq!(with_name.items(), &["Rename", "Clear name"]);
+
+        let without_name = ContextMenuState {
+            kind: ContextMenuKind::Agent {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id,
+                has_name: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        assert_eq!(without_name.items(), &["Rename"]);
+    }
+
+    #[test]
+    fn open_rename_agent_prefills_from_agent_name() {
+        let mut state = state_with_workspaces(&["main"]);
+        let pane_id = register_root_terminal(&mut state, 0);
+        let term_id = state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&term_id)
+            .expect("terminal")
+            .set_agent_name("backend".into());
+
+        open_rename_agent(&mut state, 0, pane_id);
+
+        assert_eq!(state.mode, Mode::RenameAgent);
+        assert_eq!(state.rename_agent_target, Some((0, pane_id)));
+        assert_eq!(state.name_input, "backend");
+        assert!(!state.name_input_replace_on_type);
+    }
+
+    #[test]
+    fn open_rename_agent_starts_empty_when_unnamed() {
+        let mut state = state_with_workspaces(&["main"]);
+        let pane_id = register_root_terminal(&mut state, 0);
+
+        open_rename_agent(&mut state, 0, pane_id);
+
+        assert_eq!(state.mode, Mode::RenameAgent);
+        assert!(state.name_input.is_empty());
+        assert!(state.name_input_replace_on_type);
+    }
+
+    #[test]
+    fn apply_rename_agent_sets_agent_name_and_label() {
+        let mut state = state_with_workspaces(&["main"]);
+        let pane_id = register_root_terminal(&mut state, 0);
+        open_rename_agent(&mut state, 0, pane_id);
+        state.name_input = "backend".into();
+
+        apply_rename_action(&mut state, ModalAction::Save);
+
+        let term_id = &state.workspaces[0].tabs[0].panes[&pane_id].attached_terminal_id;
+        let terminal = state.terminals.get(term_id).expect("terminal");
+        assert_eq!(terminal.agent_name.as_deref(), Some("backend"));
+        assert_eq!(terminal.manual_label.as_deref(), Some("backend"));
+        assert_eq!(state.rename_agent_target, None);
+        assert!(state.name_input.is_empty());
+    }
+
+    #[test]
+    fn apply_rename_agent_empty_clears_name() {
+        let mut state = state_with_workspaces(&["main"]);
+        let pane_id = register_root_terminal(&mut state, 0);
+        let term_id = state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&term_id)
+            .expect("terminal")
+            .set_agent_name("backend".into());
+        open_rename_agent(&mut state, 0, pane_id);
+        state.name_input = "   ".into();
+
+        apply_rename_action(&mut state, ModalAction::Save);
+
+        assert_eq!(root_agent_name(&state, 0), None);
+    }
+
+    #[test]
+    fn context_menu_clear_name_clears_agent_name() {
+        let mut state = state_with_workspaces(&["main"]);
+        let pane_id = register_root_terminal(&mut state, 0);
+        let term_id = state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&term_id)
+            .expect("terminal")
+            .set_agent_name("backend".into());
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Agent {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id,
+                has_name: true,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Clear name")
+            .expect("clear name item");
+        let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+
+        apply_context_menu_action(&mut state, &mut terminal_runtimes, menu, idx);
+
+        assert_eq!(root_agent_name(&state, 0), None);
+    }
+
+    #[test]
+    fn rename_agent_targets_non_active_workspace() {
+        let mut state = state_with_workspaces(&["main", "other"]);
+        state.active = Some(0);
+        register_root_terminal(&mut state, 0);
+        let other_pane = register_root_terminal(&mut state, 1);
+
+        // Rename the agent that lives in the non-active workspace.
+        open_rename_agent(&mut state, 1, other_pane);
+        state.name_input = "renamed".into();
+        apply_rename_action(&mut state, ModalAction::Save);
+
+        assert_eq!(root_agent_name(&state, 1).as_deref(), Some("renamed"));
+        assert_eq!(root_agent_name(&state, 0), None);
     }
 }

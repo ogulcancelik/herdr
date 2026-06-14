@@ -450,6 +450,7 @@ impl App {
             creating_new_tab: false,
             requested_new_tab_name: None,
             rename_pane_target: None,
+            rename_agent_target: None,
             worktree_create: None,
             worktree_open: None,
             worktree_remove: None,
@@ -1471,7 +1472,7 @@ impl App {
             Mode::Copy => {
                 self.handle_copy_mode_key(key);
             }
-            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
+            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::RenameAgent => {
                 input::handle_rename_key(&mut self.state, key_event);
             }
             Mode::NewLinkedWorktree => {

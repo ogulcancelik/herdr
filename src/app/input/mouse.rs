@@ -342,7 +342,7 @@ impl AppState {
 
                 if matches!(
                     self.mode,
-                    Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane
+                    Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::RenameAgent
                 ) {
                     let action = self
                         .rename_modal_inner()
@@ -941,6 +941,27 @@ impl AppState {
                         .unwrap_or(ContextMenuKind::Workspace { ws_idx: idx });
                     self.context_menu = Some(ContextMenuState {
                         kind,
+                        x: mouse.column,
+                        y: mouse.row,
+                        list: MenuListState::new(0),
+                    });
+                    self.mode = Mode::ContextMenu;
+                } else if let Some((ws_idx, tab_idx, pane_id)) =
+                    self.agent_detail_target_at(mouse.row)
+                {
+                    let has_name = self
+                        .workspaces
+                        .get(ws_idx)
+                        .and_then(|ws| ws.pane_state(pane_id))
+                        .and_then(|pane| self.terminals.get(&pane.attached_terminal_id))
+                        .is_some_and(|terminal| terminal.agent_name.is_some());
+                    self.context_menu = Some(ContextMenuState {
+                        kind: ContextMenuKind::Agent {
+                            ws_idx,
+                            tab_idx,
+                            pane_id,
+                            has_name,
+                        },
                         x: mouse.column,
                         y: mouse.row,
                         list: MenuListState::new(0),

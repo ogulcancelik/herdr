@@ -756,6 +756,7 @@ pub enum Mode {
     RenameWorkspace,
     RenameTab,
     RenamePane,
+    RenameAgent,
     NewLinkedWorktree,
     OpenExistingWorktree,
     ConfirmRemoveWorktree,
@@ -1067,6 +1068,12 @@ pub enum ContextMenuKind {
         source_pane_id: Option<PaneId>,
         has_manual_label: bool,
     },
+    Agent {
+        ws_idx: usize,
+        tab_idx: usize,
+        pane_id: PaneId,
+        has_name: bool,
+    },
 }
 
 /// Right-click context menu state.
@@ -1163,6 +1170,10 @@ impl ContextMenuState {
                 "Zoom",
                 "Close pane",
             ],
+            ContextMenuKind::Agent { has_name: true, .. } => &["Rename", "Clear name"],
+            ContextMenuKind::Agent {
+                has_name: false, ..
+            } => &["Rename"],
         }
     }
 }
@@ -1289,6 +1300,10 @@ pub struct AppState {
     pub creating_new_tab: bool,
     pub requested_new_tab_name: Option<String>,
     pub rename_pane_target: Option<PaneId>,
+    /// Target for the agent rename modal: `(ws_idx, pane_id)`. Carries the
+    /// workspace explicitly because the agents panel spans all workspaces and the
+    /// renamed agent may not live in the active one.
+    pub rename_agent_target: Option<(usize, PaneId)>,
     pub worktree_create: Option<WorktreeCreateState>,
     pub worktree_open: Option<WorktreeOpenState>,
     pub worktree_remove: Option<WorktreeRemoveState>,
@@ -1629,6 +1644,7 @@ impl AppState {
             creating_new_tab: false,
             requested_new_tab_name: None,
             rename_pane_target: None,
+            rename_agent_target: None,
             worktree_create: None,
             worktree_open: None,
             worktree_remove: None,
@@ -1811,6 +1827,10 @@ impl AppState {
                 "empty app state must not keep rename pane target"
             );
             assert!(
+                self.rename_agent_target.is_none(),
+                "empty app state must not keep rename agent target"
+            );
+            assert!(
                 self.selection.is_none(),
                 "empty app state must not keep text selection"
             );
@@ -1971,6 +1991,9 @@ impl AppState {
         if let Some(pane_id) = self.rename_pane_target {
             assert_live_pane(pane_id, "rename pane target");
         }
+        if let Some((_, pane_id)) = self.rename_agent_target {
+            assert_live_pane(pane_id, "rename agent target");
+        }
         if let Some(selection) = &self.selection {
             assert_live_pane(selection.pane_id, "text selection");
         } else {
@@ -2055,6 +2078,23 @@ impl AppState {
                     if let Some(source_pane_id) = source_pane_id {
                         assert_live_pane(source_pane_id, "context menu source pane");
                     }
+                }
+                ContextMenuKind::Agent {
+                    ws_idx,
+                    tab_idx,
+                    pane_id,
+                    ..
+                } => {
+                    assert_tab_index(ws_idx, tab_idx, "context menu agent tab");
+                    assert!(
+                        self.workspaces[ws_idx].tabs[tab_idx]
+                            .panes
+                            .contains_key(&pane_id),
+                        "context menu agent references pane {:?} outside workspace {} tab {}",
+                        pane_id,
+                        ws_idx,
+                        tab_idx
+                    );
                 }
             }
         }
