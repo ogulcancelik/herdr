@@ -571,6 +571,7 @@ impl App {
             plugin_commands_in_flight: 0,
             global_menu: state::MenuListState::new(0),
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
+            host_ansi_palette: [None; 16],
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
         };

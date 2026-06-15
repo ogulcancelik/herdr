@@ -1406,6 +1406,11 @@ pub struct AppState {
     pub global_menu: MenuListState,
     /// Resolved host terminal default colors for theming embedded panes.
     pub host_terminal_theme: TerminalTheme,
+    /// Host terminal's 16 ANSI palette colors (OSC 4), when known. Used to
+    /// resolve indexed cell colors to real RGB for pane dimming so dimmed
+    /// indexed content matches the host's actual theme instead of a generic
+    /// fallback palette.
+    pub host_ansi_palette: crate::terminal_theme::AnsiPalette,
     /// Set when a persisted session snapshot would change.
     pub session_dirty: bool,
     /// Terminal runtimes that should be shut down by the app/runtime layer
@@ -1740,6 +1745,7 @@ impl AppState {
             plugin_commands_in_flight: 0,
             global_menu: MenuListState::new(0),
             host_terminal_theme: TerminalTheme::default(),
+            host_ansi_palette: [None; 16],
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
         }
