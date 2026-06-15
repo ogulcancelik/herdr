@@ -330,13 +330,13 @@ fn render_header_status(
 }
 
 fn mobile_tab_status(ws: &crate::workspace::Workspace) -> String {
-    let tab_number = ws
-        .public_tab_number(ws.active_tab)
-        .unwrap_or(ws.active_tab + 1);
+    let tab_label = ws
+        .tab_display_name(ws.active_tab)
+        .unwrap_or_else(|| (ws.active_tab + 1).to_string());
     if ws.tabs.len() <= 1 {
-        format!("tab {tab_number}")
+        format!("tab {tab_label}")
     } else {
-        format!("tab {tab_number} · {}/{}", ws.active_tab + 1, ws.tabs.len())
+        format!("tab {tab_label} · {}/{}", ws.active_tab + 1, ws.tabs.len())
     }
 }
 
@@ -524,10 +524,13 @@ fn render_mobile_switcher_content(
         for (idx, tab) in ws.tabs.iter().enumerate() {
             let active = idx == ws.active_tab;
             let bg = mobile_item_bg(false, active, p);
+            let display_name = ws
+                .tab_display_name(idx)
+                .unwrap_or_else(|| (idx + 1).to_string());
             let label = if tab.is_auto_named() {
-                format!("tab {}", tab.display_name())
+                format!("tab {display_name}")
             } else {
-                format!("{} · {}", tab.number, tab.display_name())
+                format!("{} · {display_name}", idx + 1)
             };
             let title = Line::from(vec![
                 Span::styled("  ", Style::default().bg(bg)),
@@ -976,18 +979,18 @@ mod tests {
     }
 
     #[test]
-    fn mobile_tab_status_uses_public_tab_number_and_position() {
+    fn mobile_tab_status_uses_compact_tab_label_and_position() {
         let mut workspace = crate::workspace::Workspace::test_new("mobile-tabs");
         let removed_tab = workspace.test_add_tab(None);
         workspace.test_add_tab(None);
         assert!(workspace.close_tab(removed_tab));
         workspace.active_tab = 1;
 
-        assert_eq!(mobile_tab_status(&workspace), "tab 3 · 2/2");
+        assert_eq!(mobile_tab_status(&workspace), "tab 2 · 2/2");
     }
 
     #[test]
-    fn mobile_switcher_uses_stable_public_tab_number_for_auto_tab_labels() {
+    fn mobile_switcher_uses_compact_tab_label_for_auto_tab_labels() {
         let mut app = crate::app::state::AppState::test_new();
         let mut workspace = crate::workspace::Workspace::test_new("mobile-tabs");
         let removed_tab = workspace.test_add_tab(None);
@@ -1017,8 +1020,8 @@ mod tests {
             .map(|x| terminal.backend().buffer()[(x, 10)].symbol())
             .collect::<String>();
 
-        assert!(row.contains("tab 3"), "mobile tab row: {row:?}");
-        assert!(!row.contains("tab 2"), "mobile tab row: {row:?}");
+        assert!(row.contains("tab 2"), "mobile tab row: {row:?}");
+        assert!(!row.contains("tab 3"), "mobile tab row: {row:?}");
     }
 
     #[cfg(unix)]

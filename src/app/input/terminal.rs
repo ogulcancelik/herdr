@@ -261,6 +261,45 @@ mod tests {
             .is_some_and(crate::selection::Selection::is_visible));
     }
 
+    #[cfg(unix)]
+    fn install_test_link_handler(app: &mut App) {
+        let plugin_root = std::env::temp_dir();
+        app.state.installed_plugins = std::collections::HashMap::from([(
+            "example.links".to_string(),
+            crate::api::schema::InstalledPluginInfo {
+                plugin_id: "example.links".into(),
+                name: "Links".into(),
+                version: "0.1.0".into(),
+                min_herdr_version: "0.6.10".into(),
+                description: None,
+                manifest_path: plugin_root.join("herdr-plugin.toml").display().to_string(),
+                plugin_root: plugin_root.display().to_string(),
+                enabled: true,
+                platforms: None,
+                build: Vec::new(),
+                actions: vec![crate::api::schema::PluginManifestAction {
+                    id: "open".into(),
+                    title: "Open link".into(),
+                    description: None,
+                    contexts: Vec::new(),
+                    platforms: None,
+                    command: vec!["sh".into(), "-c".into(), ":".into()],
+                }],
+                events: Vec::new(),
+                panes: Vec::new(),
+                link_handlers: vec![crate::api::schema::PluginManifestLinkHandler {
+                    id: "github-issue".into(),
+                    title: "Open GitHub issue".into(),
+                    pattern: "^https://github\\.com/[^/]+/[^/]+/(issues|pull)/[0-9]+$".into(),
+                    action: "open".into(),
+                    platforms: None,
+                }],
+                source: crate::api::schema::PluginSourceInfo::default(),
+                warnings: Vec::new(),
+            },
+        )]);
+    }
+
     #[tokio::test]
     async fn dragging_selection_above_pane_autoscrolls_and_extends_into_scrollback() {
         let mut app = app_for_mouse_test();
@@ -463,6 +502,41 @@ mod tests {
 
         assert!(app.event_rx.try_recv().is_err());
         assert!(app.selection_highlight_clear_deadline.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ctrl_click_url_invokes_plugin_link_handler_but_super_click_does_not() {
+        let line = "see https://github.com/ogulcancelik/herdr/issues/398";
+        let col = line.find("github").expect("url host") as u16;
+
+        let (mut ctrl_app, ctrl_info) = app_with_screen_bytes(line.as_bytes());
+        install_test_link_handler(&mut ctrl_app);
+        ctrl_app.handle_mouse(modified_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            ctrl_info.inner_rect.x + col,
+            ctrl_info.inner_rect.y,
+            KeyModifiers::CONTROL,
+        ));
+
+        let ctrl_log = ctrl_app
+            .state
+            .plugin_command_logs
+            .last()
+            .expect("ctrl-click should start plugin link handler");
+        assert_eq!(ctrl_log.plugin_id, "example.links");
+        assert_eq!(ctrl_log.action_id.as_deref(), Some("open"));
+
+        let (mut super_app, super_info) = app_with_screen_bytes(line.as_bytes());
+        install_test_link_handler(&mut super_app);
+        super_app.handle_mouse(modified_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            super_info.inner_rect.x + col,
+            super_info.inner_rect.y,
+            KeyModifiers::SUPER,
+        ));
+
+        assert!(super_app.state.plugin_command_logs.is_empty());
     }
 
     #[tokio::test]

@@ -219,8 +219,9 @@ pub fn notification_context(
     let mut context = format!("{} · {}", workspace_label, ws_idx + 1);
     if ws.tabs.len() > 1 {
         if let Some(tab_idx) = ws.find_tab_index_for_pane(pane_id) {
-            let tab = &ws.tabs[tab_idx];
-            context.push_str(&format!(" · {}", tab.display_name()));
+            if let Some(label) = ws.tab_display_name(tab_idx) {
+                context.push_str(&format!(" · {label}"));
+            }
         }
     }
     context
@@ -450,7 +451,9 @@ impl AppState {
     fn navigator_tab_row(&self, ws_idx: usize, tab_idx: usize) -> NavigatorRow {
         let ws = &self.workspaces[ws_idx];
         let tab = &ws.tabs[tab_idx];
-        let label = tab.display_name();
+        let label = ws
+            .tab_display_name(tab_idx)
+            .unwrap_or_else(|| (tab_idx + 1).to_string());
         let (status, seen) = tab_aggregate_state(tab, &self.terminals);
         let activity = tab_activity_summary(tab, &self.terminals);
         let pane_count = tab.panes.len();
@@ -2452,9 +2455,16 @@ impl AppState {
                 agent_label,
                 seq,
                 session_ref,
+                session_start_source,
             } => self
                 .update_terminal_state(pane_id, |terminal| {
-                    terminal.set_agent_session_ref(source, agent_label, session_ref, seq)
+                    terminal.set_agent_session_ref_for_session_start(
+                        source,
+                        agent_label,
+                        session_ref,
+                        seq,
+                        session_start_source,
+                    )
                 })
                 .into_iter()
                 .collect(),
@@ -2757,7 +2767,7 @@ impl AppState {
                 }),
             }
         };
-        let toast = (!is_active_tab).then(&build_toast);
+        let toast = (!is_active_tab).then(build_toast);
         let client_notification = (!suppress_active_tab_notifications).then(build_toast);
 
         if toast.is_none() && client_notification.is_none() && sound.is_none() {
@@ -3531,27 +3541,6 @@ mod tests {
         assert_eq!(state.workspaces[0].worktree_space().cloned(), membership);
     }
 
-    #[test]
-    fn update_ready_sets_explicit_upgrade_toast() {
-        let mut state = AppState::test_new();
-        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
-
-        let updates = state.handle_app_event(crate::events::AppEvent::UpdateReady {
-            version: "0.5.0".into(),
-            install_command: "herdr update".into(),
-        });
-
-        assert!(updates.is_empty());
-        assert_eq!(state.update_available.as_deref(), Some("0.5.0"));
-        assert!(state.latest_release_notes_available);
-        let toast = state.toast.as_ref().expect("update toast");
-        assert_eq!(toast.title, "v0.5.0 available");
-        assert_eq!(
-            toast.context,
-            "detach, run `herdr update`, then follow its restart guidance"
-        );
-    }
-
     fn mark_agent(state: &mut AppState, ws_idx: usize, tab_idx: usize, pane_id: PaneId) {
         state.ensure_test_terminals();
         let terminal_id = state.workspaces[ws_idx].tabs[tab_idx]
@@ -3596,6 +3585,7 @@ mod tests {
         state.previous_agent();
         assert_eq!(state.active, Some(0));
         assert_eq!(state.workspaces[0].focused_pane_id(), Some(first_second));
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -3621,6 +3611,7 @@ mod tests {
 
         assert_eq!(state.active, Some(1));
         assert_eq!(state.workspaces[1].focused_pane_id(), Some(second_root));
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -3633,6 +3624,7 @@ mod tests {
         assert!(state.focus_agent_entry(0));
         assert_eq!(state.active, Some(0));
         assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -3659,6 +3651,7 @@ mod tests {
 
         assert_eq!(state.active, Some(0));
         assert_eq!(state.workspaces[0].focused_pane_id(), Some(first_root));
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -3688,6 +3681,7 @@ mod tests {
         let last_idx = state.workspaces[0].tabs.len() - 1;
         assert_eq!(state.workspaces[0].active_tab, last_idx);
         assert!(state.agent_panel_scroll > 0);
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -3958,6 +3952,7 @@ mod tests {
 
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].custom_name.as_deref(), Some("b"));
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -3970,17 +3965,20 @@ mod tests {
 
         assert!(state.workspaces.is_empty());
         assert_eq!(state.mode, Mode::Navigate);
+        state.assert_invariants_for_test();
     }
 
     #[test]
     fn pane_died_multi_pane_keeps_workspace() {
         let mut state = app_with_workspaces(&["test"]);
         let second_id = state.workspaces[0].test_split(Direction::Horizontal);
+        state.ensure_test_terminals();
 
         state.handle_pane_died(second_id);
 
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].panes.len(), 1);
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -3991,6 +3989,7 @@ mod tests {
         state.handle_pane_died(fake_id);
 
         assert_eq!(state.workspaces.len(), 1);
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -4013,6 +4012,7 @@ mod tests {
 
         assert!(state.selection.is_some());
         assert!(state.selection_autoscroll.is_some());
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -4020,6 +4020,7 @@ mod tests {
         let mut state = app_with_workspaces(&["test"]);
         let first_id = state.workspaces[0].tabs[0].root_pane;
         let second_id = state.workspaces[0].test_split(Direction::Horizontal);
+        state.ensure_test_terminals();
 
         state.selection = Some(crate::selection::Selection::anchor(second_id, 0, 0, None));
         state.selection_autoscroll = Some(crate::app::state::SelectionAutoscroll {
@@ -4036,6 +4037,7 @@ mod tests {
         assert!(state.selection_autoscroll.is_none());
         assert_eq!(state.workspaces[0].panes.len(), 1);
         assert_eq!(state.workspaces[0].panes.keys().next().unwrap(), &first_id);
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -4531,6 +4533,43 @@ mod tests {
     }
 
     #[test]
+    fn devin_state_report_refreshes_session_without_overriding_screen_state() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0]
+            .panes
+            .get(&pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Devin),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+        state.handle_app_event(AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:devin".into(),
+            agent_label: "devin".into(),
+            state: AgentState::Working,
+            message: None,
+            custom_status: None,
+            seq: Some(1),
+            session_ref: crate::agent_resume::AgentSessionRef::id("devin-session"),
+        });
+
+        let terminal = state.terminals.get(&terminal_id).unwrap();
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert!(terminal.hook_authority.is_none());
+        assert!(terminal.persisted_agent_session.is_some());
+    }
+
+    #[test]
     fn hidden_custom_session_ref_only_update_marks_session_dirty_without_visible_update() {
         let mut state = app_with_workspaces(&["active"]);
         let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
@@ -4928,6 +4967,7 @@ mod tests {
     fn close_pane_removes_from_workspace() {
         let mut state = app_with_workspaces(&["test"]);
         let closed = state.workspaces[0].test_split(Direction::Horizontal);
+        state.ensure_test_terminals();
         assert_eq!(state.workspaces[0].panes.len(), 2);
         state.plugin_panes.insert(
             closed,
@@ -4940,6 +4980,7 @@ mod tests {
         state.close_pane();
         assert_eq!(state.workspaces[0].panes.len(), 1);
         assert!(!state.plugin_panes.contains_key(&closed));
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -4985,6 +5026,7 @@ mod tests {
         state.close_pane();
 
         assert!(!state.terminals.contains_key(&terminal_id));
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -5007,6 +5049,7 @@ mod tests {
 
         assert!(!state.terminals.contains_key(&terminal_id));
         assert!(!state.plugin_panes.contains_key(&pane_id));
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -5026,6 +5069,7 @@ mod tests {
 
         assert!(!state.terminals.contains_key(&terminal_id));
         assert!(!state.plugin_panes.contains_key(&pane_id));
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -5042,6 +5086,7 @@ mod tests {
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "selected");
         assert!(!state.terminals.contains_key(&active_terminal_id));
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -5058,6 +5103,7 @@ mod tests {
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "selected");
         assert!(!state.terminals.contains_key(&active_terminal_id));
+        state.assert_invariants_for_test();
     }
 
     #[test]

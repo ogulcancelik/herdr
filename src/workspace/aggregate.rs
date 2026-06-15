@@ -30,7 +30,12 @@ impl Tab {
         })
     }
 
-    pub fn pane_details(&self, terminals: &HashMap<TerminalId, TerminalState>) -> Vec<PaneDetail> {
+    fn pane_details(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+        tab_idx: usize,
+        tab_label: &str,
+    ) -> Vec<PaneDetail> {
         self.layout
             .pane_ids()
             .iter()
@@ -48,8 +53,8 @@ impl Tab {
                 let presentation = terminal.effective_presentation();
                 Some(PaneDetail {
                     pane_id: *id,
-                    tab_idx: 0,
-                    tab_label: self.display_name(),
+                    tab_idx,
+                    tab_label: tab_label.to_string(),
                     label: agent_label.clone(),
                     agent_label,
                     agent: terminal.effective_known_agent(),
@@ -100,12 +105,10 @@ impl Workspace {
             .iter()
             .enumerate()
             .flat_map(|(tab_idx, tab)| {
-                tab.pane_details(terminals)
-                    .into_iter()
-                    .map(move |mut detail| {
-                        detail.tab_idx = tab_idx;
-                        detail
-                    })
+                let tab_label = self
+                    .tab_display_name(tab_idx)
+                    .unwrap_or_else(|| (tab_idx + 1).to_string());
+                tab.pane_details(terminals, tab_idx, &tab_label).into_iter()
             })
             .map(|mut detail| {
                 if multi_tab {

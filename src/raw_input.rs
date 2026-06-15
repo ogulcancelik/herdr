@@ -818,6 +818,27 @@ mod tests {
         assert_eq!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
         assert_eq!(mouse.column, 19);
         assert_eq!(mouse.row, 9);
+        assert_eq!(mouse.modifiers, KeyModifiers::empty());
+    }
+
+    #[test]
+    fn parses_sgr_mouse_observable_modifiers() {
+        let cases = [
+            (b"\x1b[<8;20;10M".as_slice(), KeyModifiers::ALT),
+            (b"\x1b[<16;20;10M".as_slice(), KeyModifiers::CONTROL),
+            (
+                b"\x1b[<24;20;10M".as_slice(),
+                KeyModifiers::ALT | KeyModifiers::CONTROL,
+            ),
+        ];
+
+        for (input, expected) in cases {
+            let (RawInputEvent::Mouse(mouse), _) = extract_one_event(input).unwrap() else {
+                panic!("expected mouse");
+            };
+            assert_eq!(mouse.modifiers, expected);
+            assert!(!mouse.modifiers.contains(KeyModifiers::SUPER));
+        }
     }
 
     #[test]
@@ -954,6 +975,7 @@ mod tests {
             (b"\x1b[57420;1u", KeyCode::Down, KeyModifiers::empty()),
             (b"\x1b[57423;1u", KeyCode::Home, KeyModifiers::empty()),
             (b"\x1bOq", KeyCode::Char('1'), KeyModifiers::empty()),
+            (b"\x1b[14~", KeyCode::F(4), KeyModifiers::empty()),
             (b"\x1b[49:33;2:1u", KeyCode::Char('1'), KeyModifiers::SHIFT),
         ];
 
@@ -984,6 +1006,14 @@ mod tests {
         let (event, consumed) = extract_one_event(b"\x1bOz").unwrap();
 
         assert_eq!(consumed, 3);
+        assert!(matches!(event, RawInputEvent::Unsupported));
+    }
+
+    #[test]
+    fn modified_rxvt_f_key_alias_stays_unsupported() {
+        let (event, consumed) = extract_one_event(b"\x1b[14;3~").unwrap();
+
+        assert_eq!(consumed, 7);
         assert!(matches!(event, RawInputEvent::Unsupported));
     }
 

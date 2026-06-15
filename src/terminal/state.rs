@@ -356,7 +356,7 @@ impl TerminalState {
             return None;
         }
         let session_ref = session_ref.map(|session_ref| {
-            self.conflicting_current_session_ref(&source, &agent_label, &session_ref)
+            self.conflicting_current_session_ref(&source, &agent_label, &session_ref, None)
                 .unwrap_or(session_ref)
         });
         if self.live_full_lifecycle_hook_authority_conflicts_with_session(
@@ -613,6 +613,7 @@ impl TerminalState {
         source: &str,
         agent_label: &str,
         session_ref: &crate::agent_resume::AgentSessionRef,
+        session_start_source: Option<&str>,
     ) -> Option<crate::agent_resume::AgentSessionRef> {
         self.current_session_identity_for_persistence().and_then(
             |(current_source, current_agent, current_kind, current_value)| {
@@ -620,13 +621,28 @@ impl TerminalState {
                     && current_agent == agent_label
                     && current_kind == crate::agent_resume::AgentSessionRefKind::Id
                     && session_ref.kind == crate::agent_resume::AgentSessionRefKind::Id
-                    && (current_kind != session_ref.kind || current_value != session_ref.value))
-                    .then_some(crate::agent_resume::AgentSessionRef {
-                        kind: current_kind,
-                        value: current_value,
-                    })
+                    && (current_kind != session_ref.kind || current_value != session_ref.value)
+                    && !Self::session_start_source_allows_session_replacement(
+                        source,
+                        agent_label,
+                        session_start_source,
+                    ))
+                .then_some(crate::agent_resume::AgentSessionRef {
+                    kind: current_kind,
+                    value: current_value,
+                })
             },
         )
+    }
+
+    fn session_start_source_allows_session_replacement(
+        source: &str,
+        agent_label: &str,
+        session_start_source: Option<&str>,
+    ) -> bool {
+        source == "herdr:claude"
+            && agent_label == "claude"
+            && matches!(session_start_source, Some("clear" | "resume" | "compact"))
     }
 
     pub fn set_persisted_agent_session(
@@ -643,6 +659,17 @@ impl TerminalState {
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
         seq: Option<u64>,
     ) -> Option<TerminalStateMutation> {
+        self.set_agent_session_ref_for_session_start(source, agent_label, session_ref, seq, None)
+    }
+
+    pub fn set_agent_session_ref_for_session_start(
+        &mut self,
+        source: String,
+        agent_label: String,
+        session_ref: Option<crate::agent_resume::AgentSessionRef>,
+        seq: Option<u64>,
+        session_start_source: Option<String>,
+    ) -> Option<TerminalStateMutation> {
         let session_ref = session_ref?;
         if !self.accept_hook_report(&source, seq) {
             return None;
@@ -651,7 +678,12 @@ impl TerminalState {
             return None;
         }
         if self
-            .conflicting_current_session_ref(&source, &agent_label, &session_ref)
+            .conflicting_current_session_ref(
+                &source,
+                &agent_label,
+                &session_ref,
+                session_start_source.as_deref(),
+            )
             .is_some()
         {
             return None;
@@ -1041,31 +1073,37 @@ mod tests {
 
     #[test]
     fn session_only_report_does_not_create_hook_authority() {
-        let mut terminal = test_terminal();
-        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        for (agent, source, label, session_id) in [
+            (Agent::Codex, "herdr:codex", "codex", "codex-session"),
+            (Agent::Devin, "herdr:devin", "devin", "devin-session"),
+        ] {
+            let mut terminal = test_terminal();
+            terminal.set_detected_state(Some(agent), AgentState::Idle);
 
-        let mutation = terminal.set_agent_session_ref(
-            "herdr:codex".into(),
-            "codex".into(),
-            crate::agent_resume::AgentSessionRef::id("codex-session"),
-            Some(1),
-        );
+            let mutation = terminal.set_agent_session_ref(
+                source.into(),
+                label.into(),
+                crate::agent_resume::AgentSessionRef::id(session_id),
+                Some(1),
+            );
 
-        assert!(mutation.is_some());
-        assert!(terminal.hook_authority.is_none());
-        assert_eq!(terminal.state, AgentState::Idle);
+            assert!(mutation.is_some());
+            assert!(terminal.hook_authority.is_none());
+            assert!(!terminal.full_lifecycle_hook_authority_active());
+            assert_eq!(terminal.state, AgentState::Idle);
 
-        terminal.set_detected_state_with_screen_signals_at(
-            Some(Agent::Codex),
-            AgentState::Working,
-            false,
-            false,
-            false,
-            false,
-            Instant::now(),
-        );
+            terminal.set_detected_state_with_screen_signals_at(
+                Some(agent),
+                AgentState::Working,
+                false,
+                false,
+                false,
+                false,
+                Instant::now(),
+            );
 
-        assert_eq!(terminal.state, AgentState::Working);
+            assert_eq!(terminal.state, AgentState::Working);
+        }
     }
 
     #[test]
@@ -2358,6 +2396,75 @@ mod tests {
                 .map(|session| session.session_ref.value.as_str()),
             Some("claude-session")
         );
+    }
+
+    #[test]
+    fn claude_startup_session_ref_does_not_replace_existing_session_ref() {
+        let mut terminal = test_terminal();
+        terminal
+            .set_agent_session_ref(
+                "herdr:claude".into(),
+                "claude".into(),
+                crate::agent_resume::AgentSessionRef::id("claude-session"),
+                Some(20),
+            )
+            .expect("initial session should be accepted");
+
+        let mutation = terminal.set_agent_session_ref_for_session_start(
+            "herdr:claude".into(),
+            "claude".into(),
+            crate::agent_resume::AgentSessionRef::id("nested-session"),
+            Some(21),
+            Some("startup".into()),
+        );
+
+        assert!(mutation.is_none());
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("claude-session")
+        );
+    }
+
+    #[test]
+    fn claude_lifecycle_session_ref_replaces_existing_session_ref() {
+        for session_start_source in ["clear", "resume", "compact"] {
+            let mut terminal = test_terminal();
+            terminal
+                .set_agent_session_ref(
+                    "herdr:claude".into(),
+                    "claude".into(),
+                    crate::agent_resume::AgentSessionRef::id("claude-session"),
+                    Some(20),
+                )
+                .expect("initial session should be accepted");
+
+            let next_session = format!("{session_start_source}-session");
+            let mutation = terminal
+                .set_agent_session_ref_for_session_start(
+                    "herdr:claude".into(),
+                    "claude".into(),
+                    crate::agent_resume::AgentSessionRef::id(&next_session),
+                    Some(21),
+                    Some(session_start_source.into()),
+                )
+                .unwrap_or_else(|| panic!("{session_start_source} should replace the session"));
+
+            assert!(
+                mutation.session_ref_changed,
+                "{session_start_source} should mark the session changed"
+            );
+            assert_eq!(
+                terminal
+                    .persisted_agent_session
+                    .as_ref()
+                    .map(|session| session.session_ref.value.as_str()),
+                Some(next_session.as_str()),
+                "{session_start_source} should store the replacement session"
+            );
+        }
     }
 
     #[test]

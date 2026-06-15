@@ -7,8 +7,6 @@ on:
         description: Optional master commit SHA to publish
         required: false
         type: string
-  schedule:
-    - cron: "0 3 * * 3,5"
 
 permissions:
   contents: read

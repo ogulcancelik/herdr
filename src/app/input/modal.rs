@@ -355,7 +355,7 @@ fn next_new_tab_default_name(state: &AppState) -> String {
     state
         .active
         .and_then(|i| state.workspaces.get(i))
-        .map(|ws| ws.next_public_tab_number.to_string())
+        .map(|ws| (ws.tabs.len() + 1).to_string())
         .unwrap_or_else(|| "1".to_string())
 }
 
@@ -453,9 +453,14 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                         if let Some(ws) = state.workspaces.get_mut(ws_idx) {
                             let workspace_id = ws.id.clone();
                             let active_tab = ws.active_tab;
+                            let keep_auto_name = ws
+                                .tabs
+                                .get(active_tab)
+                                .is_some_and(|tab| tab.is_auto_named())
+                                && ws
+                                    .tab_display_name(active_tab)
+                                    .is_some_and(|name| new_name == name);
                             if let Some(tab) = ws.active_tab_mut() {
-                                let keep_auto_name =
-                                    tab.is_auto_named() && new_name == tab.number.to_string();
                                 if !new_name.is_empty() && !keep_auto_name {
                                     tab.set_custom_name(new_name);
                                     let tab_id = ws
@@ -1296,7 +1301,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_first_auto_tab_keeps_remaining_auto_tab_number_and_next_prompt() {
+    fn closing_first_auto_tab_compacts_remaining_auto_tab_label_and_next_prompt() {
         let mut state = state_with_workspaces(&["test"]);
         open_new_tab_dialog(&mut state);
         handle_rename_key(
@@ -1311,11 +1316,14 @@ mod tests {
         state.workspaces[0].close_tab(0);
         state.workspaces[0].switch_tab(0);
 
-        assert_eq!(state.workspaces[0].tabs[0].display_name(), "2");
+        assert_eq!(
+            state.workspaces[0].tab_display_name(0).as_deref(),
+            Some("1")
+        );
         assert!(state.workspaces[0].tabs[0].custom_name.is_none());
 
         open_new_tab_dialog(&mut state);
-        assert_eq!(state.name_input, "3");
+        assert_eq!(state.name_input, "2");
     }
 
     #[test]
@@ -1332,7 +1340,10 @@ mod tests {
 
         assert_eq!(state.mode, Mode::Terminal);
         assert!(state.workspaces[0].tabs[1].custom_name.is_none());
-        assert_eq!(state.workspaces[0].tabs[1].display_name(), "2");
+        assert_eq!(
+            state.workspaces[0].tab_display_name(1).as_deref(),
+            Some("2")
+        );
     }
 
     #[test]

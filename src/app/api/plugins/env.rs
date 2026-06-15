@@ -1,9 +1,20 @@
 use crate::api::schema::InstalledPluginInfo;
 
+pub(super) fn plugin_config_dir(plugin_id: &str) -> std::path::PathBuf {
+    crate::plugin_paths::plugin_config_dir(plugin_id)
+}
+
+pub(super) fn plugin_state_dir(plugin_id: &str) -> std::path::PathBuf {
+    crate::plugin_paths::plugin_state_dir(plugin_id)
+}
+
+pub(super) fn ensure_plugin_user_dirs(plugin: &InstalledPluginInfo) -> std::io::Result<()> {
+    crate::plugin_paths::ensure_plugin_user_dirs(&plugin.plugin_id)
+}
+
 pub(super) fn plugin_path_env(plugin: &InstalledPluginInfo) -> Vec<(String, String)> {
-    let component = crate::api::schema::plugin_managed_path_component(&plugin.plugin_id);
-    let config_dir = crate::config::config_dir().join("plugins").join(&component);
-    let state_dir = crate::config::state_dir().join("plugins").join(component);
+    let config_dir = plugin_config_dir(&plugin.plugin_id);
+    let state_dir = plugin_state_dir(&plugin.plugin_id);
 
     vec![
         ("HERDR_PLUGIN_ROOT".to_string(), plugin.plugin_root.clone()),

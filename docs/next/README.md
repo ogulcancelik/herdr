@@ -153,7 +153,7 @@ states:
 - 🔵 **done** — work finished, you have not looked at it yet
 - 🟢 **idle** — done and seen
 
-detection works by reading foreground process and terminal output. zero config, no hooks required. official claude code, codex, github copilot cli, droid, kimi code cli, qodercli, and cursor agent cli integrations provide session restore identity; pi, omp, opencode, kilo code cli, hermes, and custom socket integrations can report their own state.
+detection works by reading foreground process and terminal output. zero config, no hooks required. official claude code, codex, github copilot cli, devin, droid, kimi code cli, qodercli, and cursor agent cli integrations provide session restore identity; pi, omp, kimi code cli, opencode, kilo code cli, hermes, and custom socket integrations can report their own state.
 
 ## lives in your terminal
 
@@ -187,6 +187,7 @@ automatic detection works out of the box. process name matching plus terminal ou
 | [grok cli](https://x.ai/grok) | ✓ | ✓ | ✓ |
 | [hermes agent](https://github.com/NousResearch/hermes-agent) | ✓ | ✓ | ✓ |
 | [kilo code cli](https://kilo.ai/) | ✓ | ✓ | ✓ |
+| [devin cli](https://docs.devin.ai/cli) | ✓ | ✓ | ✓ |
 | cursor agent | ✓ | ✓ | ✓ |
 | antigravity cli | ✓ | ✓ | ✓ |
 | kimi code cli | ✓ | ✓ | ✓ |
@@ -200,7 +201,7 @@ for agents outside the built-in list, herdr still works as a terminal multiplexe
 
 ### direct integrations
 
-official integrations have two roles. claude code, codex, github copilot cli, droid, kimi code cli, qodercli, and cursor agent cli report session identity for native restore, while their state still comes from screen detection. pi, opencode, kilo code cli, and hermes report both semantic state and session identity. omp reports semantic state without native session restore. install with:
+official integrations have two roles. claude code, codex, github copilot cli, devin, droid, qodercli, and cursor agent cli report session identity for native restore, while their state still comes from screen detection. pi, kimi code cli, opencode, kilo code cli, and hermes report both semantic state and session identity. omp reports semantic state without native session restore. install with:
 
 ```bash
 herdr integration install pi
@@ -208,6 +209,7 @@ herdr integration install omp
 herdr integration install claude
 herdr integration install codex
 herdr integration install copilot
+herdr integration install devin
 herdr integration install droid
 herdr integration install kimi
 herdr integration install opencode

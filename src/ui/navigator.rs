@@ -354,7 +354,11 @@ fn tab_detail(
     };
     let mut parts = vec![
         ws.display_name_from(&app.terminals, terminal_runtimes),
-        format!("tab: {}", tab.display_name()),
+        format!(
+            "tab: {}",
+            ws.tab_display_name(tab_idx)
+                .unwrap_or_else(|| (tab_idx + 1).to_string())
+        ),
         format!("{} panes", tab.panes.len()),
     ];
     let rows = app.navigator_rows_from(terminal_runtimes);
@@ -384,7 +388,11 @@ fn pane_detail(
     };
     let mut parts = vec![ws.display_name_from(&app.terminals, terminal_runtimes)];
     if ws.tabs.len() > 1 {
-        parts.push(format!("tab: {}", tab.display_name()));
+        parts.push(format!(
+            "tab: {}",
+            ws.tab_display_name(tab_idx)
+                .unwrap_or_else(|| (tab_idx + 1).to_string())
+        ));
     }
     if let Some(pane_number) = ws.public_pane_number(pane_id) {
         parts.push(format!("pane {pane_number}"));

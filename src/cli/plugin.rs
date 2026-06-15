@@ -26,6 +26,7 @@ pub(super) fn run_plugin_command(args: &[String]) -> std::io::Result<i32> {
         "uninstall" => plugin_uninstall(&args[1..]),
         "link" => plugin_link(&args[1..]),
         "list" => plugin_list(&args[1..]),
+        "config-dir" => plugin_config_dir_command(&args[1..]),
         "unlink" => plugin_unlink(&args[1..]),
         "enable" => plugin_set_enabled(&args[1..], true),
         "disable" => plugin_set_enabled(&args[1..], false),
@@ -72,6 +73,21 @@ fn plugin_link(args: &[String]) -> std::io::Result<i32> {
         enabled,
         source: None,
     }))
+}
+
+fn plugin_config_dir_command(args: &[String]) -> std::io::Result<i32> {
+    let Some(plugin_id) = args.first() else {
+        eprintln!("usage: herdr plugin config-dir <plugin_id>");
+        return Ok(2);
+    };
+    if args.len() != 1 {
+        eprintln!("usage: herdr plugin config-dir <plugin_id>");
+        return Ok(2);
+    }
+    let path = crate::plugin_paths::plugin_config_dir(plugin_id);
+    crate::plugin_paths::ensure_plugin_user_dirs(plugin_id)?;
+    println!("{}", path.display());
+    Ok(0)
 }
 
 fn plugin_list(args: &[String]) -> std::io::Result<i32> {
@@ -192,14 +208,17 @@ fn plugin_install(args: &[String]) -> std::io::Result<i32> {
         let backup_checkout = temp_root.join("previous-checkout");
         let mut backup_moved = false;
         if final_checkout.exists() {
-            std::fs::rename(&final_checkout, &backup_checkout)?;
+            std::fs::rename(&final_checkout, &backup_checkout)
+                .map_err(|err| plugin_checkout_lifecycle_error("replace", &final_checkout, err))?;
             backup_moved = true;
         }
         let install_attempt = (|| {
             if let Some(parent) = final_checkout.parent() {
                 std::fs::create_dir_all(parent).map_err(InstallFailure::Rollback)?;
             }
-            std::fs::rename(&checkout, &final_checkout).map_err(InstallFailure::Rollback)?;
+            std::fs::rename(&checkout, &final_checkout)
+                .map_err(|err| plugin_checkout_lifecycle_error("install", &final_checkout, err))
+                .map_err(InstallFailure::Rollback)?;
 
             source_info.managed_path = Some(final_checkout.display().to_string());
             let final_manifest_root = source.manifest_root(&final_checkout);
@@ -221,6 +240,10 @@ fn plugin_install(args: &[String]) -> std::io::Result<i32> {
             Err(InstallFailure::KeepCheckout(err)) => return Err(err),
         };
         println!("Installed {} from {}.", plugin.plugin_id, source.display());
+        println!(
+            "Config: {}",
+            crate::plugin_paths::plugin_config_dir(&plugin.plugin_id).display()
+        );
         Ok(0)
     })();
     let _ = std::fs::remove_dir_all(&temp_root);
@@ -889,6 +912,8 @@ fn register_installed_plugin(
         Err(err) if is_connection_error(&err) => {
             let mut plugins = crate::persist::plugin_registry::load();
             plugins.retain(|entry| entry.plugin_id != plugin.plugin_id);
+            crate::plugin_paths::ensure_plugin_user_dirs(&plugin.plugin_id)
+                .map_err(InstallFailure::Rollback)?;
             plugins.push(plugin);
             crate::persist::plugin_registry::save(&plugins).map_err(InstallFailure::Rollback)
         }
@@ -1079,6 +1104,10 @@ fn print_plugin_list_human(response: &serde_json::Value) -> std::io::Result<i32>
             source_display(&plugin),
             warning
         );
+        println!(
+            "  config: {}",
+            crate::plugin_paths::plugin_config_dir(&plugin.plugin_id).display()
+        );
         for warning in plugin.warnings {
             println!("  warning: {warning}");
         }
@@ -1220,9 +1249,9 @@ fn run_plugin_build_command(
             },
         }));
     };
-    let mut child = Command::new(program);
+    let args = command.iter().skip(1).cloned().collect::<Vec<_>>();
+    let mut child = crate::plugin_command::command_for_argv(program, &args);
     child
-        .args(command.iter().skip(1))
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1499,7 +1528,21 @@ fn remove_managed_plugin_files(plugin: &InstalledPluginInfo) -> std::io::Result<
             path.display()
         )));
     }
-    std::fs::remove_dir_all(path)
+    std::fs::remove_dir_all(&path)
+        .map_err(|err| plugin_checkout_lifecycle_error("remove", &path, err))
+}
+
+fn plugin_checkout_lifecycle_error(operation: &str, path: &Path, err: io::Error) -> io::Error {
+    if cfg!(windows) && err.kind() == io::ErrorKind::PermissionDenied {
+        return io::Error::new(
+            err.kind(),
+            format!(
+                "failed to {operation} managed plugin checkout at {}; close any Herdr plugin panes or plugin commands using that checkout, then retry: {err}",
+                path.display()
+            ),
+        );
+    }
+    err
 }
 
 fn is_expected_managed_path(plugin: &InstalledPluginInfo, path: &Path) -> bool {
@@ -1544,6 +1587,7 @@ fn print_plugin_help() {
     eprintln!("  herdr plugin uninstall <plugin_id|owner/repo[/subdir...]>");
     eprintln!("  herdr plugin link <path> [--disabled]");
     eprintln!("  herdr plugin list [--plugin ID] [--json]");
+    eprintln!("  herdr plugin config-dir <plugin_id>");
     eprintln!("  herdr plugin unlink <plugin_id>");
     eprintln!("  herdr plugin enable <plugin_id>");
     eprintln!("  herdr plugin disable <plugin_id>");
@@ -1569,6 +1613,14 @@ fn print_plugin_pane_help() {
 mod tests {
     use super::*;
 
+    fn unique_plugin_id(label: &str) -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        format!("test.{label}.{}.{nanos}", std::process::id())
+    }
+
     fn github_plugin(
         id: &str,
         owner: &str,
@@ -1579,6 +1631,7 @@ mod tests {
             plugin_id: id.to_string(),
             name: "Test Plugin".to_string(),
             version: "0.1.0".to_string(),
+            min_herdr_version: crate::build_info::BASE_VERSION.to_string(),
             description: None,
             manifest_path: format!("/tmp/{id}/herdr-plugin.toml"),
             plugin_root: format!("/tmp/{id}"),
@@ -1690,5 +1743,32 @@ mod tests {
         plugin.source = PluginSourceInfo::default();
 
         assert!(plugin_by_github_source([plugin], &source).is_none());
+    }
+
+    #[test]
+    fn cli_user_dir_creation_seeds_legacy_config_before_printing_config_dir() {
+        let plugin_id = unique_plugin_id("legacy-config");
+        let config_dir = crate::plugin_paths::plugin_config_dir(&plugin_id);
+        let state_dir = crate::plugin_paths::plugin_state_dir(&plugin_id);
+        let legacy_dir = crate::config::config_dir().join("plugins").join(&plugin_id);
+        let _ = std::fs::remove_dir_all(&config_dir);
+        let _ = std::fs::remove_dir_all(&state_dir);
+        let _ = std::fs::remove_dir_all(&legacy_dir);
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        std::fs::write(legacy_dir.join(".env"), "TOKEN=legacy\n").unwrap();
+
+        assert_eq!(
+            plugin_config_dir_command(std::slice::from_ref(&plugin_id)).unwrap(),
+            0
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(config_dir.join(".env")).unwrap(),
+            "TOKEN=legacy\n"
+        );
+
+        let _ = std::fs::remove_dir_all(config_dir);
+        let _ = std::fs::remove_dir_all(state_dir);
+        let _ = std::fs::remove_dir_all(legacy_dir);
     }
 }

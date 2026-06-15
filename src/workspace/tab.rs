@@ -185,12 +185,6 @@ impl Tab {
         ))
     }
 
-    pub fn display_name(&self) -> String {
-        self.custom_name
-            .clone()
-            .unwrap_or_else(|| self.number.to_string())
-    }
-
     pub fn is_auto_named(&self) -> bool {
         self.custom_name.is_none()
     }

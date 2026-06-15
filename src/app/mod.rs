@@ -2951,7 +2951,7 @@ mod tests {
 
         assert_eq!(tab.tab_id, format!("{}:t3", app.state.workspaces[0].id));
         assert_eq!(tab.number, 3);
-        assert_eq!(tab.label, "3");
+        assert_eq!(tab.label, "2");
     }
 
     #[test]
@@ -3971,6 +3971,15 @@ last_pane = "prefix+tab"
         app.route_client_input(b"\x1b[99;5u".to_vec());
 
         assert_eq!(rx.recv().await.unwrap(), bytes::Bytes::from(vec![3]));
+
+        // iTerm2 and rxvt-style hosts may send F4 as CSI 14~. Normalize it
+        // through the same semantic key path instead of leaking host bytes.
+        app.route_client_input(b"\x1b[14~".to_vec());
+
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            bytes::Bytes::from_static(b"\x1bOS")
+        );
     }
 
     #[tokio::test]

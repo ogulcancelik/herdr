@@ -1,0 +1,86 @@
+id = "devin"
+version = "2026.06.15.1"
+min_engine_version = 1
+updated_at = "2026-06-15T00:00:00Z"
+aliases = ["devin-cli", "devin cli"]
+
+[[rules]]
+id = "workspace_trust_prompt"
+state = "blocked"
+priority = 300
+region = "bottom_non_empty_lines(8)"
+visible_blocker = true
+contains = [
+  "do you trust the authors of this directory?",
+  "with untrusted content.",
+  "yes, trust ",
+]
+
+[[rules]]
+id = "permission_prompt"
+state = "blocked"
+priority = 290
+region = "bottom_non_empty_lines(8)"
+visible_blocker = true
+contains = ["approve once", "select", "confirm", "esc cancel"]
+
+[[rules]]
+id = "running_tools_footer"
+state = "working"
+priority = 200
+region = "bottom_non_empty_lines(8)"
+visible_working = true
+contains = ["running tools", "esc to interrupt"]
+not = [
+  { contains = ["approve once", "esc cancel"] },
+]
+
+[[rules]]
+id = "guide_while_working"
+state = "working"
+priority = 190
+region = "bottom_non_empty_lines(6)"
+visible_working = true
+contains = ["guide devin while it works"]
+not = [
+  { contains = ["approve once", "esc cancel"] },
+]
+
+[[rules]]
+id = "tool_reading_timeout"
+state = "working"
+priority = 180
+region = "bottom_non_empty_lines(8)"
+visible_working = true
+contains = ["reading shell ", "timeout:"]
+not = [
+  { contains = ["approve once", "esc cancel"] },
+]
+
+[[rules]]
+id = "welcome_prompt_footer"
+state = "idle"
+priority = 120
+region = "bottom_non_empty_lines(8)"
+visible_idle = true
+contains = ["ask devin to build", "features, fix bugs", "your code"]
+line_regex = ['^\s*❭ Ask Devin to build']
+not = [
+  { contains = ["approve once", "esc cancel"] },
+  { contains = ["running tools", "esc to interrupt"] },
+  { contains = ["guide devin while it works"] },
+]
+
+[[rules]]
+id = "live_prompt_footer"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(6)"
+visible_idle = true
+contains = ["context:"]
+line_regex = ['^\s*❭']
+not = [
+  { contains = ["approve once", "esc cancel"] },
+  { contains = ["running tools", "esc to interrupt"] },
+  { contains = ["guide devin while it works"] },
+]

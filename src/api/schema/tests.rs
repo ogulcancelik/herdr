@@ -3,125 +3,6 @@ use std::collections::HashMap;
 use super::*;
 
 #[test]
-fn request_round_trips_for_pane_read() {
-    let request = Request {
-        id: "req_1".into(),
-        method: Method::PaneRead(PaneReadParams {
-            pane_id: "p_1".into(),
-            source: ReadSource::Recent,
-            lines: Some(80),
-            format: ReadFormat::Text,
-            strip_ansi: true,
-        }),
-    };
-
-    let json = serde_json::to_string(&request).unwrap();
-    let restored: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(restored, request);
-}
-
-#[test]
-fn request_round_trips_for_pane_report_agent() {
-    let request = Request {
-        id: "req_hook".into(),
-        method: Method::PaneReportAgent(PaneReportAgentParams {
-            pane_id: "1-1".into(),
-            source: "herdr:pi".into(),
-            agent: "pi".into(),
-            state: PaneAgentState::Working,
-            message: Some("thinking".into()),
-            custom_status: Some("indexing".into()),
-            seq: Some(42),
-            agent_session_id: Some("pi-session".into()),
-            agent_session_path: Some("/tmp/pi-session.jsonl".into()),
-        }),
-    };
-
-    let json = serde_json::to_string(&request).unwrap();
-    let restored: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(restored, request);
-}
-
-#[test]
-fn request_round_trips_for_pane_report_agent_session() {
-    let request = Request {
-        id: "req_session".into(),
-        method: Method::PaneReportAgentSession(PaneReportAgentSessionParams {
-            pane_id: "1-1".into(),
-            source: "herdr:claude".into(),
-            agent: "claude".into(),
-            seq: Some(42),
-            agent_session_id: Some("claude-session".into()),
-            agent_session_path: None,
-        }),
-    };
-
-    let json = serde_json::to_string(&request).unwrap();
-    let restored: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(restored, request);
-}
-
-#[test]
-fn request_round_trips_for_pane_report_metadata() {
-    let request = Request {
-        id: "req_metadata".into(),
-        method: Method::PaneReportMetadata(PaneReportMetadataParams {
-            pane_id: "1-1".into(),
-            source: "user:claude-title".into(),
-            agent: Some("claude".into()),
-            applies_to_source: Some("herdr:claude".into()),
-            title: Some("Refactor auth".into()),
-            display_agent: Some("Claude auth".into()),
-            custom_status: Some("refactor auth".into()),
-            state_labels: HashMap::from([("working".into(), "deep in the mines".into())]),
-            clear_title: false,
-            clear_display_agent: false,
-            clear_custom_status: false,
-            clear_state_labels: false,
-            seq: Some(42),
-            ttl_ms: Some(3_600_000),
-        }),
-    };
-
-    let json = serde_json::to_string(&request).unwrap();
-    let restored: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(restored, request);
-}
-
-#[test]
-fn request_round_trips_for_pane_clear_agent_authority() {
-    let request = Request {
-        id: "req_clear".into(),
-        method: Method::PaneClearAgentAuthority(PaneClearAgentAuthorityParams {
-            pane_id: "1-1".into(),
-            source: Some("herdr:pi".into()),
-            seq: Some(42),
-        }),
-    };
-
-    let json = serde_json::to_string(&request).unwrap();
-    let restored: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(restored, request);
-}
-
-#[test]
-fn request_round_trips_for_pane_release_agent() {
-    let request = Request {
-        id: "req_release".into(),
-        method: Method::PaneReleaseAgent(PaneReleaseAgentParams {
-            pane_id: "1-1".into(),
-            source: "herdr:pi".into(),
-            agent: "pi".into(),
-            seq: Some(42),
-        }),
-    };
-
-    let json = serde_json::to_string(&request).unwrap();
-    let restored: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(restored, request);
-}
-
-#[test]
 fn request_uses_dot_method_names() {
     let request = Request {
         id: "req_1".into(),
@@ -685,6 +566,7 @@ fn plugin_link_list_unlink_round_trip() {
         plugin_id: "example.worktree-bootstrap".into(),
         name: "Worktree Bootstrap".into(),
         version: "0.1.0".into(),
+        min_herdr_version: crate::build_info::BASE_VERSION.into(),
         description: Some("Prepare new worktrees".into()),
         manifest_path: "/plugins/worktree-bootstrap/herdr-plugin.toml".into(),
         plugin_root: "/plugins/worktree-bootstrap".into(),

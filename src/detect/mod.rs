@@ -46,6 +46,7 @@ pub enum Agent {
     Codex,
     Gemini,
     Cursor,
+    Devin,
     Antigravity,
     Cline,
     OpenCode,
@@ -61,12 +62,13 @@ pub enum Agent {
 }
 
 impl Agent {
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::Pi,
         Self::Claude,
         Self::Codex,
         Self::Gemini,
         Self::Cursor,
+        Self::Devin,
         Self::Antigravity,
         Self::Cline,
         Self::OpenCode,
@@ -89,6 +91,7 @@ pub fn agent_label(agent: Agent) -> &'static str {
         Agent::Codex => "codex",
         Agent::Gemini => "gemini",
         Agent::Cursor => "cursor",
+        Agent::Devin => "devin",
         Agent::Antigravity => "agy",
         Agent::Cline => "cline",
         Agent::OpenCode => "opencode",
@@ -112,6 +115,7 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
         "codex" => Some(Agent::Codex),
         "gemini" => Some(Agent::Gemini),
         "cursor" | "cursor-agent" => Some(Agent::Cursor),
+        "devin" | "devin-cli" | "devin cli" => Some(Agent::Devin),
         "agy" | "antigravity" | "antigravity-cli" => Some(Agent::Antigravity),
         "cline" => Some(Agent::Cline),
         "opencode" | "open-code" => Some(Agent::OpenCode),
@@ -139,6 +143,7 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
         "codex" => Some(Agent::Codex),
         "gemini" => Some(Agent::Gemini),
         "cursor" | "cursor-agent" => Some(Agent::Cursor),
+        "devin" | "devin-cli" | "devin cli" => Some(Agent::Devin),
         "agy" | "antigravity" | "antigravity-cli" => Some(Agent::Antigravity),
         "cline" => Some(Agent::Cline),
         "opencode" | "open-code" => Some(Agent::OpenCode),
@@ -582,6 +587,8 @@ mod tests {
         assert_eq!(identify_agent("gemini"), Some(Agent::Gemini));
         assert_eq!(identify_agent("cursor"), Some(Agent::Cursor));
         assert_eq!(identify_agent("cursor-agent"), Some(Agent::Cursor));
+        assert_eq!(identify_agent("devin"), Some(Agent::Devin));
+        assert_eq!(identify_agent("devin-cli"), Some(Agent::Devin));
         assert_eq!(identify_agent("agy"), Some(Agent::Antigravity));
         assert_eq!(identify_agent("antigravity-cli"), Some(Agent::Antigravity));
         assert_eq!(identify_agent("cline"), Some(Agent::Cline));
@@ -606,6 +613,7 @@ mod tests {
         assert_eq!(parse_agent_label("pi"), Some(Agent::Pi));
         assert_eq!(parse_agent_label("claude"), Some(Agent::Claude));
         assert_eq!(parse_agent_label("cursor-agent"), Some(Agent::Cursor));
+        assert_eq!(parse_agent_label("devin-cli"), Some(Agent::Devin));
         assert_eq!(parse_agent_label("agy"), Some(Agent::Antigravity));
         assert_eq!(parse_agent_label("antigravity"), Some(Agent::Antigravity));
         assert_eq!(parse_agent_label("opencode.exe"), Some(Agent::OpenCode));
@@ -627,6 +635,7 @@ mod tests {
         assert_eq!(agent_label(Agent::Pi), "pi");
         assert_eq!(agent_label(Agent::GithubCopilot), "copilot");
         assert_eq!(agent_label(Agent::OpenCode), "opencode");
+        assert_eq!(agent_label(Agent::Devin), "devin");
         assert_eq!(agent_label(Agent::Antigravity), "agy");
         assert_eq!(agent_label(Agent::Kiro), "kiro");
         assert_eq!(agent_label(Agent::Grok), "grok");
@@ -647,6 +656,7 @@ mod tests {
         assert_eq!(identify_agent("Pi"), Some(Agent::Pi));
         assert_eq!(identify_agent("CLAUDE"), Some(Agent::Claude));
         assert_eq!(identify_agent("Codex"), Some(Agent::Codex));
+        assert_eq!(identify_agent("Devin"), Some(Agent::Devin));
     }
 
     #[test]

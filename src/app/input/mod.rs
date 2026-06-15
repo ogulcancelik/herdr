@@ -23,23 +23,13 @@ enum WheelRouting {
 const WORKSPACE_DRAG_THRESHOLD: u16 = 1;
 const TAB_DRAG_THRESHOLD: u16 = 1;
 
-#[cfg(target_os = "macos")]
-fn modified_url_click_modifier() -> KeyModifiers {
-    KeyModifiers::SUPER
-}
-
-#[cfg(not(target_os = "macos"))]
 fn modified_url_click_modifier() -> KeyModifiers {
     KeyModifiers::CONTROL
 }
 
 #[cfg(test)]
 #[test]
-fn modified_url_click_modifier_matches_platform_primary_modifier() {
-    #[cfg(target_os = "macos")]
-    assert_eq!(modified_url_click_modifier(), KeyModifiers::SUPER);
-
-    #[cfg(not(target_os = "macos"))]
+fn modified_url_click_modifier_matches_terminal_mouse_reporting() {
     assert_eq!(modified_url_click_modifier(), KeyModifiers::CONTROL);
 }
 

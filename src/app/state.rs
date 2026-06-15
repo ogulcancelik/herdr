@@ -1762,6 +1762,304 @@ impl AppState {
         }
     }
 
+    pub fn test_with_adversarial_identity_state() -> Self {
+        let mut state = Self::test_new();
+        state.workspaces = vec![crate::workspace::Workspace::test_adversarial_identity_state()];
+        state.active = Some(0);
+        state.selected = 0;
+        state.ensure_test_terminals();
+        state
+    }
+
+    pub fn assert_invariants_for_test(&self) {
+        if self.workspaces.is_empty() {
+            assert!(
+                self.active.is_none(),
+                "empty app state must not have active workspace {:?}",
+                self.active
+            );
+            assert_eq!(
+                self.selected, 0,
+                "empty app state should keep selected workspace at 0"
+            );
+            assert!(
+                self.pane_id_aliases.is_empty(),
+                "empty app state must not keep raw pane aliases"
+            );
+            assert!(
+                self.public_pane_id_aliases.is_empty(),
+                "empty app state must not keep public pane aliases"
+            );
+            assert!(
+                self.previous_pane_focus.is_none(),
+                "empty app state must not keep previous pane focus"
+            );
+            assert!(
+                self.plugin_panes.is_empty(),
+                "empty app state must not keep plugin pane records"
+            );
+            assert!(
+                self.pending_agent_notifications.is_empty(),
+                "empty app state must not keep pending agent notifications"
+            );
+            assert!(
+                self.copy_mode.is_none(),
+                "empty app state must not keep copy mode"
+            );
+            assert!(
+                self.rename_pane_target.is_none(),
+                "empty app state must not keep rename pane target"
+            );
+            assert!(
+                self.selection.is_none(),
+                "empty app state must not keep text selection"
+            );
+            assert!(
+                self.selection_autoscroll.is_none(),
+                "empty app state must not keep selection autoscroll"
+            );
+            if let Some(toast) = &self.toast {
+                assert!(
+                    toast.target.is_none(),
+                    "empty app state must not keep pane-targeted toast"
+                );
+            }
+            assert!(
+                self.right_click_passthrough.is_none(),
+                "empty app state must not keep right-click passthrough gesture"
+            );
+            assert!(
+                self.drag.is_none(),
+                "empty app state must not keep drag state"
+            );
+            assert!(
+                self.workspace_press.is_none(),
+                "empty app state must not keep workspace press state"
+            );
+            assert!(
+                self.tab_press.is_none(),
+                "empty app state must not keep tab press state"
+            );
+            assert!(
+                self.context_menu.is_none(),
+                "empty app state must not keep context menu"
+            );
+            return;
+        }
+
+        assert!(
+            self.selected < self.workspaces.len(),
+            "selected workspace {} out of bounds for {} workspaces",
+            self.selected,
+            self.workspaces.len()
+        );
+        let active = self
+            .active
+            .expect("non-empty app state must have active workspace");
+        assert!(
+            active < self.workspaces.len(),
+            "active workspace {} out of bounds for {} workspaces",
+            active,
+            self.workspaces.len()
+        );
+
+        let mut workspace_ids = std::collections::HashSet::new();
+        let mut workspace_id_to_idx = std::collections::HashMap::new();
+        let mut pane_ids = std::collections::HashSet::new();
+        let mut attached_terminal_ids = std::collections::HashSet::new();
+        for (ws_idx, ws) in self.workspaces.iter().enumerate() {
+            assert!(
+                workspace_ids.insert(ws.id.clone()),
+                "duplicate workspace id {} at workspace index {}",
+                ws.id,
+                ws_idx
+            );
+            workspace_id_to_idx.insert(ws.id.clone(), ws_idx);
+            ws.assert_invariants_for_test();
+
+            for tab in &ws.tabs {
+                for (pane_id, pane) in &tab.panes {
+                    assert!(
+                        pane_ids.insert(*pane_id),
+                        "pane {:?} appears in more than one workspace",
+                        pane_id
+                    );
+                    assert!(
+                        attached_terminal_ids.insert(pane.attached_terminal_id.clone()),
+                        "terminal {} is attached to more than one app pane",
+                        pane.attached_terminal_id
+                    );
+                    assert!(
+                        self.terminals.contains_key(&pane.attached_terminal_id),
+                        "pane {:?} is attached to missing terminal {}",
+                        pane_id,
+                        pane.attached_terminal_id
+                    );
+                }
+            }
+        }
+
+        let assert_live_pane = |pane_id: PaneId, context: &str| {
+            assert!(
+                pane_ids.contains(&pane_id),
+                "{context} references missing pane {:?}",
+                pane_id
+            );
+        };
+        let assert_workspace_pane = |workspace_id: &str, pane_id: PaneId, context: &str| {
+            let ws_idx = workspace_id_to_idx
+                .get(workspace_id)
+                .copied()
+                .unwrap_or_else(|| panic!("{context} references missing workspace {workspace_id}"));
+            assert!(
+                self.workspaces[ws_idx].pane_state(pane_id).is_some(),
+                "{context} references pane {:?} outside workspace {}",
+                pane_id,
+                workspace_id
+            );
+        };
+        let assert_workspace_index = |ws_idx: usize, context: &str| {
+            assert!(
+                ws_idx < self.workspaces.len(),
+                "{context} references workspace index {} out of bounds for {} workspaces",
+                ws_idx,
+                self.workspaces.len()
+            );
+        };
+        let assert_tab_index = |ws_idx: usize, tab_idx: usize, context: &str| {
+            assert_workspace_index(ws_idx, context);
+            assert!(
+                tab_idx < self.workspaces[ws_idx].tabs.len(),
+                "{context} references tab index {} out of bounds for workspace {} with {} tabs",
+                tab_idx,
+                ws_idx,
+                self.workspaces[ws_idx].tabs.len()
+            );
+        };
+
+        for (&raw, &pane_id) in &self.pane_id_aliases {
+            assert_live_pane(pane_id, &format!("raw pane alias {raw}"));
+        }
+        for (public_id, &pane_id) in &self.public_pane_id_aliases {
+            assert_live_pane(pane_id, &format!("public pane alias {public_id}"));
+        }
+        if let Some(focus) = &self.previous_pane_focus {
+            assert_workspace_pane(&focus.workspace_id, focus.pane_id, "previous pane focus");
+        }
+        if let Some(toast) = &self.toast {
+            if let Some(target) = &toast.target {
+                assert_workspace_pane(&target.workspace_id, target.pane_id, "toast target");
+            }
+        }
+        for (&pane_id, notification) in &self.pending_agent_notifications {
+            assert_eq!(
+                pane_id, notification.pane_id,
+                "pending agent notification map key must match payload pane id"
+            );
+            assert_workspace_pane(
+                &notification.workspace_id,
+                notification.pane_id,
+                "pending agent notification",
+            );
+        }
+        for &pane_id in self.plugin_panes.keys() {
+            assert_live_pane(pane_id, "plugin pane record");
+        }
+        if let Some(copy_mode) = &self.copy_mode {
+            assert_live_pane(copy_mode.pane_id, "copy mode");
+        }
+        if let Some(pane_id) = self.rename_pane_target {
+            assert_live_pane(pane_id, "rename pane target");
+        }
+        if let Some(selection) = &self.selection {
+            assert_live_pane(selection.pane_id, "text selection");
+        } else {
+            assert!(
+                self.selection_autoscroll.is_none(),
+                "selection autoscroll must not remain without an active text selection"
+            );
+        }
+        if let Some(gesture) = &self.right_click_passthrough {
+            assert_live_pane(gesture.pane_info.id, "right-click passthrough gesture");
+        }
+        if let Some(drag) = &self.drag {
+            match &drag.target {
+                DragTarget::WorkspaceReorder {
+                    source_ws_idx,
+                    insert_idx,
+                } => {
+                    assert_workspace_index(*source_ws_idx, "workspace drag source");
+                    if let Some(insert_idx) = insert_idx {
+                        assert!(
+                            *insert_idx <= self.workspaces.len(),
+                            "workspace drag insert index {} out of bounds for {} workspaces",
+                            insert_idx,
+                            self.workspaces.len()
+                        );
+                    }
+                }
+                DragTarget::TabReorder {
+                    ws_idx,
+                    source_tab_idx,
+                    insert_idx,
+                } => {
+                    assert_tab_index(*ws_idx, *source_tab_idx, "tab drag source");
+                    if let Some(insert_idx) = insert_idx {
+                        assert!(
+                            *insert_idx <= self.workspaces[*ws_idx].tabs.len(),
+                            "tab drag insert index {} out of bounds for workspace {} with {} tabs",
+                            insert_idx,
+                            ws_idx,
+                            self.workspaces[*ws_idx].tabs.len()
+                        );
+                    }
+                }
+                DragTarget::PaneScrollbar { pane_id, .. } => {
+                    assert_live_pane(*pane_id, "pane scrollbar drag")
+                }
+                _ => {}
+            }
+        }
+        if let Some(press) = &self.workspace_press {
+            assert_workspace_index(press.ws_idx, "workspace press");
+        }
+        if let Some(press) = &self.tab_press {
+            assert_tab_index(press.ws_idx, press.tab_idx, "tab press");
+        }
+        if let Some(menu) = &self.context_menu {
+            match menu.kind {
+                ContextMenuKind::Workspace { ws_idx }
+                | ContextMenuKind::GitWorkspace { ws_idx, .. } => {
+                    assert_workspace_index(ws_idx, "context menu workspace")
+                }
+                ContextMenuKind::Tab { ws_idx, tab_idx } => {
+                    assert_tab_index(ws_idx, tab_idx, "context menu tab")
+                }
+                ContextMenuKind::Pane {
+                    ws_idx,
+                    tab_idx,
+                    pane_id,
+                    source_pane_id,
+                    ..
+                } => {
+                    assert_tab_index(ws_idx, tab_idx, "context menu pane tab");
+                    assert!(
+                        self.workspaces[ws_idx].tabs[tab_idx]
+                            .panes
+                            .contains_key(&pane_id),
+                        "context menu pane references pane {:?} outside workspace {} tab {}",
+                        pane_id,
+                        ws_idx,
+                        tab_idx
+                    );
+                    if let Some(source_pane_id) = source_pane_id {
+                        assert_live_pane(source_pane_id, "context menu source pane");
+                    }
+                }
+            }
+        }
+    }
+
     pub fn insert_test_runtime(
         &mut self,
         pane_id: crate::layout::PaneId,
@@ -1802,6 +2100,21 @@ mod tests {
         state.workspaces = vec![ws];
 
         assert!(state.pane_exposes_host_cursor(0, pane_id));
+    }
+
+    #[test]
+    fn adversarial_identity_state_satisfies_app_invariants_after_mutation() {
+        let mut state = AppState::test_with_adversarial_identity_state();
+        state.assert_invariants_for_test();
+
+        let ws = &mut state.workspaces[0];
+        let active_public = ws.tabs[ws.active_tab].number;
+        assert_ne!(ws.active_tab + 1, active_public);
+        let new_pane = ws.test_split(ratatui::layout::Direction::Horizontal);
+        assert!(ws.public_pane_number(new_pane).is_some());
+        state.ensure_test_terminals();
+
+        state.assert_invariants_for_test();
     }
 
     #[test]

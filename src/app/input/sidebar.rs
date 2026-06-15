@@ -1298,9 +1298,10 @@ mod tests {
         let labels: Vec<_> = app.state.workspaces[0]
             .tabs
             .iter()
-            .map(|tab| tab.display_name())
+            .enumerate()
+            .map(|(tab_idx, _)| app.state.workspaces[0].tab_display_name(tab_idx).unwrap())
             .collect();
-        assert_eq!(labels, vec!["foo", "3", "1"]);
+        assert_eq!(labels, vec!["foo", "2", "3"]);
         assert_eq!(
             app.state.workspaces[0].tabs[0].custom_name.as_deref(),
             Some("foo")

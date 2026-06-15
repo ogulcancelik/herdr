@@ -1239,6 +1239,9 @@ impl App {
             source: params.source,
             agent_label,
             seq: params.seq,
+            session_start_source: crate::agent_resume::normalize_claude_session_start_source(
+                params.session_start_source,
+            ),
         });
 
         encode_success(id, ResponseResult::Ok {})

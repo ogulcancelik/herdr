@@ -33,10 +33,13 @@ For internal beta testing, `HERDR_MANIFEST_URL` can point the installer at a cus
 | Agent self-report integrations | beta |
 | Agent process-tree detection | beta |
 | Git/worktree detection from known cwd | beta |
+| Plugins | preview |
 | Pane screen history | beta |
 | Nested launch override | beta |
 
 Windows agent process detection scans descendants of the pane shell and recognizes direct agents plus common command wrappers. It is useful for Codex, Claude, and similar agents, but it is not the same as Unix foreground process-group detection.
+
+Plugins support `windows` as a manifest platform in preview. GitHub install, local link, build commands, actions, events, and plugin panes are best effort on Windows. Commands are argv commands and must be Windows-compatible; Node package shims such as `npm`, `bun`, and `node` are expected to work when they are on `PATH`, while Unix-only examples using `sh` or Bash need Windows-specific alternatives. Platform filters skip unsupported build commands and return `platform_unsupported` for unsupported actions or panes.
 
 ## Partial support
 

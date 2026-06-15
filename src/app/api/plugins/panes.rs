@@ -183,8 +183,15 @@ impl App {
         let mut env = super::super::env::normalize_launch_env(env)?;
         let context_json = serde_json::to_string(&context)
             .map_err(|err| ("invalid_plugin_context".to_string(), err.to_string()))?;
+        super::env::ensure_plugin_user_dirs(plugin)
+            .map_err(|err| ("plugin_user_dir_create_failed".to_string(), err.to_string()))?;
         env.retain(|(key, _)| !plugin_pane_protected_env_key(key));
         env.extend(super::env::plugin_path_env(plugin));
+        env.push((
+            crate::api::SOCKET_PATH_ENV_VAR.to_string(),
+            crate::api::socket_path().display().to_string(),
+        ));
+        env.push(("HERDR_ENV".to_string(), "1".to_string()));
         env.push(("HERDR_PLUGIN_ID".to_string(), plugin.plugin_id.clone()));
         env.push((
             "HERDR_PLUGIN_ENTRYPOINT_ID".to_string(),
@@ -273,7 +280,9 @@ impl App {
 fn plugin_pane_protected_env_key(key: &str) -> bool {
     matches!(
         key,
-        "HERDR_PLUGIN_ID"
+        crate::api::SOCKET_PATH_ENV_VAR
+            | "HERDR_ENV"
+            | "HERDR_PLUGIN_ID"
             | "HERDR_PLUGIN_ROOT"
             | "HERDR_PLUGIN_CONFIG_DIR"
             | "HERDR_PLUGIN_STATE_DIR"

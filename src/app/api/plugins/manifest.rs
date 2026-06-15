@@ -13,6 +13,8 @@ struct RawPluginManifest {
     name: String,
     version: String,
     #[serde(default)]
+    min_herdr_version: Option<String>,
+    #[serde(default)]
     description: Option<String>,
     #[serde(default)]
     platforms: Option<Vec<RawPlatform>>,
@@ -133,6 +135,7 @@ pub(crate) fn load_plugin_manifest(
         "invalid_plugin_version",
         "plugin version is required",
     )?;
+    let min_herdr_version = validate_min_herdr_version(raw.min_herdr_version.as_deref())?;
     let description = raw
         .description
         .map(|description| description.trim().to_string())
@@ -180,6 +183,7 @@ pub(crate) fn load_plugin_manifest(
         plugin_id,
         name,
         version,
+        min_herdr_version,
         description,
         manifest_path: manifest_path.display().to_string(),
         plugin_root: plugin_root.display().to_string(),
@@ -193,6 +197,37 @@ pub(crate) fn load_plugin_manifest(
         source: Default::default(),
         warnings,
     })
+}
+
+fn validate_min_herdr_version(value: Option<&str>) -> Result<String, (&'static str, String)> {
+    let Some(value) = value else {
+        return Err((
+            "invalid_plugin_min_herdr_version",
+            "plugin min_herdr_version is required".to_string(),
+        ));
+    };
+    let value = non_empty_trimmed(
+        value,
+        "invalid_plugin_min_herdr_version",
+        "plugin min_herdr_version is required",
+    )?;
+    let required = crate::update::Version::parse(&value).ok_or_else(|| {
+        (
+            "invalid_plugin_min_herdr_version",
+            format!(
+                "plugin min_herdr_version must be a semantic version like {}",
+                crate::build_info::BASE_VERSION
+            ),
+        )
+    })?;
+    let current = crate::update::Version::current();
+    if required > current {
+        return Err((
+            "plugin_requires_newer_herdr",
+            format!("plugin requires Herdr {required} or newer; current Herdr is {current}"),
+        ));
+    }
+    Ok(required.to_string())
 }
 
 fn normalize_manifest_build(

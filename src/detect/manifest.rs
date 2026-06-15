@@ -243,6 +243,7 @@ const BUNDLED_MANIFESTS: &[(&str, &str)] = &[
     ("cline", include_str!("manifests/cline.toml")),
     ("codex", include_str!("manifests/codex.toml")),
     ("cursor", include_str!("manifests/cursor.toml")),
+    ("devin", include_str!("manifests/devin.toml")),
     ("droid", include_str!("manifests/droid.toml")),
     ("gemini", include_str!("manifests/gemini.toml")),
     ("grok", include_str!("manifests/grok.toml")),

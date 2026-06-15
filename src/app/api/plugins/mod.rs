@@ -36,6 +36,9 @@ impl App {
                 Err((code, message)) => return encode_error(id, code, message),
             }
         }
+        if let Err(err) = env::ensure_plugin_user_dirs(&plugin) {
+            return encode_error(id, "plugin_user_dir_create_failed", err.to_string());
+        }
         let previous = self.state.installed_plugins.get(&plugin.plugin_id).cloned();
         self.state
             .installed_plugins
@@ -471,7 +474,7 @@ impl App {
                 .actions
                 .iter()
                 .find(|a| a.id == action_id)
-                .map(|a| manifest_action_info(&plugin_id, a))
+                .map(|a| manifest_action_info(&plugin_id, &plugin.platforms, a))
                 .ok_or_else(|| {
                     (
                         "plugin_action_not_found",
@@ -622,7 +625,11 @@ fn plugin_manifest_available(plugin: &InstalledPluginInfo) -> bool {
     })
 }
 
-fn manifest_action_info(plugin_id: &str, action: &PluginManifestAction) -> PluginActionInfo {
+fn manifest_action_info(
+    plugin_id: &str,
+    plugin_platforms: &Option<Vec<crate::api::schema::PluginPlatform>>,
+    action: &PluginManifestAction,
+) -> PluginActionInfo {
     PluginActionInfo {
         plugin_id: plugin_id.to_string(),
         action_id: action.id.clone(),
@@ -630,7 +637,7 @@ fn manifest_action_info(plugin_id: &str, action: &PluginManifestAction) -> Plugi
         description: action.description.clone(),
         contexts: action.contexts.clone(),
         command: action.command.clone(),
-        platforms: action.platforms.clone(),
+        platforms: effective_platforms(&action.platforms, plugin_platforms).clone(),
     }
 }
 
@@ -644,7 +651,7 @@ fn manifest_actions(
             plugin
                 .actions
                 .iter()
-                .map(|action| manifest_action_info(&plugin.plugin_id, action))
+                .map(|action| manifest_action_info(&plugin.plugin_id, &plugin.platforms, action))
         })
 }
 
@@ -697,6 +704,7 @@ mod tests {
 id = "example.worktree-bootstrap"
 name = "Worktree Bootstrap"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 description = "Prepare new worktrees"
 platforms = ["linux", "macos", "windows"]
 
@@ -749,6 +757,73 @@ action = "bootstrap"
             result.contains("plugin_linked"),
             "expected plugin_linked: {result}"
         );
+    }
+
+    #[test]
+    fn plugin_link_creates_stable_config_and_state_dirs() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-link-dirs");
+        let config_dir = super::env::plugin_config_dir("example.config-dirs");
+        let state_dir = super::env::plugin_state_dir("example.config-dirs");
+        let _ = std::fs::remove_dir_all(&config_dir);
+        let _ = std::fs::remove_dir_all(&state_dir);
+        write_manifest_content(
+            &root,
+            r#"
+id = "example.config-dirs"
+name = "Config Dirs"
+version = "0.1.0"
+min_herdr_version = "0.6.10"
+platforms = ["linux", "macos", "windows"]
+"#,
+        );
+
+        link_manifest(&mut app, &root);
+
+        assert!(config_dir.is_dir());
+        assert!(state_dir.is_dir());
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(config_dir);
+        let _ = std::fs::remove_dir_all(state_dir);
+    }
+
+    #[test]
+    fn plugin_link_seeds_stable_config_dir_from_legacy_unhashed_dir() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-link-legacy-config");
+        let config_dir = super::env::plugin_config_dir("example.legacy-config");
+        let state_dir = super::env::plugin_state_dir("example.legacy-config");
+        let legacy_dir = crate::config::config_dir()
+            .join("plugins")
+            .join("example.legacy-config");
+        let _ = std::fs::remove_dir_all(&config_dir);
+        let _ = std::fs::remove_dir_all(&state_dir);
+        let _ = std::fs::remove_dir_all(&legacy_dir);
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        std::fs::write(legacy_dir.join(".env"), "TELEGRAM_BOT_TOKEN=test\n").unwrap();
+        write_manifest_content(
+            &root,
+            r#"
+id = "example.legacy-config"
+name = "Legacy Config"
+version = "0.1.0"
+min_herdr_version = "0.6.10"
+platforms = ["linux", "macos", "windows"]
+"#,
+        );
+
+        link_manifest(&mut app, &root);
+
+        assert_eq!(
+            std::fs::read_to_string(config_dir.join(".env")).unwrap(),
+            "TELEGRAM_BOT_TOKEN=test\n"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(config_dir);
+        let _ = std::fs::remove_dir_all(state_dir);
+        let _ = std::fs::remove_dir_all(legacy_dir);
     }
 
     #[test]
@@ -853,6 +928,56 @@ action = "bootstrap"
     }
 
     #[test]
+    fn link_rejects_invalid_min_herdr_versions() {
+        let cases = [
+            (
+                "plugin-missing-min-herdr",
+                r#"
+id = "example.missing-min-herdr"
+name = "Missing Min Herdr"
+version = "0.1.0"
+platforms = ["linux", "macos", "windows"]
+"#,
+                "invalid_plugin_min_herdr_version",
+            ),
+            (
+                "plugin-invalid-min-herdr",
+                r#"
+id = "example.invalid-min-herdr"
+name = "Invalid Min Herdr"
+version = "0.1.0"
+min_herdr_version = "soon"
+platforms = ["linux", "macos", "windows"]
+"#,
+                "invalid_plugin_min_herdr_version",
+            ),
+            (
+                "plugin-future-min-herdr",
+                r#"
+id = "example.future-min-herdr"
+name = "Future Min Herdr"
+version = "0.1.0"
+min_herdr_version = "999.0.0"
+platforms = ["linux", "macos", "windows"]
+"#,
+                "plugin_requires_newer_herdr",
+            ),
+        ];
+
+        for (name, manifest, expected_code) in cases {
+            let root = unique_temp_path(name);
+            write_manifest_content(&root, manifest);
+
+            let result = load_plugin_manifest(&root.display().to_string(), true);
+            assert!(
+                matches!(result, Err((code, _)) if code == expected_code),
+                "{name}: expected {expected_code}, got {result:?}"
+            );
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
     fn link_rejects_duplicate_action_ids() {
         let root = unique_temp_path("plugin-duplicate-action");
         write_manifest_content(
@@ -861,6 +986,7 @@ action = "bootstrap"
 id = "example.duplicate"
 name = "Duplicate"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[actions]]
@@ -889,6 +1015,7 @@ command = ["echo", "b"]
 id = "example.dotted-action"
 name = "Dotted Action"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[actions]]
@@ -912,6 +1039,7 @@ command = ["echo", "build"]
 id = "example.duplicate-pane"
 name = "Duplicate Pane"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[panes]]
@@ -1027,6 +1155,7 @@ command = ["echo", "b"]
 id = "example.pane"
 name = "Pane Plugin"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos"]
 
 [[panes]]
@@ -1133,6 +1262,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \"$PWD\" \"$HERDR_
 id = "example.path-env"
 name = "Path Env"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos"]
 
 [[panes]]
@@ -1188,9 +1318,8 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PL
             Some(
                 crate::config::config_dir()
                     .join("plugins")
-                    .join(crate::api::schema::plugin_managed_path_component(
-                        "example.path-env"
-                    ))
+                    .join("config")
+                    .join("example.path-env")
                     .display()
                     .to_string()
                     .as_str()
@@ -1201,9 +1330,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PL
             Some(
                 crate::config::state_dir()
                     .join("plugins")
-                    .join(crate::api::schema::plugin_managed_path_component(
-                        "example.path-env"
-                    ))
+                    .join("example.path-env")
                     .display()
                     .to_string()
                     .as_str()
@@ -1241,6 +1368,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PL
 id = "example.tab"
 name = "Tab Plugin"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos"]
 
 [[panes]]
@@ -1311,6 +1439,14 @@ command = ["sh", "-c", "sleep 1"]
             "example.worktree-bootstrap.bootstrap"
         );
         assert_eq!(actions[0].command, ["bun", "run", "bootstrap.ts"]);
+        assert_eq!(
+            actions[0].platforms,
+            Some(vec![
+                crate::api::schema::PluginPlatform::Linux,
+                crate::api::schema::PluginPlatform::Macos,
+                crate::api::schema::PluginPlatform::Windows,
+            ])
+        );
 
         let invoke = app.handle_api_request(Request {
             id: "invoke".into(),
@@ -1437,6 +1573,7 @@ command = ["sh", "-c", "sleep 1"]
 id = "example.runner"
 name = "Runner"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos"]
 
 [[actions]]
@@ -1503,6 +1640,7 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_ACTION_ID\""]
 id = "example.action-paths"
 name = "Action Paths"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos"]
 
 [[actions]]
@@ -1558,9 +1696,8 @@ command = ["sh", "-c", "printf '%s\n%s\n%s' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUG
             Some(
                 crate::config::config_dir()
                     .join("plugins")
-                    .join(crate::api::schema::plugin_managed_path_component(
-                        "example.action-paths"
-                    ))
+                    .join("config")
+                    .join("example.action-paths")
                     .display()
                     .to_string()
                     .as_str()
@@ -1571,9 +1708,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUG
             Some(
                 crate::config::state_dir()
                     .join("plugins")
-                    .join(crate::api::schema::plugin_managed_path_component(
-                        "example.action-paths"
-                    ))
+                    .join("example.action-paths")
                     .display()
                     .to_string()
                     .as_str()
@@ -1628,6 +1763,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUG
 id = "example.event-context"
 name = "Event Context"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos"]
 
 [[events]]
@@ -1777,6 +1913,7 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > {}"]
 id = "example.links"
 name = "Links"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos"]
 
 [[actions]]
@@ -1844,6 +1981,7 @@ action = "open"
 id = "example.link-order"
 name = "Link Order"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[actions]]
@@ -1890,6 +2028,7 @@ action = "generic"
 id = "example.bad-links"
 name = "Bad Links"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[actions]]
@@ -1932,6 +2071,7 @@ action = "open"
 id = "example.bad-link-action"
 name = "Bad Link Action"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[actions]]
@@ -2005,6 +2145,7 @@ action = "missing"
 id = "example.context"
 name = "Context"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 
 [[actions]]
 id = "show"
@@ -2101,6 +2242,7 @@ command = ["show-ctx"]
 id = "example.bad-event"
 name = "Bad Event Plugin"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 
 [[events]]
 on = "worktree.craeted"
@@ -2384,6 +2526,7 @@ command = ["sh", "-c", "echo ok"]
 id = "example.platforms"
 name = "Platforms"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos"]
 
 [[actions]]
@@ -2466,6 +2609,7 @@ command = ["run.bat"]
 id = "example.reject"
 name = "Reject"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 {excluded_platforms}
 
 [[actions]]
@@ -2530,6 +2674,7 @@ command = ["act"]
 id = "example.override"
 name = "Override"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[actions]]
@@ -2580,6 +2725,7 @@ command = ["act"]
 id = "example.nodecl"
 name = "No Decl"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 
 [[actions]]
 id = "act"
@@ -2637,6 +2783,7 @@ command = ["act"]
 id = "example.badplatform"
 name = "Bad Platform"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "beos"]
 
 [[actions]]
@@ -2668,6 +2815,7 @@ command = ["act"]
 id = "example.platform-rt"
 name = "Platform RT"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos"]
 
 [[actions]]

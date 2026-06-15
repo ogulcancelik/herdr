@@ -527,8 +527,9 @@ pub struct ExperimentalConfig {
     /// detected agent matches one of these names (case-insensitive). Empty
     /// list means apply to any focused pane. Unknown agent names are ignored;
     /// if the list contains no valid names, the reveal does not apply.
-    /// Accepted names: pi, claude, codex, gemini, cursor, cline, opencode,
-    /// copilot, kimi, kiro, droid, amp, grok, hermes, kilo, qodercli, qoder.
+    /// Accepted names: pi, claude, codex, gemini, cursor, devin, cline,
+    /// opencode, copilot, kimi, kiro, droid, amp, grok, hermes, kilo,
+    /// qodercli, qoder.
     /// Default: empty.
     pub cjk_ime_agents: Vec<String>,
     /// Cursor shape rendered for the IME anchor when

@@ -1,5 +1,5 @@
 use std::io::Read;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use super::manifest::{effective_platforms, ensure_platform_supported};
 use super::plugin_manifest_available;
@@ -31,6 +31,8 @@ impl App {
         let args = command.iter().skip(1).cloned().collect::<Vec<_>>();
         let context_json = serde_json::to_string(context)
             .map_err(|err| ("invalid_plugin_context", err.to_string()))?;
+        super::env::ensure_plugin_user_dirs(plugin)
+            .map_err(|err| ("plugin_user_dir_create_failed", err.to_string()))?;
         let log_id = format!("plugin-log-{}", self.state.next_plugin_command_log_id);
         self.state.next_plugin_command_log_id += 1;
         let started_unix_ms = current_unix_ms();
@@ -117,8 +119,7 @@ impl App {
         self.state.plugin_commands_in_flight += 1;
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
-            let child = Command::new(&program)
-                .args(args)
+            let child = crate::plugin_command::command_for_argv(&program, &args)
                 .current_dir(plugin_root)
                 .envs(env)
                 .stdout(Stdio::piped())

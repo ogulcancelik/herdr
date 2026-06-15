@@ -37,6 +37,8 @@ pub struct InstalledPluginInfo {
     pub plugin_id: String,
     pub name: String,
     pub version: String,
+    #[serde(default)]
+    pub min_herdr_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub manifest_path: String,
@@ -106,16 +108,117 @@ pub enum PluginSourceKind {
 }
 
 pub(crate) fn plugin_managed_path_component(value: &str) -> String {
-    value
+    let slug = readable_plugin_path_slug(value);
+    let hash = short_plugin_id_hash_for_path_component(value);
+    format!("{slug}-{hash}")
+}
+
+fn readable_plugin_path_slug(value: &str) -> String {
+    let mut slug = value
         .chars()
         .map(|ch| {
             if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
                 ch
             } else {
-                '_'
+                '-'
             }
         })
-        .collect()
+        .collect::<String>();
+    while slug.contains("--") {
+        slug = slug.replace("--", "-");
+    }
+    let slug = slug
+        .trim_matches(|ch| matches!(ch, '-' | '_' | '.'))
+        .to_string();
+    let slug = if slug.is_empty() {
+        "plugin".to_string()
+    } else {
+        slug.chars().take(80).collect()
+    };
+    if has_windows_reserved_stem_for_path_component(&slug) {
+        slug.replace('.', "-")
+    } else {
+        slug
+    }
+}
+
+pub(crate) fn short_plugin_id_hash_for_path_component(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(value.as_bytes());
+    let mut hash = String::with_capacity(12);
+    for byte in &digest[..6] {
+        use std::fmt::Write as _;
+        let _ = write!(hash, "{byte:02x}");
+    }
+    hash
+}
+
+pub(crate) fn has_windows_reserved_stem_for_path_component(value: &str) -> bool {
+    let stem = value.split('.').next().unwrap_or(value);
+    matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_managed_path_component_is_windows_safe_and_collision_free() {
+        let dotdot = plugin_managed_path_component("..");
+        assert_ne!(dotdot, ".");
+        assert_ne!(dotdot, "..");
+        assert!(dotdot.starts_with("plugin-"));
+        assert_ne!(
+            plugin_managed_path_component("a:b"),
+            plugin_managed_path_component("a_b")
+        );
+        assert_ne!(plugin_managed_path_component("con"), "con");
+        assert!(!plugin_managed_path_component("example.").ends_with('.'));
+        assert!(plugin_managed_path_component("con.example").starts_with("con-example-"));
+        assert!(plugin_managed_path_component("aux.plugin").starts_with("aux-plugin-"));
+        assert!(plugin_managed_path_component("nul.x").starts_with("nul-x-"));
+        assert!(plugin_managed_path_component("com1.tool").starts_with("com1-tool-"));
+    }
+
+    #[test]
+    fn plugin_managed_path_component_keeps_readable_slug() {
+        let component = plugin_managed_path_component("example.worktree-bootstrap");
+        assert!(component.starts_with("example.worktree-bootstrap-"));
+        assert!(component.len() <= "example.worktree-bootstrap-".len() + 12);
+    }
+
+    #[test]
+    fn plugin_managed_path_component_hash_distinguishes_same_slug_shape() {
+        assert_ne!(
+            plugin_managed_path_component("example:a"),
+            plugin_managed_path_component("example/a")
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

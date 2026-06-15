@@ -16,12 +16,26 @@ use support::{
     unregister_spawned_herdr_pid,
 };
 
+const WORKTREE_BOOTSTRAP_MANAGED_COMPONENT: &str = "example.worktree-bootstrap-ef876653ffc3";
+
 fn unique_test_dir() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     PathBuf::from(format!("/tmp/hcli-{}-{nanos}", std::process::id()))
+}
+
+fn managed_github_plugin_dir(config_home: &Path) -> PathBuf {
+    config_home.join("herdr-dev").join("plugins").join("github")
+}
+
+fn path_missing_or_empty(path: &Path) -> bool {
+    match fs::read_dir(path) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
+        Err(err) => panic!("failed to read {}: {err}", path.display()),
+    }
 }
 
 fn run_git(repo: &Path, args: &[&str]) {
@@ -530,7 +544,29 @@ fn run_copilot_hook(hook_input: &str) -> Option<serde_json::Value> {
     )
 }
 
+fn run_devin_hook(
+    action: &str,
+    hook_input: &str,
+    envs: &[(&str, &str)],
+) -> Option<serde_json::Value> {
+    run_shell_hook_with_env(
+        "src/integration/assets/devin/herdr-agent-state.sh",
+        &[action],
+        hook_input,
+        envs,
+    )
+}
+
 fn run_shell_hook(asset_path: &str, args: &[&str], hook_input: &str) -> Option<serde_json::Value> {
+    run_shell_hook_with_env(asset_path, args, hook_input, &[])
+}
+
+fn run_shell_hook_with_env(
+    asset_path: &str,
+    args: &[&str],
+    hook_input: &str,
+    envs: &[(&str, &str)],
+) -> Option<serde_json::Value> {
     let base = unique_test_dir();
     fs::create_dir_all(&base).unwrap();
     let socket_path = base.join("herdr.sock");
@@ -560,7 +596,8 @@ fn run_shell_hook(asset_path: &str, args: &[&str], hook_input: &str) -> Option<s
     });
 
     let hook_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(asset_path);
-    let mut child = Command::new("bash")
+    let mut command = Command::new("bash");
+    command
         .arg(hook_path)
         .args(args)
         .env("HERDR_ENV", "1")
@@ -568,9 +605,11 @@ fn run_shell_hook(asset_path: &str, args: &[&str], hook_input: &str) -> Option<s
         .env("HERDR_PANE_ID", "p_test")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::piped());
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().unwrap();
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(hook_input.as_bytes()).unwrap();
     drop(stdin);
@@ -679,6 +718,113 @@ fn copilot_hook_does_not_report_lifecycle_state() {
             "copilot session-only hook should ignore lifecycle payload {payload}"
         );
     }
+}
+
+#[test]
+fn devin_hook_ignores_prompt_session_list_fallback() {
+    let request = run_devin_hook(
+        "session",
+        r#"{"hook_event_name":"UserPromptSubmit","prompt":"run tests"}"#,
+        &[
+            ("DEVIN_PROJECT_DIR", "/tmp/project"),
+            (
+                "HERDR_DEVIN_LIST_JSON",
+                r#"[{"id":"older-session","working_directory":"/tmp/other"},{"id":"devin-session","working_directory":"/tmp/project"}]"#,
+            ),
+        ],
+    );
+
+    assert!(request.is_none());
+}
+
+#[test]
+fn devin_hook_reports_session_id_from_stdin_without_state() {
+    let request = run_devin_hook(
+        "session",
+        r#"{"hook_event_name":"SessionStart","session_id":"devin-session","source":"startup"}"#,
+        &[("HERDR_DEVIN_LIST_JSON", r#"[{"id":"older-session"}]"#)],
+    )
+    .expect("devin session start should report session identity");
+
+    assert_eq!(request["method"], "pane.report_agent_session");
+    assert_eq!(request["params"]["agent"], "devin");
+    assert_eq!(request["params"]["agent_session_id"], "devin-session");
+    assert!(request["params"].get("state").is_none());
+}
+
+#[test]
+fn devin_hook_prefers_hook_session_id_over_list() {
+    let request = run_devin_hook(
+        "session",
+        r#"{"hook_event_name":"PreToolUse","sessionId":"fresh-session","tool_name":"exec"}"#,
+        &[
+            ("DEVIN_PROJECT_DIR", "/tmp/project"),
+            (
+                "HERDR_DEVIN_LIST_JSON",
+                r#"[{"id":"older-session","working_directory":"/tmp/project"}]"#,
+            ),
+        ],
+    )
+    .expect("devin tool hook should report session identity");
+
+    assert_eq!(request["method"], "pane.report_agent_session");
+    assert_eq!(request["params"]["agent_session_id"], "fresh-session");
+    assert!(request["params"].get("state").is_none());
+}
+
+#[test]
+fn devin_hook_reports_tool_session_from_list_without_state() {
+    let request = run_devin_hook(
+        "session",
+        r#"{"hook_event_name":"PreToolUse","tool_name":"exec"}"#,
+        &[
+            ("DEVIN_PROJECT_DIR", "/tmp/project"),
+            (
+                "HERDR_DEVIN_LIST_JSON",
+                r#"[{"id":"older-session","working_directory":"/tmp/other"},{"id":"devin-session","working_directory":"/tmp/project"}]"#,
+            ),
+        ],
+    )
+    .expect("devin tool hook should report session identity");
+
+    assert_eq!(request["method"], "pane.report_agent_session");
+    assert_eq!(request["params"]["agent"], "devin");
+    assert_eq!(request["params"]["agent_session_id"], "devin-session");
+    assert!(request["params"].get("state").is_none());
+}
+
+#[test]
+fn devin_hook_ignores_startup_session_list_fallback() {
+    let request = run_devin_hook(
+        "session",
+        r#"{"hook_event_name":"SessionStart","source":"startup"}"#,
+        &[
+            ("DEVIN_PROJECT_DIR", "/tmp/project"),
+            (
+                "HERDR_DEVIN_LIST_JSON",
+                r#"[{"id":"stale-session","working_directory":"/tmp/project"}]"#,
+            ),
+        ],
+    );
+
+    assert!(request.is_none());
+}
+
+#[test]
+fn devin_hook_ignores_non_matching_session_list_entries() {
+    let request = run_devin_hook(
+        "session",
+        r#"{"hook_event_name":"PreToolUse","tool_name":"exec"}"#,
+        &[
+            ("DEVIN_PROJECT_DIR", "/tmp/project"),
+            (
+                "HERDR_DEVIN_LIST_JSON",
+                r#"[{"id":"other-session","working_directory":"/tmp/other"}]"#,
+            ),
+        ],
+    );
+
+    assert!(request.is_none());
 }
 
 #[test]
@@ -1544,6 +1690,105 @@ fn server_stop_then_restart_restores_pane_history() {
     );
 
     cleanup_spawned_herdr(restarted, base);
+}
+
+#[test]
+fn server_start_restores_legacy_session_through_api_identity() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+    let data_dir = config_home.join(app_dir_name());
+    let pion_cwd = base.join("legacy-pion");
+    let herdr_cwd = base.join("legacy-herdr");
+
+    fs::create_dir_all(&pion_cwd).unwrap();
+    fs::create_dir_all(&herdr_cwd).unwrap();
+    fs::create_dir_all(&data_dir).unwrap();
+    let pion_cwd = pion_cwd.to_str().expect("test cwd should be UTF-8");
+    let herdr_cwd = herdr_cwd.to_str().expect("test cwd should be UTF-8");
+    let legacy_session = include_str!("fixtures/session/legacy-pre-tabs-v2.json")
+        .replace("/tmp/pion", pion_cwd)
+        .replace("/tmp/herdr", herdr_cwd);
+    fs::write(data_dir.join("session.json"), legacy_session).unwrap();
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    wait_for_socket(&client_socket, Duration::from_secs(5));
+
+    let workspaces = run_cli_json(&socket_path, &["workspace", "list"]);
+    let restored_workspace = workspaces["result"]["workspaces"]
+        .as_array()
+        .expect("workspace.list should return workspaces")
+        .iter()
+        .find(|workspace| workspace["label"] == "legacy")
+        .expect("legacy workspace should restore");
+    let workspace_id = restored_workspace["workspace_id"]
+        .as_str()
+        .expect("restored workspace should have public id")
+        .to_string();
+    assert_eq!(restored_workspace["pane_count"], 2);
+    assert_eq!(restored_workspace["tab_count"], 1);
+    assert_eq!(
+        restored_workspace["active_tab_id"],
+        format!("{workspace_id}:t1")
+    );
+
+    let panes = run_cli_json(
+        &socket_path,
+        &["pane", "list", "--workspace", &workspace_id],
+    );
+    let panes = panes["result"]["panes"]
+        .as_array()
+        .expect("pane.list should return panes");
+    assert_eq!(panes.len(), 2);
+    let root_pane_id = format!("{workspace_id}:p1");
+    let focused_pane_id = format!("{workspace_id}:p2");
+    assert!(panes.iter().any(|pane| {
+        pane["pane_id"] == root_pane_id
+            && pane["tab_id"] == format!("{workspace_id}:t1")
+            && pane["cwd"] == pion_cwd
+            && pane["focused"] == false
+    }));
+    assert!(panes.iter().any(|pane| {
+        pane["pane_id"] == focused_pane_id
+            && pane["tab_id"] == format!("{workspace_id}:t1")
+            && pane["cwd"] == herdr_cwd
+            && pane["focused"] == true
+    }));
+
+    let reported = run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "report-agent",
+            &focused_pane_id,
+            "--source",
+            "test",
+            "--agent",
+            "pi",
+            "--state",
+            "working",
+        ],
+    );
+    assert!(
+        reported.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&reported.stderr)
+    );
+
+    let agents = run_cli_json(&socket_path, &["agent", "list"]);
+    let agents = agents["result"]["agents"]
+        .as_array()
+        .expect("agent.list should return agents");
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0]["pane_id"], focused_pane_id);
+    assert_eq!(agents[0]["workspace_id"], workspace_id);
+    assert_eq!(agents[0]["agent"], "pi");
+    assert_eq!(agents[0]["agent_status"], "working");
+
+    cleanup_spawned_herdr(herdr, base);
 }
 
 #[test]
@@ -2776,6 +3021,7 @@ fn plugin_link_list_unlink_cli_smoke_test() {
 id = "example.layout"
 name = "Layout"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 description = "Apply a preferred Herdr layout"
 
 [[actions]]
@@ -2916,6 +3162,7 @@ fn plugin_install_list_uninstall_offline_cli_smoke_test() {
 id = "example.worktree-bootstrap"
 name = "Worktree Bootstrap"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[build]]
@@ -3045,6 +3292,7 @@ fn plugin_install_build_failure_does_not_register_or_create_checkout() {
 id = "example.build-fail"
 name = "Build Fail"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[build]]
@@ -3115,14 +3363,9 @@ command = ["sh", "-c", "echo should-not-install"]
     );
     assert!(listed["result"]["plugins"].as_array().unwrap().is_empty());
 
-    let managed_checkout = config_home
-        .join("herdr-dev")
-        .join("plugins")
-        .join("github")
-        .join("example.build-fail");
     assert!(
-        !managed_checkout.exists(),
-        "failed build should not create managed checkout"
+        path_missing_or_empty(&managed_github_plugin_dir(&config_home)),
+        "failed build should not leave managed checkouts"
     );
 
     cleanup_test_base(&base);
@@ -3143,6 +3386,7 @@ fn plugin_install_build_spawn_failure_prints_clean_error() {
 id = "example.missing-tool"
 name = "Missing Tool"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[build]]
@@ -3231,6 +3475,7 @@ fn plugin_install_rejects_manifest_changed_by_build() {
 id = "example.manifest-mutator"
 name = "Manifest Mutator"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[build]]
@@ -3249,12 +3494,16 @@ command = ["sh", "-c", "echo reviewed"]
 id = "example.manifest-mutator"
 name = "Manifest Mutator"
 version = "0.1.0"
+min_herdr_version = "0.0.1"
 platforms = ["linux", "macos", "windows"]
+
+[[build]]
+command = ["sh", "mutate.sh"]
 
 [[actions]]
 id = "run"
-title = "Run changed command"
-command = ["sh", "-c", "echo changed"]
+title = "Run reviewed command"
+command = ["sh", "-c", "echo reviewed"]
 EOF
 "#,
     )
@@ -3307,14 +3556,9 @@ EOF
     );
     assert!(listed["result"]["plugins"].as_array().unwrap().is_empty());
 
-    let managed_checkout = config_home
-        .join("herdr-dev")
-        .join("plugins")
-        .join("github")
-        .join("example.manifest-mutator");
     assert!(
-        !managed_checkout.exists(),
-        "manifest mutation should not create managed checkout"
+        path_missing_or_empty(&managed_github_plugin_dir(&config_home)),
+        "manifest mutation should not leave managed checkouts"
     );
 
     cleanup_test_base(&base);
@@ -3336,6 +3580,7 @@ fn plugin_install_restores_previous_checkout_when_registration_fails() {
 id = "example.worktree-bootstrap"
 name = "Worktree Bootstrap"
 version = "0.2.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[actions]]
@@ -3357,7 +3602,7 @@ command = ["sh", "-c", "echo new"]
         .join("herdr-dev")
         .join("plugins")
         .join("github")
-        .join("example.worktree-bootstrap");
+        .join(WORKTREE_BOOTSTRAP_MANAGED_COMPONENT);
     fs::create_dir_all(&managed_checkout).unwrap();
     fs::write(managed_checkout.join("old-marker"), "old checkout\n").unwrap();
 
@@ -3391,6 +3636,7 @@ command = ["sh", "-c", "echo new"]
                         "plugin_id": "example.worktree-bootstrap",
                         "name": "Worktree Bootstrap",
                         "version": "0.1.0",
+                        "min_herdr_version": "0.6.10",
                         "manifest_path": managed_checkout_for_server.join("herdr-plugin.toml").display().to_string(),
                         "plugin_root": managed_checkout_for_server.display().to_string(),
                         "enabled": true,
@@ -3466,6 +3712,7 @@ fn plugin_install_rejects_server_that_drops_source_metadata() {
 id = "example.worktree-bootstrap"
 name = "Worktree Bootstrap"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[actions]]
@@ -3487,7 +3734,7 @@ command = ["sh", "-c", "echo install"]
         .join("herdr-dev")
         .join("plugins")
         .join("github")
-        .join("example.worktree-bootstrap");
+        .join(WORKTREE_BOOTSTRAP_MANAGED_COMPONENT);
     let git_config = base.join("gitconfig");
     fs::write(
         &git_config,
@@ -3530,6 +3777,7 @@ command = ["sh", "-c", "echo install"]
                         "plugin_id": "example.worktree-bootstrap",
                         "name": "Worktree Bootstrap",
                         "version": "0.1.0",
+                        "min_herdr_version": "0.6.10",
                         "manifest_path": managed_checkout_for_server.join("herdr-plugin.toml").display().to_string(),
                         "plugin_root": managed_checkout_for_server.display().to_string(),
                         "enabled": true,
@@ -3601,6 +3849,7 @@ fn plugin_install_keeps_checkout_when_incompatible_server_cleanup_fails() {
 id = "example.worktree-bootstrap"
 name = "Worktree Bootstrap"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[actions]]
@@ -3622,7 +3871,7 @@ command = ["sh", "-c", "echo install"]
         .join("herdr-dev")
         .join("plugins")
         .join("github")
-        .join("example.worktree-bootstrap");
+        .join(WORKTREE_BOOTSTRAP_MANAGED_COMPONENT);
     let git_config = base.join("gitconfig");
     fs::write(
         &git_config,
@@ -3661,6 +3910,7 @@ command = ["sh", "-c", "echo install"]
                         "plugin_id": "example.worktree-bootstrap",
                         "name": "Worktree Bootstrap",
                         "version": "0.1.0",
+                        "min_herdr_version": "0.6.10",
                         "manifest_path": managed_checkout_for_server.join("herdr-plugin.toml").display().to_string(),
                         "plugin_root": managed_checkout_for_server.display().to_string(),
                         "enabled": true,
