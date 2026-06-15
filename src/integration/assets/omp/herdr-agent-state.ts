@@ -2,7 +2,7 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=omp
-// HERDR_INTEGRATION_VERSION=2
+// HERDR_INTEGRATION_VERSION=3
 // @ts-nocheck
 
 import { createConnection } from "node:net";
@@ -201,9 +201,9 @@ export default function (pi) {
     return { state: "idle" as const, message: undefined };
   }
 
-  function publishState() {
+  function publishState(force = false) {
     const next = desiredState();
-    if (next.state === lastState && next.message === lastMessage) {
+    if (!force && next.state === lastState && next.message === lastMessage) {
       return;
     }
     lastState = next.state;
@@ -237,25 +237,29 @@ export default function (pi) {
     retryTimer.unref?.();
   }
 
-  pi.events.on("herdr:blocked", (data) => {
-    if (!data?.active) {
-      blockedCount = Math.max(0, blockedCount - 1);
-      if (blockedCount === 0) {
-        blockedMessage = undefined;
+  if (pi.events?.on) {
+    pi.events.on("herdr:blocked", (data) => {
+      if (!data?.active) {
+        blockedCount = Math.max(0, blockedCount - 1);
+        if (blockedCount === 0) {
+          blockedMessage = undefined;
+        }
+        publishState();
+        return;
       }
-      publishState();
-      return;
-    }
 
-    clearPendingTimers();
-    blockedCount += 1;
-    blockedMessage = data.label;
-    publishState();
-  });
+      clearPendingTimers();
+      blockedCount += 1;
+      blockedMessage = data.label;
+      publishState();
+    });
+  }
 
   pi.on("session_start", () => {
-    publishState();
+    publishState(true);
   });
+
+  publishState(true);
 
   pi.on("agent_start", () => {
     clearPendingTimers();

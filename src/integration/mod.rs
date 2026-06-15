@@ -15,7 +15,7 @@ const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/herdr-agent-state.ts");
 const PI_INTEGRATION_VERSION: u32 = 2;
 const OMP_EXTENSION_INSTALL_NAME: &str = "herdr-omp-agent-state.ts";
 const OMP_EXTENSION_ASSET: &str = include_str!("assets/omp/herdr-agent-state.ts");
-const OMP_INTEGRATION_VERSION: u32 = 2;
+const OMP_INTEGRATION_VERSION: u32 = 3;
 const PI_CODING_AGENT_DIR_ENV_VAR: &str = "PI_CODING_AGENT_DIR";
 const CLAUDE_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "herdr-agent-state.ps1"
@@ -4018,6 +4018,18 @@ mod tests {
 
         std::env::remove_var("HOME");
         let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn omp_asset_tolerates_missing_internal_event_bus() {
+        assert!(OMP_EXTENSION_ASSET
+            .contains("if (pi.events?.on) {\n    pi.events.on(\"herdr:blocked\""));
+    }
+
+    #[test]
+    fn omp_asset_reports_idle_when_loaded() {
+        assert!(OMP_EXTENSION_ASSET.contains("function publishState(force = false)"));
+        assert!(OMP_EXTENSION_ASSET.contains("publishState(true);\n\n  pi.on(\"agent_start\""));
     }
 
     #[test]
