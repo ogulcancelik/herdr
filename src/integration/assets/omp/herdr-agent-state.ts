@@ -11,6 +11,9 @@ const HERDR_ENV = process.env.HERDR_ENV;
 const socketPath = process.env.HERDR_SOCKET_PATH;
 const paneId = process.env.HERDR_PANE_ID;
 const source = "herdr:omp";
+// Persistent session ID — lets Herdr clear lifecycle-hook suppression
+// when OMP re-registers after process restart.
+const agentSessionId: string = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}-${Math.random().toString(36).slice(2, 10)}`;
 
 function enabled() {
   return HERDR_ENV === "1" && !!socketPath && !!paneId;
@@ -79,6 +82,7 @@ function sendState(state: AgentState, message?: string, seq = nextReportSeq()): 
       pane_id: paneId,
       source,
       agent: "omp",
+      agent_session_id: agentSessionId,
       state,
       message,
       seq,
