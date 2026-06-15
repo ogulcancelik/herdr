@@ -99,6 +99,30 @@ impl AgentPanelScopeConfig {
     }
 }
 
+/// Visual style for the borders drawn around split panes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PaneBordersConfig {
+    /// A full box around every pane, with focus shown by an accent-colored border.
+    #[default]
+    Full,
+    /// A single separator line between adjacent panes, with focus shown by dimming
+    /// the inactive panes.
+    Minimal,
+}
+
+impl PaneBordersConfig {
+    /// Whether this style draws single-line separators between panes (minimal mode).
+    pub fn draws_separators(self) -> bool {
+        self == Self::Minimal
+    }
+
+    /// Whether this style dims inactive panes instead of relying on border color alone.
+    pub fn dims_inactive_panes(self) -> bool {
+        self == Self::Minimal
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RightClickPassthroughModifierConfig(Option<KeyModifiers>);
 
@@ -440,6 +464,9 @@ pub struct UiConfig {
     pub prompt_new_tab_name: bool,
     /// Show agent labels in split pane borders when no manual pane label is set. Default: false.
     pub show_agent_labels_on_pane_borders: bool,
+    /// Border style for split panes: "full" (box per pane) or "minimal" (single
+    /// separator line plus dimming for the inactive panes). Default: "full".
+    pub pane_borders: PaneBordersConfig,
     /// Agent sidebar scope. Saved values are "current" or "all". Default: "all".
     pub agent_panel_scope: AgentPanelScopeConfig,
     /// Accent color for highlights, borders, and navigation UI.
@@ -626,6 +653,7 @@ impl Default for UiConfig {
             confirm_close: true,
             prompt_new_tab_name: true,
             show_agent_labels_on_pane_borders: false,
+            pane_borders: PaneBordersConfig::default(),
             agent_panel_scope: AgentPanelScopeConfig::All,
             accent: "cyan".into(),
             toast: ToastConfig::default(),
@@ -817,6 +845,19 @@ show_agent_labels_on_pane_borders = true
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.ui.show_agent_labels_on_pane_borders);
+    }
+
+    #[test]
+    fn pane_borders_default_full_and_parse_minimal() {
+        let default_config = Config::default();
+        assert_eq!(default_config.ui.pane_borders, PaneBordersConfig::Full);
+
+        let toml = r#"
+[ui]
+pane_borders = "minimal"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.pane_borders, PaneBordersConfig::Minimal);
     }
 
     #[test]
