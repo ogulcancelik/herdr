@@ -34,6 +34,7 @@ pub fn play(sound: Sound, config: &crate::config::SoundConfig) {
     }
 
     let custom_path = config.path_for(sound);
+    let _ = crate::terminal_notify::emit_bell();
     std::thread::spawn(move || {
         if let Some(path) = custom_path {
             match play_file(&path) {

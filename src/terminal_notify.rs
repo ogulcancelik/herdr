@@ -92,6 +92,15 @@ fn sanitize_text(text: impl AsRef<str>) -> String {
         .collect()
 }
 
+/// Write a BEL character (0x07) to stdout so the host terminal triggers its
+/// bell indicator (dock bounce, taskbar flash, etc.).
+pub fn emit_bell() -> io::Result<()> {
+    let mut stdout = io::stdout();
+    stdout.write_all(b"\x07")?;
+    stdout.flush()?;
+    Ok(())
+}
+
 fn wrap_tmux_passthrough(sequence: &[u8]) -> Vec<u8> {
     let mut wrapped = Vec::with_capacity(sequence.len() + 16);
     wrapped.extend_from_slice(b"\x1bPtmux;");
