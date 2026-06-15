@@ -1443,6 +1443,11 @@ impl App {
                         self.update_host_terminal_theme(kind, color);
                     }
                 }
+                crate::raw_input::RawInputEvent::HostPaletteColor { index, color } => {
+                    if apply_host_terminal_theme {
+                        self.set_host_ansi_palette_color(index, color);
+                    }
+                }
                 crate::raw_input::RawInputEvent::Unsupported => {}
             }
             self.sync_prefix_input_source(previous_mode);

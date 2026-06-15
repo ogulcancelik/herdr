@@ -112,6 +112,10 @@ pub enum RawInputEvent {
         kind: DefaultColorKind,
         color: RgbColor,
     },
+    HostPaletteColor {
+        index: u8,
+        color: RgbColor,
+    },
     Unsupported,
 }
 
@@ -462,6 +466,10 @@ fn extract_one_event(buffer: &[u8]) -> Option<(RawInputEvent, usize)> {
 
         if let Some((kind, color)) = parse_default_color_response(seq) {
             return Some((RawInputEvent::HostDefaultColor { kind, color }, seq_len));
+        }
+
+        if let Some((index, color)) = crate::terminal_theme::parse_palette_color_response(seq) {
+            return Some((RawInputEvent::HostPaletteColor { index, color }, seq_len));
         }
 
         match seq {

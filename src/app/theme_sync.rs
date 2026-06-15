@@ -6,9 +6,27 @@ impl App {
     pub(super) fn query_host_terminal_theme(&self) {
         use std::io::Write;
 
-        let _ = std::io::stdout()
-            .write_all(crate::terminal_theme::HOST_COLOR_QUERY_SEQUENCE.as_bytes());
-        let _ = std::io::stdout().flush();
+        let mut stdout = std::io::stdout();
+        let _ = stdout.write_all(crate::terminal_theme::HOST_COLOR_QUERY_SEQUENCE.as_bytes());
+        let _ = stdout.write_all(crate::terminal_theme::host_palette_query_sequence().as_bytes());
+        let _ = stdout.flush();
+    }
+
+    pub(super) fn set_host_ansi_palette_color(
+        &mut self,
+        index: u8,
+        color: crate::terminal_theme::RgbColor,
+    ) -> bool {
+        let Some(slot) = self.state.host_ansi_palette.get_mut(usize::from(index)) else {
+            return false;
+        };
+        if *slot == Some(color) {
+            return false;
+        }
+        *slot = Some(color);
+        self.render_dirty.store(true, Ordering::Release);
+        self.render_notify.notify_one();
+        true
     }
 
     pub(super) fn update_host_terminal_theme(
