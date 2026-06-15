@@ -2520,10 +2520,7 @@ impl AppState {
                 seq,
                 ..
             } => {
-                let devin_release = source == "herdr:devin" && agent_label == "devin";
-                if crate::agent_resume::is_reserved_native_state_source(&source, &agent_label)
-                    && !devin_release
-                {
+                if crate::agent_resume::is_reserved_native_state_source(&source, &agent_label) {
                     Vec::new()
                 } else {
                     self.update_terminal_state(pane_id, |terminal| {
@@ -4570,39 +4567,6 @@ mod tests {
         assert_eq!(terminal.state, AgentState::Idle);
         assert!(terminal.hook_authority.is_none());
         assert!(terminal.persisted_agent_session.is_some());
-    }
-
-    #[test]
-    fn devin_release_report_clears_detected_agent() {
-        let mut state = app_with_workspaces(&["active"]);
-        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
-        let terminal_id = state.workspaces[0]
-            .panes
-            .get(&pane_id)
-            .unwrap()
-            .attached_terminal_id
-            .clone();
-
-        state.handle_app_event(AppEvent::StateChanged {
-            pane_id,
-            agent: Some(Agent::Devin),
-            state: AgentState::Working,
-            visible_blocker: false,
-            visible_working: true,
-            process_exited: false,
-            observed_at: std::time::Instant::now(),
-        });
-        state.handle_app_event(AppEvent::HookAgentReleased {
-            pane_id,
-            source: "herdr:devin".into(),
-            agent_label: "devin".into(),
-            known_agent: Some(Agent::Devin),
-            seq: Some(1),
-        });
-
-        let terminal = state.terminals.get(&terminal_id).unwrap();
-        assert_eq!(terminal.state, AgentState::Unknown);
-        assert_eq!(terminal.detected_agent, None);
     }
 
     #[test]

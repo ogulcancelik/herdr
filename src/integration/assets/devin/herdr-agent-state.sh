@@ -13,7 +13,7 @@ trap 'rm -f "$hook_input_file"' EXIT HUP INT TERM
 cat >"$hook_input_file" 2>/dev/null || true
 
 case "$action" in
-  session|working|idle|blocked|release) ;;
+  session) ;;
   *) exit 0 ;;
 esac
 
@@ -22,7 +22,7 @@ esac
 [ -n "${HERDR_PANE_ID:-}" ] || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 
-HERDR_ACTION="$action" HERDR_HOOK_INPUT_FILE="$hook_input_file" python3 - <<'PY'
+HERDR_HOOK_INPUT_FILE="$hook_input_file" python3 - <<'PY'
 import json
 import os
 import random
@@ -97,30 +97,41 @@ def hook_session_id(hook_input: dict) -> str | None:
     return None
 
 
-def resolve_session_id(project_dir: str | None, hook_input: dict) -> str | None:
+def hook_event_name(hook_input: dict) -> str:
+    value = hook_input.get("hook_event_name")
+    return value if isinstance(value, str) else ""
+
+
+def allow_session_list_fallback(hook_input: dict) -> bool:
+    event = hook_event_name(hook_input)
+    if event == "UserPromptSubmit":
+        return False
+    if event == "SessionStart" and hook_input.get("source") == "startup":
+        return False
+    return True
+
+
+def resolve_session_id(project_dir: str, hook_input: dict) -> str | None:
     direct = hook_session_id(hook_input)
     if direct:
         return direct
+    if not allow_session_list_fallback(hook_input):
+        return None
 
     entries = load_session_list(project_dir)
     project_dir = normalize_path(project_dir)
-    fallback = None
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         session_id = entry.get("id")
         if not isinstance(session_id, str) or not session_id:
             continue
-        fallback = fallback or session_id
-        if project_dir is None:
-            continue
         working_directory = normalize_path(entry.get("working_directory"))
         if working_directory == project_dir:
             return session_id
-    return fallback
+    return None
 
 
-action = os.environ.get("HERDR_ACTION", "")
 pane_id = os.environ.get("HERDR_PANE_ID")
 socket_path = os.environ.get("HERDR_SOCKET_PATH")
 project_dir = os.environ.get("DEVIN_PROJECT_DIR") or os.getcwd()
@@ -132,47 +143,20 @@ if not pane_id or not socket_path:
 request_id = f"{SOURCE}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
 report_seq = time.time_ns()
 
-if action == "release":
-    request = {
-        "id": request_id,
-        "method": "pane.release_agent",
-        "params": {
-            "pane_id": pane_id,
-            "source": SOURCE,
-            "agent": AGENT,
-            "seq": report_seq,
-        },
-    }
-elif action == "session":
-    session_id = resolve_session_id(project_dir, hook_input)
-    if not session_id:
-        raise SystemExit(0)
-    request = {
-        "id": request_id,
-        "method": "pane.report_agent_session",
-        "params": {
-            "pane_id": pane_id,
-            "source": SOURCE,
-            "agent": AGENT,
-            "agent_session_id": session_id,
-            "seq": report_seq,
-        },
-    }
-else:
-    request = {
-        "id": request_id,
-        "method": "pane.report_agent",
-        "params": {
-            "pane_id": pane_id,
-            "source": SOURCE,
-            "agent": AGENT,
-            "state": action,
-            "seq": report_seq,
-        },
-    }
-    session_id = resolve_session_id(project_dir, hook_input)
-    if session_id:
-        request["params"]["agent_session_id"] = session_id
+session_id = resolve_session_id(project_dir, hook_input)
+if not session_id:
+    raise SystemExit(0)
+request = {
+    "id": request_id,
+    "method": "pane.report_agent_session",
+    "params": {
+        "pane_id": pane_id,
+        "source": SOURCE,
+        "agent": AGENT,
+        "agent_session_id": session_id,
+        "seq": report_seq,
+    },
+}
 
 try:
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

@@ -95,21 +95,21 @@ const COPILOT_REMOVED_LIFECYCLE_HOOK_EVENTS: [&str; 9] = [
 const DEVIN_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const DEVIN_HOOK_ASSET: &str = include_str!("assets/devin/herdr-agent-state.sh");
 const DEVIN_INTEGRATION_VERSION: u32 = 1;
-const DEVIN_HOOK_EVENTS: [(&str, &str); 7] = [
+const DEVIN_HOOK_EVENTS: [(&str, &str); 6] = [
     ("SessionStart", "session"),
     ("UserPromptSubmit", "session"),
     ("PreToolUse", "session"),
     ("PostToolUse", "session"),
     ("PermissionRequest", "session"),
     ("Stop", "session"),
-    ("SessionEnd", "release"),
 ];
-const DEVIN_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 5] = [
+const DEVIN_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 6] = [
     ("UserPromptSubmit", "working"),
     ("PreToolUse", "working"),
     ("PostToolUse", "working"),
     ("PermissionRequest", "blocked"),
     ("Stop", "idle"),
+    ("SessionEnd", "release"),
 ];
 const DROID_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "herdr-agent-state.ps1"
@@ -5232,23 +5232,33 @@ mod tests {
                 .unwrap();
         for (event, action) in DEVIN_REMOVED_LIFECYCLE_HOOK_EVENTS {
             let legacy_command = hook_command(&hook_path, Some(action));
-            let entries = settings["hooks"][event].as_array().unwrap();
+            let entries = settings["hooks"][event].as_array();
             assert!(
-                entries.iter().all(|entry| {
-                    entry
-                        .get("hooks")
-                        .and_then(Value::as_array)
-                        .is_none_or(|hooks| {
-                            hooks.iter().all(|hook| {
-                                hook.get("command").and_then(Value::as_str)
-                                    != Some(legacy_command.as_str())
+                entries.is_none_or(|entries| {
+                    entries.iter().all(|entry| {
+                        entry
+                            .get("hooks")
+                            .and_then(Value::as_array)
+                            .is_none_or(|hooks| {
+                                hooks.iter().all(|hook| {
+                                    hook.get("command").and_then(Value::as_str)
+                                        != Some(legacy_command.as_str())
+                                })
                             })
-                        })
+                    })
                 }),
                 "expected legacy devin {event} -> {action} hook to be removed"
             );
 
+            if !DEVIN_HOOK_EVENTS
+                .iter()
+                .any(|(installed_event, _)| installed_event == &event)
+            {
+                continue;
+            }
+
             let session_command = hook_command(&hook_path, Some("session"));
+            let entries = entries.unwrap();
             assert!(
                 entries.iter().any(|entry| {
                     entry
@@ -5980,9 +5990,10 @@ mod tests {
         assert!(!COPILOT_HOOK_ASSET.contains("\"state\":"));
         assert!(!COPILOT_HOOK_ASSET.contains("pane.release_agent"));
         assert!(DEVIN_HOOK_ASSET.contains("HERDR_DEVIN_LIST_JSON"));
-        assert!(DEVIN_HOOK_ASSET.contains("\"method\": \"pane.report_agent\""));
         assert!(DEVIN_HOOK_ASSET.contains("\"method\": \"pane.report_agent_session\""));
-        assert!(DEVIN_HOOK_ASSET.contains("\"method\": \"pane.release_agent\""));
+        assert!(!DEVIN_HOOK_ASSET.contains("\"method\": \"pane.report_agent\""));
+        assert!(!DEVIN_HOOK_ASSET.contains("\"state\":"));
+        assert!(!DEVIN_HOOK_ASSET.contains("pane.release_agent"));
         assert!(DEVIN_HOOK_ASSET.contains("agent_session_id"));
         assert!(DROID_HOOK_ASSET.contains("agent_session_id"));
         assert!(DROID_HOOK_ASSET.contains("pane.report_agent_session"));

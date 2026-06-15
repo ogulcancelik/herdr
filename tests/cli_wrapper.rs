@@ -721,9 +721,9 @@ fn copilot_hook_does_not_report_lifecycle_state() {
 }
 
 #[test]
-fn devin_hook_reports_working_and_resolves_session_from_list() {
+fn devin_hook_ignores_prompt_session_list_fallback() {
     let request = run_devin_hook(
-        "working",
+        "session",
         r#"{"hook_event_name":"UserPromptSubmit","prompt":"run tests"}"#,
         &[
             ("DEVIN_PROJECT_DIR", "/tmp/project"),
@@ -732,13 +732,9 @@ fn devin_hook_reports_working_and_resolves_session_from_list() {
                 r#"[{"id":"older-session","working_directory":"/tmp/other"},{"id":"devin-session","working_directory":"/tmp/project"}]"#,
             ),
         ],
-    )
-    .expect("devin user prompt should report working");
+    );
 
-    assert_eq!(request["method"], "pane.report_agent");
-    assert_eq!(request["params"]["agent"], "devin");
-    assert_eq!(request["params"]["state"], "working");
-    assert_eq!(request["params"]["agent_session_id"], "devin-session");
+    assert!(request.is_none());
 }
 
 #[test]
@@ -759,7 +755,7 @@ fn devin_hook_reports_session_id_from_stdin_without_state() {
 #[test]
 fn devin_hook_prefers_hook_session_id_over_list() {
     let request = run_devin_hook(
-        "working",
+        "session",
         r#"{"hook_event_name":"PreToolUse","sessionId":"fresh-session","tool_name":"exec"}"#,
         &[
             ("DEVIN_PROJECT_DIR", "/tmp/project"),
@@ -769,42 +765,66 @@ fn devin_hook_prefers_hook_session_id_over_list() {
             ),
         ],
     )
-    .expect("devin tool hook should report working");
+    .expect("devin tool hook should report session identity");
 
-    assert_eq!(request["method"], "pane.report_agent");
-    assert_eq!(request["params"]["state"], "working");
+    assert_eq!(request["method"], "pane.report_agent_session");
     assert_eq!(request["params"]["agent_session_id"], "fresh-session");
+    assert!(request["params"].get("state").is_none());
 }
 
 #[test]
-fn devin_hook_reports_blocked_without_session_when_list_is_empty() {
+fn devin_hook_reports_tool_session_from_list_without_state() {
     let request = run_devin_hook(
-        "blocked",
-        r#"{"hook_event_name":"PermissionRequest","tool_name":"exec","tool_input":{"command":"sleep 30"}}"#,
+        "session",
+        r#"{"hook_event_name":"PreToolUse","tool_name":"exec"}"#,
         &[
             ("DEVIN_PROJECT_DIR", "/tmp/project"),
-            ("HERDR_DEVIN_LIST_JSON", "[]"),
+            (
+                "HERDR_DEVIN_LIST_JSON",
+                r#"[{"id":"older-session","working_directory":"/tmp/other"},{"id":"devin-session","working_directory":"/tmp/project"}]"#,
+            ),
         ],
     )
-    .expect("devin permission request should report blocked");
+    .expect("devin tool hook should report session identity");
 
-    assert_eq!(request["method"], "pane.report_agent");
+    assert_eq!(request["method"], "pane.report_agent_session");
     assert_eq!(request["params"]["agent"], "devin");
-    assert_eq!(request["params"]["state"], "blocked");
-    assert!(request["params"].get("agent_session_id").is_none());
+    assert_eq!(request["params"]["agent_session_id"], "devin-session");
+    assert!(request["params"].get("state").is_none());
 }
 
 #[test]
-fn devin_hook_releases_agent_on_session_end() {
+fn devin_hook_ignores_startup_session_list_fallback() {
     let request = run_devin_hook(
-        "release",
-        r#"{"hook_event_name":"SessionEnd","reason":"session_complete"}"#,
-        &[("DEVIN_PROJECT_DIR", "/tmp/project")],
-    )
-    .expect("devin session end should release");
+        "session",
+        r#"{"hook_event_name":"SessionStart","source":"startup"}"#,
+        &[
+            ("DEVIN_PROJECT_DIR", "/tmp/project"),
+            (
+                "HERDR_DEVIN_LIST_JSON",
+                r#"[{"id":"stale-session","working_directory":"/tmp/project"}]"#,
+            ),
+        ],
+    );
 
-    assert_eq!(request["method"], "pane.release_agent");
-    assert_eq!(request["params"]["agent"], "devin");
+    assert!(request.is_none());
+}
+
+#[test]
+fn devin_hook_ignores_non_matching_session_list_entries() {
+    let request = run_devin_hook(
+        "session",
+        r#"{"hook_event_name":"PreToolUse","tool_name":"exec"}"#,
+        &[
+            ("DEVIN_PROJECT_DIR", "/tmp/project"),
+            (
+                "HERDR_DEVIN_LIST_JSON",
+                r#"[{"id":"other-session","working_directory":"/tmp/other"}]"#,
+            ),
+        ],
+    );
+
+    assert!(request.is_none());
 }
 
 #[test]
