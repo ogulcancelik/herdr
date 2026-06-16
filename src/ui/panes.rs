@@ -267,17 +267,7 @@ pub(super) fn render_panes(
 
     // Precompute per-frame fallback colors once so dimming multiple inactive
     // panes doesn't repeat the same derivation.
-    let dim_fg_fallback = app
-        .host_terminal_theme
-        .foreground
-        .map(terminal_theme_to_rgb)
-        .or_else(|| color_to_rgb(app.palette.text))
-        .unwrap_or((205, 214, 244));
-    let dim_bg_fallback = app
-        .host_terminal_theme
-        .background
-        .map(terminal_theme_to_rgb)
-        .or_else(|| color_to_rgb(selection_palette_background(&app.palette)));
+    let (dim_fg_fallback, dim_bg_fallback) = dim_fallback_colors(app);
 
     for info in &app.view.pane_infos {
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
@@ -580,6 +570,53 @@ fn dim_color(
     Some(Color::Rgb(r, g, b))
 }
 
+/// Derive the fg/bg fallback colors used when dimming a cell whose own color is
+/// `Reset` (the host theme's default), so both the full render path and the
+/// server's retained fast path dim against the same base.
+pub(crate) fn dim_fallback_colors(app: &AppState) -> (Rgb, Option<Rgb>) {
+    let fg = app
+        .host_terminal_theme
+        .foreground
+        .map(terminal_theme_to_rgb)
+        .or_else(|| color_to_rgb(app.palette.text))
+        .unwrap_or((205, 214, 244));
+    let bg = app
+        .host_terminal_theme
+        .background
+        .map(terminal_theme_to_rgb)
+        .or_else(|| color_to_rgb(selection_palette_background(&app.palette)));
+    (fg, bg)
+}
+
+/// Dim a serialized `CellData` in place with the same HSV transform
+/// `dim_pane_content` applies to the ratatui buffer. The server's retained PTY
+/// fast path patches raw (undimmed) cells straight into a frame; without this
+/// the dimmed regions flash to full brightness whenever they repaint.
+pub(crate) fn dim_cell_data(
+    cell: &mut crate::protocol::CellData,
+    fg_fallback: Rgb,
+    bg_fallback: Option<Rgb>,
+    ansi_palette: &crate::terminal_theme::AnsiPalette,
+    scaled: &mut HashMap<Rgb, Rgb>,
+) {
+    if let Some(fg) = dim_color(
+        crate::protocol::u32_to_color(cell.fg),
+        Some(fg_fallback),
+        ansi_palette,
+        scaled,
+    ) {
+        cell.fg = crate::protocol::color_to_u32(fg);
+    }
+    if let Some(bg) = dim_color(
+        crate::protocol::u32_to_color(cell.bg),
+        bg_fallback,
+        ansi_palette,
+        scaled,
+    ) {
+        cell.bg = crate::protocol::color_to_u32(bg);
+    }
+}
+
 /// Resolve a cell color to concrete RGB so it can be dimmed. Unlike
 /// `color_to_rgb`, this expands `Color::Indexed`: the 16 ANSI colors use the
 /// host terminal's queried palette when known (so dimmed content matches what
@@ -852,6 +889,36 @@ mod tests {
     use crate::selection::Selection;
     use crate::terminal::TerminalRuntime;
     use crate::workspace::Workspace;
+
+    #[test]
+    fn dim_cell_data_matches_full_render_dim() {
+        let palette: crate::terminal_theme::AnsiPalette =
+            [None; crate::terminal_theme::HOST_ANSI_PALETTE_LEN];
+        let fg_fallback = (205, 214, 244);
+        let bg_fallback = Some((30, 30, 46));
+        let bright_fg = Color::Rgb(40, 200, 80);
+
+        let mut cell = crate::protocol::CellData {
+            symbol: "x".to_string(),
+            fg: crate::protocol::color_to_u32(bright_fg),
+            bg: crate::protocol::color_to_u32(Color::Reset),
+            modifier: 0,
+            skip: false,
+            hyperlink: None,
+        };
+        let mut scaled = HashMap::new();
+        dim_cell_data(&mut cell, fg_fallback, bg_fallback, &palette, &mut scaled);
+
+        // The retained fast path must produce exactly what the full render
+        // path's per-cell dim produces; any divergence flickers a patched row
+        // against the surrounding dimmed frame.
+        let mut expected = HashMap::new();
+        let expected_fg = dim_color(bright_fg, Some(fg_fallback), &palette, &mut expected).unwrap();
+        let expected_bg = dim_color(Color::Reset, bg_fallback, &palette, &mut expected).unwrap();
+        assert_eq!(cell.fg, crate::protocol::color_to_u32(expected_fg));
+        assert_eq!(cell.bg, crate::protocol::color_to_u32(expected_bg));
+        assert_ne!(cell.fg, crate::protocol::color_to_u32(bright_fg));
+    }
 
     #[test]
     fn pane_border_title_trims_and_truncates() {

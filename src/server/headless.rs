@@ -2890,6 +2890,14 @@ impl HeadlessServer {
             retained_fallback!("no_pane_info");
         }
 
+        // The full render path dims inactive panes in `render_panes`; mirror it
+        // here so patched (dirty) rows don't flash to full brightness while the
+        // surrounding cells stay dimmed.
+        let dim_inactive =
+            self.app.state.pane_borders.dims_inactive_panes() && pane_infos.len() > 1;
+        let (dim_fg_fallback, dim_bg_fallback) = crate::ui::dim_fallback_colors(&self.app.state);
+        let mut dim_scaled = std::collections::HashMap::new();
+
         let mut touched = false;
         for info in pane_infos {
             if !rect_fits_frame(info.inner_rect, &frame) {
@@ -2909,11 +2917,24 @@ impl HeadlessServer {
                 crate::pane::TerminalDirtyPatchOutcome::Fallback => {
                     retained_fallback!("dirty_patch_fallback");
                 }
-                crate::pane::TerminalDirtyPatchOutcome::Patch(patch) => {
+                crate::pane::TerminalDirtyPatchOutcome::Patch(mut patch) => {
                     crate::render_prof::event("retained.pane_patch");
                     crate::render_prof::counter("retained.patch_rows", patch.rows.len() as u64);
                     if dirty_patch_intersects_hyperlinks(&frame, info.inner_rect, &patch) {
                         retained_fallback!("hyperlink_intersection");
+                    }
+                    if dim_inactive && !info.is_focused {
+                        for (_, row_cells) in &mut patch.rows {
+                            for cell in row_cells.iter_mut() {
+                                crate::ui::dim_cell_data(
+                                    cell,
+                                    dim_fg_fallback,
+                                    dim_bg_fallback,
+                                    &self.app.state.host_ansi_palette,
+                                    &mut dim_scaled,
+                                );
+                            }
+                        }
                     }
                     if !apply_terminal_dirty_patch(&mut frame, info.inner_rect, patch) {
                         retained_fallback!("patch_apply_failed");
