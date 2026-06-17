@@ -36,6 +36,24 @@ impl App {
         encode_success(id, ResponseResult::AgentInfo { agent })
     }
 
+    pub(super) fn handle_agent_mark_read(&mut self, id: String, target: AgentTarget) -> String {
+        let agent = match self.mark_agent_read_target(&target.target) {
+            Ok(agent) => agent,
+            Err(err) => return encode_error_body(id, self.agent_seen_error_body(err)),
+        };
+
+        encode_success(id, ResponseResult::AgentInfo { agent })
+    }
+
+    pub(super) fn handle_agent_mark_unread(&mut self, id: String, target: AgentTarget) -> String {
+        let agent = match self.mark_agent_unread_target(&target.target) {
+            Ok(agent) => agent,
+            Err(err) => return encode_error_body(id, self.agent_seen_error_body(err)),
+        };
+
+        encode_success(id, ResponseResult::AgentInfo { agent })
+    }
+
     pub(super) fn handle_agent_rename(&mut self, id: String, params: AgentRenameParams) -> String {
         let agent = match self.rename_agent_target(&params.target, params.name) {
             Ok(agent) => agent,
@@ -201,4 +219,256 @@ fn agent_not_found(id: String, target: &str) -> String {
         "agent_not_found",
         format!("agent target {target} not found"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        api::schema::{AgentStatus, ErrorResponse, ResponseResult, SuccessResponse},
+        config::Config,
+        detect::{Agent, AgentState},
+        workspace::Workspace,
+    };
+
+    fn test_app() -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        )
+    }
+
+    fn app_with_named_agent(
+        name: &str,
+        seen: bool,
+        state: AgentState,
+    ) -> (App, String, crate::layout::PaneId) {
+        let mut app = test_app();
+        let mut active = Workspace::test_new("active");
+        let active_root = active.tabs[0].root_pane;
+        let _active_second = active.test_split(ratatui::layout::Direction::Horizontal);
+        active.tabs[0].layout.focus_pane(active_root);
+        let background = Workspace::test_new("background");
+        app.state.workspaces = vec![active, background];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let bg_pane = app.state.workspaces[1].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[1]
+            .pane_state(bg_pane)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        {
+            let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.set_agent_name(name.into());
+            terminal.set_detected_state(Some(Agent::Pi), state);
+        }
+        app.state.workspaces[1]
+            .panes
+            .get_mut(&bg_pane)
+            .unwrap()
+            .seen = seen;
+
+        (app, name.to_string(), bg_pane)
+    }
+
+    #[test]
+    fn api_agent_mark_read_on_done_agent_returns_idle_without_navigation() {
+        let (mut app, target, bg_pane) = app_with_named_agent("reviewer", false, AgentState::Idle);
+
+        let response = app.handle_agent_mark_read(
+            "req".into(),
+            AgentTarget {
+                target: target.clone(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.id, "req");
+        let ResponseResult::AgentInfo { agent } = success.result else {
+            panic!("expected agent info response");
+        };
+        assert_eq!(agent.agent_status, AgentStatus::Idle);
+        assert_eq!(app.state.active, Some(0));
+        assert_ne!(
+            app.state
+                .current_pane_focus_target()
+                .map(|target| target.pane_id),
+            Some(bg_pane),
+        );
+        assert!(app.state.workspaces[1].panes[&bg_pane].seen);
+    }
+
+    #[test]
+    fn api_agent_mark_read_on_working_agent_returns_agent_not_idle() {
+        let (mut app, target, _) = app_with_named_agent("worker", false, AgentState::Working);
+
+        let response = app.handle_agent_mark_read(
+            "req".into(),
+            AgentTarget {
+                target: target.clone(),
+            },
+        );
+
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.id, "req");
+        assert_eq!(error.error.code, "agent_not_idle");
+    }
+
+    #[test]
+    fn api_agent_mark_unread_on_idle_seen_agent_returns_done() {
+        let (mut app, target, bg_pane) = app_with_named_agent("reviewer", true, AgentState::Idle);
+
+        let response = app.handle_agent_mark_unread(
+            "req".into(),
+            AgentTarget {
+                target: target.clone(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.id, "req");
+        let ResponseResult::AgentInfo { agent } = success.result else {
+            panic!("expected agent info response");
+        };
+        assert_eq!(agent.agent_status, AgentStatus::Done);
+        assert!(!app.state.workspaces[1].panes[&bg_pane].seen);
+    }
+
+    #[test]
+    fn api_agent_mark_read_on_currently_viewed_agent_is_noop() {
+        let (mut app, target, pane_id) = app_with_named_agent("reviewer", false, AgentState::Idle);
+        app.state.active = Some(1);
+        app.state.selected = 1;
+        app.state.workspaces[1].tabs[0].layout.focus_pane(pane_id);
+
+        let response = app.handle_agent_mark_read(
+            "req".into(),
+            AgentTarget {
+                target: target.clone(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.id, "req");
+        let ResponseResult::AgentInfo { agent } = success.result else {
+            panic!("expected agent info response");
+        };
+        assert_eq!(agent.agent_status, AgentStatus::Done);
+        assert!(!app.state.workspaces[1].panes[&pane_id].seen);
+    }
+
+    #[test]
+    fn api_agent_mark_unread_on_currently_viewed_agent_is_noop() {
+        let (mut app, target, pane_id) = app_with_named_agent("reviewer", true, AgentState::Idle);
+        app.state.active = Some(1);
+        app.state.selected = 1;
+        app.state.workspaces[1].tabs[0].layout.focus_pane(pane_id);
+
+        let response = app.handle_agent_mark_unread(
+            "req".into(),
+            AgentTarget {
+                target: target.clone(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.id, "req");
+        let ResponseResult::AgentInfo { agent } = success.result else {
+            panic!("expected agent info response");
+        };
+        assert_eq!(agent.agent_status, AgentStatus::Idle);
+        assert!(app.state.workspaces[1].panes[&pane_id].seen);
+    }
+
+    #[test]
+    fn api_agent_mark_read_is_idempotent_when_already_seen() {
+        let (mut app, target, bg_pane) = app_with_named_agent("reviewer", true, AgentState::Idle);
+
+        let response = app.handle_agent_mark_read(
+            "req".into(),
+            AgentTarget {
+                target: target.clone(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.id, "req");
+        let ResponseResult::AgentInfo { agent } = success.result else {
+            panic!("expected agent info response");
+        };
+        assert_eq!(agent.agent_status, AgentStatus::Idle);
+        assert!(app.state.workspaces[1].panes[&bg_pane].seen);
+    }
+
+    #[test]
+    fn api_agent_mark_read_on_unknown_target_returns_agent_not_found() {
+        let mut app = test_app();
+
+        let response = app.handle_agent_mark_read(
+            "req".into(),
+            AgentTarget {
+                target: "missing-agent".into(),
+            },
+        );
+
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.id, "req");
+        assert_eq!(error.error.code, "agent_not_found");
+    }
+
+    #[test]
+    fn api_agent_mark_read_on_blocked_agent_returns_agent_not_idle() {
+        let (mut app, target, _) = app_with_named_agent("blocked", false, AgentState::Blocked);
+
+        let response = app.handle_agent_mark_read(
+            "req".into(),
+            AgentTarget {
+                target: target.clone(),
+            },
+        );
+
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.id, "req");
+        assert_eq!(error.error.code, "agent_not_idle");
+    }
+
+    #[test]
+    fn api_agent_mark_read_on_non_agent_pane_returns_agent_not_found_without_mutation() {
+        let mut app = test_app();
+        let background = Workspace::test_new("background");
+        app.state.workspaces = vec![background];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Idle;
+        app.state.workspaces[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .seen = false;
+
+        let response = app.handle_agent_mark_read(
+            "req".into(),
+            AgentTarget {
+                target: terminal_id.to_string(),
+            },
+        );
+
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.id, "req");
+        assert_eq!(error.error.code, "agent_not_found");
+        assert!(!app.state.workspaces[0].panes[&pane_id].seen);
+    }
 }

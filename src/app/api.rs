@@ -793,6 +793,12 @@ impl App {
             Method::AgentList(_) => return self.handle_agent_list(request.id),
             Method::AgentGet(target) => return self.handle_agent_get(request.id, target),
             Method::AgentFocus(target) => return self.handle_agent_focus(request.id, target),
+            Method::AgentMarkRead(target) => {
+                return self.handle_agent_mark_read(request.id, target)
+            }
+            Method::AgentMarkUnread(target) => {
+                return self.handle_agent_mark_unread(request.id, target);
+            }
             Method::AgentRename(params) => return self.handle_agent_rename(request.id, params),
             Method::AgentStart(params) => return self.handle_agent_start(request.id, params),
             Method::AgentRead(params) => return self.handle_agent_read(request.id, params),

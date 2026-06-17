@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use super::{terminal_targets::TerminalTargetError, App, Mode};
-use crate::api::schema::{AgentStartParams, SplitDirection};
+use crate::api::schema::{AgentInfo, AgentStartParams, SplitDirection};
+use crate::app::actions::{SeenChange, SeenError};
 
 impl App {
     pub(super) fn collect_agent_infos(&self) -> Vec<crate::api::schema::AgentInfo> {
@@ -28,6 +29,57 @@ impl App {
         self.agent_info(resolved.ws_idx, resolved.pane_id)
             .ok_or_else(|| TerminalTargetError::NotFound {
                 target: target.to_string(),
+            })
+    }
+
+    pub(super) fn mark_agent_read_target(
+        &mut self,
+        target: &str,
+    ) -> Result<AgentInfo, AgentSeenError> {
+        self.mark_agent_seen_target(target, true)
+    }
+
+    pub(super) fn mark_agent_unread_target(
+        &mut self,
+        target: &str,
+    ) -> Result<AgentInfo, AgentSeenError> {
+        self.mark_agent_seen_target(target, false)
+    }
+
+    fn mark_agent_seen_target(
+        &mut self,
+        target: &str,
+        seen: bool,
+    ) -> Result<AgentInfo, AgentSeenError> {
+        let resolved = self
+            .resolve_terminal_target(target)
+            .map_err(AgentSeenError::Target)?;
+        if !self
+            .state
+            .is_pane_agent_terminal(resolved.ws_idx, resolved.pane_id)
+        {
+            return Err(AgentSeenError::Target(TerminalTargetError::NotFound {
+                target: target.to_string(),
+            }));
+        }
+        match self
+            .state
+            .set_pane_agent_seen(resolved.ws_idx, resolved.pane_id, seen)
+        {
+            Ok(SeenChange::Changed(update)) => self.emit_pane_state_update(&update),
+            Ok(SeenChange::Unchanged) => {}
+            Err(SeenError::NotIdle) => return Err(AgentSeenError::NotIdle),
+            Err(SeenError::PaneNotFound) => {
+                return Err(AgentSeenError::Target(TerminalTargetError::NotFound {
+                    target: target.to_string(),
+                }));
+            }
+        }
+        self.agent_info(resolved.ws_idx, resolved.pane_id)
+            .ok_or_else(|| {
+                AgentSeenError::Target(TerminalTargetError::NotFound {
+                    target: target.to_string(),
+                })
             })
     }
 
@@ -284,6 +336,19 @@ impl App {
         }
     }
 
+    pub(super) fn agent_seen_error_body(
+        &self,
+        err: AgentSeenError,
+    ) -> crate::api::schema::ErrorBody {
+        match err {
+            AgentSeenError::Target(err) => self.agent_target_error_body(err),
+            AgentSeenError::NotIdle => crate::api::schema::ErrorBody {
+                code: "agent_not_idle".into(),
+                message: "mark read/unread is only allowed when the agent is done or idle".into(),
+            },
+        }
+    }
+
     pub(super) fn agent_rename_error_body(
         &self,
         err: AgentRenameError,
@@ -471,4 +536,9 @@ pub(super) enum AgentRenameError {
         name: String,
         candidates: Vec<crate::api::schema::AgentInfo>,
     },
+}
+
+pub(super) enum AgentSeenError {
+    Target(TerminalTargetError),
+    NotIdle,
 }

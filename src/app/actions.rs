@@ -12,7 +12,7 @@ use crate::workspace::WorkspaceGitStatus;
 use unicode_width::UnicodeWidthChar;
 
 use super::state::{
-    text_matches_query, AgentNotificationDelivery, AppState, Mode, NavigatorRow,
+    text_matches_query, AgentNotificationDelivery, AppState, ContextMenuKind, Mode, NavigatorRow,
     NavigatorStateFilter, NavigatorTarget, PaneFocusTarget, PendingAgentNotification, ToastKind,
     ToastNotification, ToastTarget, ViewLayout,
 };
@@ -243,6 +243,19 @@ pub struct PaneStateUpdate {
     pub presentation: crate::terminal::EffectivePresentation,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeenError {
+    PaneNotFound,
+    NotIdle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
+pub enum SeenChange {
+    Unchanged,
+    Changed(PaneStateUpdate),
+}
+
 // ---------------------------------------------------------------------------
 // Navigator operations
 // ---------------------------------------------------------------------------
@@ -256,6 +269,97 @@ impl AppState {
             workspace_id: ws.id.clone(),
             pane_id,
         })
+    }
+
+    pub(crate) fn pane_agent_terminal_state(
+        &self,
+        ws_idx: usize,
+        pane_id: PaneId,
+    ) -> Option<AgentState> {
+        let pane = self.workspaces.get(ws_idx)?.pane_state(pane_id)?;
+        Some(self.terminals.get(&pane.attached_terminal_id)?.state)
+    }
+
+    pub(crate) fn is_pane_agent_terminal(&self, ws_idx: usize, pane_id: PaneId) -> bool {
+        let pane = match self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.pane_state(pane_id))
+        {
+            Some(pane) => pane,
+            None => return false,
+        };
+        self.terminals
+            .get(&pane.attached_terminal_id)
+            .is_some_and(|terminal| terminal.is_agent_terminal())
+    }
+
+    pub(crate) fn refresh_agent_panel_context_menu(&mut self) {
+        let Some((ws_idx, pane_id, seen)) =
+            self.context_menu.as_ref().and_then(|menu| match menu.kind {
+                ContextMenuKind::AgentPanel {
+                    ws_idx, pane_id, ..
+                } => self
+                    .workspaces
+                    .get(ws_idx)
+                    .and_then(|ws| ws.pane_state(pane_id))
+                    .map(|pane| (ws_idx, pane_id, pane.seen)),
+                _ => None,
+            })
+        else {
+            return;
+        };
+
+        let next_mark_item = self.agent_panel_mark_item(ws_idx, pane_id, seen);
+        let Some(menu) = &mut self.context_menu else {
+            return;
+        };
+        let ContextMenuKind::AgentPanel { mark_item, .. } = &mut menu.kind else {
+            return;
+        };
+        if *mark_item == next_mark_item {
+            return;
+        }
+        *mark_item = next_mark_item;
+        let item_count = menu.items().len();
+        if item_count == 0 {
+            menu.list.highlighted = 0;
+        } else if menu.list.highlighted >= item_count {
+            menu.list.highlighted = item_count - 1;
+        }
+    }
+
+    pub(crate) fn agent_panel_mark_item(
+        &self,
+        ws_idx: usize,
+        pane_id: PaneId,
+        seen: bool,
+    ) -> Option<crate::app::state::AgentPanelMarkItem> {
+        use crate::app::state::AgentPanelMarkItem;
+
+        let agent_state = self.pane_agent_terminal_state(ws_idx, pane_id)?;
+        if agent_state != AgentState::Idle {
+            return None;
+        }
+        if !seen {
+            return Some(AgentPanelMarkItem::MarkAsRead);
+        }
+        if self.is_pane_currently_viewed(ws_idx, pane_id) {
+            None
+        } else {
+            Some(AgentPanelMarkItem::MarkAsUnread)
+        }
+    }
+
+    pub(crate) fn is_pane_currently_viewed(&self, ws_idx: usize, pane_id: PaneId) -> bool {
+        let Some(tab_idx) = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.find_tab_index_for_pane(pane_id))
+        else {
+            return false;
+        };
+        self.is_active_pane(ws_idx, tab_idx, pane_id)
     }
 
     fn pane_focus_target_indices(&self, target: &PaneFocusTarget) -> Option<(usize, usize)> {
@@ -1133,6 +1237,100 @@ impl AppState {
             }
         }
         changed
+    }
+
+    pub(crate) fn set_pane_agent_seen(
+        &mut self,
+        ws_idx: usize,
+        pane_id: PaneId,
+        seen: bool,
+    ) -> Result<SeenChange, SeenError> {
+        let (previous_seen, terminal_state) = {
+            let workspace = self.workspaces.get(ws_idx).ok_or(SeenError::PaneNotFound)?;
+            let pane = workspace
+                .pane_state(pane_id)
+                .ok_or(SeenError::PaneNotFound)?;
+            let terminal_id = pane.attached_terminal_id.clone();
+            let previous_seen = pane.seen;
+            let terminal = self
+                .terminals
+                .get(&terminal_id)
+                .ok_or(SeenError::PaneNotFound)?;
+            (previous_seen, terminal.state)
+        };
+
+        if terminal_state != AgentState::Idle {
+            return Err(SeenError::NotIdle);
+        }
+
+        if self.is_pane_currently_viewed(ws_idx, pane_id) {
+            return Ok(SeenChange::Unchanged);
+        }
+
+        if previous_seen == seen {
+            return Ok(SeenChange::Unchanged);
+        }
+
+        let update = self.pane_state_update_for_seen(ws_idx, pane_id, previous_seen, seen)?;
+
+        let pane_found = self.workspaces[ws_idx]
+            .tabs
+            .iter_mut()
+            .find_map(|tab| tab.panes.get_mut(&pane_id));
+        let Some(pane) = pane_found else {
+            return Err(SeenError::PaneNotFound);
+        };
+        pane.seen = seen;
+
+        self.mark_session_dirty();
+
+        if seen
+            && self.toast.as_ref().is_some_and(|toast| {
+                toast
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| target.pane_id == pane_id)
+            })
+        {
+            self.toast = None;
+        }
+
+        Ok(SeenChange::Changed(update))
+    }
+
+    fn pane_state_update_for_seen(
+        &self,
+        ws_idx: usize,
+        pane_id: PaneId,
+        previous_seen: bool,
+        seen: bool,
+    ) -> Result<PaneStateUpdate, SeenError> {
+        let workspace = self.workspaces.get(ws_idx).ok_or(SeenError::PaneNotFound)?;
+        let pane = workspace
+            .pane_state(pane_id)
+            .ok_or(SeenError::PaneNotFound)?;
+        let terminal = self
+            .terminals
+            .get(&pane.attached_terminal_id)
+            .ok_or(SeenError::PaneNotFound)?;
+        let agent_label = terminal.effective_agent_label().map(str::to_string);
+        let known_agent = terminal.effective_known_agent().or(terminal.detected_agent);
+        let presentation = terminal.effective_presentation();
+
+        Ok(PaneStateUpdate {
+            pane_id,
+            ws_idx,
+            previous_agent_label: agent_label.clone(),
+            previous_known_agent: known_agent,
+            previous_state: terminal.state,
+            previous_seen,
+            previous_presentation: presentation.clone(),
+            agent_label,
+            known_agent,
+            state: terminal.state,
+            seen,
+            presentation,
+        })
     }
 
     pub(crate) fn visible_workspace_order(&self) -> Vec<usize> {
@@ -4981,6 +5179,197 @@ mod tests {
         assert_eq!(state.workspaces[0].panes.len(), 1);
         assert!(!state.plugin_panes.contains_key(&closed));
         state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn set_pane_agent_seen_marks_done_agent_read_without_navigation() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(0);
+        state.selected = 0;
+        let bg_pane = *state.workspaces[1].panes.keys().next().unwrap();
+        let bg_terminal_id = state.workspaces[1].panes[&bg_pane]
+            .attached_terminal_id
+            .clone();
+        state.terminals.get_mut(&bg_terminal_id).unwrap().state = AgentState::Idle;
+        state.workspaces[1].panes.get_mut(&bg_pane).unwrap().seen = false;
+
+        let change = state
+            .set_pane_agent_seen(1, bg_pane, true)
+            .expect("mark read succeeds");
+
+        assert!(matches!(change, SeenChange::Changed(_)));
+        assert!(state.workspaces[1].panes[&bg_pane].seen);
+        assert_eq!(state.active, Some(0));
+        assert_ne!(
+            state
+                .current_pane_focus_target()
+                .map(|target| target.pane_id),
+            Some(bg_pane),
+        );
+    }
+
+    #[test]
+    fn set_pane_agent_seen_rejects_working_agent() {
+        let mut state = app_with_workspaces(&["ws"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        state.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Working;
+
+        let err = state
+            .set_pane_agent_seen(0, pane_id, true)
+            .expect_err("working agent should fail");
+        assert!(matches!(err, SeenError::NotIdle));
+    }
+
+    #[test]
+    fn agent_panel_mark_item_returns_mark_as_read_for_done_agent() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(0);
+        let bg_pane = *state.workspaces[1].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[1].panes[&bg_pane]
+            .attached_terminal_id
+            .clone();
+        state.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Idle;
+        state.workspaces[1].panes.get_mut(&bg_pane).unwrap().seen = false;
+
+        assert_eq!(
+            state.agent_panel_mark_item(1, bg_pane, false),
+            Some(crate::app::state::AgentPanelMarkItem::MarkAsRead),
+        );
+    }
+
+    #[test]
+    fn agent_panel_mark_item_returns_mark_as_unread_for_background_idle_seen() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(0);
+        let bg_pane = *state.workspaces[1].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[1].panes[&bg_pane]
+            .attached_terminal_id
+            .clone();
+        state.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Idle;
+        state.workspaces[1].panes.get_mut(&bg_pane).unwrap().seen = true;
+
+        assert_eq!(
+            state.agent_panel_mark_item(1, bg_pane, true),
+            Some(crate::app::state::AgentPanelMarkItem::MarkAsUnread),
+        );
+    }
+
+    #[test]
+    fn agent_panel_mark_item_returns_none_for_focused_idle_seen() {
+        let mut state = app_with_workspaces(&["ws"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        state.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Idle;
+        state.workspaces[0].panes.get_mut(&pane_id).unwrap().seen = true;
+        state.active = Some(0);
+
+        assert_eq!(state.agent_panel_mark_item(0, pane_id, true), None);
+    }
+
+    #[test]
+    fn agent_panel_mark_item_returns_none_for_working_agent() {
+        let mut state = app_with_workspaces(&["ws"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        state.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Working;
+
+        assert_eq!(state.agent_panel_mark_item(0, pane_id, true), None);
+    }
+
+    #[test]
+    fn agent_panel_mark_item_returns_none_for_blocked_agent() {
+        let mut state = app_with_workspaces(&["ws"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        state.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Blocked;
+
+        assert_eq!(state.agent_panel_mark_item(0, pane_id, false), None);
+    }
+
+    #[test]
+    fn agent_panel_mark_item_returns_none_for_unknown_agent() {
+        let mut state = app_with_workspaces(&["ws"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        state.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Unknown;
+
+        assert_eq!(state.agent_panel_mark_item(0, pane_id, false), None);
+    }
+
+    #[test]
+    fn set_pane_agent_seen_noops_for_currently_viewed_pane() {
+        let mut state = app_with_workspaces(&["ws"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        state.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Idle;
+        state.workspaces[0].panes.get_mut(&pane_id).unwrap().seen = true;
+        state.active = Some(0);
+        state.selected = 0;
+
+        let change = state
+            .set_pane_agent_seen(0, pane_id, false)
+            .expect("currently viewed pane should no-op mark unread");
+        assert!(matches!(change, SeenChange::Unchanged));
+        assert!(state.workspaces[0].panes[&pane_id].seen);
+    }
+
+    #[test]
+    fn set_pane_agent_seen_is_idempotent() {
+        let mut state = app_with_workspaces(&["ws"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        state.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Idle;
+        state.workspaces[0].panes.get_mut(&pane_id).unwrap().seen = true;
+
+        let change = state
+            .set_pane_agent_seen(0, pane_id, true)
+            .expect("idempotent mark read");
+        assert!(matches!(change, SeenChange::Unchanged));
+    }
+
+    #[test]
+    fn set_pane_agent_seen_clears_toast_targeting_pane() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(0);
+        state.selected = 0;
+        let bg_pane = *state.workspaces[1].panes.keys().next().unwrap();
+        let bg_terminal_id = state.workspaces[1].panes[&bg_pane]
+            .attached_terminal_id
+            .clone();
+        state.terminals.get_mut(&bg_terminal_id).unwrap().state = AgentState::Idle;
+        state.workspaces[1].panes.get_mut(&bg_pane).unwrap().seen = false;
+        let workspace_id = state.workspaces[1].id.clone();
+        state.toast = Some(ToastNotification {
+            kind: ToastKind::Finished,
+            title: "reviewer finished".into(),
+            context: "background".into(),
+            position: None,
+            target: Some(ToastTarget {
+                workspace_id,
+                pane_id: bg_pane,
+            }),
+        });
+
+        let change = state
+            .set_pane_agent_seen(1, bg_pane, true)
+            .expect("mark read succeeds");
+        assert!(matches!(change, SeenChange::Changed(_)));
+        assert!(state.toast.is_none());
     }
 
     #[test]

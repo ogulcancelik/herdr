@@ -99,6 +99,7 @@ impl App {
                         &mut self.terminal_runtimes,
                         key_event,
                     );
+                    self.emit_pending_pane_state_updates();
                 }
                 Mode::Settings => self.handle_settings_key(key_event),
                 Mode::GlobalMenu => handle_global_menu_key(&mut self.state, key_event),
@@ -307,6 +308,14 @@ impl App {
         } else if self.selection_autoscroll_deadline.is_none() {
             self.selection_autoscroll_deadline =
                 Some(std::time::Instant::now() + super::SELECTION_AUTOSCROLL_INTERVAL);
+        }
+
+        self.emit_pending_pane_state_updates();
+    }
+
+    fn emit_pending_pane_state_updates(&mut self) {
+        for update in self.state.take_pending_pane_state_updates() {
+            self.emit_pane_state_update(&update);
         }
     }
 

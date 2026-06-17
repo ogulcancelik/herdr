@@ -572,6 +572,7 @@ impl App {
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
+            pending_pane_state_updates: Vec::new(),
         };
 
         state.terminals = restored_terminals;

@@ -105,6 +105,10 @@ pub enum Method {
     AgentRename(AgentRenameParams),
     #[serde(rename = "agent.focus")]
     AgentFocus(AgentTarget),
+    #[serde(rename = "agent.mark_read")]
+    AgentMarkRead(AgentTarget),
+    #[serde(rename = "agent.mark_unread")]
+    AgentMarkUnread(AgentTarget),
     #[serde(rename = "agent.start")]
     AgentStart(AgentStartParams),
     #[serde(rename = "pane.split")]

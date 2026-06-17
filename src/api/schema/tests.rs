@@ -86,6 +86,34 @@ fn request_round_trips_for_agent_explain() {
 }
 
 #[test]
+fn request_round_trips_for_agent_mark_read() {
+    let request = Request {
+        id: "req_mark_read".into(),
+        method: Method::AgentMarkRead(AgentTarget {
+            target: "pi".into(),
+        }),
+    };
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "agent.mark_read");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
+fn request_round_trips_for_agent_mark_unread() {
+    let request = Request {
+        id: "req_mark_unread".into(),
+        method: Method::AgentMarkUnread(AgentTarget {
+            target: "pi".into(),
+        }),
+    };
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "agent.mark_unread");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
 fn notification_show_request_parses() {
     let json = r#"{"id":"req_1","method":"notification.show","params":{"title":"build failed","body":"api workspace","position":"top-left","sound":"request"}}"#;
     let request: Request = serde_json::from_str(json).unwrap();

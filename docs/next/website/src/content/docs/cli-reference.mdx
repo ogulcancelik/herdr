@@ -203,6 +203,8 @@ herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [
 herdr agent send <target> <text>
 herdr agent rename <target> <name>|--clear
 herdr agent focus <target>
+herdr agent mark-read <target>
+herdr agent mark-unread <target>
 herdr agent wait <target> --status <idle|working|blocked|unknown> [--timeout MS]
 herdr agent attach <target> [--takeover]
 herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>
@@ -213,6 +215,8 @@ herdr agent explain --file PATH --agent LABEL [--json|--verbose]
 Agent targets can be terminal IDs, unique agent names, detected or reported agent labels, or legacy pane IDs. Names and labels are agent identities. Terminal IDs and legacy pane IDs are low-level escape hatches.
 
 `agent read` reads the resolved terminal stream. `agent send` writes literal text to that stream. `agent get`, `agent focus`, `agent wait`, and `agent attach` require the resolved terminal to have agent identity. `agent rename` can assign that identity.
+
+`agent mark-read` and `agent mark-unread` update the pane seen state for an agent whose effective status is `done` or `idle`. They do not change focus or navigate to the target pane. Marking a working, blocked, or unknown agent returns `agent_not_idle`. Marking the currently focused agent is a no-op.
 
 `agent explain` asks the running server to classify the same bottom-buffer detection snapshot used by screen detection, so live output reflects the server's active manifest cache. Because this uses the `agent.explain` socket method, restart or hand off to an updated server after upgrading Herdr before using live explain. Use `--file PATH --agent LABEL` to explain a saved fixture locally instead. The default output shows the agent, final state, manifest source and version, matched rule with its region evidence, and any fallback, skip, or warning reasons. Add `--verbose` for visible evidence flags, cached remote version, local override shadowing, remote update status, and the full evaluated-rules list with matcher and region evidence. Add `--json` for issue reports or tests.
 

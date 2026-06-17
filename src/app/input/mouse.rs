@@ -5,9 +5,8 @@ use tracing::warn;
 
 use crate::{
     app::state::{
-        AgentPanelScope, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget,
-        MenuListState, Mode, RightClickPassthroughGesture, TabPressState, ViewLayout,
-        WorkspacePressState,
+        AgentPanelScope, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget, Mode,
+        RightClickPassthroughGesture, TabPressState, ViewLayout, WorkspacePressState,
     },
     layout::{PaneInfo, SplitBorder},
     selection::Selection,
@@ -364,7 +363,17 @@ impl AppState {
                 }
 
                 if self.mode == Mode::ContextMenu {
-                    let item_idx = self.context_menu_item_at(mouse.column, mouse.row);
+                    let item_idx =
+                        self.context_menu_item_at(mouse.column, mouse.row)
+                            .or_else(|| {
+                                let menu = self.context_menu.as_ref()?;
+                                let rect = self.context_menu_rect()?;
+                                let inside = mouse.column >= rect.x
+                                    && mouse.column < rect.x + rect.width
+                                    && mouse.row >= rect.y
+                                    && mouse.row < rect.y + rect.height;
+                                inside.then_some(menu.list.highlighted)
+                            });
                     if let Some(menu) = self.context_menu.take() {
                         if let Some(idx) = item_idx {
                             apply_context_menu_action(self, terminal_runtimes, menu, idx);
@@ -884,6 +893,7 @@ impl AppState {
             }
 
             MouseEventKind::Moved if self.mode == Mode::ContextMenu => {
+                self.refresh_agent_panel_context_menu();
                 let hovered = self.context_menu_item_at(mouse.column, mouse.row);
                 if let Some(menu) = &mut self.context_menu {
                     menu.list.hover(hovered);
@@ -896,13 +906,29 @@ impl AppState {
                 }
             }
 
-            MouseEventKind::Down(MouseButton::Right) if in_sidebar && !self.sidebar_collapsed => {
+            MouseEventKind::Down(MouseButton::Right) if in_sidebar => {
                 self.workspace_press = None;
                 self.tab_press = None;
-                if self
-                    .workspace_list_scrollbar_target_at(mouse.column, mouse.row)
-                    .is_some()
+                if !self.sidebar_collapsed
+                    && self
+                        .workspace_list_scrollbar_target_at(mouse.column, mouse.row)
+                        .is_some()
                 {
+                    return None;
+                }
+                if let Some((ws_idx, tab_idx, pane_id)) = self.agent_panel_target_at(mouse.row) {
+                    if self.open_agent_panel_context_menu(
+                        ws_idx,
+                        tab_idx,
+                        pane_id,
+                        mouse.column,
+                        mouse.row,
+                    ) {
+                        self.mode = Mode::ContextMenu;
+                        return None;
+                    }
+                }
+                if self.sidebar_collapsed {
                     return None;
                 }
                 if let Some(idx) = self.workspace_at_row(mouse.row) {
@@ -939,12 +965,8 @@ impl AppState {
                             })
                         })
                         .unwrap_or(ContextMenuKind::Workspace { ws_idx: idx });
-                    self.context_menu = Some(ContextMenuState {
-                        kind,
-                        x: mouse.column,
-                        y: mouse.row,
-                        list: MenuListState::new(0),
-                    });
+                    self.context_menu =
+                        Some(ContextMenuState::at_cursor(kind, mouse.column, mouse.row));
                     self.mode = Mode::ContextMenu;
                 }
             }
@@ -955,12 +977,11 @@ impl AppState {
                 if let (Some(ws_idx), Some(tab_idx)) =
                     (self.active, self.tab_at(mouse.column, mouse.row))
                 {
-                    self.context_menu = Some(ContextMenuState {
-                        kind: ContextMenuKind::Tab { ws_idx, tab_idx },
-                        x: mouse.column,
-                        y: mouse.row,
-                        list: MenuListState::new(0),
-                    });
+                    self.context_menu = Some(ContextMenuState::at_cursor(
+                        ContextMenuKind::Tab { ws_idx, tab_idx },
+                        mouse.column,
+                        mouse.row,
+                    ));
                     self.mode = Mode::ContextMenu;
                 }
             }
@@ -985,18 +1006,17 @@ impl AppState {
                         .and_then(|pane| self.terminals.get(&pane.attached_terminal_id))
                         .and_then(|terminal| terminal.manual_label.as_ref())
                         .is_some();
-                    self.context_menu = Some(ContextMenuState {
-                        kind: ContextMenuKind::Pane {
+                    self.context_menu = Some(ContextMenuState::at_cursor(
+                        ContextMenuKind::Pane {
                             ws_idx,
                             tab_idx,
                             pane_id: info.id,
                             source_pane_id,
                             has_manual_label,
                         },
-                        x: mouse.column,
-                        y: mouse.row,
-                        list: MenuListState::new(0),
-                    });
+                        mouse.column,
+                        mouse.row,
+                    ));
                     self.mode = Mode::ContextMenu;
                 }
             }

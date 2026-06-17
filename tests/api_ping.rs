@@ -966,11 +966,20 @@ fn agent_methods_round_trip_over_socket() {
     let second_reported = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"agent_second_report","method":"pane.report_agent","params":{{"pane_id":"{}","source":"test","agent":"codex","state":"idle"}}}}"#,
+            r#"{{"id":"agent_second_report","method":"pane.report_agent","params":{{"pane_id":"{}","source":"test","agent":"codex","state":"working"}}}}"#,
             second_pane_id
         ),
     );
     assert_eq!(second_reported["result"]["type"], "ok");
+
+    let second_idle = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"agent_second_idle","method":"pane.report_agent","params":{{"pane_id":"{}","source":"test","agent":"codex","state":"idle"}}}}"#,
+            second_pane_id
+        ),
+    );
+    assert_eq!(second_idle["result"]["type"], "ok");
 
     let second_renamed = send_request(
         &socket_path,
@@ -996,6 +1005,34 @@ fn agent_methods_round_trip_over_socket() {
         r#"{"id":"agent_rename","method":"agent.rename","params":{"target":"reviewer","name":"qa"}}"#,
     );
     assert_eq!(agent_renamed["result"]["agent"]["name"], "qa");
+
+    let qa_before_read = send_request(
+        &socket_path,
+        r#"{"id":"agent_qa_get","method":"agent.get","params":{"target":"qa"}}"#,
+    );
+    assert_eq!(qa_before_read["result"]["agent"]["agent_status"], "done");
+    assert_eq!(qa_before_read["result"]["agent"]["focused"], false);
+
+    let mark_read = send_request(
+        &socket_path,
+        r#"{"id":"agent_mark_read","method":"agent.mark_read","params":{"target":"qa"}}"#,
+    );
+    assert_eq!(mark_read["result"]["agent"]["name"], "qa");
+    assert_eq!(mark_read["result"]["agent"]["agent_status"], "idle");
+    assert_eq!(mark_read["result"]["agent"]["focused"], false);
+
+    let mark_unread = send_request(
+        &socket_path,
+        r#"{"id":"agent_mark_unread","method":"agent.mark_unread","params":{"target":"qa"}}"#,
+    );
+    assert_eq!(mark_unread["result"]["agent"]["agent_status"], "done");
+    assert_eq!(mark_unread["result"]["agent"]["focused"], false);
+
+    let mark_read_working = send_request(
+        &socket_path,
+        r#"{"id":"agent_mark_read_working","method":"agent.mark_read","params":{"target":"worker"}}"#,
+    );
+    assert_eq!(mark_read_working["error"]["code"], "agent_not_idle");
 
     let focused = send_request(
         &socket_path,

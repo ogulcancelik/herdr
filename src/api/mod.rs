@@ -38,6 +38,8 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::LayoutApply(_)
             | Method::AgentRename(_)
             | Method::AgentFocus(_)
+            | Method::AgentMarkRead(_)
+            | Method::AgentMarkUnread(_)
             | Method::AgentStart(_)
             | Method::PaneSplit(_)
             | Method::PaneSwap(_)

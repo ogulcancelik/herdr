@@ -449,6 +449,46 @@ impl AppState {
             && row < rect.y + rect.height
     }
 
+    pub(super) fn agent_panel_target_at(
+        &self,
+        row: u16,
+    ) -> Option<(usize, usize, crate::layout::PaneId)> {
+        if self.sidebar_collapsed {
+            self.collapsed_agent_detail_target_at(row)
+        } else {
+            self.agent_detail_target_at(row)
+        }
+    }
+
+    pub(super) fn open_agent_panel_context_menu(
+        &mut self,
+        ws_idx: usize,
+        tab_idx: usize,
+        pane_id: crate::layout::PaneId,
+        x: u16,
+        y: u16,
+    ) -> bool {
+        let Some(pane) = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.pane_state(pane_id))
+        else {
+            return false;
+        };
+        let mark_item = self.agent_panel_mark_item(ws_idx, pane_id, pane.seen);
+        self.context_menu = Some(crate::app::state::ContextMenuState::at_agent_panel_cursor(
+            crate::app::state::ContextMenuKind::AgentPanel {
+                ws_idx,
+                tab_idx,
+                pane_id,
+                mark_item,
+            },
+            x,
+            y,
+        ));
+        true
+    }
+
     pub(super) fn agent_detail_target_at(
         &self,
         row: u16,
@@ -496,8 +536,8 @@ mod tests {
 
     use super::super::{app_for_mouse_test, capture_snapshot, mouse, unique_temp_path};
     use crate::{
-        app::state::{AgentPanelScope, DragTarget, Mode},
-        detect::Agent,
+        app::state::{AgentPanelMarkItem, AgentPanelScope, ContextMenuKind, DragTarget, Mode},
+        detect::{Agent, AgentState},
         workspace::Workspace,
     };
 
@@ -958,6 +998,155 @@ mod tests {
             second_pane
         );
         assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn right_click_collapsed_agent_row_opens_mark_as_read_menu() {
+        let mut app = app_for_mouse_test();
+        let first = Workspace::test_new("one");
+        let first_pane = first.tabs[0].root_pane;
+        let second = Workspace::test_new("two");
+        let second_pane = second.tabs[0].root_pane;
+
+        app.state.workspaces = vec![first, second];
+        app.state.ensure_test_terminals();
+        let first_terminal_id = app.state.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&first_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        let second_terminal_id = app.state.workspaces[1].tabs[0].panes[&second_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&second_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+        app.state
+            .terminals
+            .get_mut(&second_terminal_id)
+            .unwrap()
+            .state = AgentState::Idle;
+        app.state.workspaces[1].tabs[0]
+            .panes
+            .get_mut(&second_pane)
+            .unwrap()
+            .seen = false;
+        app.state.active = Some(1);
+        app.state.selected = 1;
+        app.state.mode = Mode::Terminal;
+        app.state.sidebar_collapsed = true;
+        app.state.view.sidebar_rect = Rect::new(0, 0, 4, 20);
+        app.state.view.terminal_area = Rect::new(4, 0, 80, 20);
+
+        let (_, _, detail_area) =
+            crate::ui::collapsed_sidebar_sections(app.state.view.sidebar_rect);
+        let detail_content_y = detail_area.y;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            detail_area.x,
+            detail_content_y,
+        ));
+
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        let menu = app
+            .state
+            .context_menu
+            .as_ref()
+            .expect("collapsed agent panel context menu");
+        assert!(matches!(
+            menu.kind,
+            ContextMenuKind::AgentPanel {
+                ws_idx: 1,
+                tab_idx: 0,
+                pane_id,
+                mark_item: Some(AgentPanelMarkItem::MarkAsRead),
+            } if pane_id == second_pane
+        ));
+    }
+
+    #[test]
+    fn right_click_agent_mark_as_read_shows_toast_when_agent_is_working() {
+        let mut app = app_for_mouse_test();
+        let first = Workspace::test_new("one");
+        let first_pane = first.tabs[0].root_pane;
+        let second = Workspace::test_new("two");
+        let second_pane = second.tabs[0].root_pane;
+
+        app.state.workspaces = vec![first, second];
+        app.state.ensure_test_terminals();
+        let first_terminal_id = app.state.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&first_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        let second_terminal_id = app.state.workspaces[1].tabs[0].panes[&second_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&second_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+        app.state
+            .terminals
+            .get_mut(&second_terminal_id)
+            .unwrap()
+            .state = AgentState::Working;
+        app.state.workspaces[1].tabs[0]
+            .panes
+            .get_mut(&second_pane)
+            .unwrap()
+            .seen = false;
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 20));
+
+        let row = agent_panel_entry_row(&app, 1, second_pane);
+        let detail_area = app.state.agent_panel_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            detail_area.x + 2,
+            row,
+        ));
+
+        app.state.context_menu = Some(crate::app::state::ContextMenuState::at_agent_panel_cursor(
+            ContextMenuKind::AgentPanel {
+                ws_idx: 1,
+                tab_idx: 0,
+                pane_id: second_pane,
+                mark_item: Some(AgentPanelMarkItem::MarkAsRead),
+            },
+            detail_area.x + 2,
+            row,
+        ));
+        app.state.mode = Mode::ContextMenu;
+
+        let menu_rect = app.state.context_menu_rect().expect("context menu rect");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu_rect.x + 2,
+            menu_rect.y,
+        ));
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        let toast = app.state.toast.as_ref().expect("working-agent toast");
+        assert_eq!(toast.title, "cannot update read state");
+        assert_eq!(
+            toast.context,
+            "agent is no longer idle or already matches that state"
+        );
+        assert!(!app.state.workspaces[1].tabs[0].panes[&second_pane].seen);
     }
 
     #[test]
@@ -1567,5 +1756,439 @@ mod tests {
         assert!(app.state.drag.is_none());
         let snapshot = capture_snapshot(&app.state);
         assert_eq!(snapshot.sidebar_width, Some(26));
+    }
+
+    fn agent_panel_entry_row(
+        app: &crate::app::input::App,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+    ) -> u16 {
+        let detail_area = app.state.agent_panel_rect();
+        let metrics = crate::ui::agent_panel_scroll_metrics(&app.state, detail_area);
+        let body = crate::ui::agent_panel_body_rect(
+            detail_area,
+            crate::ui::should_show_scrollbar(metrics),
+        );
+        let mut row_y = body.y;
+        for detail in crate::ui::agent_panel_entries(&app.state)
+            .into_iter()
+            .skip(app.state.agent_panel_scroll)
+        {
+            if detail.ws_idx == ws_idx && detail.pane_id == pane_id {
+                return row_y;
+            }
+            row_y = row_y.saturating_add(2);
+            if row_y < body.y + body.height {
+                row_y = row_y.saturating_add(1);
+            }
+        }
+        panic!("agent panel entry not found for workspace {ws_idx} pane {pane_id:?}");
+    }
+
+    #[test]
+    fn right_click_done_agent_opens_mark_as_read_menu_without_navigation() {
+        let mut app = app_for_mouse_test();
+        let first = Workspace::test_new("one");
+        let first_pane = first.tabs[0].root_pane;
+
+        let second = Workspace::test_new("two");
+        let second_pane = second.tabs[0].root_pane;
+
+        app.state.workspaces = vec![first, second];
+        app.state.ensure_test_terminals();
+        let first_terminal_id = app.state.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&first_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        let second_terminal_id = app.state.workspaces[1].tabs[0].panes[&second_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&second_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+        app.state
+            .terminals
+            .get_mut(&second_terminal_id)
+            .unwrap()
+            .state = AgentState::Idle;
+        app.state.workspaces[1].tabs[0]
+            .panes
+            .get_mut(&second_pane)
+            .unwrap()
+            .seen = false;
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 20));
+
+        let row = agent_panel_entry_row(&app, 1, second_pane);
+        let detail_area = app.state.agent_panel_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            detail_area.x + 2,
+            row,
+        ));
+
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        let menu = app
+            .state
+            .context_menu
+            .as_ref()
+            .expect("agent panel context menu");
+        assert!(matches!(
+            menu.kind,
+            ContextMenuKind::AgentPanel {
+                ws_idx: 1,
+                tab_idx: 0,
+                pane_id,
+                mark_item: Some(AgentPanelMarkItem::MarkAsRead),
+            } if pane_id == second_pane
+        ));
+        assert_eq!(menu.items(), &["Mark as read", "Close"]);
+
+        let menu_rect = app.state.context_menu_rect().expect("context menu rect");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu_rect.x + 2,
+            menu_rect.y + 1,
+        ));
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.selected, 0);
+        assert!(app.state.workspaces[1].tabs[0].panes[&second_pane].seen);
+    }
+
+    #[test]
+    fn right_click_done_agent_mark_as_read_works_without_mouse_move() {
+        let mut app = app_for_mouse_test();
+        let first = Workspace::test_new("one");
+        let first_pane = first.tabs[0].root_pane;
+
+        let second = Workspace::test_new("two");
+        let second_pane = second.tabs[0].root_pane;
+
+        app.state.workspaces = vec![first, second];
+        app.state.ensure_test_terminals();
+        let first_terminal_id = app.state.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&first_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        let second_terminal_id = app.state.workspaces[1].tabs[0].panes[&second_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&second_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+        app.state
+            .terminals
+            .get_mut(&second_terminal_id)
+            .unwrap()
+            .state = AgentState::Idle;
+        app.state.workspaces[1].tabs[0]
+            .panes
+            .get_mut(&second_pane)
+            .unwrap()
+            .seen = false;
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 20));
+
+        let row = agent_panel_entry_row(&app, 1, second_pane);
+        let detail_area = app.state.agent_panel_rect();
+        let click_col = detail_area.x + 2;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            click_col,
+            row,
+        ));
+
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            click_col,
+            row,
+        ));
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.selected, 0);
+        assert!(app.state.workspaces[1].tabs[0].panes[&second_pane].seen);
+    }
+
+    #[test]
+    fn right_click_idle_seen_agent_opens_mark_as_unread_menu_without_navigation() {
+        let mut app = app_for_mouse_test();
+        let first = Workspace::test_new("one");
+        let first_pane = first.tabs[0].root_pane;
+
+        let second = Workspace::test_new("two");
+        let second_pane = second.tabs[0].root_pane;
+
+        app.state.workspaces = vec![first, second];
+        app.state.ensure_test_terminals();
+        let first_terminal_id = app.state.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&first_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        let second_terminal_id = app.state.workspaces[1].tabs[0].panes[&second_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&second_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+        app.state
+            .terminals
+            .get_mut(&second_terminal_id)
+            .unwrap()
+            .state = AgentState::Idle;
+        app.state.workspaces[1].tabs[0]
+            .panes
+            .get_mut(&second_pane)
+            .unwrap()
+            .seen = true;
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 20));
+
+        let row = agent_panel_entry_row(&app, 1, second_pane);
+        let detail_area = app.state.agent_panel_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            detail_area.x + 2,
+            row,
+        ));
+
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        let menu = app
+            .state
+            .context_menu
+            .as_ref()
+            .expect("agent panel context menu");
+        assert!(matches!(
+            menu.kind,
+            ContextMenuKind::AgentPanel {
+                ws_idx: 1,
+                tab_idx: 0,
+                pane_id,
+                mark_item: Some(AgentPanelMarkItem::MarkAsUnread),
+            } if pane_id == second_pane
+        ));
+        assert_eq!(menu.items(), &["Mark as unread", "Close"]);
+
+        let menu_rect = app.state.context_menu_rect().expect("context menu rect");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu_rect.x + 2,
+            menu_rect.y + 1,
+        ));
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.selected, 0);
+        assert!(!app.state.workspaces[1].tabs[0].panes[&second_pane].seen);
+    }
+
+    #[test]
+    fn right_click_working_agent_opens_close_only_menu() {
+        let mut app = app_for_mouse_test();
+        let first = Workspace::test_new("one");
+        let first_pane = first.tabs[0].root_pane;
+
+        let second = Workspace::test_new("two");
+        let second_pane = second.tabs[0].root_pane;
+
+        app.state.workspaces = vec![first, second];
+        app.state.ensure_test_terminals();
+        let first_terminal_id = app.state.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&first_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        let second_terminal_id = app.state.workspaces[1].tabs[0].panes[&second_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&second_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+        app.state
+            .terminals
+            .get_mut(&second_terminal_id)
+            .unwrap()
+            .state = AgentState::Working;
+        app.state.workspaces[1].tabs[0]
+            .panes
+            .get_mut(&second_pane)
+            .unwrap()
+            .seen = true;
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 20));
+
+        let row = agent_panel_entry_row(&app, 1, second_pane);
+        let detail_area = app.state.agent_panel_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            detail_area.x + 2,
+            row,
+        ));
+
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        let menu = app
+            .state
+            .context_menu
+            .as_ref()
+            .expect("agent panel context menu");
+        assert!(matches!(
+            menu.kind,
+            ContextMenuKind::AgentPanel {
+                ws_idx: 1,
+                tab_idx: 0,
+                pane_id,
+                mark_item: None,
+            } if pane_id == second_pane
+        ));
+        assert_eq!(menu.items(), &["Close"]);
+        assert!(app.state.workspaces[1].tabs[0].panes[&second_pane].seen);
+    }
+
+    #[test]
+    fn right_click_focused_idle_agent_opens_close_only_menu() {
+        let mut app = app_for_mouse_test();
+        let workspace = Workspace::test_new("one");
+        let pane_id = workspace.tabs[0].root_pane;
+
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+        app.state.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Idle;
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .seen = true;
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.agent_panel_scope = AgentPanelScope::CurrentWorkspace;
+
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 20));
+
+        let row = agent_panel_entry_row(&app, 0, pane_id);
+        let detail_area = app.state.agent_panel_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            detail_area.x + 2,
+            row,
+        ));
+
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        let menu = app
+            .state
+            .context_menu
+            .as_ref()
+            .expect("agent panel context menu");
+        assert_eq!(menu.items(), &["Close"]);
+        assert!(matches!(
+            menu.kind,
+            ContextMenuKind::AgentPanel {
+                ws_idx: 0,
+                pane_id: matched_pane,
+                mark_item: None,
+                ..
+            } if matched_pane == pane_id
+        ));
+        assert!(app.state.workspaces[0].tabs[0].panes[&pane_id].seen);
+    }
+
+    #[test]
+    fn right_click_agent_close_navigates_and_closes_pane() {
+        let mut app = app_for_mouse_test();
+        let first = Workspace::test_new("one");
+        let first_pane = first.tabs[0].root_pane;
+        let second = Workspace::test_new("two");
+        let second_pane = second.tabs[0].root_pane;
+
+        app.state.workspaces = vec![first, second];
+        app.state.ensure_test_terminals();
+        for (ws_idx, pane) in [(0, first_pane), (1, second_pane)] {
+            let terminal_id = app.state.workspaces[ws_idx].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .detected_agent = Some(Agent::Claude);
+            app.state.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Working;
+        }
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 20));
+
+        let row = agent_panel_entry_row(&app, 1, second_pane);
+        let detail_area = app.state.agent_panel_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            detail_area.x + 2,
+            row,
+        ));
+
+        let menu_rect = app.state.context_menu_rect().expect("context menu rect");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu_rect.x + 2,
+            menu_rect.y + 1,
+        ));
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.selected, 0);
     }
 }

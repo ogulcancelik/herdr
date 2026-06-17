@@ -18,6 +18,8 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "send" => agent_send(&args[1..]),
         "rename" => agent_rename(&args[1..]),
         "focus" => agent_focus(&args[1..]),
+        "mark-read" => agent_mark_read(&args[1..]),
+        "mark-unread" => agent_mark_unread(&args[1..]),
         "wait" => agent_wait(&args[1..]),
         "attach" => agent_attach(&args[1..]),
         "start" => agent_start(&args[1..]),
@@ -417,6 +419,40 @@ fn agent_focus(args: &[String]) -> std::io::Result<i32> {
     })?)
 }
 
+fn agent_mark_read(args: &[String]) -> std::io::Result<i32> {
+    let Some(target) = args.first() else {
+        eprintln!("usage: herdr agent mark-read <target>");
+        return Ok(2);
+    };
+    if args.len() != 1 {
+        eprintln!("usage: herdr agent mark-read <target>");
+        return Ok(2);
+    }
+    super::print_response(&super::send_request(&Request {
+        id: "cli:agent:mark-read".into(),
+        method: Method::AgentMarkRead(AgentTarget {
+            target: target.clone(),
+        }),
+    })?)
+}
+
+fn agent_mark_unread(args: &[String]) -> std::io::Result<i32> {
+    let Some(target) = args.first() else {
+        eprintln!("usage: herdr agent mark-unread <target>");
+        return Ok(2);
+    };
+    if args.len() != 1 {
+        eprintln!("usage: herdr agent mark-unread <target>");
+        return Ok(2);
+    }
+    super::print_response(&super::send_request(&Request {
+        id: "cli:agent:mark-unread".into(),
+        method: Method::AgentMarkUnread(AgentTarget {
+            target: target.clone(),
+        }),
+    })?)
+}
+
 fn agent_attach(args: &[String]) -> std::io::Result<i32> {
     let (target, takeover) =
         match super::parse_attach_target(args, "usage: herdr agent attach <target> [--takeover]") {
@@ -673,6 +709,8 @@ fn print_agent_help() {
     eprintln!("  herdr agent send <target> <text>");
     eprintln!("  herdr agent rename <target> <name>|--clear");
     eprintln!("  herdr agent focus <target>");
+    eprintln!("  herdr agent mark-read <target>");
+    eprintln!("  herdr agent mark-unread <target>");
     eprintln!("  herdr agent wait <target> --status <idle|working|blocked|unknown> [--timeout MS]");
     eprintln!("  herdr agent attach <target> [--takeover]");
     eprintln!("  herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>");
@@ -682,4 +720,31 @@ fn print_agent_help() {
     eprintln!(
         "  agent send writes literal text; use pane run when you want command text plus Enter"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn mark_read_requires_single_target() {
+        assert_eq!(agent_mark_read(&args(&[])).unwrap(), 2);
+        assert_eq!(agent_mark_read(&args(&["reviewer", "extra"])).unwrap(), 2);
+    }
+
+    #[test]
+    fn mark_unread_requires_single_target() {
+        assert_eq!(agent_mark_unread(&args(&[])).unwrap(), 2);
+        assert_eq!(agent_mark_unread(&args(&["reviewer", "extra"])).unwrap(), 2);
+    }
+
+    #[test]
+    fn run_agent_command_dispatches_mark_read_subcommands() {
+        assert_eq!(run_agent_command(&args(&["mark-read"])).unwrap(), 2);
+        assert_eq!(run_agent_command(&args(&["mark-unread"])).unwrap(), 2);
+    }
 }

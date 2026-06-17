@@ -3,7 +3,8 @@ use ratatui::layout::{Direction, Rect};
 
 use crate::{
     app::state::{
-        AppState, ContextMenuKind, ContextMenuState, MenuListState, Mode, NavigatorStateFilter,
+        AgentPanelMarkItem, AppState, ContextMenuKind, ContextMenuState, MenuListState, Mode,
+        NavigatorStateFilter, ToastKind, ToastNotification,
     },
     input::TerminalKey,
     layout::NavDirection,
@@ -376,6 +377,61 @@ pub(super) fn leave_modal(state: &mut AppState) {
     }
 }
 
+fn agent_panel_seen_toast(state: &mut AppState, title: &str, context: &str) {
+    state.toast = Some(ToastNotification {
+        kind: ToastKind::NeedsAttention,
+        title: title.to_string(),
+        context: context.to_string(),
+        position: None,
+        target: None,
+    });
+}
+
+fn apply_agent_panel_seen_change(
+    state: &mut AppState,
+    ws_idx: usize,
+    pane_id: crate::layout::PaneId,
+    seen: bool,
+) {
+    let expected_mark_item = if seen {
+        AgentPanelMarkItem::MarkAsRead
+    } else {
+        AgentPanelMarkItem::MarkAsUnread
+    };
+    let mark_allowed = state
+        .workspaces
+        .get(ws_idx)
+        .and_then(|ws| ws.pane_state(pane_id))
+        .and_then(|pane| {
+            state
+                .agent_panel_mark_item(ws_idx, pane_id, pane.seen)
+                .filter(|item| *item == expected_mark_item)
+        });
+    if mark_allowed.is_none() {
+        agent_panel_seen_toast(
+            state,
+            "cannot update read state",
+            "agent is no longer idle or already matches that state",
+        );
+        leave_modal(state);
+        return;
+    }
+
+    match state.set_pane_agent_seen(ws_idx, pane_id, seen) {
+        Ok(crate::app::actions::SeenChange::Changed(update)) => {
+            state.queue_pane_state_update(update);
+        }
+        Ok(crate::app::actions::SeenChange::Unchanged) => {}
+        Err(crate::app::actions::SeenError::NotIdle) => {
+            agent_panel_seen_toast(state, "cannot update read state", "agent is still working");
+        }
+        Err(crate::app::actions::SeenError::PaneNotFound) => {
+            agent_panel_seen_toast(state, "cannot update read state", "agent pane not found");
+        }
+    }
+    leave_modal(state);
+}
+
 pub(super) const ONBOARDING_WELCOME_ACTIONS: &[ModalActionSpec<ModalAction>] = &[ModalActionSpec {
     action: ModalAction::Continue,
     bindings: &[ModalKeyBinding::Enter],
@@ -664,6 +720,25 @@ pub(crate) fn handle_confirm_close_key(state: &mut AppState, key: KeyEvent) {
     }
 }
 
+fn close_pane_from_context(
+    state: &mut AppState,
+    ws_idx: usize,
+    tab_idx: usize,
+    pane_id: crate::layout::PaneId,
+) {
+    state.selected = ws_idx;
+    state.active = Some(ws_idx);
+    state.switch_tab(tab_idx);
+    state.focus_pane_in_workspace(ws_idx, pane_id);
+    if !state.close_pane() {
+        state.mode = if state.active.is_some() {
+            Mode::Terminal
+        } else {
+            Mode::Navigate
+        };
+    }
+}
+
 pub(super) fn apply_context_menu_action(
     state: &mut AppState,
     terminal_runtimes: &mut crate::terminal::TerminalRuntimeRegistry,
@@ -851,17 +926,34 @@ pub(super) fn apply_context_menu_action(
             },
             Some("Close pane"),
         ) => {
-            state.selected = ws_idx;
-            state.active = Some(ws_idx);
-            state.switch_tab(tab_idx);
-            state.focus_pane_in_workspace(ws_idx, pane_id);
-            if !state.close_pane() {
-                state.mode = if state.active.is_some() {
-                    Mode::Terminal
-                } else {
-                    Mode::Navigate
-                };
-            }
+            close_pane_from_context(state, ws_idx, tab_idx, pane_id);
+        }
+        (
+            ContextMenuKind::AgentPanel {
+                ws_idx, pane_id, ..
+            },
+            Some("Mark as read"),
+        ) => {
+            apply_agent_panel_seen_change(state, ws_idx, pane_id, true);
+        }
+        (
+            ContextMenuKind::AgentPanel {
+                ws_idx, pane_id, ..
+            },
+            Some("Mark as unread"),
+        ) => {
+            apply_agent_panel_seen_change(state, ws_idx, pane_id, false);
+        }
+        (
+            ContextMenuKind::AgentPanel {
+                ws_idx,
+                tab_idx,
+                pane_id,
+                ..
+            },
+            Some("Close"),
+        ) => {
+            close_pane_from_context(state, ws_idx, tab_idx, pane_id);
         }
         _ => leave_modal(state),
     }

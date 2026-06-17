@@ -1045,6 +1045,12 @@ pub(crate) struct TabPressState {
     pub start_row: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentPanelMarkItem {
+    MarkAsRead,
+    MarkAsUnread,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextMenuKind {
     Workspace {
@@ -1067,6 +1073,12 @@ pub enum ContextMenuKind {
         source_pane_id: Option<PaneId>,
         has_manual_label: bool,
     },
+    AgentPanel {
+        ws_idx: usize,
+        tab_idx: usize,
+        pane_id: PaneId,
+        mark_item: Option<AgentPanelMarkItem>,
+    },
 }
 
 /// Right-click context menu state.
@@ -1078,6 +1090,24 @@ pub struct ContextMenuState {
 }
 
 impl ContextMenuState {
+    pub fn at_cursor(kind: ContextMenuKind, x: u16, y: u16) -> Self {
+        Self {
+            kind,
+            x,
+            y,
+            list: MenuListState::new(0),
+        }
+    }
+
+    pub fn at_agent_panel_cursor(kind: ContextMenuKind, x: u16, y: u16) -> Self {
+        Self {
+            kind,
+            x,
+            y: y.saturating_sub(1),
+            list: MenuListState::new(0),
+        }
+    }
+
     pub fn items(&self) -> &'static [&'static str] {
         match self.kind {
             ContextMenuKind::Workspace { .. } => &["Rename", "Close"],
@@ -1163,6 +1193,17 @@ impl ContextMenuState {
                 "Zoom",
                 "Close pane",
             ],
+            ContextMenuKind::AgentPanel {
+                mark_item: Some(AgentPanelMarkItem::MarkAsRead),
+                ..
+            } => &["Mark as read", "Close"],
+            ContextMenuKind::AgentPanel {
+                mark_item: Some(AgentPanelMarkItem::MarkAsUnread),
+                ..
+            } => &["Mark as unread", "Close"],
+            ContextMenuKind::AgentPanel {
+                mark_item: None, ..
+            } => &["Close"],
         }
     }
 }
@@ -1410,9 +1451,20 @@ pub struct AppState {
     /// Terminal runtimes that should be shut down by the app/runtime layer
     /// after state has detached their terminal metadata.
     pub(crate) terminal_runtime_shutdowns: Vec<crate::terminal::TerminalId>,
+    pub(crate) pending_pane_state_updates: Vec<crate::app::actions::PaneStateUpdate>,
 }
 
 impl AppState {
+    pub(crate) fn queue_pane_state_update(&mut self, update: crate::app::actions::PaneStateUpdate) {
+        self.pending_pane_state_updates.push(update);
+    }
+
+    pub(crate) fn take_pending_pane_state_updates(
+        &mut self,
+    ) -> Vec<crate::app::actions::PaneStateUpdate> {
+        std::mem::take(&mut self.pending_pane_state_updates)
+    }
+
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
     }
@@ -1740,6 +1792,7 @@ impl AppState {
             host_terminal_theme: TerminalTheme::default(),
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
+            pending_pane_state_updates: Vec::new(),
         }
     }
 
@@ -2055,6 +2108,12 @@ impl AppState {
                     if let Some(source_pane_id) = source_pane_id {
                         assert_live_pane(source_pane_id, "context menu source pane");
                     }
+                }
+                ContextMenuKind::AgentPanel {
+                    ws_idx, pane_id, ..
+                } => {
+                    assert_workspace_index(ws_idx, "context menu agent panel");
+                    assert_live_pane(pane_id, "context menu agent panel pane");
                 }
             }
         }

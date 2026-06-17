@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Added agent panel right-click **Mark as read** / **Mark as unread** / **Close** actions, plus matching `agent.mark_read` / `agent.mark_unread` socket API methods and `herdr agent mark-read` / `herdr agent mark-unread` CLI commands. Mark actions update read state without navigation; **Close** navigates to the pane and closes it.
+
 ## [0.7.0] - 2026-06-15
 
 ### Added
