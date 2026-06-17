@@ -4,6 +4,18 @@ use crate::detect::{Agent, AgentDetection, AgentState};
 
 pub(super) const AGENT_PENDING_IDLE_RECHECK: std::time::Duration =
     std::time::Duration::from_millis(100);
+/// Minimum wall-clock spacing between detection-loop work iterations.
+///
+/// The detection loop wakes either on its normal tick or when `detect_reset` is
+/// notified. A `tokio::Notify` coalesces to a stored permit, so a sustained
+/// notify source (authority re-assertion, repeated `report_agent_session`,
+/// agent-state churn across many panes) would otherwise let the loop re-probe
+/// `/proc` and re-emit with no sleep at all, pegging a CPU core and starving the
+/// single-threaded server loop. Bounding the loop to this interval keeps reset
+/// responsiveness well under the normal 300-500ms tick while making a reset
+/// storm unable to drive the loop faster than the fastest legitimate tick.
+pub(super) const DETECTION_LOOP_MIN_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(50);
 const AGENT_PENDING_IDLE_CONFIRMATIONS: u8 = 3;
 pub(super) const AGENT_PENDING_IDLE_CAP: std::time::Duration =
     std::time::Duration::from_millis(700);
@@ -326,6 +338,17 @@ pub(super) fn mark_detection_content_changed(detection_content_seq: &AtomicU64) 
     detection_content_seq.fetch_add(1, Ordering::Relaxed);
 }
 
+/// How long a detection-loop iteration must wait before doing work, given how
+/// long ago the previous iteration ran. Returns `None` once `min_interval` has
+/// elapsed (run immediately), otherwise the remaining time to sleep so that a
+/// `detect_reset` notify storm cannot drive the loop faster than `min_interval`.
+pub(super) fn detection_loop_throttle_delay(
+    since_last_iteration: std::time::Duration,
+    min_interval: std::time::Duration,
+) -> Option<std::time::Duration> {
+    (since_last_iteration < min_interval).then(|| min_interval - since_last_iteration)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,5 +575,28 @@ mod tests {
         mark_detection_content_changed(&seq);
 
         assert_eq!(seq.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn detection_loop_throttle_runs_immediately_once_interval_elapsed() {
+        let min = std::time::Duration::from_millis(50);
+        assert_eq!(detection_loop_throttle_delay(min, min), None);
+        assert_eq!(
+            detection_loop_throttle_delay(std::time::Duration::from_millis(60), min),
+            None
+        );
+    }
+
+    #[test]
+    fn detection_loop_throttle_sleeps_remaining_when_woken_early() {
+        let min = std::time::Duration::from_millis(50);
+        assert_eq!(
+            detection_loop_throttle_delay(std::time::Duration::from_millis(0), min),
+            Some(min)
+        );
+        assert_eq!(
+            detection_loop_throttle_delay(std::time::Duration::from_millis(10), min),
+            Some(std::time::Duration::from_millis(40))
+        );
     }
 }

@@ -33,11 +33,11 @@ mod terminal;
 mod xtgettcap;
 
 use self::agent_detection::{
-    decide_detection_screen_read, decide_screen_detection_publish,
+    decide_detection_screen_read, decide_screen_detection_publish, detection_loop_throttle_delay,
     detection_update_for_publish_with_osc, mark_detection_content_changed,
     observe_detection_content_change, DetectionPublishDecision, DetectionScreenReadDecision,
     DetectionScreenReadInput, PendingIdleConfirmation, ScreenDetectionPublishInput,
-    AGENT_PENDING_IDLE_RECHECK, AGENT_STARTUP_GRACE_WINDOW,
+    AGENT_PENDING_IDLE_RECHECK, AGENT_STARTUP_GRACE_WINDOW, DETECTION_LOOP_MIN_INTERVAL,
 };
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
 pub(crate) use self::terminal::{TerminalDirtyPatch, TerminalDirtyPatchOutcome};
@@ -447,6 +447,7 @@ fn spawn_basic_detection_task(
     detection_content_seq: Arc<AtomicU64>,
     full_lifecycle_authority_active: Arc<AtomicBool>,
     state_events: mpsc::Sender<AppEvent>,
+    iteration_counter: Arc<AtomicU64>,
 ) -> (
     tokio::task::AbortHandle,
     Arc<Notify>,
@@ -476,6 +477,7 @@ fn spawn_basic_detection_task(
         let mut last_screen_scan_detection_content_seq = None;
         let mut agent_startup_grace_until = None;
         let mut pending_idle = PendingIdleConfirmation::default();
+        let mut last_loop_iteration = std::time::Instant::now() - DETECTION_LOOP_MIN_INTERVAL;
 
         loop {
             let sleep_duration = if pending_idle.active() {
@@ -506,6 +508,17 @@ fn spawn_basic_detection_task(
                     pending_idle.clear();
                 }
             }
+
+            // Bound the loop rate so a `detect_reset` notify storm cannot drive
+            // it faster than a normal tick (avoids a /proc-polling CPU spin).
+            if let Some(delay) = detection_loop_throttle_delay(
+                last_loop_iteration.elapsed(),
+                DETECTION_LOOP_MIN_INTERVAL,
+            ) {
+                tokio::time::sleep(delay).await;
+            }
+            last_loop_iteration = std::time::Instant::now();
+            iteration_counter.fetch_add(1, Ordering::Relaxed);
 
             let now = std::time::Instant::now();
             let suppressed_agent = active_pending_release(&pending_release_for_task, now);
@@ -1632,6 +1645,7 @@ impl PaneRuntime {
             detection_content_seq.clone(),
             full_lifecycle_authority_active.clone(),
             events,
+            Arc::new(AtomicU64::new(0)),
         );
 
         Ok(Self {
@@ -1822,6 +1836,7 @@ impl PaneRuntime {
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
+                let mut last_loop_iteration = Instant::now() - DETECTION_LOOP_MIN_INTERVAL;
                 loop {
                     let now_for_tick = Instant::now();
                     let tick = if active_pending_release(&pending_release_for_task, now_for_tick)
@@ -1859,6 +1874,17 @@ impl PaneRuntime {
                             pending_idle.clear();
                         }
                     }
+
+                    // Bound the loop rate so a `detect_reset` notify storm cannot
+                    // drive it faster than a normal tick (avoids a /proc-polling
+                    // CPU spin that starves the single-threaded server loop).
+                    if let Some(delay) = detection_loop_throttle_delay(
+                        last_loop_iteration.elapsed(),
+                        DETECTION_LOOP_MIN_INTERVAL,
+                    ) {
+                        tokio::time::sleep(delay).await;
+                    }
+                    last_loop_iteration = Instant::now();
 
                     let now = Instant::now();
                     let suppressed_agent = active_pending_release(&pending_release_for_task, now);
@@ -2577,6 +2603,51 @@ impl PaneRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn detection_loop_throttles_detect_reset_storm() {
+        // A sustained `detect_reset` notify storm must not let the detection
+        // loop bypass its tick and busy-poll /proc: that is the CPU spin that
+        // starves the server's single-threaded loop and freezes the session.
+        let (tx, _rx) = mpsc::channel(64);
+        let (term_tx, _term_rx) = mpsc::channel::<Bytes>(64);
+        let terminal = Arc::new(PaneTerminal::new(
+            GhosttyPaneTerminal::new(
+                crate::ghostty::Terminal::new(80, 24, 1_000_000).unwrap(),
+                term_tx,
+            )
+            .unwrap(),
+        ));
+        let iteration_counter = Arc::new(AtomicU64::new(0));
+        let (handle, detect_reset, _pending) = spawn_basic_detection_task(
+            PaneId::from_raw(0),
+            Arc::new(AtomicU32::new(0)),
+            terminal,
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicBool::new(false)),
+            tx,
+            iteration_counter.clone(),
+        );
+
+        // Hammer the reset notifier far faster than the loop's minimum interval
+        // for several intervals' worth of wall-clock time.
+        let storm_for = std::time::Duration::from_millis(300);
+        let storm_until = std::time::Instant::now() + storm_for;
+        while std::time::Instant::now() < storm_until {
+            detect_reset.notify_one();
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+
+        let iterations = iteration_counter.load(Ordering::Relaxed);
+        let max_expected =
+            (storm_for.as_millis() / DETECTION_LOOP_MIN_INTERVAL.as_millis()) as u64 + 3;
+        assert!(
+            iterations <= max_expected,
+            "detection loop ran {iterations} times under a reset storm; \
+             throttle should cap it near {max_expected}"
+        );
+        handle.abort();
+    }
 
     #[test]
     fn shutdown_liveness_treats_reaped_direct_child_as_gone() {
