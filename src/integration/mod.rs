@@ -12,6 +12,10 @@ pub(crate) const HERDR_TAB_ID_ENV_VAR: &str = "HERDR_TAB_ID";
 pub(crate) const HERDR_WORKSPACE_ID_ENV_VAR: &str = "HERDR_WORKSPACE_ID";
 const PI_EXTENSION_INSTALL_NAME: &str = "herdr-agent-state.ts";
 const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/herdr-agent-state.ts");
+const GSD_EXTENSION_INSTALL_NAME: &str = "herdr-agent-state.ts";
+const GSD_EXTENSION_ASSET: &str = include_str!("assets/gsd/herdr-agent-state.ts");
+const GSD_INTEGRATION_VERSION: u32 = 1;
+const GSD_AGENT_DIR_ENV_VAR: &str = "GSD_AGENT_DIR";
 const PI_INTEGRATION_VERSION: u32 = 2;
 const OMP_EXTENSION_INSTALL_NAME: &str = "herdr-omp-agent-state.ts";
 const OMP_EXTENSION_ASSET: &str = include_str!("assets/omp/herdr-agent-state.ts");
@@ -258,6 +262,12 @@ pub(crate) struct CursorUninstallResult {
     pub hooks_path: PathBuf,
     pub removed_hook_file: bool,
     pub updated_hooks: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct GsdUninstallResult {
+    pub extension_path: PathBuf,
+    pub removed_extension: bool,
 }
 
 #[derive(Debug)]
@@ -659,6 +669,10 @@ fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Re
                 format!("updated cursor hooks at {}", installed.hooks_path.display()),
             ]
         }
+        crate::api::schema::IntegrationTarget::Gsd => {
+            let path = install_gsd()?;
+            vec![format!("installed gsd integration to {}", path.display())]
+        }
     };
 
     if let Some(warning) = version_warning {
@@ -986,6 +1000,20 @@ pub(crate) fn uninstall_target(
             }
             messages
         }
+        crate::api::schema::IntegrationTarget::Gsd => {
+            let result = uninstall_gsd()?;
+            if result.removed_extension {
+                vec![format!(
+                    "removed gsd integration extension at {}",
+                    result.extension_path.display()
+                )]
+            } else {
+                vec![format!(
+                    "no gsd integration extension found at {}",
+                    result.extension_path.display()
+                )]
+            }
+        }
     };
 
     crate::logging::integration_action("uninstall", integration_target_label(target), "ok");
@@ -1009,6 +1037,7 @@ pub(crate) fn integration_target_label(
         crate::api::schema::IntegrationTarget::Hermes => "hermes",
         crate::api::schema::IntegrationTarget::Qodercli => "qodercli",
         crate::api::schema::IntegrationTarget::Cursor => "cursor",
+        crate::api::schema::IntegrationTarget::Gsd => "gsd",
     }
 }
 
@@ -1033,6 +1062,7 @@ fn integration_target_command_names(
         crate::api::schema::IntegrationTarget::Hermes => &["hermes"],
         crate::api::schema::IntegrationTarget::Qodercli => qodercli_command_names(),
         crate::api::schema::IntegrationTarget::Cursor => cursor_command_names(),
+        crate::api::schema::IntegrationTarget::Gsd => &["gsd"],
     }
 }
 
@@ -1051,6 +1081,7 @@ fn integration_target_supported(target: crate::api::schema::IntegrationTarget) -
                 | crate::api::schema::IntegrationTarget::Droid
                 | crate::api::schema::IntegrationTarget::Kimi
                 | crate::api::schema::IntegrationTarget::Qodercli
+                | crate::api::schema::IntegrationTarget::Gsd
         )
     }
 
@@ -1237,7 +1268,7 @@ fn integration_specs() -> [(
     crate::api::schema::IntegrationTarget,
     io::Result<PathBuf>,
     u32,
-); 13] {
+); 14] {
     [
         (
             crate::api::schema::IntegrationTarget::Pi,
@@ -1303,6 +1334,11 @@ fn integration_specs() -> [(
             crate::api::schema::IntegrationTarget::Cursor,
             cursor_dir().map(|dir| dir.join(CURSOR_HOOK_INSTALL_NAME)),
             CURSOR_INTEGRATION_VERSION,
+        ),
+        (
+            crate::api::schema::IntegrationTarget::Gsd,
+            gsd_extension_dir().map(|dir| dir.join(GSD_EXTENSION_INSTALL_NAME)),
+            GSD_INTEGRATION_VERSION,
         ),
     ]
 }
@@ -1403,6 +1439,20 @@ pub(crate) fn install_pi() -> io::Result<PathBuf> {
 
     let path = dir.join(PI_EXTENSION_INSTALL_NAME);
     fs::write(&path, PI_EXTENSION_ASSET)?;
+    Ok(path)
+}
+
+pub(crate) fn install_gsd() -> io::Result<PathBuf> {
+    let dir = gsd_extension_dir()?;
+    if !dir.is_dir() {
+        return Err(io::Error::other(format!(
+            "gsd extension directory not found at {}. install gsd and create the extensions directory first",
+            dir.display()
+        )));
+    }
+
+    let path = dir.join(GSD_EXTENSION_INSTALL_NAME);
+    fs::write(&path, GSD_EXTENSION_ASSET)?;
     Ok(path)
 }
 
@@ -1886,6 +1936,16 @@ pub(crate) fn uninstall_pi() -> io::Result<PiUninstallResult> {
     let removed_extension = remove_file_if_exists(&extension_path)?;
 
     Ok(PiUninstallResult {
+        extension_path,
+        removed_extension,
+    })
+}
+
+pub(crate) fn uninstall_gsd() -> io::Result<GsdUninstallResult> {
+    let extension_path = gsd_extension_dir()?.join(GSD_EXTENSION_INSTALL_NAME);
+    let removed_extension = remove_file_if_exists(&extension_path)?;
+
+    Ok(GsdUninstallResult {
         extension_path,
         removed_extension,
     })
@@ -3359,6 +3419,10 @@ fn pi_extension_dir() -> io::Result<PathBuf> {
     )
 }
 
+fn gsd_extension_dir() -> io::Result<PathBuf> {
+    Ok(config_dir_from_env_or_home(GSD_AGENT_DIR_ENV_VAR, &[".gsd", "agent"])?.join("extensions"))
+}
+
 fn omp_extension_dir() -> io::Result<PathBuf> {
     Ok(
         config_dir_from_env_or_home(PI_CODING_AGENT_DIR_ENV_VAR, &[".omp", "agent"])?
@@ -3572,6 +3636,7 @@ mod tests {
 
     fn clear_integration_path_env() {
         std::env::remove_var(PI_CODING_AGENT_DIR_ENV_VAR);
+        std::env::remove_var(GSD_AGENT_DIR_ENV_VAR);
         std::env::remove_var(CLAUDE_CONFIG_DIR_ENV_VAR);
         std::env::remove_var(CODEX_HOME_ENV_VAR);
         std::env::remove_var(COPILOT_HOME_ENV_VAR);
@@ -3660,6 +3725,7 @@ mod tests {
         assert!(integration_target_supported(IntegrationTarget::Droid));
         assert!(integration_target_supported(IntegrationTarget::Kimi));
         assert!(integration_target_supported(IntegrationTarget::Qodercli));
+        assert!(integration_target_supported(IntegrationTarget::Gsd));
     }
 
     #[cfg(windows)]
@@ -3681,6 +3747,7 @@ mod tests {
         fs::write(bin.join("hermes.exe"), "").unwrap();
         fs::write(bin.join("cursor-agent.cmd"), "@echo off\r\n").unwrap();
         fs::write(bin.join("devin.cmd"), "@echo off\r\n").unwrap();
+        fs::write(bin.join("gsd.cmd"), "@echo off\r\n").unwrap();
 
         assert!(!integration_target_available(IntegrationTarget::Pi));
         assert!(!integration_target_available(IntegrationTarget::Omp));
@@ -3689,6 +3756,8 @@ mod tests {
         assert!(!integration_target_available(IntegrationTarget::Hermes));
         assert!(!integration_target_available(IntegrationTarget::Cursor));
         assert!(!integration_target_available(IntegrationTarget::Devin));
+        // GSD is supported on Windows but has no installed extension yet
+        assert!(!integration_target_available(IntegrationTarget::Gsd));
 
         if let Some(path) = original_path {
             std::env::set_var("PATH", path);
@@ -3994,6 +4063,104 @@ mod tests {
 
         std::env::remove_var("HOME");
         clear_integration_path_env();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_gsd_writes_embedded_asset_to_gsd_extensions_dir() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let ext_dir = home.join(".gsd/agent/extensions");
+        fs::create_dir_all(&ext_dir).unwrap();
+        std::env::set_var("HOME", &home);
+
+        let path = install_gsd().unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+
+        assert_eq!(path, ext_dir.join(GSD_EXTENSION_INSTALL_NAME));
+        assert_eq!(content, GSD_EXTENSION_ASSET);
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_gsd_uses_gsd_agent_dir_env() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let agent_dir = base.join("custom-gsd-agent");
+        let ext_dir = agent_dir.join("extensions");
+        fs::create_dir_all(&ext_dir).unwrap();
+        std::env::set_var(GSD_AGENT_DIR_ENV_VAR, &agent_dir);
+
+        let path = install_gsd().unwrap();
+
+        assert_eq!(path, ext_dir.join(GSD_EXTENSION_INSTALL_NAME));
+
+        clear_integration_path_env();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_gsd_expands_tilde_in_gsd_agent_dir_env() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let ext_dir = home.join("custom-gsd-agent/extensions");
+        fs::create_dir_all(&ext_dir).unwrap();
+        std::env::set_var("HOME", &home);
+        std::env::set_var(GSD_AGENT_DIR_ENV_VAR, "~/custom-gsd-agent");
+
+        let path = install_gsd().unwrap();
+
+        assert_eq!(path, ext_dir.join(GSD_EXTENSION_INSTALL_NAME));
+
+        std::env::remove_var("HOME");
+        clear_integration_path_env();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_gsd_errors_when_extension_dir_missing() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+
+        let err = install_gsd().unwrap_err().to_string();
+
+        assert!(err.contains("gsd extension directory not found"));
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn uninstall_gsd_removes_embedded_extension_when_present() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let ext_dir = home.join(".gsd/agent/extensions");
+        fs::create_dir_all(&ext_dir).unwrap();
+        fs::write(
+            ext_dir.join(GSD_EXTENSION_INSTALL_NAME),
+            GSD_EXTENSION_ASSET,
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        let result = uninstall_gsd().unwrap();
+
+        assert_eq!(
+            result.extension_path,
+            ext_dir.join(GSD_EXTENSION_INSTALL_NAME)
+        );
+        assert!(result.removed_extension);
+        assert!(!result.extension_path.exists());
+
+        std::env::remove_var("HOME");
         let _ = fs::remove_dir_all(base);
     }
 
