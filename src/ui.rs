@@ -38,6 +38,7 @@ use self::navigator::render_navigator_overlay;
 pub(crate) use self::onboarding::onboarding_welcome_continue_rect;
 use self::onboarding::render_onboarding_overlay;
 use self::panes::{compute_pane_infos, render_panes, resize_tab_panes};
+pub(crate) use self::panes::{dim_cell_data, dim_fallback_colors};
 pub(crate) use self::release_notes::{
     product_announcement_display_lines, release_notes_close_button_rect,
     release_notes_display_lines, release_notes_wrapped_line_count, PRODUCT_ANNOUNCEMENT_MODAL_SIZE,

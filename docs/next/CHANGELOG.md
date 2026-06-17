@@ -5,6 +5,7 @@
 ## [0.7.0] - 2026-06-15
 
 ### Added
+- Added a `ui.pane_borders = "minimal"` option that replaces the per-pane box with a single separator line between panes and dims the inactive panes (WezTerm-style), resolving indexed colors through the host's queried ANSI palette. Defaults to `full` (the existing bordered style).
 - Added local plugin v1 support with `plugin.link/list/unlink/enable/disable`, manifest-declared actions, event hooks, managed plugin panes, link handlers, command logs, keybinding integration, and authoring docs under Preview docs.
 - Added `herdr plugin install <owner>/<repo>[/subdir...]`, `plugin uninstall`, source metadata in `plugin.list`, offline registry fallback, and a human-readable default `plugin list` with `--json` for scripts.
 - Added `herdr plugin config-dir <id>` and automatic plugin config/state directory creation so plugin setup docs can point users at a stable config path.

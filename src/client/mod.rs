@@ -1387,6 +1387,7 @@ fn should_query_host_terminal_theme() -> bool {
 
 fn write_host_terminal_theme_query(mut writer: impl io::Write) -> io::Result<()> {
     writer.write_all(crate::terminal_theme::HOST_COLOR_QUERY_SEQUENCE.as_bytes())?;
+    writer.write_all(crate::terminal_theme::host_palette_query_sequence().as_bytes())?;
     writer.flush()
 }
 
@@ -1525,10 +1526,12 @@ mod tests {
     fn write_host_terminal_theme_query_emits_osc_queries() {
         let mut output = Vec::new();
         write_host_terminal_theme_query(&mut output).unwrap();
-        assert_eq!(
-            output,
-            crate::terminal_theme::HOST_COLOR_QUERY_SEQUENCE.as_bytes()
+        let expected = format!(
+            "{}{}",
+            crate::terminal_theme::HOST_COLOR_QUERY_SEQUENCE,
+            crate::terminal_theme::host_palette_query_sequence(),
         );
+        assert_eq!(output, expected.as_bytes());
     }
 
     #[test]

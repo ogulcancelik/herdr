@@ -681,8 +681,7 @@ pub(crate) fn color_to_u32(color: ratatui::style::Color) -> u32 {
 }
 
 /// Converts a packed u32 back to a ratatui `Color`.
-#[cfg(test)]
-fn u32_to_color(val: u32) -> ratatui::style::Color {
+pub(crate) fn u32_to_color(val: u32) -> ratatui::style::Color {
     match val >> 24 {
         0x00 => match val & 0xFF {
             0x00 => ratatui::style::Color::Reset,

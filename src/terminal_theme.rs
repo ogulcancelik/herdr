@@ -19,6 +19,29 @@ pub enum DefaultColorKind {
 
 pub const HOST_COLOR_QUERY_SEQUENCE: &str = "\x1b]10;?\x1b\\\x1b]11;?\x1b\\";
 
+/// Number of ANSI palette entries (0..16) Herdr queries from the host terminal
+/// so it can resolve indexed colors to real RGB (e.g. when dimming panes).
+pub const HOST_ANSI_PALETTE_LEN: usize = 16;
+
+/// The host terminal's 16 ANSI palette colors, as reported via OSC 4.
+pub type AnsiPalette = [Option<RgbColor>; HOST_ANSI_PALETTE_LEN];
+
+/// OSC 4 queries for the 16 ANSI palette colors. Sent alongside the OSC 10/11
+/// default-color queries; responses arrive on the same input stream and are
+/// parsed by `parse_palette_color_response`.
+pub fn host_palette_query_sequence() -> &'static str {
+    use std::sync::OnceLock;
+    static SEQ: OnceLock<String> = OnceLock::new();
+    SEQ.get_or_init(|| {
+        let mut sequence = String::with_capacity(HOST_ANSI_PALETTE_LEN * 12);
+        for index in 0..HOST_ANSI_PALETTE_LEN {
+            sequence.push_str(&format!("\x1b]4;{index};?\x1b\\"));
+        }
+        sequence
+    })
+    .as_str()
+}
+
 impl TerminalTheme {
     pub fn with_color(mut self, kind: DefaultColorKind, color: RgbColor) -> Self {
         match kind {
@@ -45,6 +68,22 @@ pub fn parse_default_color_response(sequence: &str) -> Option<(DefaultColorKind,
         _ => return None,
     };
     Some((kind, parse_rgb_color(value)?))
+}
+
+/// Parse an OSC 4 palette-color response (`ESC ] 4 ; <index> ; rgb:.. ST`).
+/// Only indices within the ANSI range (0..16) are reported.
+pub fn parse_palette_color_response(sequence: &str) -> Option<(u8, RgbColor)> {
+    let body = sequence.strip_prefix("\x1b]")?;
+    let body = body
+        .strip_suffix("\x1b\\")
+        .or_else(|| body.strip_suffix('\u{7}'))?;
+    let rest = body.strip_prefix("4;")?;
+    let (index, value) = rest.split_once(';')?;
+    let index: u8 = index.parse().ok()?;
+    if usize::from(index) >= HOST_ANSI_PALETTE_LEN {
+        return None;
+    }
+    Some((index, parse_rgb_color(value)?))
 }
 
 pub fn osc_set_default_color_sequence(kind: DefaultColorKind, color: RgbColor) -> String {
@@ -130,6 +169,40 @@ mod tests {
                 },
             ))
         );
+    }
+
+    #[test]
+    fn parses_palette_color_response() {
+        let parsed = parse_palette_color_response("\x1b]4;4;rgb:8989/b4b4/fafa\x1b\\");
+        assert_eq!(
+            parsed,
+            Some((
+                4,
+                RgbColor {
+                    r: 0x89,
+                    g: 0xb4,
+                    b: 0xfa,
+                },
+            ))
+        );
+        // Out-of-range indices (256-color cube/grayscale) are ignored.
+        assert_eq!(
+            parse_palette_color_response("\x1b]4;200;rgb:1111/2222/3333\x1b\\"),
+            None
+        );
+        // OSC 10/11 default-color responses are not palette responses.
+        assert_eq!(
+            parse_palette_color_response("\x1b]11;rgb:1111/2222/3333\x1b\\"),
+            None
+        );
+    }
+
+    #[test]
+    fn palette_query_sequence_covers_sixteen_ansi_colors() {
+        let seq = host_palette_query_sequence();
+        assert!(seq.starts_with("\x1b]4;0;?\x1b\\"));
+        assert!(seq.contains("\x1b]4;15;?\x1b\\"));
+        assert_eq!(seq.matches("\x1b]4;").count(), HOST_ANSI_PALETTE_LEN);
     }
 
     #[test]

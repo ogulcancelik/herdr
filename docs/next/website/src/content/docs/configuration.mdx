@@ -287,6 +287,7 @@ mouse_scroll_lines = 3
 confirm_close = true
 prompt_new_tab_name = true
 show_agent_labels_on_pane_borders = false
+pane_borders = "full"
 agent_panel_scope = "all"
 accent = "cyan"
 ```
@@ -308,6 +309,8 @@ Set `redraw_on_focus_gained = false` to avoid the visible full-screen refresh wh
 Set `mouse_scroll_lines` to change how many pane scrollback lines each mouse wheel notch scrolls. The default is 3. Pane apps that request mouse reporting still receive wheel events directly. Alternate-screen apps have no scrollback to scroll; see [Scrollback](#scrollback).
 
 Set `show_agent_labels_on_pane_borders = true` if you want detected agent labels in split pane borders when no manual pane label is set.
+
+`pane_borders` controls the style of split-pane borders. The default `full` draws a box around every pane and marks the focused pane with an accent-colored border. Set `pane_borders = "minimal"` for a single separator line between adjacent panes, with the inactive panes dimmed (like WezTerm); agent labels are only shown with `full` borders.
 
 ## Notifications
 

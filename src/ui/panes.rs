@@ -6,11 +6,14 @@ use ratatui::{
     Frame,
 };
 
+use std::collections::{HashMap, HashSet};
+
 use super::scrollbar::{render_pane_scrollbar, should_show_scrollbar};
 use super::widgets::panel_contrast_fg;
 use crate::app::state::Palette;
 use crate::app::{AppState, Mode};
-use crate::layout::PaneInfo;
+use crate::config::PaneBordersConfig;
+use crate::layout::{PaneInfo, SplitBorder};
 use crate::terminal::{TerminalRuntime, TerminalRuntimeRegistry};
 
 pub(crate) fn pane_is_scrolled_back(rt: &TerminalRuntime) -> bool {
@@ -55,12 +58,36 @@ fn stable_terminal_inner_rect(pane_inner: Rect) -> Rect {
     )
 }
 
-fn pane_inner_rect(area: Rect, framed: bool) -> Rect {
-    if framed {
-        Block::default().borders(Borders::ALL).inner(area)
-    } else {
-        area
+fn pane_inner_rect(
+    pane_rect: Rect,
+    area: Rect,
+    multi_pane: bool,
+    style: PaneBordersConfig,
+) -> Rect {
+    if !multi_pane {
+        return area;
     }
+    match style {
+        PaneBordersConfig::Full => Block::default().borders(Borders::ALL).inner(pane_rect),
+        PaneBordersConfig::Minimal => minimal_pane_content_rect(pane_rect, area),
+    }
+}
+
+/// Content rect for a pane in minimal-border mode: trim a single cell off the
+/// left/top edges that sit against an internal separator and leave the outer
+/// edges flush. The trimmed cell is where the shared separator line is drawn,
+/// so each seam costs one cell instead of a per-pane box.
+fn minimal_pane_content_rect(pane_rect: Rect, area: Rect) -> Rect {
+    let mut content = pane_rect;
+    if content.x > area.x {
+        content.x = content.x.saturating_add(1);
+        content.width = content.width.saturating_sub(1);
+    }
+    if content.y > area.y {
+        content.y = content.y.saturating_add(1);
+        content.height = content.height.saturating_sub(1);
+    }
+    content
 }
 
 fn runtime_for_tab_pane<'a>(
@@ -106,11 +133,12 @@ pub(super) fn resize_tab_panes(
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
     let multi_pane = tab.layout.pane_count() > 1;
+    let style = app.pane_borders;
 
     if tab.zoomed {
         let focused_id = tab.layout.focused();
         if let Some((terminal_id, rt)) = runtime_for_tab_pane(terminal_runtimes, tab, focused_id) {
-            let pane_inner = pane_inner_rect(area, multi_pane);
+            let pane_inner = pane_inner_rect(area, area, multi_pane, style);
             let inner_rect = stable_terminal_inner_rect(pane_inner);
             if !app.direct_attach_resize_locks.contains(terminal_id) {
                 rt.resize(
@@ -125,11 +153,7 @@ pub(super) fn resize_tab_panes(
     }
 
     for info in tab.layout.panes(area) {
-        let pane_inner = if multi_pane {
-            Block::default().borders(Borders::ALL).inner(info.rect)
-        } else {
-            area
-        };
+        let pane_inner = pane_inner_rect(info.rect, area, multi_pane, style);
 
         if let Some((terminal_id, rt)) = runtime_for_tab_pane(terminal_runtimes, tab, info.id) {
             let inner_rect = stable_terminal_inner_rect(pane_inner);
@@ -161,11 +185,11 @@ pub(super) fn compute_pane_infos(
     };
 
     let multi_pane = ws.layout.pane_count() > 1;
-    let terminal_active = app.mode == Mode::Terminal;
+    let style = app.pane_borders;
 
     if ws.zoomed {
         let focused_id = ws.layout.focused();
-        let pane_inner = pane_inner_rect(area, multi_pane);
+        let pane_inner = pane_inner_rect(area, area, multi_pane, style);
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, focused_id) {
@@ -195,19 +219,7 @@ pub(super) fn compute_pane_infos(
     let mut pane_infos = ws.layout.panes(area);
 
     for info in &mut pane_infos {
-        let pane_inner = if multi_pane {
-            let border_set = if info.is_focused && terminal_active {
-                ratatui::symbols::border::THICK
-            } else {
-                ratatui::symbols::border::PLAIN
-            };
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_set(border_set);
-            block.inner(info.rect)
-        } else {
-            area
-        };
+        let pane_inner = pane_inner_rect(info.rect, area, multi_pane, style);
 
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
@@ -251,10 +263,15 @@ pub(super) fn render_panes(
 
     let multi_pane = ws.layout.pane_count() > 1;
     let terminal_active = app.mode == Mode::Terminal;
+    let borders = app.pane_borders;
+
+    // Precompute per-frame fallback colors once so dimming multiple inactive
+    // panes doesn't repeat the same derivation.
+    let (dim_fg_fallback, dim_bg_fallback) = dim_fallback_colors(app);
 
     for info in &app.view.pane_infos {
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
-            if multi_pane {
+            if multi_pane && !borders.draws_separators() {
                 let (border_style, border_set) = if info.is_focused && terminal_active {
                     (
                         Style::default().fg(app.palette.accent),
@@ -296,15 +313,22 @@ pub(super) fn render_panes(
             rt.render(frame, info.inner_rect, show_cursor);
             render_pane_scrollbar(app, frame, info, rt);
 
-            let should_dim = !info.is_focused && multi_pane && !terminal_active;
-            if should_dim {
-                let inner = info.inner_rect;
-                let buf = frame.buffer_mut();
-                for y in inner.y..inner.y + inner.height {
-                    for x in inner.x..inner.x + inner.width {
-                        let cell = &mut buf[(x, y)];
-                        cell.set_style(cell.style().add_modifier(Modifier::DIM));
-                    }
+            // Minimal mode has no border to show focus, so it always dims the
+            // inactive panes (including terminal mode) with a wezterm-style HSV
+            // transform. Full mode keeps its border as the focus cue and only
+            // dims in non-terminal modes, using the terminal's native DIM
+            // attribute as before.
+            if !info.is_focused && multi_pane {
+                if borders.dims_inactive_panes() {
+                    dim_pane_content(
+                        frame,
+                        info.inner_rect,
+                        dim_fg_fallback,
+                        dim_bg_fallback,
+                        &app.host_ansi_palette,
+                    );
+                } else if !terminal_active {
+                    dim_pane_with_modifier(frame, info.inner_rect);
                 }
             }
 
@@ -319,6 +343,107 @@ pub(super) fn render_panes(
             );
             render_copy_mode_cursor(app, frame, info);
         }
+    }
+
+    if borders.draws_separators() && multi_pane && !ws.zoomed {
+        // surface1 matches wezterm's subtle split-line color (~#444444).
+        render_pane_separators(frame, area, &app.view.split_borders, app.palette.surface1);
+    }
+}
+
+const SEP_UP: u8 = 1;
+const SEP_DOWN: u8 = 1 << 1;
+const SEP_LEFT: u8 = 1 << 2;
+const SEP_RIGHT: u8 = 1 << 3;
+
+/// Draw single-cell separators between adjacent panes, connecting them with the
+/// correct box-drawing junction glyph wherever lines meet.
+fn render_pane_separators(frame: &mut Frame, area: Rect, splits: &[SplitBorder], color: Color) {
+    let cells = collect_separator_cells(area, splits);
+    if cells.is_empty() {
+        return;
+    }
+    let style = Style::default().fg(color);
+    let buf = frame.buffer_mut();
+    for &(x, y) in &cells {
+        let glyph = separator_glyph(separator_bits(x, y, &cells));
+        let mut tmp = [0u8; 4];
+        buf[(x, y)]
+            .set_symbol(glyph.encode_utf8(&mut tmp))
+            .set_style(style);
+    }
+}
+
+fn collect_separator_cells(area: Rect, splits: &[SplitBorder]) -> HashSet<(u16, u16)> {
+    let x_end = area.x.saturating_add(area.width);
+    let y_end = area.y.saturating_add(area.height);
+    let mut cells = HashSet::new();
+    for split in splits {
+        match split.direction {
+            ratatui::layout::Direction::Horizontal => {
+                let x = split.pos;
+                if x < area.x || x >= x_end {
+                    continue;
+                }
+                let y0 = split.area.y.max(area.y);
+                let y1 = split.area.y.saturating_add(split.area.height).min(y_end);
+                for y in y0..y1 {
+                    cells.insert((x, y));
+                }
+            }
+            ratatui::layout::Direction::Vertical => {
+                let y = split.pos;
+                if y < area.y || y >= y_end {
+                    continue;
+                }
+                let x0 = split.area.x.max(area.x);
+                let x1 = split.area.x.saturating_add(split.area.width).min(x_end);
+                for x in x0..x1 {
+                    cells.insert((x, y));
+                }
+            }
+        }
+    }
+    cells
+}
+
+fn separator_bits(x: u16, y: u16, cells: &HashSet<(u16, u16)>) -> u8 {
+    let mut bits = 0;
+    if y > 0 && cells.contains(&(x, y - 1)) {
+        bits |= SEP_UP;
+    }
+    if cells.contains(&(x, y + 1)) {
+        bits |= SEP_DOWN;
+    }
+    if x > 0 && cells.contains(&(x - 1, y)) {
+        bits |= SEP_LEFT;
+    }
+    if cells.contains(&(x + 1, y)) {
+        bits |= SEP_RIGHT;
+    }
+    bits
+}
+
+fn separator_glyph(bits: u8) -> char {
+    match (
+        bits & SEP_UP != 0,
+        bits & SEP_DOWN != 0,
+        bits & SEP_LEFT != 0,
+        bits & SEP_RIGHT != 0,
+    ) {
+        (true, true, true, true) => '┼',
+        (true, true, true, false) => '┤',
+        (true, true, false, true) => '├',
+        (true, false, true, true) => '┴',
+        (false, true, true, true) => '┬',
+        (true, false, false, true) => '└',
+        (true, false, true, false) => '┘',
+        (false, true, false, true) => '┌',
+        (false, true, true, false) => '┐',
+        (false, false, true, true) | (false, false, true, false) | (false, false, false, true) => {
+            '─'
+        }
+        _ => '│',
     }
 }
 
@@ -373,6 +498,255 @@ fn render_selection_highlight(
 }
 
 type Rgb = (u8, u8, u8);
+
+/// HSV multipliers applied to an inactive pane's cells, mirroring wezterm's
+/// `inactive_pane_hsb`: scale saturation and brightness down a little so the
+/// focused pane stands out while the dimmed pane keeps its colors (no border).
+const INACTIVE_PANE_SATURATION: f32 = 0.9;
+const INACTIVE_PANE_BRIGHTNESS: f32 = 0.8;
+
+/// Dim an inactive full-border pane using the terminal's native DIM attribute,
+/// matching the pre-minimal-borders behavior for that mode.
+fn dim_pane_with_modifier(frame: &mut Frame, inner: Rect) {
+    let buf = frame.buffer_mut();
+    for y in inner.y..inner.bottom() {
+        for x in inner.x..inner.right() {
+            let cell = &mut buf[(x, y)];
+            cell.set_style(cell.style().add_modifier(Modifier::DIM));
+        }
+    }
+}
+
+fn dim_pane_content(
+    frame: &mut Frame,
+    inner: Rect,
+    fg_fallback: Rgb,
+    bg_fallback: Option<Rgb>,
+    ansi_palette: &crate::terminal_theme::AnsiPalette,
+) {
+    // Cache the HSV transform per resolved color: terminal content reuses a
+    // small set of colors, so this avoids re-running the sRGB/HSV round-trip
+    // (several powf calls) for every cell.
+    let mut scaled = HashMap::new();
+    let buf = frame.buffer_mut();
+    for y in inner.y..inner.bottom() {
+        for x in inner.x..inner.right() {
+            let cell = &mut buf[(x, y)];
+            let style = cell.style();
+            let fg = dim_color(
+                style.fg.unwrap_or(Color::Reset),
+                Some(fg_fallback),
+                ansi_palette,
+                &mut scaled,
+            );
+            let bg = dim_color(
+                style.bg.unwrap_or(Color::Reset),
+                bg_fallback,
+                ansi_palette,
+                &mut scaled,
+            );
+            let mut dimmed = style;
+            if let Some(fg) = fg {
+                dimmed = dimmed.fg(fg);
+            }
+            if let Some(bg) = bg {
+                dimmed = dimmed.bg(bg);
+            }
+            cell.set_style(dimmed);
+        }
+    }
+}
+
+fn dim_color(
+    color: Color,
+    fallback: Option<Rgb>,
+    ansi_palette: &crate::terminal_theme::AnsiPalette,
+    scaled: &mut HashMap<Rgb, Rgb>,
+) -> Option<Color> {
+    let rgb = resolve_rgb(color, ansi_palette).or(fallback)?;
+    let (r, g, b) = *scaled
+        .entry(rgb)
+        .or_insert_with(|| scale_hsv(rgb, INACTIVE_PANE_SATURATION, INACTIVE_PANE_BRIGHTNESS));
+    Some(Color::Rgb(r, g, b))
+}
+
+/// Derive the fg/bg fallback colors used when dimming a cell whose own color is
+/// `Reset` (the host theme's default), so both the full render path and the
+/// server's retained fast path dim against the same base.
+pub(crate) fn dim_fallback_colors(app: &AppState) -> (Rgb, Option<Rgb>) {
+    let fg = app
+        .host_terminal_theme
+        .foreground
+        .map(terminal_theme_to_rgb)
+        .or_else(|| color_to_rgb(app.palette.text))
+        .unwrap_or((205, 214, 244));
+    let bg = app
+        .host_terminal_theme
+        .background
+        .map(terminal_theme_to_rgb)
+        .or_else(|| color_to_rgb(selection_palette_background(&app.palette)));
+    (fg, bg)
+}
+
+/// Dim a serialized `CellData` in place with the same HSV transform
+/// `dim_pane_content` applies to the ratatui buffer. The server's retained PTY
+/// fast path patches raw (undimmed) cells straight into a frame; without this
+/// the dimmed regions flash to full brightness whenever they repaint.
+pub(crate) fn dim_cell_data(
+    cell: &mut crate::protocol::CellData,
+    fg_fallback: Rgb,
+    bg_fallback: Option<Rgb>,
+    ansi_palette: &crate::terminal_theme::AnsiPalette,
+    scaled: &mut HashMap<Rgb, Rgb>,
+) {
+    if let Some(fg) = dim_color(
+        crate::protocol::u32_to_color(cell.fg),
+        Some(fg_fallback),
+        ansi_palette,
+        scaled,
+    ) {
+        cell.fg = crate::protocol::color_to_u32(fg);
+    }
+    if let Some(bg) = dim_color(
+        crate::protocol::u32_to_color(cell.bg),
+        bg_fallback,
+        ansi_palette,
+        scaled,
+    ) {
+        cell.bg = crate::protocol::color_to_u32(bg);
+    }
+}
+
+/// Resolve a cell color to concrete RGB so it can be dimmed. Unlike
+/// `color_to_rgb`, this expands `Color::Indexed`: the 16 ANSI colors use the
+/// host terminal's queried palette when known (so dimmed content matches what
+/// the host actually shows), falling back to the standard xterm table; the
+/// 256-color cube and grayscale ramp are universal. `Reset` stays unresolved
+/// (the caller's host-theme fallback handles it).
+fn resolve_rgb(color: Color, ansi_palette: &crate::terminal_theme::AnsiPalette) -> Option<Rgb> {
+    match color {
+        Color::Indexed(i) => Some(
+            ansi_palette
+                .get(usize::from(i))
+                .copied()
+                .flatten()
+                .map(|c| (c.r, c.g, c.b))
+                .unwrap_or_else(|| xterm_256_to_rgb(i)),
+        ),
+        other => color_to_rgb(other),
+    }
+}
+
+/// Standard xterm palette mapping, used only as a fallback when the host's real
+/// ANSI palette (OSC 4) is not yet known. The 0..16 entries are generic xterm
+/// defaults and may differ from the user's theme; the 16..256 cube and grayscale
+/// ramp are universal.
+fn xterm_256_to_rgb(index: u8) -> Rgb {
+    const BASE16: [Color; 16] = [
+        Color::Black,
+        Color::Red,
+        Color::Green,
+        Color::Yellow,
+        Color::Blue,
+        Color::Magenta,
+        Color::Cyan,
+        Color::Gray,
+        Color::DarkGray,
+        Color::LightRed,
+        Color::LightGreen,
+        Color::LightYellow,
+        Color::LightBlue,
+        Color::LightMagenta,
+        Color::LightCyan,
+        Color::White,
+    ];
+    match index {
+        0..=15 => color_to_rgb(BASE16[index as usize]).unwrap_or((0, 0, 0)),
+        16..=231 => {
+            let i = index - 16;
+            let step = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+            (step(i / 36), step((i / 6) % 6), step(i % 6))
+        }
+        _ => {
+            let gray = 8 + (index - 232) * 10;
+            (gray, gray, gray)
+        }
+    }
+}
+
+/// Scale a color's saturation and value in HSV space, leaving hue intact.
+/// Mirrors wezterm's `apply_hsv` (hsv *= transform), including operating in
+/// linear-light RGB so the brightness reduction reads the same as wezterm's
+/// rather than darkening too aggressively in sRGB space.
+fn scale_hsv(rgb: Rgb, saturation: f32, value: f32) -> Rgb {
+    let linear = (
+        srgb_to_linear(rgb.0),
+        srgb_to_linear(rgb.1),
+        srgb_to_linear(rgb.2),
+    );
+    let (h, s, v) = rgb_to_hsv(linear);
+    let scaled = hsv_to_rgb(
+        h,
+        (s * saturation).clamp(0.0, 1.0),
+        (v * value).clamp(0.0, 1.0),
+    );
+    (
+        linear_to_srgb(scaled.0),
+        linear_to_srgb(scaled.1),
+        linear_to_srgb(scaled.2),
+    )
+}
+
+fn srgb_to_linear(value: u8) -> f32 {
+    let value = f32::from(value) / 255.0;
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(value: f32) -> u8 {
+    let value = value.clamp(0.0, 1.0);
+    let srgb = if value <= 0.0031308 {
+        value * 12.92
+    } else {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
+    };
+    (srgb * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+fn rgb_to_hsv((r, g, b): (f32, f32, f32)) -> (f32, f32, f32) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+    let hue = if delta == 0.0 {
+        0.0
+    } else if max == r {
+        60.0 * (((g - b) / delta).rem_euclid(6.0))
+    } else if max == g {
+        60.0 * (((b - r) / delta) + 2.0)
+    } else {
+        60.0 * (((r - g) / delta) + 4.0)
+    };
+    let saturation = if max == 0.0 { 0.0 } else { delta / max };
+    (hue, saturation, max)
+}
+
+fn hsv_to_rgb(hue: f32, saturation: f32, value: f32) -> (f32, f32, f32) {
+    let c = value * saturation;
+    let x = c * (1.0 - ((hue / 60.0).rem_euclid(2.0) - 1.0).abs());
+    let m = value - c;
+    let (r, g, b) = match hue {
+        h if h < 60.0 => (c, x, 0.0),
+        h if h < 120.0 => (x, c, 0.0),
+        h if h < 180.0 => (0.0, c, x),
+        h if h < 240.0 => (0.0, x, c),
+        h if h < 300.0 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    (r + m, g + m, b + m)
+}
 
 fn automatic_selection_style(
     p: &Palette,
@@ -515,6 +889,36 @@ mod tests {
     use crate::selection::Selection;
     use crate::terminal::TerminalRuntime;
     use crate::workspace::Workspace;
+
+    #[test]
+    fn dim_cell_data_matches_full_render_dim() {
+        let palette: crate::terminal_theme::AnsiPalette =
+            [None; crate::terminal_theme::HOST_ANSI_PALETTE_LEN];
+        let fg_fallback = (205, 214, 244);
+        let bg_fallback = Some((30, 30, 46));
+        let bright_fg = Color::Rgb(40, 200, 80);
+
+        let mut cell = crate::protocol::CellData {
+            symbol: "x".to_string(),
+            fg: crate::protocol::color_to_u32(bright_fg),
+            bg: crate::protocol::color_to_u32(Color::Reset),
+            modifier: 0,
+            skip: false,
+            hyperlink: None,
+        };
+        let mut scaled = HashMap::new();
+        dim_cell_data(&mut cell, fg_fallback, bg_fallback, &palette, &mut scaled);
+
+        // The retained fast path must produce exactly what the full render
+        // path's per-cell dim produces; any divergence flickers a patched row
+        // against the surrounding dimmed frame.
+        let mut expected = HashMap::new();
+        let expected_fg = dim_color(bright_fg, Some(fg_fallback), &palette, &mut expected).unwrap();
+        let expected_bg = dim_color(Color::Reset, bg_fallback, &palette, &mut expected).unwrap();
+        assert_eq!(cell.fg, crate::protocol::color_to_u32(expected_fg));
+        assert_eq!(cell.bg, crate::protocol::color_to_u32(expected_bg));
+        assert_ne!(cell.fg, crate::protocol::color_to_u32(bright_fg));
+    }
 
     #[test]
     fn pane_border_title_trims_and_truncates() {
@@ -757,5 +1161,167 @@ mod tests {
             panic!("selection background should resolve to rgb");
         };
         assert!(relative_luminance((r, g, b)) > relative_luminance((12, 14, 16)));
+    }
+
+    #[test]
+    fn dim_color_dims_without_killing_hue_and_resolves_default_via_fallback() {
+        let no_palette: crate::terminal_theme::AnsiPalette = [None; 16];
+        let mut cache = HashMap::new();
+        // A saturated green stays clearly green (hue preserved) but darker.
+        let Some(Color::Rgb(r, g, b)) =
+            dim_color(Color::Rgb(40, 200, 80), None, &no_palette, &mut cache)
+        else {
+            panic!("rgb input should dim");
+        };
+        assert!(g > r && g > b, "green should remain the dominant channel");
+        assert!(g < 200, "value should be reduced");
+
+        // A default (Reset) color falls back to the supplied host color.
+        assert!(dim_color(Color::Reset, None, &no_palette, &mut cache).is_none());
+        assert!(dim_color(Color::Reset, Some((180, 180, 180)), &no_palette, &mut cache).is_some());
+
+        // Indexed (256-color) content keeps its hue instead of graying out.
+        let Some(Color::Rgb(r, g, b)) = dim_color(Color::Indexed(2), None, &no_palette, &mut cache)
+        else {
+            panic!("indexed green should resolve and dim");
+        };
+        assert!(g > r && g > b, "indexed green stays green");
+    }
+
+    #[test]
+    fn resolve_rgb_prefers_host_ansi_palette_for_indexed_colors() {
+        let mut palette: crate::terminal_theme::AnsiPalette = [None; 16];
+        // Host's ANSI blue (index 4) is catppuccin blue, not standard (0,0,128).
+        palette[4] = Some(crate::terminal_theme::RgbColor {
+            r: 137,
+            g: 180,
+            b: 250,
+        });
+        assert_eq!(
+            resolve_rgb(Color::Indexed(4), &palette),
+            Some((137, 180, 250))
+        );
+        // Without a host entry, falls back to the standard xterm table.
+        let empty: crate::terminal_theme::AnsiPalette = [None; 16];
+        assert_eq!(resolve_rgb(Color::Indexed(4), &empty), Some((0, 0, 128)));
+        // The 256-color cube is never overridden by the 16-entry ANSI palette.
+        assert_eq!(
+            resolve_rgb(Color::Indexed(196), &palette),
+            Some((255, 0, 0))
+        );
+    }
+
+    #[test]
+    fn xterm_256_palette_resolves_cube_and_grayscale() {
+        assert_eq!(xterm_256_to_rgb(0), (0, 0, 0));
+        assert_eq!(xterm_256_to_rgb(15), (255, 255, 255));
+        // First color-cube entry (16) is black; 196 is pure red.
+        assert_eq!(xterm_256_to_rgb(16), (0, 0, 0));
+        assert_eq!(xterm_256_to_rgb(196), (255, 0, 0));
+        // Grayscale ramp.
+        assert_eq!(xterm_256_to_rgb(232), (8, 8, 8));
+        assert_eq!(xterm_256_to_rgb(255), (238, 238, 238));
+    }
+
+    #[test]
+    fn scale_hsv_preserves_hue_order_and_dims_value() {
+        // Pure red scaled down keeps red dominant.
+        let (r, g, b) = scale_hsv((255, 0, 0), 0.9, 0.8);
+        assert!(r > g && r > b);
+        assert!(r < 255);
+        // A gray (zero saturation) just dims toward darker gray, staying neutral.
+        let (r, g, b) = scale_hsv((100, 100, 100), 0.9, 0.8);
+        assert_eq!(r, g);
+        assert_eq!(g, b);
+        assert!(r < 100, "value should be reduced");
+    }
+
+    #[test]
+    fn minimal_content_rect_trims_only_internal_edges() {
+        let area = Rect::new(0, 0, 40, 10);
+        assert_eq!(
+            minimal_pane_content_rect(Rect::new(0, 0, 20, 10), area),
+            Rect::new(0, 0, 20, 10)
+        );
+        assert_eq!(
+            minimal_pane_content_rect(Rect::new(20, 0, 20, 10), area),
+            Rect::new(21, 0, 19, 10)
+        );
+        assert_eq!(
+            minimal_pane_content_rect(Rect::new(0, 5, 40, 5), area),
+            Rect::new(0, 6, 40, 4)
+        );
+    }
+
+    #[tokio::test]
+    async fn minimal_borders_reclaim_separator_space_for_split_panes() {
+        let mut app = AppState::test_new();
+        app.pane_borders = crate::config::PaneBordersConfig::Minimal;
+        let mut workspace = Workspace::test_new("test");
+        workspace.test_split(ratatui::layout::Direction::Horizontal);
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+
+        let area = Rect::new(0, 0, 40, 10);
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        let infos = compute_pane_infos(
+            &app,
+            &terminal_runtimes,
+            area,
+            false,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
+
+        assert_eq!(infos.len(), 2);
+        assert_eq!(infos[0].rect, Rect::new(0, 0, 20, 10));
+        assert_eq!(infos[0].inner_rect, Rect::new(0, 0, 20, 10));
+        assert_eq!(infos[1].rect, Rect::new(20, 0, 20, 10));
+        assert_eq!(infos[1].inner_rect, Rect::new(21, 0, 19, 10));
+    }
+
+    #[test]
+    fn separator_cells_cover_the_divider_column_only() {
+        let area = Rect::new(0, 0, 40, 10);
+        let splits = vec![SplitBorder {
+            pos: 20,
+            direction: ratatui::layout::Direction::Horizontal,
+            ratio: 0.5,
+            area,
+            path: vec![],
+        }];
+        let cells = collect_separator_cells(area, &splits);
+        assert_eq!(cells.len(), 10);
+        assert!(cells.contains(&(20, 0)));
+        assert!(cells.contains(&(20, 9)));
+        assert!(!cells.contains(&(19, 0)));
+        assert!(!cells.contains(&(21, 0)));
+    }
+
+    #[test]
+    fn separator_glyph_maps_each_junction() {
+        assert_eq!(separator_glyph(SEP_UP | SEP_DOWN), '│');
+        assert_eq!(separator_glyph(SEP_LEFT | SEP_RIGHT), '─');
+        assert_eq!(
+            separator_glyph(SEP_UP | SEP_DOWN | SEP_LEFT | SEP_RIGHT),
+            '┼'
+        );
+        assert_eq!(separator_glyph(SEP_UP | SEP_DOWN | SEP_RIGHT), '├');
+        assert_eq!(separator_glyph(SEP_UP | SEP_DOWN | SEP_LEFT), '┤');
+        assert_eq!(separator_glyph(SEP_DOWN | SEP_LEFT | SEP_RIGHT), '┬');
+        assert_eq!(separator_glyph(SEP_UP | SEP_LEFT | SEP_RIGHT), '┴');
+    }
+
+    #[test]
+    fn separator_bits_connect_where_a_horizontal_line_meets_a_vertical_one() {
+        let mut cells = HashSet::new();
+        for y in 0..4 {
+            cells.insert((5u16, y));
+        }
+        for x in 5..10 {
+            cells.insert((x, 2u16));
+        }
+        assert_eq!(separator_glyph(separator_bits(5, 2, &cells)), '├');
+        assert_eq!(separator_glyph(separator_bits(5, 0, &cells)), '│');
+        assert_eq!(separator_glyph(separator_bits(7, 2, &cells)), '─');
     }
 }

@@ -528,6 +528,7 @@ impl App {
             confirm_close: config.ui.confirm_close,
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
+            pane_borders: config.ui.pane_borders,
             pane_history_persistence: config.experimental.pane_history,
             reveal_hidden_cursor_for_cjk_ime: config.experimental.reveal_hidden_cursor_for_cjk_ime,
             cjk_ime_agent_filter_configured: !config.experimental.cjk_ime_agents.is_empty(),
@@ -570,6 +571,7 @@ impl App {
             plugin_commands_in_flight: 0,
             global_menu: state::MenuListState::new(0),
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
+            host_ansi_palette: [None; 16],
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
         };
@@ -1246,6 +1248,7 @@ impl App {
                 self.state.prompt_new_tab_name = config.ui.prompt_new_tab_name;
                 self.state.show_agent_labels_on_pane_borders =
                     config.ui.show_agent_labels_on_pane_borders;
+                self.state.pane_borders = config.ui.pane_borders;
                 self.state.agent_panel_scope =
                     agent_panel_scope_from_config(config.ui.agent_panel_scope);
                 self.state.agent_panel_scroll = 0;
@@ -1438,6 +1441,11 @@ impl App {
                 crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
                     if apply_host_terminal_theme {
                         self.update_host_terminal_theme(kind, color);
+                    }
+                }
+                crate::raw_input::RawInputEvent::HostPaletteColor { index, color } => {
+                    if apply_host_terminal_theme {
+                        self.set_host_ansi_palette_color(index, color);
                     }
                 }
                 crate::raw_input::RawInputEvent::Unsupported => {}
