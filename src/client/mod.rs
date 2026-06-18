@@ -774,14 +774,21 @@ async fn run_client_loop(
     };
     debug!(?negotiated_encoding, "client render encoding active");
 
-    // Channel for events from the stdin, resize, and server reader threads.
+    // Channel for events from the resize and server reader threads. Bounded so
+    // a slow client backpressures the server's frame stream.
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ClientLoopEvent>(256);
+
+    // Stdin gets its own unbounded channel. The stdin reader thread is what
+    // drains the host terminal's output pipe; it must never block, or the
+    // terminal stalls writing input and stops draining our frame writes,
+    // deadlocking both processes. Server frames stay bounded above.
+    let (stdin_event_tx, mut stdin_event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<ClientLoopEvent>();
 
     // Spawn the stdin reader thread.
     let stdin_quit = should_quit.clone();
-    let stdin_tx = event_tx.clone();
     std::thread::spawn(move || {
-        input::stdin_reader_loop(stdin_tx, &stdin_quit);
+        input::stdin_reader_loop(stdin_event_tx, &stdin_quit);
     });
 
     if state.attach_escape.is_none() && should_query_host_terminal_theme() {
@@ -825,6 +832,7 @@ async fn run_client_loop(
     while !should_quit.load(Ordering::Acquire) {
         let event = tokio::select! {
             ev = event_rx.recv() => ev.unwrap_or(ClientLoopEvent::Timer),
+            Some(ev) = stdin_event_rx.recv() => ev,
             _ = tokio::time::sleep(Duration::from_millis(100)) => ClientLoopEvent::Timer,
         };
 

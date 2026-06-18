@@ -32,7 +32,10 @@ use super::ClientLoopEvent;
 /// This runs on a dedicated thread because stdin reading is blocking.
 /// The main loop receives the raw bytes and forwards them as
 /// `ClientMessage::Input` to the server.
-pub fn stdin_reader_loop(event_tx: mpsc::Sender<ClientLoopEvent>, should_quit: &Arc<AtomicBool>) {
+pub fn stdin_reader_loop(
+    event_tx: mpsc::UnboundedSender<ClientLoopEvent>,
+    should_quit: &Arc<AtomicBool>,
+) {
     #[cfg(windows)]
     return windows_stdin_reader_loop(event_tx, should_quit);
 
@@ -41,7 +44,10 @@ pub fn stdin_reader_loop(event_tx: mpsc::Sender<ClientLoopEvent>, should_quit: &
 }
 
 #[cfg(unix)]
-fn unix_stdin_reader_loop(event_tx: mpsc::Sender<ClientLoopEvent>, should_quit: &Arc<AtomicBool>) {
+fn unix_stdin_reader_loop(
+    event_tx: mpsc::UnboundedSender<ClientLoopEvent>,
+    should_quit: &Arc<AtomicBool>,
+) {
     let stdin = io::stdin();
     let mut reader = stdin.lock();
     let mut scratch = [0u8; 4096];
@@ -52,20 +58,14 @@ fn unix_stdin_reader_loop(event_tx: mpsc::Sender<ClientLoopEvent>, should_quit: 
             Ok(0) => break,
             Ok(n) => {
                 for data in framer.push(&scratch[..n]) {
-                    if event_tx
-                        .blocking_send(ClientLoopEvent::StdinInput(data))
-                        .is_err()
-                    {
+                    if event_tx.send(ClientLoopEvent::StdinInput(data)).is_err() {
                         return;
                     }
                 }
 
                 if stdin_read_ready(&reader, 10) == Some(false) {
                     for data in framer.flush_timeout() {
-                        if event_tx
-                            .blocking_send(ClientLoopEvent::StdinInput(data))
-                            .is_err()
-                        {
+                        if event_tx.send(ClientLoopEvent::StdinInput(data)).is_err() {
                             return;
                         }
                     }
@@ -83,7 +83,7 @@ fn unix_stdin_reader_loop(event_tx: mpsc::Sender<ClientLoopEvent>, should_quit: 
 
 #[cfg(windows)]
 fn windows_stdin_reader_loop(
-    event_tx: mpsc::Sender<ClientLoopEvent>,
+    event_tx: mpsc::UnboundedSender<ClientLoopEvent>,
     should_quit: &Arc<AtomicBool>,
 ) {
     let mut framer = crate::raw_input::RawInputFramer::default();
@@ -140,7 +140,7 @@ fn windows_stdin_reader_loop(
             continue;
         };
         if event_tx
-            .blocking_send(ClientLoopEvent::StdinEvents(vec![event]))
+            .send(ClientLoopEvent::StdinEvents(vec![event]))
             .is_err()
         {
             return;
@@ -205,7 +205,7 @@ fn windows_key_raw_bytes(
 #[cfg(windows)]
 fn send_windows_raw_events(
     events: Vec<crate::raw_input::RawInputEvent>,
-    event_tx: &mpsc::Sender<ClientLoopEvent>,
+    event_tx: &mpsc::UnboundedSender<ClientLoopEvent>,
 ) -> bool {
     let raw_event_count = events.len();
     let events = events
@@ -221,9 +221,7 @@ fn send_windows_raw_events(
         forwarded_event_count = events.len(),
         "windows raw-framed input events forwarded"
     );
-    event_tx
-        .blocking_send(ClientLoopEvent::StdinEvents(events))
-        .is_ok()
+    event_tx.send(ClientLoopEvent::StdinEvents(events)).is_ok()
 }
 
 #[cfg(windows)]
