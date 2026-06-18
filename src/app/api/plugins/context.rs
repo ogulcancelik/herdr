@@ -63,12 +63,29 @@ impl App {
                         })
                 }),
             EventData::WorkspaceRenamed { workspace_id, .. }
-            | EventData::WorkspaceFocused { workspace_id }
-            | EventData::WorktreeRemoved { workspace_id, .. } => self
+            | EventData::WorkspaceFocused { workspace_id } => self
                 .plugin_context_for_workspace_id(workspace_id, correlation_id)
                 .unwrap_or_else(|| {
                     let mut context = empty_plugin_context(correlation_id);
                     context.workspace_id = Some(workspace_id.clone());
+                    context
+                }),
+            EventData::WorktreeRemoved {
+                workspace_id,
+                workspace,
+                worktree,
+                ..
+            } => workspace
+                .as_ref()
+                .map(|workspace| {
+                    self.plugin_context_for_workspace_snapshot(workspace, correlation_id)
+                })
+                .or_else(|| self.plugin_context_for_workspace_id(workspace_id, correlation_id))
+                .unwrap_or_else(|| {
+                    let mut context = empty_plugin_context(correlation_id);
+                    context.workspace_id = Some(workspace_id.clone());
+                    context.workspace_label = Some(worktree.label.clone());
+                    context.workspace_cwd = Some(worktree.path.clone());
                     context
                 }),
             EventData::TabCreated { tab } => self.plugin_context_for_tab_info(tab, correlation_id),
@@ -168,17 +185,25 @@ impl App {
     ) -> PluginInvocationContext {
         self.plugin_context_for_workspace_id(&workspace.workspace_id, correlation_id)
             .unwrap_or_else(|| {
-                let mut context = empty_plugin_context(correlation_id);
-                context.workspace_id = Some(workspace.workspace_id.clone());
-                context.workspace_label = Some(workspace.label.clone());
-                context.workspace_cwd = workspace
-                    .worktree
-                    .as_ref()
-                    .map(|worktree| worktree.checkout_path.clone());
-                context.worktree = workspace.worktree.clone();
-                context.tab_id = Some(workspace.active_tab_id.clone());
-                context
+                self.plugin_context_for_workspace_snapshot(workspace, correlation_id)
             })
+    }
+
+    fn plugin_context_for_workspace_snapshot(
+        &self,
+        workspace: &crate::api::schema::WorkspaceInfo,
+        correlation_id: &str,
+    ) -> PluginInvocationContext {
+        let mut context = empty_plugin_context(correlation_id);
+        context.workspace_id = Some(workspace.workspace_id.clone());
+        context.workspace_label = Some(workspace.label.clone());
+        context.workspace_cwd = workspace
+            .worktree
+            .as_ref()
+            .map(|worktree| worktree.checkout_path.clone());
+        context.worktree = workspace.worktree.clone();
+        context.tab_id = Some(workspace.active_tab_id.clone());
+        context
     }
 
     fn plugin_context_for_tab_id(

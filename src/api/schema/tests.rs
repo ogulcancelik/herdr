@@ -504,6 +504,7 @@ fn worktree_lifecycle_events_round_trip() {
             event: EventKind::WorktreeRemoved,
             data: EventData::WorktreeRemoved {
                 workspace_id: "w_2".into(),
+                workspace: Some(workspace.clone()),
                 worktree: WorktreeInfo {
                     open_workspace_id: None,
                     ..worktree.clone()

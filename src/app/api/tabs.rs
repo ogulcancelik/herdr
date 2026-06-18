@@ -122,20 +122,7 @@ impl App {
                     self.state.mode = Mode::Terminal;
                 }
                 self.schedule_session_save();
-                let tab = self.tab_info(ws_idx, tab_idx).unwrap();
-                let root_pane = self
-                    .root_pane_info(ws_idx, tab_idx)
-                    .expect("new tab should have a root pane");
-                self.emit_event(EventEnvelope {
-                    event: EventKind::TabCreated,
-                    data: EventData::TabCreated { tab: tab.clone() },
-                });
-                self.emit_event(EventEnvelope {
-                    event: EventKind::PaneCreated,
-                    data: EventData::PaneCreated {
-                        pane: root_pane.clone(),
-                    },
-                });
+                self.emit_tab_created_events(ws_idx, tab_idx);
                 encode_success(
                     id,
                     self.tab_created_result(ws_idx, tab_idx)

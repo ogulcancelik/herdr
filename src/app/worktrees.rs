@@ -358,7 +358,7 @@ impl App {
         let repo_name = open.repo_name.clone();
         self.state.worktree_open = None;
 
-        if let Some(ws_idx) = entry.already_open_ws_idx {
+        if let Some(ws_idx) = self.open_workspace_idx_for_checkout(&entry.path) {
             self.mark_opened_existing_worktree_membership(
                 &source_workspace_id,
                 source_existing_membership,
@@ -372,22 +372,43 @@ impl App {
             );
             self.state.switch_workspace(ws_idx);
             self.state.mode = Mode::Terminal;
+            self.emit_worktree_opened_for_workspace(ws_idx, true);
             return;
+        }
+
+        if let Some(source_ws_idx) = self
+            .state
+            .workspaces
+            .iter()
+            .position(|ws| ws.id == source_workspace_id)
+        {
+            let source_membership = source_existing_membership.clone().unwrap_or(
+                crate::workspace::WorktreeSpaceMembership {
+                    key: repo_key.clone(),
+                    label: repo_name.clone(),
+                    repo_root: source_repo_root.clone(),
+                    checkout_path: source_checkout_path.clone(),
+                    is_linked_worktree: false,
+                },
+            );
+            self.set_worktree_membership(source_ws_idx, source_membership, true);
         }
 
         match self.create_workspace_with_options(entry.path.clone(), true) {
             Ok(new_ws_idx) => {
-                self.mark_opened_existing_worktree_membership(
-                    &source_workspace_id,
-                    source_existing_membership,
-                    source_checkout_path,
-                    source_repo_root,
-                    repo_key,
-                    repo_name,
+                self.set_worktree_membership(
                     new_ws_idx,
-                    entry.path,
-                    entry.is_linked_worktree,
+                    crate::workspace::WorktreeSpaceMembership {
+                        key: repo_key,
+                        label: repo_name,
+                        repo_root: source_repo_root,
+                        checkout_path: entry.path,
+                        is_linked_worktree: entry.is_linked_worktree,
+                    },
+                    false,
                 );
+                self.emit_workspace_open_events(new_ws_idx);
+                self.emit_worktree_opened_for_workspace(new_ws_idx, false);
             }
             Err(err) => {
                 self.state.worktree_open = Some(WorktreeOpenState {
@@ -429,29 +450,27 @@ impl App {
             .iter()
             .position(|ws| ws.id == source_workspace_id)
         {
-            if let Some(source_membership) = source_existing_membership {
-                self.state.workspaces[source_ws_idx].worktree_space = Some(source_membership);
-            } else {
-                self.state.workspaces[source_ws_idx].worktree_space =
-                    Some(crate::workspace::WorktreeSpaceMembership {
-                        key: repo_key.clone(),
-                        label: repo_name.clone(),
-                        repo_root: source_repo_root.clone(),
-                        checkout_path: source_checkout_path,
-                        is_linked_worktree: false,
-                    });
-            }
+            let source_membership =
+                source_existing_membership.unwrap_or(crate::workspace::WorktreeSpaceMembership {
+                    key: repo_key.clone(),
+                    label: repo_name.clone(),
+                    repo_root: source_repo_root.clone(),
+                    checkout_path: source_checkout_path,
+                    is_linked_worktree: false,
+                });
+            self.set_worktree_membership(source_ws_idx, source_membership, true);
         }
-        if let Some(target) = self.state.workspaces.get_mut(target_ws_idx) {
-            target.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+        self.set_worktree_membership(
+            target_ws_idx,
+            crate::workspace::WorktreeSpaceMembership {
                 key: repo_key,
                 label: repo_name,
                 repo_root: source_repo_root,
                 checkout_path: target_path,
                 is_linked_worktree: target_is_linked_worktree,
-            });
-        }
-        self.state.mark_session_dirty();
+            },
+            true,
+        );
     }
 
     fn close_worktree_create_dialog(&mut self) {
@@ -595,6 +614,21 @@ impl App {
             self.shutdown_workspace_terminal_runtimes_for_worktree_remove(ws_idx);
         }
 
+        let (workspace_snapshot, worktree_snapshot) = self
+            .state
+            .workspaces
+            .iter()
+            .position(|ws| ws.id == workspace_id)
+            .map(|ws_idx| {
+                let workspace = Box::new(self.workspace_info(ws_idx));
+                let worktree = self.state.workspaces[ws_idx]
+                    .worktree_space()
+                    .cloned()
+                    .map(|space| Box::new(self.worktree_info_for_membership(&space, None)));
+                (Some(workspace), worktree)
+            })
+            .unwrap_or((None, None));
+
         let command = crate::worktree::build_worktree_remove_command(&repo_root, &path, force);
         tracing::info!(workspace_id = %workspace_id, path = %path.display(), force, "starting git worktree remove");
         let event_tx = self.event_tx.clone();
@@ -604,6 +638,9 @@ impl App {
                 event_tx.blocking_send(AppEvent::WorktreeRemoveFinished(WorktreeRemoveResult {
                     workspace_id,
                     path,
+                    workspace: workspace_snapshot,
+                    worktree: worktree_snapshot,
+                    forced: force,
                     result,
                 }));
         });
@@ -630,41 +667,65 @@ impl App {
                 self.state.worktree_create = None;
                 self.state.name_input.clear();
                 self.state.name_input_replace_on_type = false;
-                match self.create_workspace_with_options(path.clone(), true) {
-                    Ok(ws_idx) => {
-                        let source_membership = source_existing_membership.unwrap_or(
-                            crate::workspace::WorktreeSpaceMembership {
-                                key: repo_key.clone(),
-                                label: repo_name.clone(),
-                                repo_root: source_repo_root.clone(),
-                                checkout_path: source_checkout_path,
-                                is_linked_worktree: false,
-                            },
-                        );
-                        if let Some(ws) = self
-                            .state
-                            .workspaces
-                            .iter_mut()
-                            .find(|ws| ws.id == source_workspace_id)
-                        {
-                            ws.worktree_space = Some(source_membership);
-                        }
-                        if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
-                            ws.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
-                                key: repo_key,
-                                label: repo_name,
-                                repo_root: source_repo_root,
-                                checkout_path: path,
-                                is_linked_worktree: true,
-                            });
-                        }
-                        self.state.mark_session_dirty();
+                let source_membership = source_existing_membership.unwrap_or(
+                    crate::workspace::WorktreeSpaceMembership {
+                        key: repo_key.clone(),
+                        label: repo_name.clone(),
+                        repo_root: source_repo_root.clone(),
+                        checkout_path: source_checkout_path,
+                        is_linked_worktree: false,
+                    },
+                );
+                if let Some(source_ws_idx) = self
+                    .state
+                    .workspaces
+                    .iter()
+                    .position(|ws| ws.id == source_workspace_id)
+                {
+                    self.set_worktree_membership(source_ws_idx, source_membership, true);
+                }
+                if let Some(ws_idx) = self.open_workspace_idx_for_checkout(&path) {
+                    self.set_worktree_membership(
+                        ws_idx,
+                        crate::workspace::WorktreeSpaceMembership {
+                            key: repo_key,
+                            label: repo_name,
+                            repo_root: source_repo_root,
+                            checkout_path: path,
+                            is_linked_worktree: true,
+                        },
+                        true,
+                    );
+                    self.state.switch_workspace(ws_idx);
+                    self.state.mode = Mode::Terminal;
+                    if let Some(worktree) = self.worktree_info_for_workspace(ws_idx) {
+                        self.emit_worktree_created_event(ws_idx, worktree);
                     }
-                    Err(err) => {
-                        self.state.config_diagnostic = Some(format!(
-                            "created worktree but failed to open workspace: {err}"
-                        ));
-                        self.state.mode = Mode::Navigate;
+                } else {
+                    match self.create_workspace_with_options(path.clone(), true) {
+                        Ok(ws_idx) => {
+                            self.set_worktree_membership(
+                                ws_idx,
+                                crate::workspace::WorktreeSpaceMembership {
+                                    key: repo_key,
+                                    label: repo_name,
+                                    repo_root: source_repo_root,
+                                    checkout_path: path,
+                                    is_linked_worktree: true,
+                                },
+                                false,
+                            );
+                            self.emit_workspace_open_events(ws_idx);
+                            if let Some(worktree) = self.worktree_info_for_workspace(ws_idx) {
+                                self.emit_worktree_created_event(ws_idx, worktree);
+                            }
+                        }
+                        Err(err) => {
+                            self.state.config_diagnostic = Some(format!(
+                                "created worktree but failed to open workspace: {err}"
+                            ));
+                            self.state.mode = Mode::Navigate;
+                        }
                     }
                 }
                 self.render_dirty.store(true, Ordering::Release);
@@ -690,13 +751,25 @@ impl App {
         match result.result {
             Ok(()) => {
                 tracing::info!(workspace_id = %result.workspace_id, path = %result.path.display(), "git worktree remove completed");
+                let forced = result.forced;
                 self.state.worktree_remove = None;
+                let mut workspace_id = result.workspace_id.clone();
+                let mut workspace_snapshot = result.workspace.as_deref().cloned();
+                let mut worktree = result.worktree.as_deref().cloned();
                 if let Some(ws_idx) = self
                     .state
                     .workspaces
                     .iter()
                     .position(|ws| ws.id == result.workspace_id)
                 {
+                    workspace_id = self.public_workspace_id(ws_idx);
+                    workspace_snapshot.get_or_insert_with(|| self.workspace_info(ws_idx));
+                    if worktree.is_none() {
+                        worktree = self.state.workspaces[ws_idx]
+                            .worktree_space()
+                            .cloned()
+                            .map(|space| self.worktree_info_for_membership(&space, None));
+                    }
                     let still_same_linked_worktree = self.state.workspaces[ws_idx]
                         .worktree_space()
                         .is_some_and(|space| {
@@ -705,7 +778,25 @@ impl App {
                     if still_same_linked_worktree {
                         self.state.selected = ws_idx;
                         self.state.close_selected_workspace();
+                        self.shutdown_detached_terminal_runtimes();
+                        self.emit_event(crate::api::schema::EventEnvelope {
+                            event: crate::api::schema::EventKind::WorkspaceClosed,
+                            data: crate::api::schema::EventData::WorkspaceClosed {
+                                workspace_id: workspace_id.clone(),
+                                workspace: workspace_snapshot.clone(),
+                            },
+                        });
                     }
+                } else if let Some(snapshot) = workspace_snapshot.as_ref() {
+                    workspace_id = snapshot.workspace_id.clone();
+                }
+                if let Some(worktree) = worktree {
+                    self.emit_worktree_removed_event(
+                        workspace_id,
+                        workspace_snapshot,
+                        worktree,
+                        forced,
+                    );
                 }
                 self.state.mode = if self.state.active.is_some() {
                     Mode::Terminal
@@ -801,13 +892,68 @@ mod tests {
     }
 
     fn app_for_worktree_tests() -> App {
+        app_for_worktree_tests_with_event_hub(crate::api::EventHub::default())
+    }
+
+    fn app_for_worktree_tests_with_event_hub(event_hub: crate::api::EventHub) -> App {
         App::new(
             &crate::config::Config::default(),
             true,
             None,
             tokio::sync::mpsc::unbounded_channel().1,
-            crate::api::EventHub::default(),
+            event_hub,
         )
+    }
+
+    fn event_kinds(event_hub: &crate::api::EventHub) -> Vec<crate::api::schema::EventKind> {
+        event_hub
+            .events_after(0)
+            .into_iter()
+            .map(|(_, event)| event.event)
+            .collect()
+    }
+
+    fn shutdown_test_runtimes(app: &mut App) {
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+    }
+
+    #[tokio::test]
+    async fn ui_create_workspace_emits_initial_workspace_tab_and_pane_events() {
+        let event_hub = crate::api::EventHub::default();
+        let mut app = app_for_worktree_tests_with_event_hub(event_hub.clone());
+
+        app.create_workspace();
+
+        assert_eq!(
+            event_kinds(&event_hub),
+            vec![
+                crate::api::schema::EventKind::WorkspaceCreated,
+                crate::api::schema::EventKind::TabCreated,
+                crate::api::schema::EventKind::PaneCreated,
+            ]
+        );
+        shutdown_test_runtimes(&mut app);
+    }
+
+    #[tokio::test]
+    async fn ui_create_tab_emits_tab_and_pane_events() {
+        let event_hub = crate::api::EventHub::default();
+        let mut app = app_for_worktree_tests_with_event_hub(event_hub.clone());
+        app.create_workspace_with_options(std::env::temp_dir(), true)
+            .unwrap();
+
+        app.create_tab();
+
+        assert_eq!(
+            event_kinds(&event_hub),
+            vec![
+                crate::api::schema::EventKind::TabCreated,
+                crate::api::schema::EventKind::PaneCreated,
+            ]
+        );
+        shutdown_test_runtimes(&mut app);
     }
 
     #[test]
@@ -913,6 +1059,7 @@ mod tests {
             crate::workspace::Workspace::test_new("main"),
             crate::workspace::Workspace::test_new("issue"),
         ];
+        app.state.workspaces[1].identity_cwd = "/repo/herdr-issue".into();
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.worktree_open = Some(WorktreeOpenState {
@@ -947,6 +1094,114 @@ mod tests {
             std::path::PathBuf::from("/repo/herdr-issue")
         );
         assert!(target_membership.is_linked_worktree);
+    }
+
+    #[tokio::test]
+    async fn ui_worktree_open_new_workspace_emits_api_parity_events() {
+        let checkout = unique_temp_path("app-worktree-open-event-checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let event_hub = crate::api::EventHub::default();
+        let mut app = app_for_worktree_tests_with_event_hub(event_hub.clone());
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("source")];
+        let source_workspace_id = app.state.workspaces[0].id.clone();
+        let source_membership = crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr".into(),
+            is_linked_worktree: false,
+        };
+        app.state.workspaces[0].worktree_space = Some(source_membership.clone());
+        app.state.worktree_open = Some(WorktreeOpenState {
+            source_workspace_id,
+            source_existing_membership: Some(source_membership),
+            source_checkout_path: "/repo/herdr".into(),
+            source_repo_root: "/repo/herdr".into(),
+            repo_key: "repo-key".into(),
+            repo_name: "herdr".into(),
+            entries: vec![WorktreeOpenEntry {
+                path: checkout.clone(),
+                branch: Some("worktree/open-event".into()),
+                is_linked_worktree: true,
+                already_open_ws_idx: None,
+            }],
+            selected: 0,
+            query: String::new(),
+            search_focused: false,
+            error: None,
+        });
+
+        app.open_selected_existing_worktree();
+
+        assert_eq!(
+            event_kinds(&event_hub),
+            vec![
+                crate::api::schema::EventKind::WorkspaceCreated,
+                crate::api::schema::EventKind::TabCreated,
+                crate::api::schema::EventKind::PaneCreated,
+                crate::api::schema::EventKind::WorktreeOpened,
+            ]
+        );
+        shutdown_test_runtimes(&mut app);
+        let _ = std::fs::remove_dir_all(checkout);
+    }
+
+    #[tokio::test]
+    async fn open_selected_existing_worktree_recomputes_stale_already_open_state() {
+        let checkout = unique_temp_path("app-worktree-stale-open-checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let event_hub = crate::api::EventHub::default();
+        let mut app = app_for_worktree_tests_with_event_hub(event_hub.clone());
+        app.state.workspaces = vec![
+            crate::workspace::Workspace::test_new("source"),
+            crate::workspace::Workspace::test_new("other"),
+        ];
+        let source_workspace_id = app.state.workspaces[0].id.clone();
+        app.state.worktree_open = Some(WorktreeOpenState {
+            source_workspace_id,
+            source_existing_membership: None,
+            source_checkout_path: "/repo/herdr".into(),
+            source_repo_root: "/repo/herdr".into(),
+            repo_key: "repo-key".into(),
+            repo_name: "herdr".into(),
+            entries: vec![WorktreeOpenEntry {
+                path: checkout.clone(),
+                branch: Some("worktree/stale-open".into()),
+                is_linked_worktree: true,
+                already_open_ws_idx: Some(1),
+            }],
+            selected: 0,
+            query: String::new(),
+            search_focused: false,
+            error: None,
+        });
+
+        app.open_selected_existing_worktree();
+
+        assert_eq!(app.state.workspaces.len(), 3);
+        assert_eq!(
+            event_kinds(&event_hub),
+            vec![
+                crate::api::schema::EventKind::WorkspaceUpdated,
+                crate::api::schema::EventKind::WorkspaceCreated,
+                crate::api::schema::EventKind::TabCreated,
+                crate::api::schema::EventKind::PaneCreated,
+                crate::api::schema::EventKind::WorktreeOpened,
+            ]
+        );
+        let opened = event_hub
+            .events_after(0)
+            .into_iter()
+            .find_map(|(_, event)| match event.data {
+                crate::api::schema::EventData::WorktreeOpened { already_open, .. } => {
+                    Some(already_open)
+                }
+                _ => None,
+            })
+            .expect("worktree.opened should be emitted");
+        assert!(!opened);
+        shutdown_test_runtimes(&mut app);
+        let _ = std::fs::remove_dir_all(checkout);
     }
 
     #[test]
@@ -1114,6 +1369,197 @@ mod tests {
             std::path::PathBuf::from("/w/herdr/issue-137")
         );
         assert_eq!(create.error, None);
+    }
+
+    #[tokio::test]
+    async fn ui_worktree_create_emits_api_parity_events_after_membership_is_committed() {
+        let repo = create_committed_repo("app-worktree-create-event-repo");
+        let worktree_root = unique_temp_path("app-worktree-create-event-root");
+        let branch = "worktree/ui-create-event";
+        let checkout = crate::worktree::default_checkout_path(&worktree_root, "herdr", branch);
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                branch,
+                checkout.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+
+        let event_hub = crate::api::EventHub::default();
+        let mut app = app_for_worktree_tests_with_event_hub(event_hub.clone());
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("source")];
+        let source_workspace_id = app.state.workspaces[0].id.clone();
+        let source_membership = crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: repo.clone(),
+            checkout_path: repo.clone(),
+            is_linked_worktree: false,
+        };
+        app.state.workspaces[0].worktree_space = Some(source_membership.clone());
+        app.state.worktree_create = Some(WorktreeCreateState {
+            source_workspace_id,
+            source_checkout_path: repo.clone(),
+            source_existing_membership: Some(source_membership),
+            source_repo_root: repo.clone(),
+            repo_key: "repo-key".into(),
+            repo_name: "herdr".into(),
+            branch: branch.into(),
+            checkout_path: checkout.clone(),
+            error: None,
+            creating: true,
+        });
+        let plugin_root = unique_temp_path("app-worktree-create-plugin");
+        std::fs::create_dir_all(&plugin_root).unwrap();
+        let manifest_path = plugin_root.join("herdr-plugin.toml");
+        std::fs::write(&manifest_path, "id = 'example.ui-worktree-create'\n").unwrap();
+        app.state.installed_plugins.insert(
+            "example.ui-worktree-create".into(),
+            crate::api::schema::InstalledPluginInfo {
+                plugin_id: "example.ui-worktree-create".into(),
+                name: "UI Worktree Create".into(),
+                version: "0.1.0".into(),
+                min_herdr_version: "0.7.0".into(),
+                description: None,
+                manifest_path: manifest_path.display().to_string(),
+                plugin_root: plugin_root.display().to_string(),
+                enabled: true,
+                platforms: None,
+                build: Vec::new(),
+                actions: Vec::new(),
+                events: vec![crate::api::schema::PluginManifestEventHook {
+                    on: "worktree.created".into(),
+                    platforms: None,
+                    command: vec!["sh".into(), "-c".into(), "true".into()],
+                }],
+                panes: Vec::new(),
+                link_handlers: Vec::new(),
+                source: crate::api::schema::PluginSourceInfo::default(),
+                warnings: Vec::new(),
+            },
+        );
+
+        app.handle_worktree_add_finished(WorktreeAddResult {
+            path: checkout.clone(),
+            result: Ok(()),
+        });
+
+        assert_eq!(
+            event_kinds(&event_hub),
+            vec![
+                crate::api::schema::EventKind::WorkspaceCreated,
+                crate::api::schema::EventKind::TabCreated,
+                crate::api::schema::EventKind::PaneCreated,
+                crate::api::schema::EventKind::WorktreeCreated,
+            ]
+        );
+        let events = event_hub.events_after(0);
+        let workspace_created = events
+            .iter()
+            .find(|(_, event)| event.event == crate::api::schema::EventKind::WorkspaceCreated)
+            .map(|(_, event)| event)
+            .expect("workspace.created should be emitted");
+        let crate::api::schema::EventData::WorkspaceCreated { workspace } = &workspace_created.data
+        else {
+            panic!("unexpected event data");
+        };
+        let checkout_path = checkout.display().to_string();
+        assert_eq!(
+            workspace
+                .worktree
+                .as_ref()
+                .map(|worktree| worktree.checkout_path.as_str()),
+            Some(checkout_path.as_str())
+        );
+        let worktree_created = events
+            .iter()
+            .find(|(_, event)| event.event == crate::api::schema::EventKind::WorktreeCreated)
+            .map(|(_, event)| event)
+            .expect("worktree.created should be emitted");
+        let crate::api::schema::EventData::WorktreeCreated {
+            workspace,
+            worktree,
+        } = &worktree_created.data
+        else {
+            panic!("unexpected event data");
+        };
+        assert_eq!(
+            workspace
+                .worktree
+                .as_ref()
+                .map(|worktree| worktree.checkout_path.as_str()),
+            Some(checkout_path.as_str())
+        );
+        assert_eq!(
+            worktree.open_workspace_id.as_deref(),
+            Some(workspace.workspace_id.as_str())
+        );
+        assert!(app.state.plugin_command_logs.iter().any(|log| {
+            log.event.as_deref() == Some("worktree.created")
+                && log.status == crate::api::schema::PluginCommandStatus::Running
+        }));
+
+        shutdown_test_runtimes(&mut app);
+        let remove = crate::worktree::build_worktree_remove_command(&repo, &checkout, false);
+        crate::worktree::run_worktree_command(&remove).unwrap();
+        let _ = std::fs::remove_dir_all(worktree_root);
+        let _ = std::fs::remove_dir_all(repo);
+        let _ = std::fs::remove_dir_all(plugin_root);
+    }
+
+    #[test]
+    fn worktree_create_finished_reuses_checkout_opened_before_result() {
+        let checkout = unique_temp_path("app-worktree-create-race-checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let event_hub = crate::api::EventHub::default();
+        let mut app = app_for_worktree_tests_with_event_hub(event_hub.clone());
+        app.state.workspaces = vec![
+            crate::workspace::Workspace::test_new("source"),
+            crate::workspace::Workspace::test_new("opened-by-race"),
+        ];
+        let source_workspace_id = app.state.workspaces[0].id.clone();
+        app.state.workspaces[1].identity_cwd = checkout.clone();
+        app.state.worktree_create = Some(WorktreeCreateState {
+            source_workspace_id,
+            source_checkout_path: "/repo/herdr".into(),
+            source_existing_membership: None,
+            source_repo_root: "/repo/herdr".into(),
+            repo_key: "repo-key".into(),
+            repo_name: "herdr".into(),
+            branch: "worktree/create-race".into(),
+            checkout_path: checkout.clone(),
+            error: None,
+            creating: true,
+        });
+
+        app.handle_worktree_add_finished(WorktreeAddResult {
+            path: checkout.clone(),
+            result: Ok(()),
+        });
+
+        assert_eq!(app.state.workspaces.len(), 2);
+        let kinds = event_kinds(&event_hub);
+        assert!(!kinds.contains(&crate::api::schema::EventKind::WorkspaceCreated));
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == crate::api::schema::EventKind::WorktreeCreated)
+                .count(),
+            1
+        );
+        assert_eq!(
+            app.state.workspaces[1]
+                .worktree_space()
+                .map(|membership| membership.checkout_path.as_path()),
+            Some(checkout.as_path())
+        );
+        shutdown_test_runtimes(&mut app);
+        let _ = std::fs::remove_dir_all(checkout);
     }
 
     #[test]
@@ -1286,6 +1732,9 @@ mod tests {
         app.handle_worktree_remove_finished(WorktreeRemoveResult {
             workspace_id: "ws".into(),
             path,
+            workspace: None,
+            worktree: None,
+            forced: false,
             result: Err(
                 "fatal: '/w/herdr/dirty' contains modified or untracked files, use --force to delete it"
                     .into(),
@@ -1314,6 +1763,9 @@ mod tests {
         app.handle_worktree_remove_finished(WorktreeRemoveResult {
             workspace_id: "ws".into(),
             path,
+            workspace: None,
+            worktree: None,
+            forced: false,
             result: Err("fatal: '/w/herdr/missing' is not a working tree".into()),
         });
 
@@ -1324,6 +1776,70 @@ mod tests {
             remove.error,
             Some("fatal: '/w/herdr/missing' is not a working tree".into())
         );
+    }
+
+    #[test]
+    fn worktree_remove_finished_emits_removed_event_from_snapshot_after_workspace_closed() {
+        let event_hub = crate::api::EventHub::default();
+        let mut app = app_for_worktree_tests_with_event_hub(event_hub.clone());
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("issue")];
+        let internal_workspace_id = app.state.workspaces[0].id.clone();
+        let checkout = std::path::PathBuf::from("/repo/herdr-issue");
+        app.state.workspaces[0].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: checkout.clone(),
+            is_linked_worktree: true,
+        });
+        let workspace_snapshot = app.workspace_info(0);
+        let worktree_snapshot = crate::api::schema::WorktreeInfo {
+            path: checkout.display().to_string(),
+            branch: Some("worktree/issue".into()),
+            is_bare: false,
+            is_detached: false,
+            is_prunable: false,
+            is_linked_worktree: true,
+            open_workspace_id: None,
+            label: "herdr".into(),
+        };
+        app.state.worktree_remove = Some(WorktreeRemoveState {
+            workspace_id: internal_workspace_id.clone(),
+            repo_root: "/repo/herdr".into(),
+            path: checkout.clone(),
+            error: None,
+            removing: true,
+            force_confirmation: true,
+        });
+        app.state.workspaces.clear();
+
+        app.handle_worktree_remove_finished(WorktreeRemoveResult {
+            workspace_id: internal_workspace_id,
+            path: checkout,
+            workspace: Some(Box::new(workspace_snapshot.clone())),
+            worktree: Some(Box::new(worktree_snapshot)),
+            forced: true,
+            result: Ok(()),
+        });
+
+        assert_eq!(
+            event_kinds(&event_hub),
+            vec![crate::api::schema::EventKind::WorktreeRemoved]
+        );
+        assert!(event_hub.events_after(0).iter().any(|(_, event)| {
+            matches!(
+                &event.data,
+                crate::api::schema::EventData::WorktreeRemoved {
+                    workspace_id,
+                    workspace: Some(workspace),
+                    worktree,
+                    forced,
+                } if workspace_id == &workspace_snapshot.workspace_id
+                    && workspace.workspace_id == workspace_snapshot.workspace_id
+                    && worktree.branch.as_deref() == Some("worktree/issue")
+                    && *forced
+            )
+        }));
     }
 
     #[test]
@@ -1344,7 +1860,8 @@ mod tests {
         );
         std::fs::write(checkout.join("README.md"), "dirty\n").unwrap();
 
-        let mut app = app_for_worktree_tests();
+        let event_hub = crate::api::EventHub::default();
+        let mut app = app_for_worktree_tests_with_event_hub(event_hub.clone());
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("issue")];
         let workspace_id = app.state.workspaces[0].id.clone();
         app.state.workspaces[0].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
@@ -1394,6 +1911,21 @@ mod tests {
         assert!(!checkout.exists());
         assert!(app.state.worktree_remove.is_none());
         assert!(app.state.workspaces.is_empty());
+        assert_eq!(
+            event_kinds(&event_hub),
+            vec![
+                crate::api::schema::EventKind::WorkspaceClosed,
+                crate::api::schema::EventKind::WorktreeRemoved,
+            ]
+        );
+        assert!(event_hub.events_after(0).iter().any(|(_, event)| {
+            matches!(
+                &event.data,
+                crate::api::schema::EventData::WorktreeRemoved { worktree, .. }
+                    if worktree.branch.as_deref() == Some("worktree/dirty-remove")
+                        && !worktree.is_detached
+            )
+        }));
 
         let _ = std::fs::remove_dir_all(repo);
     }

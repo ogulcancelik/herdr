@@ -397,6 +397,8 @@ pub enum EventData {
     },
     WorktreeRemoved {
         workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<WorkspaceInfo>,
         worktree: WorktreeInfo,
         forced: bool,
     },

@@ -879,7 +879,7 @@ impl App {
             }
 
             if let Some(cwd) = self.state.request_new_workspace_cwd.take() {
-                if let Err(err) = self.create_workspace_with_options(cwd, true) {
+                if let Err(err) = self.create_workspace_with_events(cwd, true) {
                     tracing::error!(err = %err, "failed to create workspace at requested cwd");
                     self.state.mode = Mode::Navigate;
                 }

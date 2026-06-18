@@ -19,6 +19,9 @@ pub struct WorktreeAddResult {
 pub struct WorktreeRemoveResult {
     pub workspace_id: String,
     pub path: std::path::PathBuf,
+    pub workspace: Option<Box<crate::api::schema::WorkspaceInfo>>,
+    pub worktree: Option<Box<crate::api::schema::WorktreeInfo>>,
+    pub forced: bool,
     pub result: Result<(), String>,
 }
 

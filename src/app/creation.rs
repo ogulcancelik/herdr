@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::api::schema::{EventData, EventEnvelope, EventKind};
 use tracing::error;
 
 use super::{
@@ -61,7 +62,7 @@ impl App {
             .workspace_creation_source()
             .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx));
         let initial_cwd = self.resolve_new_terminal_cwd(follow_cwd);
-        if let Err(e) = self.create_workspace_with_options(initial_cwd, true) {
+        if let Err(e) = self.create_workspace_with_events(initial_cwd, true) {
             error!(err = %e, "failed to create workspace");
             self.state.mode = Mode::Navigate;
         }
@@ -69,23 +70,36 @@ impl App {
 
     pub(crate) fn create_tab(&mut self) {
         let custom_name = self.state.requested_new_tab_name.take();
+        let active_before = self.state.active;
         let follow_cwd = self
             .state
             .active
             .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx));
         let initial_cwd = self.resolve_new_terminal_cwd(follow_cwd);
         match self.create_tab_with_options(initial_cwd, true) {
-            Ok(tab_idx) => {
+            Ok(created_idx) => {
+                let created_workspace = active_before.is_none();
+                let ws_idx = if created_workspace {
+                    Some(created_idx)
+                } else {
+                    self.state.active
+                };
+                let tab_idx = if created_workspace { 0 } else { created_idx };
                 if let Some(name) = custom_name {
-                    if let Some(ws) = self
-                        .state
-                        .active
-                        .and_then(|ws_idx| self.state.workspaces.get_mut(ws_idx))
+                    if let Some(ws) =
+                        ws_idx.and_then(|ws_idx| self.state.workspaces.get_mut(ws_idx))
                     {
                         if let Some(tab) = ws.tabs.get_mut(tab_idx) {
                             tab.set_custom_name(name);
                         }
                         self.schedule_session_save();
+                    }
+                }
+                if let Some(ws_idx) = ws_idx {
+                    if created_workspace {
+                        self.emit_workspace_open_events(ws_idx);
+                    } else {
+                        self.emit_tab_created_events(ws_idx, tab_idx);
                     }
                 }
             }
@@ -138,6 +152,16 @@ impl App {
         focus: bool,
     ) -> std::io::Result<usize> {
         self.create_workspace_with_launch_env(initial_cwd, focus, Vec::new())
+    }
+
+    pub(crate) fn create_workspace_with_events(
+        &mut self,
+        initial_cwd: PathBuf,
+        focus: bool,
+    ) -> std::io::Result<()> {
+        let ws_idx = self.create_workspace_with_options(initial_cwd, focus)?;
+        self.emit_workspace_open_events(ws_idx);
+        Ok(())
     }
 
     pub(crate) fn create_workspace_with_launch_env(
@@ -242,6 +266,48 @@ impl App {
             pane_count: tab.panes.len(),
             agent_status: pane_agent_status(agg_state, seen),
         })
+    }
+
+    pub(crate) fn emit_workspace_open_events(&mut self, ws_idx: usize) {
+        let workspace_info = self.workspace_info(ws_idx);
+        let Some(tab) = self.tab_info(ws_idx, 0) else {
+            return;
+        };
+        let Some(root_pane) = self.root_pane_info(ws_idx, 0) else {
+            return;
+        };
+        self.emit_event(EventEnvelope {
+            event: EventKind::WorkspaceCreated,
+            data: EventData::WorkspaceCreated {
+                workspace: workspace_info,
+            },
+        });
+        self.emit_tab_and_pane_created_events(tab, root_pane);
+    }
+
+    pub(crate) fn emit_tab_created_events(&mut self, ws_idx: usize, tab_idx: usize) {
+        let Some(tab) = self.tab_info(ws_idx, tab_idx) else {
+            return;
+        };
+        let Some(root_pane) = self.root_pane_info(ws_idx, tab_idx) else {
+            return;
+        };
+        self.emit_tab_and_pane_created_events(tab, root_pane);
+    }
+
+    fn emit_tab_and_pane_created_events(
+        &mut self,
+        tab: crate::api::schema::TabInfo,
+        root_pane: crate::api::schema::PaneInfo,
+    ) {
+        self.emit_event(EventEnvelope {
+            event: EventKind::TabCreated,
+            data: EventData::TabCreated { tab },
+        });
+        self.emit_event(EventEnvelope {
+            event: EventKind::PaneCreated,
+            data: EventData::PaneCreated { pane: root_pane },
+        });
     }
 
     pub(super) fn workspace_created_result(

@@ -63,29 +63,7 @@ impl App {
                         crate::logging::workspace_renamed(&workspace.id);
                     }
                 }
-                let workspace = self.workspace_info(index);
-                let tab = self
-                    .tab_info(index, 0)
-                    .expect("new workspace should have an initial tab");
-                let root_pane = self
-                    .root_pane_info(index, 0)
-                    .expect("new workspace should have an initial root pane");
-                self.emit_event(EventEnvelope {
-                    event: EventKind::WorkspaceCreated,
-                    data: EventData::WorkspaceCreated {
-                        workspace: workspace.clone(),
-                    },
-                });
-                self.emit_event(EventEnvelope {
-                    event: EventKind::TabCreated,
-                    data: EventData::TabCreated { tab: tab.clone() },
-                });
-                self.emit_event(EventEnvelope {
-                    event: EventKind::PaneCreated,
-                    data: EventData::PaneCreated {
-                        pane: root_pane.clone(),
-                    },
-                });
+                self.emit_workspace_open_events(index);
                 encode_success(
                     id,
                     self.workspace_created_result(index)

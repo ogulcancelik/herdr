@@ -146,15 +146,9 @@ impl App {
         self.emit_workspace_open_events(ws_idx);
 
         let worktree = self
-            .worktree_info_for_checkout(&source, ws_idx)
+            .worktree_info_for_workspace(ws_idx)
             .expect("created worktree workspace should have worktree info");
-        self.emit_event(EventEnvelope {
-            event: EventKind::WorktreeCreated,
-            data: EventData::WorktreeCreated {
-                workspace: self.workspace_info(ws_idx),
-                worktree: worktree.clone(),
-            },
-        });
+        self.emit_worktree_created_event(ws_idx, worktree.clone());
         encode_success(
             id,
             ResponseResult::WorktreeCreated {
@@ -252,14 +246,7 @@ impl App {
 
         let tab_idx = self.state.workspaces[ws_idx].active_tab;
         let worktree = self.worktree_info_for_entry(&source, entry);
-        self.emit_event(EventEnvelope {
-            event: EventKind::WorktreeOpened,
-            data: EventData::WorktreeOpened {
-                workspace: self.workspace_info(ws_idx),
-                worktree: worktree.clone(),
-                already_open: already_open.is_some(),
-            },
-        });
+        self.emit_worktree_opened_event(ws_idx, worktree.clone(), already_open.is_some());
         encode_success(
             id,
             ResponseResult::WorktreeOpened {
@@ -355,18 +342,16 @@ impl App {
                 event: EventKind::WorkspaceClosed,
                 data: EventData::WorkspaceClosed {
                     workspace_id: workspace_id.clone(),
-                    workspace: Some(workspace_snapshot),
+                    workspace: Some(workspace_snapshot.clone()),
                 },
             });
         }
-        self.emit_event(EventEnvelope {
-            event: EventKind::WorktreeRemoved,
-            data: EventData::WorktreeRemoved {
-                workspace_id: workspace_id.clone(),
-                worktree,
-                forced: params.force,
-            },
-        });
+        self.emit_worktree_removed_event(
+            workspace_id.clone(),
+            Some(workspace_snapshot),
+            worktree,
+            params.force,
+        );
 
         encode_success(
             id,
@@ -653,7 +638,7 @@ impl App {
         self.set_worktree_membership(target_ws_idx, membership, emit_update);
     }
 
-    fn set_worktree_membership(
+    pub(crate) fn set_worktree_membership(
         &mut self,
         ws_idx: usize,
         membership: crate::workspace::WorktreeSpaceMembership,
@@ -754,27 +739,7 @@ impl App {
         }
     }
 
-    fn worktree_info_for_checkout(
-        &self,
-        source: &WorktreeSource,
-        ws_idx: usize,
-    ) -> Option<WorktreeInfo> {
-        let membership = self.state.workspaces.get(ws_idx)?.worktree_space()?;
-        let branch = crate::workspace::git_branch(&membership.checkout_path);
-        let is_detached = branch.is_none();
-        Some(WorktreeInfo {
-            path: membership.checkout_path.display().to_string(),
-            branch,
-            is_bare: false,
-            is_detached,
-            is_prunable: false,
-            is_linked_worktree: membership.is_linked_worktree,
-            open_workspace_id: Some(self.public_workspace_id(ws_idx)),
-            label: source.repo_name.clone(),
-        })
-    }
-
-    fn worktree_info_for_membership(
+    pub(crate) fn worktree_info_for_membership(
         &self,
         membership: &crate::workspace::WorktreeSpaceMembership,
         open_workspace_id: Option<String>,
@@ -793,7 +758,7 @@ impl App {
         }
     }
 
-    fn open_workspace_idx_for_checkout(&self, checkout_path: &Path) -> Option<usize> {
+    pub(crate) fn open_workspace_idx_for_checkout(&self, checkout_path: &Path) -> Option<usize> {
         let canonical_checkout = crate::worktree::canonical_or_original(checkout_path);
         let checkout_key = canonical_checkout.display().to_string();
         self.state.workspaces.iter().position(|ws| {
@@ -823,27 +788,59 @@ impl App {
         })
     }
 
-    fn emit_workspace_open_events(&mut self, ws_idx: usize) {
-        let workspace_info = self.workspace_info(ws_idx);
-        let Some(tab) = self.tab_info(ws_idx, 0) else {
-            return;
-        };
-        let Some(root_pane) = self.root_pane_info(ws_idx, 0) else {
-            return;
-        };
+    pub(crate) fn worktree_info_for_workspace(&self, ws_idx: usize) -> Option<WorktreeInfo> {
+        let membership = self.state.workspaces.get(ws_idx)?.worktree_space()?;
+        Some(self.worktree_info_for_membership(membership, Some(self.public_workspace_id(ws_idx))))
+    }
+
+    pub(crate) fn emit_worktree_created_event(&mut self, ws_idx: usize, worktree: WorktreeInfo) {
         self.emit_event(EventEnvelope {
-            event: EventKind::WorkspaceCreated,
-            data: EventData::WorkspaceCreated {
-                workspace: workspace_info,
+            event: EventKind::WorktreeCreated,
+            data: EventData::WorktreeCreated {
+                workspace: self.workspace_info(ws_idx),
+                worktree,
             },
         });
+    }
+
+    pub(crate) fn emit_worktree_opened_for_workspace(&mut self, ws_idx: usize, already_open: bool) {
+        let Some(worktree) = self.worktree_info_for_workspace(ws_idx) else {
+            return;
+        };
+        self.emit_worktree_opened_event(ws_idx, worktree, already_open);
+    }
+
+    fn emit_worktree_opened_event(
+        &mut self,
+        ws_idx: usize,
+        worktree: WorktreeInfo,
+        already_open: bool,
+    ) {
         self.emit_event(EventEnvelope {
-            event: EventKind::TabCreated,
-            data: EventData::TabCreated { tab },
+            event: EventKind::WorktreeOpened,
+            data: EventData::WorktreeOpened {
+                workspace: self.workspace_info(ws_idx),
+                worktree,
+                already_open,
+            },
         });
+    }
+
+    pub(crate) fn emit_worktree_removed_event(
+        &mut self,
+        workspace_id: String,
+        workspace: Option<crate::api::schema::WorkspaceInfo>,
+        worktree: WorktreeInfo,
+        forced: bool,
+    ) {
         self.emit_event(EventEnvelope {
-            event: EventKind::PaneCreated,
-            data: EventData::PaneCreated { pane: root_pane },
+            event: EventKind::WorktreeRemoved,
+            data: EventData::WorktreeRemoved {
+                workspace_id,
+                workspace,
+                worktree,
+                forced,
+            },
         });
     }
 
@@ -1033,7 +1030,8 @@ mod tests {
                 .is_linked_worktree
         );
         assert!(workspace.worktree.unwrap().is_linked_worktree);
-        assert!(event_hub.events_after(0).iter().any(|(_, event)| {
+        let events = event_hub.events_after(0);
+        assert!(events.iter().any(|(_, event)| {
             matches!(
                 &event.data,
                 EventData::WorktreeCreated {
@@ -1044,6 +1042,26 @@ mod tests {
                     && event_worktree.is_linked_worktree
             )
         }));
+        let kinds = events
+            .iter()
+            .map(|(_, event)| event.event)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|event| **event == EventKind::WorktreeCreated)
+                .count(),
+            1
+        );
+        assert_eq!(
+            &kinds[kinds.len() - 4..],
+            &[
+                EventKind::WorkspaceCreated,
+                EventKind::TabCreated,
+                EventKind::PaneCreated,
+                EventKind::WorktreeCreated,
+            ]
+        );
 
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
@@ -1674,9 +1692,11 @@ mod tests {
                 &event.data,
                 EventData::WorktreeRemoved {
                     workspace_id,
+                    workspace: Some(workspace),
                     worktree,
                     forced,
                 } if workspace_id == &child_id
+                    && workspace.workspace_id == child_id
                     && worktree.branch.as_deref() == Some("worktree/api-remove-event")
                     && worktree.is_linked_worktree
                     && worktree.open_workspace_id.is_none()
