@@ -103,6 +103,18 @@ impl AgentPanelSortConfig {
     }
 }
 
+/// Border style used for the focused pane in a split layout. The focused pane
+/// always uses the accent color; this only controls the line weight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ActivePaneBorderConfig {
+    /// Heavy line weight (current default).
+    #[default]
+    Thick,
+    /// Regular line weight, matching unfocused panes but keeping the accent color.
+    Plain,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RightClickPassthroughModifierConfig(Option<KeyModifiers>);
 
@@ -448,6 +460,9 @@ pub struct UiConfig {
     pub show_agent_labels_on_pane_borders: bool,
     /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
     pub agent_panel_sort: AgentPanelSortConfig,
+    /// Border line weight for the focused split pane. "thick" (default) or "plain".
+    /// The focused pane keeps the accent color either way.
+    pub active_pane_border: ActivePaneBorderConfig,
     /// Accent color for highlights, borders, and navigation UI.
     /// Accepts hex (#89b4fa), named colors (cyan, blue), or RGB (rgb(137,180,250)).
     pub accent: String,
@@ -634,6 +649,7 @@ impl Default for UiConfig {
             prompt_new_tab_name: true,
             show_agent_labels_on_pane_borders: false,
             agent_panel_sort: AgentPanelSortConfig::Spaces,
+            active_pane_border: ActivePaneBorderConfig::Thick,
             accent: "cyan".into(),
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
@@ -836,6 +852,28 @@ agent_panel_scope = "current"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.ui.agent_panel_sort, AgentPanelSortConfig::Spaces);
+    }
+
+    #[test]
+    fn active_pane_border_defaults_to_thick_and_parses() {
+        assert_eq!(
+            Config::default().ui.active_pane_border,
+            ActivePaneBorderConfig::Thick
+        );
+
+        let toml = r#"
+[ui]
+active_pane_border = "plain"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.active_pane_border, ActivePaneBorderConfig::Plain);
+
+        let toml = r#"
+[ui]
+active_pane_border = "thick"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.active_pane_border, ActivePaneBorderConfig::Thick);
     }
 
     #[test]

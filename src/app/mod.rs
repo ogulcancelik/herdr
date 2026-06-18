@@ -219,6 +219,15 @@ fn agent_panel_sort_from_config(
     }
 }
 
+fn active_pane_border_from_config(
+    border: crate::config::ActivePaneBorderConfig,
+) -> state::ActivePaneBorderStyle {
+    match border {
+        crate::config::ActivePaneBorderConfig::Thick => state::ActivePaneBorderStyle::Thick,
+        crate::config::ActivePaneBorderConfig::Plain => state::ActivePaneBorderStyle::Plain,
+    }
+}
+
 /// Parse the configured agent name list into a deduplicated set of `Agent`
 /// values. Unknown agent names are silently dropped so a typo cannot disable
 /// other valid entries.
@@ -595,6 +604,7 @@ impl App {
             confirm_close: config.ui.confirm_close,
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
+            active_pane_border: active_pane_border_from_config(config.ui.active_pane_border),
             pane_history_persistence: config.experimental.pane_history,
             reveal_hidden_cursor_for_cjk_ime: config.experimental.reveal_hidden_cursor_for_cjk_ime,
             cjk_ime_agent_filter_configured: !config.experimental.cjk_ime_agents.is_empty(),
@@ -1321,6 +1331,8 @@ impl App {
                 self.state.prompt_new_tab_name = config.ui.prompt_new_tab_name;
                 self.state.show_agent_labels_on_pane_borders =
                     config.ui.show_agent_labels_on_pane_borders;
+                self.state.active_pane_border =
+                    active_pane_border_from_config(config.ui.active_pane_border);
                 self.state.agent_panel_sort =
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);
                 self.state.agent_panel_scroll = 0;
@@ -2180,6 +2192,20 @@ mod tests {
         let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
 
         assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Priority);
+    }
+
+    #[test]
+    fn startup_uses_configured_active_pane_border() {
+        let mut config = Config::default();
+        config.ui.active_pane_border = crate::config::ActivePaneBorderConfig::Plain;
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+
+        assert_eq!(
+            app.state.active_pane_border,
+            state::ActivePaneBorderStyle::Plain
+        );
     }
 
     #[test]

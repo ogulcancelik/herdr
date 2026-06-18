@@ -279,6 +279,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # "workspaces" is accepted as an alias for "spaces".
 # agent_panel_sort = "spaces"
 
+# Border line weight for the focused split pane: "thick" (default) or "plain".
+# The focused pane keeps the accent color either way; "plain" only drops the heavy glyphs.
+# active_pane_border = "thick"
+
 # Accent color for highlights, borders, and navigation UI.
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"

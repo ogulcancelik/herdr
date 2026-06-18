@@ -8,7 +8,7 @@ use ratatui::{
 
 use super::scrollbar::{render_pane_scrollbar, should_show_scrollbar};
 use super::widgets::panel_contrast_fg;
-use crate::app::state::Palette;
+use crate::app::state::{ActivePaneBorderStyle, Palette};
 use crate::app::{AppState, Mode};
 use crate::layout::PaneInfo;
 use crate::terminal::{TerminalRuntime, TerminalRuntimeRegistry};
@@ -256,10 +256,11 @@ pub(super) fn render_panes(
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
             if multi_pane {
                 let (border_style, border_set) = if info.is_focused && terminal_active {
-                    (
-                        Style::default().fg(app.palette.accent),
-                        ratatui::symbols::border::THICK,
-                    )
+                    let focused_set = match app.active_pane_border_style() {
+                        ActivePaneBorderStyle::Thick => ratatui::symbols::border::THICK,
+                        ActivePaneBorderStyle::Plain => ratatui::symbols::border::PLAIN,
+                    };
+                    (Style::default().fg(app.palette.accent), focused_set)
                 } else if info.is_focused {
                     (
                         Style::default().fg(app.palette.accent),

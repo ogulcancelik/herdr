@@ -18,8 +18,8 @@ pub use self::{
         IndexedKeybind, Keybinds, LiveKeybindConfig,
     },
     model::{
-        validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
-        ConfigReloadStatus, KeysConfig, NewTerminalCwdConfig, ShellModeConfig,
+        validated_sidebar_bounds, ActivePaneBorderConfig, AgentPanelSortConfig, Config,
+        ConfigReloadReport, ConfigReloadStatus, KeysConfig, NewTerminalCwdConfig, ShellModeConfig,
         ToastClipboardPosition, ToastConfig, ToastDelivery, ToastHerdrPosition,
         UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
     },

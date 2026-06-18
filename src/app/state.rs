@@ -839,6 +839,15 @@ pub enum AgentPanelSort {
     Priority,
 }
 
+/// Border line weight for the focused split pane. The focused pane always uses
+/// the accent color; this only selects the glyph set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ActivePaneBorderStyle {
+    #[default]
+    Thick,
+    Plain,
+}
+
 // ---------------------------------------------------------------------------
 // Settings UI state
 // ---------------------------------------------------------------------------
@@ -1351,6 +1360,7 @@ pub struct AppState {
     /// Ratio of sidebar height allocated to the workspaces section.
     pub sidebar_section_split: f32,
     pub agent_panel_sort: AgentPanelSort,
+    pub active_pane_border: ActivePaneBorderStyle,
     pub next_agent_state_change_seq: u64,
     /// Capture mouse input for Herdr's own mouse UI. When false, Herdr only
     /// captures mouse while the focused pane app requests mouse reporting.
@@ -1448,6 +1458,10 @@ impl AppState {
 
     pub fn agent_border_labels_enabled(&self) -> bool {
         self.show_agent_labels_on_pane_borders
+    }
+
+    pub fn active_pane_border_style(&self) -> ActivePaneBorderStyle {
+        self.active_pane_border
     }
 
     pub fn pane_history_persistence_enabled(&self) -> bool {
@@ -1707,6 +1721,7 @@ impl AppState {
             sidebar_collapsed: false,
             sidebar_section_split: 0.5,
             agent_panel_sort: AgentPanelSort::Spaces,
+            active_pane_border: ActivePaneBorderStyle::Thick,
             next_agent_state_change_seq: 0,
             mouse_capture: true,
             right_click_passthrough_modifiers: None,
