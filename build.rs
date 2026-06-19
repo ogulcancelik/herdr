@@ -57,6 +57,15 @@ fn main() {
         .trim()
         .to_string();
 
+    // Install into an optimize-specific prefix instead of the default `zig-out`.
+    // A bare `zig build` in the vendored tree defaults to `-Doptimize=Debug`,
+    // which turns on libghostty-vt's `slow_runtime_safety` page-integrity checks
+    // (see vendor/libghostty-vt/src/build_config.zig). Those checks are O(n) per
+    // terminal write and make heavy output pathologically slow. If such a Debug
+    // build populated the shared `zig-out/lib`, this release build would silently
+    // link it. Keying the prefix on the optimize mode means a stray default
+    // `zig-out` can never be linked into a build of a different mode.
+    let prefix = vendored_dir.join("zig-out").join(&optimize);
     let zig = env::var("ZIG").unwrap_or_else(|_| "zig".into());
     let mut command = Command::new(zig);
     command
@@ -66,7 +75,9 @@ fn main() {
         .arg(format!("-Dsimd={simd}"))
         .arg(format!("-Dtarget={zig_target}"))
         .arg(format!("-Dversion-string={version_string}"))
-        .arg("-Demit-xcframework=false");
+        .arg("-Demit-xcframework=false")
+        .arg("--prefix")
+        .arg(&prefix);
     if let Ok(system_dir) = env::var("LIBGHOSTTY_VT_ZIG_SYSTEM_DIR") {
         command.arg("--system").arg(system_dir);
     }
@@ -80,7 +91,7 @@ fn main() {
         "zig build for vendored libghostty-vt failed: {status}"
     );
 
-    let lib_dir = vendored_dir.join("zig-out/lib");
+    let lib_dir = prefix.join("lib");
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     if target.contains("apple-darwin") {
         let static_lib = lib_dir.join("libghostty-vt.a");
