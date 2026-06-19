@@ -1,6 +1,8 @@
 //! Pure state mutations on AppState.
 //! These don't need channels, async, or PTY runtime.
 
+use std::path::{Path, PathBuf};
+
 use tracing::{info, warn};
 
 use crate::detect::{Agent, AgentState};
@@ -1986,6 +1988,39 @@ impl AppState {
         url_at_column(&row_text, col).map(str::to_owned)
     }
 
+    pub(crate) fn source_path_at_pane_cell(
+        &self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        pane_id: crate::layout::PaneId,
+        viewport_row: u16,
+        col: u16,
+    ) -> Option<SourcePathTarget> {
+        let ws_idx = self
+            .active
+            .filter(|idx| self.workspaces.get(*idx).is_some())?;
+        let ws = self.workspaces.get(ws_idx)?;
+        let info = self.pane_info_by_id(pane_id)?;
+        if viewport_row >= info.inner_rect.height || col >= info.inner_rect.width {
+            return None;
+        }
+
+        let rt = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, pane_id)?;
+        let metrics = self.pane_scroll_metrics(terminal_runtimes, pane_id);
+        let row_selection = Selection::range(
+            pane_id,
+            viewport_row,
+            0,
+            info.inner_rect.width.saturating_sub(1),
+            metrics,
+        );
+        let row_text = rt.extract_selection(&row_selection)?;
+        let cwd = ws
+            .active_tab()
+            .and_then(|tab| tab.cwd_for_pane(pane_id, &self.terminals, terminal_runtimes))
+            .or_else(|| ws.resolved_identity_cwd_from(&self.terminals, terminal_runtimes))?;
+        source_path_at_column(&row_text, col, &cwd)
+    }
+
     pub fn copy_selection(&mut self, terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry) {
         let mut sel = match self.selection.take() {
             Some(sel) => sel,
@@ -2068,6 +2103,82 @@ pub(crate) fn url_at_column(row: &str, col: u16) -> Option<&str> {
     let start_byte = byte_index_for_cell(row, span.start);
     let end_byte = byte_index_after_cell(row, span.end);
     safe_web_url(row.get(start_byte..end_byte)?)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SourcePathTarget {
+    pub path: PathBuf,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+}
+
+pub(crate) fn source_path_at_column(row: &str, col: u16, cwd: &Path) -> Option<SourcePathTarget> {
+    let cells = text_cells(row);
+    let clicked_idx = cell_index_at_column(&cells, col)?;
+    let span = quoted_path_span_at_column(&cells, clicked_idx)
+        .or_else(|| source_path_token_span_at_column(&cells, clicked_idx))?;
+    let start_byte = byte_index_for_cell(row, span.start);
+    let end_byte = byte_index_after_cell(row, span.end);
+    let raw = row.get(start_byte..end_byte)?;
+    parse_source_path_target(raw, cwd)
+}
+
+fn source_path_token_span_at_column(cells: &[TextCell], clicked_idx: usize) -> Option<CellSpan> {
+    let mut span = token_span_at_column(cells, clicked_idx)?;
+    while span.start > 0 && cells[span.start - 1].ch == '.' {
+        span.start -= 1;
+    }
+    Some(span)
+}
+
+fn parse_source_path_target(raw: &str, cwd: &Path) -> Option<SourcePathTarget> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.starts_with("http://") || raw.starts_with("https://") {
+        return None;
+    }
+    let raw = raw.strip_prefix("file://").unwrap_or(raw);
+    let raw = raw.strip_prefix("b/").or_else(|| raw.strip_prefix("a/")).unwrap_or(raw);
+    let (path_part, line, column) = split_source_location(raw);
+    if !looks_like_source_path(path_part) {
+        return None;
+    }
+    let path = PathBuf::from(path_part);
+    let resolved = if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    };
+    resolved.is_file().then_some(SourcePathTarget {
+        path: resolved,
+        line,
+        column,
+    })
+}
+
+fn split_source_location(raw: &str) -> (&str, Option<u32>, Option<u32>) {
+    let Some((path_and_line, column_text)) = raw.rsplit_once(':') else {
+        return (raw, None, None);
+    };
+    let Ok(column) = column_text.parse::<u32>() else {
+        return (raw, None, None);
+    };
+    let Some((path_text, line_text)) = path_and_line.rsplit_once(':') else {
+        return (path_and_line, Some(column), None);
+    };
+    match line_text.parse::<u32>() {
+        Ok(line) => (path_text, Some(line), Some(column)),
+        Err(_) => (path_and_line, Some(column), None),
+    }
+}
+
+fn looks_like_source_path(path: &str) -> bool {
+    if path.is_empty() || path.contains('\0') {
+        return false;
+    }
+    path.starts_with('/')
+        || path.starts_with("./")
+        || path.starts_with("../")
+        || path.contains('/')
 }
 
 fn token_span_at_column(cells: &[TextCell], clicked_idx: usize) -> Option<CellSpan> {
@@ -2966,6 +3077,14 @@ mod tests {
         url_at_column(row, col_of(row, click))
     }
 
+    fn unique_temp_dir(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}", std::process::id()))
+    }
+
     fn text_in_cell_range(row: &str, start_col: u16, end_col: u16) -> String {
         text_cells(row)
             .into_iter()
@@ -3132,6 +3251,36 @@ mod tests {
         ] {
             assert_selects_nothing(row, click);
         }
+    }
+
+    #[test]
+    fn source_path_click_resolves_existing_relative_file_with_line_column() {
+        let dir = unique_temp_dir("source-path-click");
+        let source_dir = dir.join("src/app");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let file = source_dir.join("actions.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+
+        let row = "modified src/app/actions.rs:42:7";
+        let target =
+            source_path_at_column(row, col_of(row, "actions"), &dir).expect("source path");
+
+        assert_eq!(target.path, file);
+        assert_eq!(target.line, Some(42));
+        assert_eq!(target.column, Some(7));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn source_path_click_ignores_missing_files() {
+        let dir = unique_temp_dir("missing-source-path-click");
+        std::fs::create_dir_all(&dir).unwrap();
+        let row = "modified src/app/missing.rs:42";
+
+        assert_eq!(source_path_at_column(row, col_of(row, "missing"), &dir), None);
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

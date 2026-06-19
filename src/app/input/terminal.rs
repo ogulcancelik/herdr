@@ -578,6 +578,43 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ctrl_click_existing_source_path_opens_editor_pane() {
+        let source_path = unique_temp_path("source-click.rs");
+        std::fs::write(&source_path, "fn main() {}\n").unwrap();
+        let output_path = unique_temp_path("source-click-output");
+        let line = format!("modified {}:42:7", source_path.display());
+        let (mut app, info) = app_with_screen_bytes(line.as_bytes());
+        let col = line.find("source-click").expect("path segment") as u16;
+
+        let previous_editor = std::env::var_os("EDITOR");
+        std::env::set_var(
+            "EDITOR",
+            format!(
+                "sh -c 'printf \"%s|%s\" \"$1\" \"$2\" > {}' sh",
+                output_path.display()
+            ),
+        );
+        app.handle_mouse(modified_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            info.inner_rect.x + col,
+            info.inner_rect.y,
+            KeyModifiers::CONTROL,
+        ));
+        match previous_editor {
+            Some(value) => std::env::set_var("EDITOR", value),
+            None => std::env::remove_var("EDITOR"),
+        }
+
+        let output = wait_for_file(&output_path);
+        assert_eq!(output, format!("+42|{}", source_path.display()));
+        assert!(app.state.workspaces[0].tabs[0].zoomed);
+
+        let _ = std::fs::remove_file(source_path);
+        let _ = std::fs::remove_file(output_path);
+    }
+
     #[tokio::test]
     async fn double_click_highlight_clears_after_short_delay() {
         let (mut app, info) = app_with_screen_bytes(b"copied");

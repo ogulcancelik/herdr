@@ -323,25 +323,91 @@ impl App {
         };
         let viewport_row = mouse.row.saturating_sub(info.inner_rect.y);
         let col = mouse.column.saturating_sub(info.inner_rect.x);
-        let Some(url) =
+        if let Some(url) =
             self.state
                 .url_at_pane_cell(&self.terminal_runtimes, info.id, viewport_row, col)
+        {
+            self.last_pane_click = None;
+            match self.invoke_plugin_link_handler_for_url(&url, info.id) {
+                Ok(true) => return true,
+                Ok(false) => {}
+                Err(err) => {
+                    tracing::warn!(err = %err, url = %url, "failed to invoke plugin link handler");
+                }
+            }
+            if let Err(err) = crate::platform::open_url(&url) {
+                tracing::warn!(err = %err, url = %url, "failed to open pane URL");
+            }
+            return true;
+        }
+
+        let Some(target) =
+            self.state
+                .source_path_at_pane_cell(&self.terminal_runtimes, info.id, viewport_row, col)
         else {
             return false;
         };
 
         self.last_pane_click = None;
-        match self.invoke_plugin_link_handler_for_url(&url, info.id) {
-            Ok(true) => return true,
-            Ok(false) => {}
-            Err(err) => {
-                tracing::warn!(err = %err, url = %url, "failed to invoke plugin link handler");
-            }
-        }
-        if let Err(err) = crate::platform::open_url(&url) {
-            tracing::warn!(err = %err, url = %url, "failed to open pane URL");
+        if let Err(err) = self.open_source_path_in_editor(target) {
+            tracing::warn!(err = %err, "failed to open source path");
         }
         true
+    }
+
+    fn open_source_path_in_editor(
+        &mut self,
+        target: crate::app::actions::SourcePathTarget,
+    ) -> std::io::Result<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = target;
+            return Err(std::io::Error::other(
+                "opening source paths from pane output is only supported on Unix",
+            ));
+        }
+
+        #[cfg(unix)]
+        {
+            let mut location = target.path.display().to_string();
+            if let Some(line) = target.line {
+                location.push(':');
+                location.push_str(&line.to_string());
+                if let Some(column) = target.column {
+                    location.push(':');
+                    location.push_str(&column.to_string());
+                }
+            }
+            let mut env = vec![
+                (
+                    "HERDR_CLICKED_FILE".to_string(),
+                    target.path.display().to_string(),
+                ),
+                ("HERDR_CLICKED_LOCATION".to_string(), location.clone()),
+            ];
+            if let Some(line) = target.line {
+                env.push(("HERDR_CLICKED_LINE".to_string(), line.to_string()));
+            }
+            if let Some(column) = target.column {
+                env.push(("HERDR_CLICKED_COLUMN".to_string(), column.to_string()));
+            }
+            let command = r#"editor=${EDITOR:-vi}
+if [ -n "${HERDR_CLICKED_LINE:-}" ]; then
+  case "$editor" in
+    *code*|*cursor*) eval "$editor --goto \"\$HERDR_CLICKED_LOCATION\"" ;;
+    *) eval "$editor +\"\$HERDR_CLICKED_LINE\" \"\$HERDR_CLICKED_FILE\"" ;;
+  esac
+else
+  eval "$editor \"\$HERDR_CLICKED_FILE\""
+fi"#;
+            self.spawn_overlay_argv_command(
+                &["/bin/sh".into(), "-lc".into(), command.into()],
+                target.path.parent().map(std::path::Path::to_path_buf),
+                env,
+                Vec::new(),
+            )
+            .map(|_| ())
+        }
     }
 
     fn handle_pane_double_click(&mut self, mouse: MouseEvent) -> bool {
