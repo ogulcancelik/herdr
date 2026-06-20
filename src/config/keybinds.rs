@@ -276,6 +276,7 @@ pub struct Keybinds {
     pub open_notification_target: ActionKeybinds,
     pub previous_workspace: ActionKeybinds,
     pub next_workspace: ActionKeybinds,
+    pub last_workspace: ActionKeybinds,
     pub previous_agent: ActionKeybinds,
     pub next_agent: ActionKeybinds,
     pub focus_agent: Vec<IndexedKeybind>,
@@ -459,6 +460,7 @@ impl Config {
             ),
             previous_workspace: action!("keys.previous_workspace", &self.keys.previous_workspace),
             next_workspace: action!("keys.next_workspace", &self.keys.next_workspace),
+            last_workspace: action!("keys.last_workspace", &self.keys.last_workspace),
             previous_agent: action!("keys.previous_agent", &self.keys.previous_agent),
             next_agent: action!("keys.next_agent", &self.keys.next_agent),
             focus_agent: indexed!("keys.focus_agent", &self.keys.focus_agent),
@@ -1339,6 +1341,7 @@ next_tab = "prefix+n"
     fn back_and_forth_keybinds_are_unset_by_default() {
         let kb = Config::default().keybinds();
         assert!(kb.last_pane.bindings.is_empty());
+        assert!(kb.last_workspace.bindings.is_empty());
     }
 
     #[test]

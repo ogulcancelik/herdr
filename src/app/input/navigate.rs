@@ -579,6 +579,7 @@ pub(crate) enum NavigateAction {
     WorkspacePicker,
     PreviousWorkspace,
     NextWorkspace,
+    LastWorkspace,
     PreviousAgent,
     NextAgent,
     NewTab,
@@ -683,6 +684,7 @@ fn action_for_key(
         (&kb.close_workspace, NavigateAction::CloseWorkspace),
         (&kb.previous_workspace, NavigateAction::PreviousWorkspace),
         (&kb.next_workspace, NavigateAction::NextWorkspace),
+        (&kb.last_workspace, NavigateAction::LastWorkspace),
         (&kb.previous_agent, NavigateAction::PreviousAgent),
         (&kb.next_agent, NavigateAction::NextAgent),
         (&kb.new_tab, NavigateAction::NewTab),
@@ -831,6 +833,10 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::NextWorkspace => {
             state.next_workspace();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::LastWorkspace => {
+            state.last_workspace();
             leave_navigate_mode(state);
         }
         NavigateAction::PreviousAgent => {
@@ -1644,6 +1650,19 @@ navigate_pane_right = "ctrl+l"
         );
 
         assert_eq!(action, Some(NavigateAction::LastPane));
+    }
+
+    #[test]
+    fn terminal_direct_last_workspace_shortcut_maps_to_navigation_action() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.last_workspace = crate::config::ActionKeybinds::direct("alt+w");
+
+        let action = terminal_direct_navigation_action(
+            &state,
+            TerminalKey::new(KeyCode::Char('w'), KeyModifiers::ALT),
+        );
+
+        assert_eq!(action, Some(NavigateAction::LastWorkspace));
     }
 
     #[test]

@@ -814,6 +814,8 @@ impl App {
 
         let mut closed_workspace_id = None;
         if source_workspace_empty && cross_workspace {
+            self.state
+                .clear_workspace_focus_history_if_removed(&previous_workspace_id);
             self.state.workspaces.remove(source_ws_idx);
             closed_workspace_id = Some(previous_workspace_id.clone());
             if self.state.workspaces.is_empty() {

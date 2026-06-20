@@ -292,6 +292,41 @@ impl AppState {
         }
     }
 
+    fn active_workspace_id(&self) -> Option<String> {
+        self.active
+            .and_then(|idx| self.workspaces.get(idx))
+            .map(|workspace| workspace.id.clone())
+    }
+
+    fn workspace_index_by_id(&self, workspace_id: &str) -> Option<usize> {
+        self.workspaces
+            .iter()
+            .position(|workspace| workspace.id == workspace_id)
+    }
+
+    fn record_workspace_focus_after_navigation(&mut self, previous: Option<String>) {
+        if previous != self.active_workspace_id() {
+            self.last_workspace_id = previous;
+        }
+    }
+
+    fn clear_last_workspace_if_removed(&mut self, workspace_id: &str) {
+        if self.last_workspace_id.as_deref() == Some(workspace_id) {
+            self.last_workspace_id = None;
+        }
+    }
+
+    pub(crate) fn clear_workspace_focus_history_if_removed(&mut self, workspace_id: &str) {
+        self.clear_last_workspace_if_removed(workspace_id);
+        if self
+            .previous_pane_focus
+            .as_ref()
+            .is_some_and(|focus| focus.workspace_id == workspace_id)
+        {
+            self.previous_pane_focus = None;
+        }
+    }
+
     pub(crate) fn focus_pane_in_workspace(&mut self, ws_idx: usize, pane_id: PaneId) -> bool {
         let Some(ws) = self.workspaces.get(ws_idx) else {
             return false;
@@ -944,6 +979,7 @@ impl AppState {
     pub fn switch_workspace(&mut self, idx: usize) {
         if idx < self.workspaces.len() {
             let previous_focus = self.current_pane_focus_target();
+            let previous_workspace = self.active_workspace_id();
             self.selection = None;
             self.selection_autoscroll = None;
             self.active = Some(idx);
@@ -961,6 +997,7 @@ impl AppState {
             }
             self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
+            self.record_workspace_focus_after_navigation(previous_workspace);
             self.record_pane_focus_after_navigation(previous_focus);
         }
     }
@@ -978,6 +1015,7 @@ impl AppState {
         }
 
         let previous_focus = self.current_pane_focus_target();
+        let previous_workspace = self.active_workspace_id();
         let workspace_changed = self.active != Some(ws_idx);
         self.selection = None;
         self.selection_autoscroll = None;
@@ -997,6 +1035,7 @@ impl AppState {
         }
         self.tab_scroll_follow_active = true;
         self.refresh_tab_bar_view();
+        self.record_workspace_focus_after_navigation(previous_workspace);
         self.record_pane_focus_after_navigation(previous_focus);
         true
     }
@@ -1181,6 +1220,22 @@ impl AppState {
             order[current_pos - 1]
         };
         self.switch_workspace(prev);
+    }
+
+    pub fn last_workspace(&mut self) {
+        let Some(workspace_id) = self.last_workspace_id.clone() else {
+            return;
+        };
+        let Some(ws_idx) = self.workspace_index_by_id(&workspace_id) else {
+            self.last_workspace_id = None;
+            return;
+        };
+        if self.active_workspace_id().as_deref() == Some(workspace_id.as_str()) {
+            self.last_workspace_id = None;
+            return;
+        }
+
+        self.switch_workspace(ws_idx);
     }
 
     pub fn move_workspace(&mut self, source_idx: usize, insert_idx: usize) {
@@ -1452,6 +1507,7 @@ impl AppState {
             pane_ids.extend(self.pane_ids_for_workspace(*idx));
             if let Some(workspace_id) = self.workspaces.get(*idx).map(|ws| ws.id.clone()) {
                 crate::logging::workspace_closed(&workspace_id);
+                self.clear_workspace_focus_history_if_removed(&workspace_id);
             }
         }
         self.remove_plugin_pane_records(pane_ids);
@@ -2876,6 +2932,9 @@ impl AppState {
         self.mark_session_dirty();
 
         if should_close_workspace {
+            if let Some(workspace_id) = self.workspaces.get(ws_idx).map(|ws| ws.id.clone()) {
+                self.clear_workspace_focus_history_if_removed(&workspace_id);
+            }
             self.workspaces.remove(ws_idx);
             self.remove_unattached_terminal_ids(workspace_terminal_ids);
             if self.workspaces.is_empty() {
@@ -3729,6 +3788,67 @@ mod tests {
         state.switch_workspace(2);
         assert_eq!(state.active, Some(2));
         assert_eq!(state.selected, 2);
+    }
+
+    #[test]
+    fn last_workspace_toggles_between_recent_workspaces() {
+        let mut state = app_with_workspaces(&["a", "b", "c"]);
+
+        state.switch_workspace(1);
+        state.last_workspace();
+
+        assert_eq!(state.active, Some(0));
+
+        state.last_workspace();
+
+        assert_eq!(state.active, Some(1));
+    }
+
+    #[test]
+    fn last_workspace_without_history_is_noop() {
+        let mut state = app_with_workspaces(&["a", "b"]);
+
+        state.last_workspace();
+
+        assert_eq!(state.active, Some(0));
+    }
+
+    #[test]
+    fn last_workspace_survives_workspace_reorder_by_id() {
+        let mut state = app_with_workspaces(&["a", "b", "c"]);
+        let first_id = state.workspaces[0].id.clone();
+
+        state.switch_workspace(2);
+        state.move_workspace(0, state.workspaces.len());
+        state.last_workspace();
+
+        assert_eq!(state.workspaces[state.active.unwrap()].id, first_id);
+    }
+
+    #[test]
+    fn last_workspace_clears_closed_target() {
+        let mut state = app_with_workspaces(&["a", "b", "c"]);
+
+        state.switch_workspace(1);
+        state.selected = 0;
+        state.close_selected_workspace();
+        state.last_workspace();
+
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.workspaces[0].display_name(), "b");
+        assert_eq!(state.last_workspace_id, None);
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn last_workspace_tracks_switch_workspace_tab_changes() {
+        let mut state = app_with_workspaces(&["a", "b"]);
+        let second_tab = state.workspaces[1].test_add_tab(Some("logs"));
+
+        assert!(state.switch_workspace_tab(1, second_tab));
+        state.last_workspace();
+
+        assert_eq!(state.active, Some(0));
     }
 
     #[test]

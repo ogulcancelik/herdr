@@ -500,6 +500,7 @@ impl App {
             workspaces,
             active,
             previous_pane_focus: None,
+            last_workspace_id: None,
             selected,
             mode,
             should_quit: false,

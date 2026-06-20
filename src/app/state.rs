@@ -1272,6 +1272,7 @@ pub struct AppState {
     pub workspaces: Vec<Workspace>,
     pub active: Option<usize>,
     pub(crate) previous_pane_focus: Option<PaneFocusTarget>,
+    pub(crate) last_workspace_id: Option<String>,
     pub selected: usize,
     pub mode: Mode,
     pub should_quit: bool,
@@ -1626,6 +1627,7 @@ impl AppState {
             workspaces: Vec::new(),
             active: None,
             previous_pane_focus: None,
+            last_workspace_id: None,
             selected: 0,
             mode: Mode::Navigate,
             should_quit: false,
@@ -1823,6 +1825,10 @@ impl AppState {
                 "empty app state must not keep previous pane focus"
             );
             assert!(
+                self.last_workspace_id.is_none(),
+                "empty app state must not keep last workspace"
+            );
+            assert!(
                 self.plugin_panes.is_empty(),
                 "empty app state must not keep plugin pane records"
             );
@@ -1973,6 +1979,12 @@ impl AppState {
         }
         if let Some(focus) = &self.previous_pane_focus {
             assert_workspace_pane(&focus.workspace_id, focus.pane_id, "previous pane focus");
+        }
+        if let Some(workspace_id) = &self.last_workspace_id {
+            assert!(
+                workspace_id_to_idx.contains_key(workspace_id),
+                "last workspace references missing workspace {workspace_id}"
+            );
         }
         if let Some(toast) = &self.toast {
             if let Some(target) = &toast.target {

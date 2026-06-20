@@ -190,11 +190,14 @@ Optional actions are unset by default. Bind them with `prefix+` for prefix-mode 
 [keys]
 previous_workspace = "prefix+shift+left"
 next_workspace = "prefix+shift+right"
+last_workspace = "prefix+alt+w"
 last_pane = "prefix+tab"
 open_worktree = "prefix+shift+o"
 remove_worktree = "prefix+alt+d"
 next_tab = ["prefix+n", "ctrl+alt+]"]
 ```
+
+`last_workspace` toggles back to the last focused workspace by workspace id, so it survives reordering and no-ops if that workspace was closed. It is unset by default.
 
 `last_pane` switches back to the last focused pane across workspaces and tabs. It is unset by default because the tmux-style pane binding `prefix+l` is already used for pane-right focus.
 
