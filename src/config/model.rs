@@ -312,6 +312,8 @@ pub struct KeysConfig {
     pub workspace_picker: BindingConfig,
     /// Open the session navigator. Default: "prefix+g"
     pub goto: BindingConfig,
+    /// Confirm the selected item in the navigator modal. Enter is the default. Unset disables the binding.
+    pub navigator_confirm: BindingConfig,
     /// Move workspace selection up in navigate mode. Default: "up".
     pub navigate_workspace_up: BindingConfig,
     /// Move workspace selection down in navigate mode. Default: "down".
@@ -567,6 +569,7 @@ impl Default for KeysConfig {
             close_workspace: BindingConfig::one("prefix+shift+d"),
             workspace_picker: BindingConfig::one("prefix+w"),
             goto: BindingConfig::one("prefix+g"),
+            navigator_confirm: BindingConfig::one("enter"),
             navigate_workspace_up: BindingConfig::one("up"),
             navigate_workspace_down: BindingConfig::one("down"),
             navigate_pane_left: BindingConfig::one("h"),

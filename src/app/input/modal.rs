@@ -211,7 +211,11 @@ pub(crate) fn handle_navigator_key(
                 state.clamp_navigator_selection_from(terminal_runtimes);
             }
         }
-        KeyCode::Enter => {
+        _ if state
+            .keybinds
+            .navigator_confirm
+            .matches_direct_key(TerminalKey::from(key)) =>
+        {
             state.accept_navigator_selection_from(terminal_runtimes);
         }
         KeyCode::Char('/') => {

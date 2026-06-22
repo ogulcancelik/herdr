@@ -271,6 +271,7 @@ pub struct Keybinds {
     pub close_workspace: ActionKeybinds,
     pub workspace_picker: ActionKeybinds,
     pub goto: ActionKeybinds,
+    pub navigator_confirm: ActionKeybinds,
     pub detach: ActionKeybinds,
     pub reload_config: ActionKeybinds,
     pub open_notification_target: ActionKeybinds,
@@ -390,6 +391,8 @@ impl Config {
         let mut navigate_registry = BindingRegistry::new(prefix);
         navigate_registry.reserve_direct(prefix, "keys.prefix");
         reserve_navigate_runtime_keys(&mut navigate_registry);
+        let mut navigator_registry = BindingRegistry::new(prefix);
+        reserve_navigator_runtime_keys(&mut navigator_registry);
 
         macro_rules! action {
             ($field:literal, $config:expr) => {
@@ -451,6 +454,12 @@ impl Config {
             close_workspace: action!("keys.close_workspace", &self.keys.close_workspace),
             workspace_picker: action!("keys.workspace_picker", &self.keys.workspace_picker),
             goto: action!("keys.goto", &self.keys.goto),
+            navigator_confirm: parse_navigate_bindings(
+                "keys.navigator_confirm",
+                &self.keys.navigator_confirm,
+                &mut navigator_registry,
+                &mut diagnostics,
+            ),
             detach: action!("keys.detach", &self.keys.detach),
             reload_config: action!("keys.reload_config", &self.keys.reload_config),
             open_notification_target: action!(
@@ -577,6 +586,30 @@ fn reserve_navigate_runtime_keys(registry: &mut BindingRegistry) {
             (KeyCode::Char(idx), KeyModifiers::empty()),
             "navigate reserved keys",
         );
+    }
+}
+
+fn reserve_navigator_runtime_keys(registry: &mut BindingRegistry) {
+    for combo in [
+        (KeyCode::Esc, KeyModifiers::empty()),
+        (KeyCode::Char('/'), KeyModifiers::empty()),
+        (KeyCode::Char(' '), KeyModifiers::empty()),
+        (KeyCode::Char('j'), KeyModifiers::empty()),
+        (KeyCode::Char('k'), KeyModifiers::empty()),
+        (KeyCode::Char('a'), KeyModifiers::empty()),
+        (KeyCode::Char('b'), KeyModifiers::empty()),
+        (KeyCode::Char('w'), KeyModifiers::empty()),
+        (KeyCode::Char('i'), KeyModifiers::empty()),
+        (KeyCode::Char('d'), KeyModifiers::empty()),
+        (KeyCode::Char('d'), KeyModifiers::CONTROL),
+        (KeyCode::Char('u'), KeyModifiers::CONTROL),
+        (KeyCode::Up, KeyModifiers::empty()),
+        (KeyCode::Down, KeyModifiers::empty()),
+        (KeyCode::Home, KeyModifiers::empty()),
+        (KeyCode::End, KeyModifiers::empty()),
+        (KeyCode::Backspace, KeyModifiers::empty()),
+    ] {
+        registry.reserve_direct(combo, "navigator reserved keys");
     }
 }
 
