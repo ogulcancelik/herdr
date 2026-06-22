@@ -399,13 +399,11 @@ fn render_pane_borders(app: &AppState, ws: &crate::workspace::Workspace, frame: 
         {
             continue;
         }
-        let focused_touching = app
+        let focused = app
             .view
             .pane_infos
             .iter()
             .any(|info| info.is_focused && line_touches_pane(x, y, info, app.pane_gaps));
-        let branch_cell = !app.pane_gaps && line_cell_degree(line) >= 3;
-        let focused = focused_touching && !branch_cell;
         let symbol = line_cell_symbol(line);
         if symbol.is_empty() {
             continue;
@@ -588,10 +586,6 @@ fn render_pane_border_titles(app: &AppState, ws: &crate::workspace::Workspace, f
             cell.set_style(style);
         }
     }
-}
-
-fn line_cell_degree(line: LineCell) -> u8 {
-    line.up as u8 + line.down as u8 + line.left as u8 + line.right as u8
 }
 
 fn line_cell_symbol(line: LineCell) -> &'static str {
@@ -994,7 +988,7 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(2, 2)].symbol(), "┼");
-        assert_eq!(buffer[(2, 2)].style().fg, Some(app.palette.overlay0));
+        assert_eq!(buffer[(2, 2)].style().fg, Some(app.palette.accent));
         assert_eq!(buffer[(2, 1)].symbol(), "│");
         assert_eq!(buffer[(2, 1)].style().fg, Some(app.palette.accent));
     }
