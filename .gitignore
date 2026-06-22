@@ -21,3 +21,5 @@ __pycache__/
 
 /.wrangler/
 **/.wrangler/
+tmp/
+zig

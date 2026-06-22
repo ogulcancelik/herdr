@@ -1,0 +1,53 @@
+id = "omp"
+version = "2026.06.23.5"
+min_engine_version = 2
+updated_at = "2026-06-23T00:00:00Z"
+aliases = ["oh-my-pi"]
+
+# Settings panel: freeze state while user navigates settings
+[[rules]]
+id = "settings_panel"
+state = "unknown"
+priority = 300
+region = "whole_recent"
+skip_state_update = true
+contains = ["╭─ Settings"]
+
+# Blocked: waiting for user selection/confirmation
+[[rules]]
+id = "blocked_prompt"
+state = "blocked"
+priority = 280
+region = "whole_recent"
+visible_blocker = true
+contains = ["up/down navigate", "enter select"]
+
+# Working: Braille spinner character anywhere on screen
+[[rules]]
+id = "spinner_working"
+state = "working"
+priority = 200
+region = "whole_recent"
+visible_working = true
+line_regex = ['^\s*[\x{2800}-\x{28FF}]']
+
+# Idle: prompt box visible, no spinner running
+[[rules]]
+id = "prompt_idle"
+state = "idle"
+priority = 100
+region = "whole_recent"
+visible_idle = true
+contains = ["$ …"]
+not = [
+  { line_regex = ['^\s*[\x{2800}-\x{28FF}]'] },
+]
+
+# Idle: welcome/logout screen (no prompt or spinner)
+[[rules]]
+id = "welcome_idle"
+state = "idle"
+priority = 50
+region = "whole_recent"
+visible_idle = true
+contains = ["Welcome back!"]
