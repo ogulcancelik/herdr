@@ -2,7 +2,7 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=omp
-// HERDR_INTEGRATION_VERSION=3
+// HERDR_INTEGRATION_VERSION=4
 // @ts-nocheck
 
 import { createConnection } from "node:net";
@@ -296,6 +296,10 @@ export default function (pi) {
     retryTimer.unref?.();
   }
 
+  // herdr:blocked is emitted by omp/Pi's built-in herdr integration.
+  // Not all omp-derived agents emit this custom event, so we also
+  // detect blocked state from tool_call/tool_result hooks as a fallback.
+  // The "ask" tool pauses execution to wait for user answers.
   pi.events.on("herdr:blocked", (data) => {
     if (!rootSession) {
       return;
@@ -313,6 +317,33 @@ export default function (pi) {
     blockedCount += 1;
     blockedMessage = data.label;
     publishState();
+  });
+
+  // Fallback: detect blocked state from tool calls that wait for user input.
+  // This covers omp-derived agents that don't emit herdr:blocked events.
+  pi.on("tool_call", (event) => {
+    if (!rootSession) {
+      return;
+    }
+    if (event?.toolName === "ask") {
+      clearPendingTimers();
+      blockedCount += 1;
+      blockedMessage = "waiting for input";
+      publishState();
+    }
+  });
+
+  pi.on("tool_result", (event) => {
+    if (!rootSession) {
+      return;
+    }
+    if (event?.toolName === "ask") {
+      blockedCount = Math.max(0, blockedCount - 1);
+      if (blockedCount === 0) {
+        blockedMessage = undefined;
+      }
+      publishState();
+    }
   });
 
   pi.on("session_start", (_event, ctx) => {
