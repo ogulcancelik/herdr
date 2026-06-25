@@ -120,7 +120,7 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
         "devin" | "devin-cli" | "devin cli" => Some(Agent::Devin),
         "agy" | "antigravity" | "antigravity-cli" => Some(Agent::Antigravity),
         "cline" => Some(Agent::Cline),
-        "omp" => Some(Agent::Omp),
+        "omp" | "omh" => Some(Agent::Omp),
         "opencode" | "open-code" => Some(Agent::OpenCode),
         "copilot" | "github-copilot" | "ghcs" => Some(Agent::GithubCopilot),
         "kimi" | "kimi-code" | "kimi code" => Some(Agent::Kimi),
@@ -149,7 +149,7 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
         "devin" | "devin-cli" | "devin cli" => Some(Agent::Devin),
         "agy" | "antigravity" | "antigravity-cli" => Some(Agent::Antigravity),
         "cline" => Some(Agent::Cline),
-        "omp" => Some(Agent::Omp),
+        "omp" | "omh" => Some(Agent::Omp),
         "opencode" | "open-code" => Some(Agent::OpenCode),
         "copilot" | "github-copilot" | "ghcs" => Some(Agent::GithubCopilot),
         "kimi" | "kimi-code" | "kimi code" => Some(Agent::Kimi),
@@ -494,6 +494,23 @@ fn agent_name_from_known_package_path(path: &str) -> Option<String> {
         {
             return Some(agent_label(Agent::Pi).to_string());
         }
+
+        // `omh` is an alternate launcher for `@oh-my-pi/pi-coding-agent` (the
+        // same package that ships the `omp` binary). It runs the source
+        // `dist/cli.js` via bun instead of the compiled bundle, so the process
+        // name is `bun` and the argv points here. Route it to `Agent::Omp` so
+        // it reuses omp's detection, resume, and integration paths.
+        if window
+            == [
+                "node_modules",
+                "@oh-my-pi",
+                "pi-coding-agent",
+                "dist",
+                "cli",
+            ]
+        {
+            return Some(agent_label(Agent::Omp).to_string());
+        }
     }
     None
 }
@@ -824,6 +841,42 @@ mod tests {
             identify_agent_in_job(&job),
             Some((Agent::Pi, "pi".to_string()))
         );
+    }
+
+    #[test]
+    fn identify_agent_in_job_detects_bun_wrapped_omh_package_cli() {
+        // `omh` is a shell shim that execs `bun <…>/node_modules/@oh-my-pi/
+        // pi-coding-agent/dist/cli.js`, i.e. the same agent as `omp` launched
+        // from source instead of the compiled bundle. The process name is
+        // `bun` (a generic runtime), so detection must route through the
+        // known package path and resolve to `Agent::Omp`.
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 123,
+            processes: vec![foreground_process(
+                123,
+                "bun",
+                &[
+                    "bun",
+                    "/Users/can/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js",
+                ],
+            )],
+        };
+
+        assert_eq!(
+            identify_agent_in_job(&job),
+            Some((Agent::Omp, "omp".to_string()))
+        );
+    }
+
+    #[test]
+    fn identify_agent_detects_omh_alias() {
+        assert_eq!(identify_agent("omh"), Some(Agent::Omp));
+        assert_eq!(identify_agent("OMH"), Some(Agent::Omp));
+    }
+
+    #[test]
+    fn parse_agent_label_detects_omh_alias() {
+        assert_eq!(parse_agent_label("omh"), Some(Agent::Omp));
     }
 
     #[test]
