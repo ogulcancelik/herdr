@@ -496,6 +496,9 @@ impl WindowsInputMapper {
         if !self.key_record_can_emit_event(key) {
             return Vec::new();
         }
+        if Self::key_record_is_modifier_only(key) {
+            return Vec::new();
+        }
 
         if key.virtual_key_code == 0 {
             if let Some((_bytes, event)) =
@@ -518,6 +521,13 @@ impl WindowsInputMapper {
 
     fn key_record_can_emit_event(&self, key: WindowsKeyRecord) -> bool {
         key.key_down || Self::is_alt_code(key) || key.virtual_key_code != 0
+    }
+
+    fn key_record_is_modifier_only(key: WindowsKeyRecord) -> bool {
+        matches!(
+            key.virtual_key_code,
+            0x10 | 0x11 | 0x12 | 0xa0 | 0xa1 | 0xa2 | 0xa3 | 0xa4 | 0xa5
+        ) && key.unicode == 0
     }
 
     fn is_alt_code(key: WindowsKeyRecord) -> bool {
@@ -1108,6 +1118,25 @@ mod tests {
                 kind: crate::protocol::ClientKeyKind::Press,
             }]
         );
+    }
+
+    #[test]
+    fn vti_modifier_only_key_records_do_not_emit_terminal_input() {
+        let modifier_records = [
+            key_vk_with_utf16_mods(0x11, 0, 0x0008),
+            key_vk_with_utf16_mods(0xa2, 0, 0x0008),
+            key_vk_with_utf16_mods(0xa3, 0, 0x0004),
+            key_vk_with_repeat(0x11, 3),
+        ];
+
+        assert!(translate(modifier_records).is_empty());
+    }
+
+    #[test]
+    fn vti_win32_input_mode_modifier_only_key_records_do_not_emit_terminal_input() {
+        let records = "\x1b[17;0;0;1;8;3_".chars().map(key_char);
+
+        assert!(translate(records).is_empty());
     }
 
     #[test]

@@ -1,35 +1,64 @@
 {
   "schema_version": 1,
   "channel": "preview",
-  "base_version": "0.7.0",
-  "build_id": "2026-06-22-24c7377de01c",
-  "commit": "24c7377de01c4f49e4c9a95761058252bfb53227",
-  "built_at": "2026-06-22T12:02:59Z",
+  "base_version": "0.7.1",
+  "build_id": "2026-06-25-7811d84f15f1",
+  "commit": "7811d84f15f1b2e41d68901d368791b15e0bf6c7",
+  "built_at": "2026-06-25T14:34:05Z",
   "protocol": 14,
-  "notes": "Preview build 2026-06-22-24c7377de01c\n\nBuilt from `24c7377de01c` on `master`.\nBase stable: v0.7.0\nCompare: https://github.com/ogulcancelik/herdr/compare/517ca8163f7c313bdeef565bdcb9b055ce05526c...24c7377de01c4f49e4c9a95761058252bfb53227\n\n### Added\n- Add plugin marketplace blacklist\n- Add plugin marketplace\n- Add background update check toggles\n- Sync theme with host appearance\n- Sort agent panel by priority\n\n### Fixed\n- Use active pane color for border intersections (#742)\n- Skip wide spacer cells in pane reads\n- Detect copilot ask_user accept prompt\n- Block idle client writer\n- Enable kitty file media\n- Check out existing branches for worktree create\n- Support devin hook on python 3.9\n- Release pi and omp agents on shutdown\n- Add configurable pane gaps\n- Protect root agent restore sessions\n- Preserve focus after temporary pane commands\n- Support agent env hints\n- Preserve windows terminal multiline paste\n- Defer api worktree operations\n- Reanchor lifecycle hook generations\n- Emit plugin lifecycle events from ui worktree flows\n- Scope image paste shortcut to remote\n- Handle cjk branch truncation\n- Isolate omp hook state to ui sessions\n- Restore omp sessions after same-pane restart\n- Satisfy windows clippy\n- Hold lone escape while awaiting host color reply\n- Stabilize flaky plugin capture tests and auto-trigger website deploy\n\n### Maintenance\n- Install bun in preview preflight\n- Skip named pipe timeout on windows\n- Add windows target lint to local check",
+  "notes": "Preview build 2026-06-25-7811d84f15f1\n\nBuilt from `7811d84f15f1` on `master`.\nBase stable: v0.7.1\nCompare: https://github.com/ogulcancelik/herdr/compare/v0.7.1...7811d84f15f1b2e41d68901d368791b15e0bf6c7\n\n### Fixed\n- Ignore modifier-only windows input\n- Render cjk pane border labels\n- Preserve alacritty input on windows\n- Detect antigravity background-task wait without /tasks hint",
   "assets": {
     "linux-x86_64": {
-      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-22-24c7377de01c/herdr-linux-x86_64",
-      "sha256": "c233227d6f883fe7841df43d50606faff6aa4eb5861f1057aafea447289ef49b"
+      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-25-7811d84f15f1/herdr-linux-x86_64",
+      "sha256": "b366db1c3aae2990b242d2ecfda1b903aa4638ce036fd4947be9c1cf210c82d6"
     },
     "linux-aarch64": {
-      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-22-24c7377de01c/herdr-linux-aarch64",
-      "sha256": "c8684d650e20e1b2adb62076a25dc5d6ecb2db72e128c19b52b97b6e91bf7778"
+      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-25-7811d84f15f1/herdr-linux-aarch64",
+      "sha256": "ad8c912720d8e2eb70bbf41505d76a46113dcf5f528eb4ba60d5e0af06548e87"
     },
     "macos-x86_64": {
-      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-22-24c7377de01c/herdr-macos-x86_64",
-      "sha256": "36dced19de4cbcfdd2d92a900a07e8c49d8fe239585ac3973f8d654f3a708534"
+      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-25-7811d84f15f1/herdr-macos-x86_64",
+      "sha256": "6ebecb5085f42a3adc88e9031d7567b274650f8d5fae6f1efa7a3d49e86119ab"
     },
     "macos-aarch64": {
-      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-22-24c7377de01c/herdr-macos-aarch64",
-      "sha256": "04988b316d53a0b153c368bed1a69d8adf1a219fab5c2db18c5b7c1358739f65"
+      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-25-7811d84f15f1/herdr-macos-aarch64",
+      "sha256": "6adb29e6fc129ac21a5f021b8410e6e9bdae9e7fc4342a3c0d602cc725a12dfe"
     },
     "windows-x86_64": {
-      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-22-24c7377de01c/herdr-windows-x86_64.exe",
-      "sha256": "9eb8b028d92770c0b0c39e8c5e3edd75a8ea8592473c4d1e4396e84d769a9781"
+      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-25-7811d84f15f1/herdr-windows-x86_64.exe",
+      "sha256": "6d45a5dacd471877b4c34ca4a6a33e3cd1e3ecf2adc72f1216eb15e6e7c5a0f6"
     }
   },
   "builds": {
+    "2026-06-25-7811d84f15f1": {
+      "base_version": "0.7.1",
+      "commit": "7811d84f15f1b2e41d68901d368791b15e0bf6c7",
+      "built_at": "2026-06-25T14:34:05Z",
+      "protocol": 14,
+      "tag": "preview-2026-06-25-7811d84f15f1",
+      "assets": {
+        "linux-x86_64": {
+          "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-25-7811d84f15f1/herdr-linux-x86_64",
+          "sha256": "b366db1c3aae2990b242d2ecfda1b903aa4638ce036fd4947be9c1cf210c82d6"
+        },
+        "linux-aarch64": {
+          "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-25-7811d84f15f1/herdr-linux-aarch64",
+          "sha256": "ad8c912720d8e2eb70bbf41505d76a46113dcf5f528eb4ba60d5e0af06548e87"
+        },
+        "macos-x86_64": {
+          "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-25-7811d84f15f1/herdr-macos-x86_64",
+          "sha256": "6ebecb5085f42a3adc88e9031d7567b274650f8d5fae6f1efa7a3d49e86119ab"
+        },
+        "macos-aarch64": {
+          "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-25-7811d84f15f1/herdr-macos-aarch64",
+          "sha256": "6adb29e6fc129ac21a5f021b8410e6e9bdae9e7fc4342a3c0d602cc725a12dfe"
+        },
+        "windows-x86_64": {
+          "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-25-7811d84f15f1/herdr-windows-x86_64.exe",
+          "sha256": "6d45a5dacd471877b4c34ca4a6a33e3cd1e3ecf2adc72f1216eb15e6e7c5a0f6"
+        }
+      }
+    },
     "2026-06-22-24c7377de01c": {
       "base_version": "0.7.0",
       "commit": "24c7377de01c4f49e4c9a95761058252bfb53227",

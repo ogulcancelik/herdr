@@ -5,6 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::scrollbar::{render_pane_scrollbar, should_show_scrollbar};
 use super::widgets::panel_contrast_fg;
@@ -19,8 +20,7 @@ pub(crate) fn pane_is_scrolled_back(rt: &TerminalRuntime) -> bool {
 }
 
 fn truncate_label(text: &str, max_width: usize) -> String {
-    let len = text.chars().count();
-    if len <= max_width {
+    if UnicodeWidthStr::width(text) <= max_width {
         return text.to_string();
     }
     if max_width == 0 {
@@ -29,7 +29,17 @@ fn truncate_label(text: &str, max_width: usize) -> String {
     if max_width == 1 {
         return "…".to_string();
     }
-    let prefix: String = text.chars().take(max_width.saturating_sub(1)).collect();
+    let mut prefix = String::new();
+    let mut width = 0;
+    let prefix_width = max_width.saturating_sub(1);
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width > prefix_width {
+            break;
+        }
+        prefix.push(ch);
+        width += ch_width;
+    }
     format!("{prefix}…")
 }
 
@@ -561,30 +571,32 @@ fn render_pane_border_titles(app: &AppState, ws: &crate::workspace::Workspace, f
         if y < area.y || y >= area.y.saturating_add(area.height) {
             continue;
         }
-        for (idx, ch) in title.chars().enumerate() {
-            let x = info.rect.x.saturating_add(1).saturating_add(idx as u16);
-            if x >= area.x.saturating_add(area.width)
-                || x >= info
-                    .rect
-                    .x
-                    .saturating_add(info.rect.width)
-                    .saturating_sub(1)
-            {
-                break;
-            }
-            let color = if info.is_focused {
-                app.palette.accent
-            } else {
-                app.palette.overlay0
-            };
-            let mut style = Style::default().fg(color);
-            if info.is_focused {
-                style = style.add_modifier(Modifier::BOLD);
-            }
-            let cell = &mut buf[(x, y)];
-            cell.set_symbol(&ch.to_string());
-            cell.set_style(style);
+        let start_x = info.rect.x.saturating_add(1);
+        let end_x = info
+            .rect
+            .x
+            .saturating_add(info.rect.width)
+            .saturating_sub(1)
+            .min(area.x.saturating_add(area.width));
+        if start_x >= end_x {
+            continue;
         }
+        let color = if info.is_focused {
+            app.palette.accent
+        } else {
+            app.palette.overlay0
+        };
+        let mut style = Style::default().fg(color);
+        if info.is_focused {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        buf.set_stringn(
+            start_x,
+            y,
+            title,
+            end_x.saturating_sub(start_x) as usize,
+            style,
+        );
     }
 }
 
@@ -801,6 +813,7 @@ mod tests {
     use crate::layout::PaneId;
     use crate::selection::Selection;
     use crate::terminal::TerminalRuntime;
+    use crate::terminal::TerminalState;
     use crate::workspace::Workspace;
 
     #[test]
@@ -823,6 +836,48 @@ mod tests {
             Some("▌ ab… ")
         );
         assert_eq!(pane_border_title("abcdef", 4, false), None);
+    }
+
+    #[test]
+    fn pane_border_title_truncates_cjk_by_display_width() {
+        let title = pane_border_title("1 模块组织（已定）", 12, false).unwrap();
+
+        assert_eq!(title, " 1 模块… ");
+        assert!(UnicodeWidthStr::width(title.as_str()) <= 10);
+    }
+
+    #[test]
+    fn pane_border_renderer_places_adjacent_cjk_by_display_width() {
+        let mut app = AppState::test_new();
+        app.mode = Mode::Terminal;
+        app.view.terminal_area = Rect::new(0, 0, 12, 3);
+        app.view.pane_infos = vec![PaneInfo {
+            id: PaneId::from_raw(1),
+            rect: Rect::new(0, 0, 12, 3),
+            inner_rect: Rect::default(),
+            scrollbar_rect: None,
+            borders: Borders::ALL,
+            is_focused: false,
+        }];
+
+        let ws = Workspace::test_new("test");
+        let terminal_id = ws.tabs[0].panes[&PaneId::from_raw(1)]
+            .attached_terminal_id
+            .clone();
+        let mut terminal_state = TerminalState::new(terminal_id.clone(), "/tmp".into());
+        terminal_state.set_manual_label("1 模块组织（已定）".into());
+        app.terminals.insert(terminal_id, terminal_state);
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(12, 3)).unwrap();
+        terminal
+            .draw(|frame| render_pane_borders(&app, &ws, frame))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(4, 0)].symbol(), "模");
+        assert_eq!(buffer[(5, 0)].symbol(), " ");
+        assert_eq!(buffer[(6, 0)].symbol(), "块");
     }
 
     #[test]
