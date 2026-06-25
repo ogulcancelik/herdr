@@ -15,7 +15,7 @@ const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/herdr-agent-state.ts");
 const PI_INTEGRATION_VERSION: u32 = 4;
 const OMP_EXTENSION_INSTALL_NAME: &str = "herdr-omp-agent-state.ts";
 const OMP_EXTENSION_ASSET: &str = include_str!("assets/omp/herdr-agent-state.ts");
-const OMP_INTEGRATION_VERSION: u32 = 3;
+const OMP_INTEGRATION_VERSION: u32 = 4;
 const PI_CODING_AGENT_DIR_ENV_VAR: &str = "PI_CODING_AGENT_DIR";
 const CLAUDE_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "herdr-agent-state.ps1"
@@ -6109,6 +6109,47 @@ mod tests {
         let publish_state = handler
             .find("publishState();")
             .expect("pi extension should publish working state after refreshing session");
+
+        assert!(update_session < report_session);
+        assert!(report_session < publish_state);
+    }
+
+    #[test]
+    fn omp_extension_releases_only_for_quit_session_shutdown() {
+        let release_policy = OMP_EXTENSION_ASSET
+            .find("function shouldReleaseOnSessionShutdown")
+            .expect("omp extension should centralize session shutdown release policy");
+        let quit_check = OMP_EXTENSION_ASSET
+            .find("reason === \"quit\"")
+            .expect("omp extension should release only for true quit shutdowns");
+        let shutdown_handler = OMP_EXTENSION_ASSET
+            .find("pi.on(\"session_shutdown\", async (event)")
+            .expect("omp extension should inspect the session_shutdown event");
+        let guarded_release = OMP_EXTENSION_ASSET[shutdown_handler..]
+            .find("if (shouldReleaseOnSessionShutdown(event))")
+            .expect("omp extension should guard releaseAgent by shutdown reason");
+
+        assert!(release_policy < shutdown_handler);
+        assert!(release_policy < quit_check);
+        assert!(quit_check < shutdown_handler);
+        assert!(guarded_release > 0);
+    }
+
+    #[test]
+    fn omp_extension_refreshes_session_ref_before_agent_start_state() {
+        let agent_start = OMP_EXTENSION_ASSET
+            .find("pi.on(\"agent_start\", (_event, ctx)")
+            .expect("omp extension should receive agent_start context");
+        let handler = &OMP_EXTENSION_ASSET[agent_start..];
+        let update_session = handler
+            .find("updateSessionRef(ctx);")
+            .expect("omp extension should refresh the active session on agent_start");
+        let report_session = handler
+            .find("void reportSession();")
+            .expect("omp extension should report the refreshed session before state");
+        let publish_state = handler
+            .find("publishState();")
+            .expect("omp extension should publish working state after refreshing session");
 
         assert!(update_session < report_session);
         assert!(report_session < publish_state);

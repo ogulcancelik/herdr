@@ -2,7 +2,7 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=omp
-// HERDR_INTEGRATION_VERSION=3
+// HERDR_INTEGRATION_VERSION=4
 // @ts-nocheck
 
 import { createConnection } from "node:net";
@@ -155,6 +155,16 @@ function releaseAgent(): Promise<void> {
       seq: nextReportSeq(),
     },
   });
+}
+
+function shouldReleaseOnSessionShutdown(event: any): boolean {
+  // OMP tears down and rebinds extension runtimes for internal lifecycle actions
+  // such as /reload, /new, /resume, and /fork. Those do not mean the pane's
+  // agent process has exited, and releasing hook authority there can suppress
+  // legitimate reports from the replacement runtime. Only a user/process quit
+  // should release Herdr's full-lifecycle authority.
+  const reason = event?.reason;
+  return reason === "quit";
 }
 
 let sendInFlight = false;
@@ -325,10 +335,12 @@ export default function (pi) {
     publishState(true);
   });
 
-  pi.on("agent_start", () => {
+  pi.on("agent_start", (_event, ctx) => {
     if (!rootSession) {
       return;
     }
+    updateSessionRef(ctx);
+    void reportSession();
     clearPendingTimers();
     clearFailureState();
     agentActive = true;
@@ -357,11 +369,13 @@ export default function (pi) {
     scheduleIdle();
   });
 
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (event) => {
     if (!rootSession) {
       return;
     }
     clearPendingTimers();
-    await releaseAgent();
+    if (shouldReleaseOnSessionShutdown(event)) {
+      await releaseAgent();
+    }
   });
 }
