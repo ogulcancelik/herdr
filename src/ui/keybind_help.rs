@@ -135,6 +135,10 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.edit_scrollback), "edit scrollback"),
         help_entry(keybind_label(&kb.copy_mode), "copy mode"),
         help_entry(keybind_label(&kb.zoom), "zoom pane"),
+        help_entry(
+            keybind_label(&kb.toggle_floating_pane),
+            "toggle floating pane",
+        ),
         help_entry(keybind_label(&kb.resize_mode), "resize mode"),
         help_entry(keybind_label(&kb.toggle_sidebar), "toggle sidebar"),
         help_entry(keybind_label(&kb.focus_pane_left), "focus pane left"),

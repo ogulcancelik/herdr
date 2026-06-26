@@ -401,6 +401,10 @@ impl App {
             self.last_pane_click = None;
             return None;
         };
+        if !mouse::rect_contains(info.inner_rect, mouse.column, mouse.row) {
+            self.last_pane_click = None;
+            return None;
+        }
 
         Some(PaneClickState {
             pane_id: info.id,

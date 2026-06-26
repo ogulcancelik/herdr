@@ -383,6 +383,24 @@ pub(crate) fn visible_hyperlinks(
     }
     links
 }
+/// The pane info that owns the host cursor: the focused floating pane (drawn
+/// on top) when one is focused, otherwise the focused tiled pane. Both the TUI
+/// and server render paths consider floating panes part of the focus chain, so
+/// the host cursor must follow them too.
+fn focused_pane_info_for_cursor(app_state: &AppState) -> Option<&crate::layout::PaneInfo> {
+    let focused_floating = app_state
+        .active
+        .and_then(|ws_idx| app_state.workspaces.get(ws_idx))
+        .and_then(|ws| ws.floating.focused);
+    if let Some(floating_id) = focused_floating {
+        return app_state
+            .view
+            .floating_pane_infos
+            .iter()
+            .find(|info| info.id == floating_id);
+    }
+    app_state.view.pane_infos.iter().find(|info| info.is_focused)
+}
 
 pub(crate) fn focused_terminal_cursor(
     app_state: &AppState,
@@ -393,11 +411,7 @@ pub(crate) fn focused_terminal_cursor(
     }
 
     let ws_idx = app_state.active?;
-    let info = app_state
-        .view
-        .pane_infos
-        .iter()
-        .find(|info| info.is_focused)?;
+    let info = focused_pane_info_for_cursor(app_state)?;
     if !app_state.pane_exposes_host_cursor(ws_idx, info.id) {
         return None;
     }
@@ -467,12 +481,7 @@ fn focused_terminal_owns_host_cursor(
     let Some(ws_idx) = app_state.active else {
         return false;
     };
-    let Some(info) = app_state
-        .view
-        .pane_infos
-        .iter()
-        .find(|info| info.is_focused)
-    else {
+    let Some(info) = focused_pane_info_for_cursor(app_state) else {
         return false;
     };
     if !app_state.pane_exposes_host_cursor(ws_idx, info.id) {
@@ -495,12 +504,7 @@ fn focused_terminal_suppresses_host_cursor(
     let Some(ws_idx) = app_state.active else {
         return false;
     };
-    let Some(info) = app_state
-        .view
-        .pane_infos
-        .iter()
-        .find(|info| info.is_focused)
-    else {
+    let Some(info) = focused_pane_info_for_cursor(app_state) else {
         return false;
     };
     if !app_state.pane_exposes_host_cursor(ws_idx, info.id) {

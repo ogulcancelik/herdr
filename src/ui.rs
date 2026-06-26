@@ -11,7 +11,7 @@ mod menus;
 mod mobile;
 mod navigator;
 mod onboarding;
-mod panes;
+pub(crate) mod panes;
 mod release_notes;
 mod scrollbar;
 mod settings;
@@ -273,6 +273,26 @@ fn compute_view_internal(
         })
         .unwrap_or_default();
 
+    let floating_pane_infos = app
+        .active
+        .and_then(|i| app.workspaces.get(i))
+        .map(|ws| ws.floating.pane_infos(terminal_area))
+        .unwrap_or_default();
+
+    if resize_panes {
+        if let Some(ws_idx) = app.active {
+            if let Some(ws) = app.workspaces.get(ws_idx) {
+                ws.floating.resize_terminals(
+                    terminal_area,
+                    terminal_runtimes,
+                    app,
+                    ws_idx,
+                    cell_size,
+                );
+            }
+        }
+    }
+
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
         sidebar_rect: sidebar_area,
@@ -287,6 +307,7 @@ fn compute_view_internal(
         mobile_menu_hit_area: Rect::default(),
         toast_hit_area,
         pane_infos,
+        floating_pane_infos,
         split_borders,
     };
 }
@@ -340,6 +361,26 @@ fn compute_mobile_view(
             cell_size,
         );
     }
+    let floating_pane_infos = app
+        .active
+        .and_then(|i| app.workspaces.get(i))
+        .map(|ws| ws.floating.pane_infos(terminal_area))
+        .unwrap_or_default();
+
+    if resize_panes {
+        if let Some(ws_idx) = app.active {
+            if let Some(ws) = app.workspaces.get(ws_idx) {
+                ws.floating.resize_terminals(
+                    terminal_area,
+                    terminal_runtimes,
+                    app,
+                    ws_idx,
+                    cell_size,
+                );
+            }
+        }
+    }
+
     let header_hits = compute_mobile_header_hit_areas(app, header_rect);
 
     let toast_hit_area = app
@@ -362,6 +403,7 @@ fn compute_mobile_view(
         mobile_menu_hit_area: header_hits.menu,
         toast_hit_area,
         pane_infos,
+        floating_pane_infos,
         split_borders,
     };
 }

@@ -39,6 +39,7 @@ pub(super) fn render_prefix_overlay(app: &AppState, frame: &mut Frame, area: Rec
         .add_modifier(Modifier::BOLD);
 
     let workspace_picker = prefix_rhs_label(&app.keybinds.workspace_picker);
+    let floating = prefix_rhs_label(&app.keybinds.toggle_floating_pane);
     let help = prefix_rhs_label(&app.keybinds.help);
     let prefix = crate::config::format_key_combo((app.prefix_code, app.prefix_mods));
 
@@ -51,6 +52,8 @@ pub(super) fn render_prefix_overlay(app: &AppState, frame: &mut Frame, area: Rec
         Span::styled(" send prefix  ", dim),
         Span::styled(workspace_picker, key),
         Span::styled(" workspace nav  ", dim),
+        Span::styled(floating, key),
+        Span::styled(" floating pane  ", dim),
         Span::styled(help, key),
         Span::styled(" keybinds", dim),
     ]);

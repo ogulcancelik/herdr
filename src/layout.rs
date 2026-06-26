@@ -1,5 +1,7 @@
 //! BSP tree layout for tiling panes within a workspace.
 
+pub mod floating;
+
 use std::cmp::Reverse;
 
 use ratatui::{

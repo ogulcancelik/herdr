@@ -154,6 +154,25 @@ impl App {
                     });
                 }
             }
+            if self.find_pane(*pane_id).is_some_and(|(ws_idx, _)| {
+                self.state
+                    .workspaces
+                    .get(ws_idx)
+                    .is_some_and(|ws| ws.floating_pane_states.contains_key(pane_id))
+            }) {
+                self.overlay_panes.remove(pane_id);
+                let previous_toast = self.state.toast.clone();
+                let pane_updates = self.state.handle_app_event(ev);
+                for update in &pane_updates {
+                    self.refresh_new_herdr_toast_context_for_update(update, &previous_toast);
+                    self.emit_pane_state_update(update);
+                }
+                self.sync_toast_deadline(previous_toast);
+                self.shutdown_detached_terminal_runtimes();
+                self.render_dirty.store(true, Ordering::Release);
+                self.render_notify.notify_one();
+                return;
+            }
         }
 
         let released_agent = if let AppEvent::HookAgentReleased {
@@ -387,9 +406,17 @@ impl App {
     }
 
     fn runtime_exit_action(&self, pane_id: crate::layout::PaneId) -> RuntimeExitAction {
-        let Some((_, pane_state)) = self.find_pane(pane_id) else {
+        let Some((ws_idx, pane_state)) = self.find_pane(pane_id) else {
             return RuntimeExitAction::ClosePane;
         };
+        if self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .is_some_and(|ws| ws.floating_pane_states.contains_key(&pane_id))
+        {
+            return RuntimeExitAction::ClosePane;
+        }
         let Some(terminal) = self.state.terminals.get(&pane_state.attached_terminal_id) else {
             return RuntimeExitAction::ClosePane;
         };

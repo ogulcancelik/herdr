@@ -579,6 +579,104 @@ impl AppState {
                         return None;
                     }
                 } else if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
+                    // Floating panes are handled separately: they are not part
+                    // of any tab layout, so focus and drag go through the
+                    // workspace-level floating state, not the tiled focus path.
+                    if let Some(floating_info) = self
+                        .view
+                        .floating_pane_infos
+                        .iter()
+                        .find(|p| p.id == info.id)
+                        .cloned()
+                    {
+                        // Clicking a floating pane focuses it and raises it.
+                        let previous = self.current_pane_focus_target();
+                        if let Some(ws_idx) = self.active {
+                            if let Some(ws) = self.workspaces.get_mut(ws_idx) {
+                                ws.floating.focus(floating_info.id);
+                            }
+                            self.record_pane_focus_change(previous, ws_idx, floating_info.id);
+                        }
+                        if self.mode != Mode::Terminal {
+                            self.mode = Mode::Terminal;
+                        }
+
+                        let on_border = mouse.column == floating_info.rect.x
+                            || mouse.column == floating_info.rect.x + floating_info.rect.width - 1
+                            || mouse.row == floating_info.rect.y
+                            || mouse.row == floating_info.rect.y + floating_info.rect.height - 1;
+                        let on_corner = (mouse.column
+                            == floating_info.rect.x + floating_info.rect.width - 1
+                            || mouse.column == floating_info.rect.x + floating_info.rect.width - 2)
+                            && (mouse.row == floating_info.rect.y + floating_info.rect.height - 1
+                                || mouse.row
+                                    == floating_info.rect.y + floating_info.rect.height - 2);
+                        if on_corner {
+                            // Start resize drag from bottom-right corner.
+                            // Capture the starting cursor and pane size so the
+                            // resize tracks origin + total delta rather than
+                            // snapping the corner to the raw cursor position.
+                            let origin = self
+                                .active
+                                .and_then(|ws_idx| self.workspaces.get(ws_idx))
+                                .and_then(|ws| ws.floating.positions.get(&floating_info.id))
+                                .map(|pos| (pos.width, pos.height))
+                                .unwrap_or((0, 0));
+                            self.drag = Some(DragState {
+                                target: DragTarget::FloatingPaneResize {
+                                    pane_id: floating_info.id,
+                                    start_col: mouse.column,
+                                    start_row: mouse.row,
+                                    origin_width: origin.0,
+                                    origin_height: origin.1,
+                                },
+                            });
+                            return None;
+                        } else if on_border {
+                            // Start move drag from border. Capture the pane's
+                            // current origin so the move tracks origin + total
+                            // delta rather than accumulating per-event deltas.
+                            let origin = self
+                                .active
+                                .and_then(|ws_idx| self.workspaces.get(ws_idx))
+                                .and_then(|ws| ws.floating.positions.get(&floating_info.id))
+                                .map(|pos| (pos.x, pos.y))
+                                .unwrap_or((0, 0));
+                            self.drag = Some(DragState {
+                                target: DragTarget::FloatingPaneMove {
+                                    pane_id: floating_info.id,
+                                    start_col: mouse.column,
+                                    start_row: mouse.row,
+                                    origin_x: origin.0,
+                                    origin_y: origin.1,
+                                },
+                            });
+                            return None;
+                        }
+
+                        if !rect_contains(info.inner_rect, mouse.column, mouse.row) {
+                            return None;
+                        }
+
+                        // Content click: forward to the pane / begin selection.
+                        if self.forward_pane_mouse_button(terminal_runtimes, &info, mouse) {
+                            self.selection = None;
+                            self.selection_autoscroll = None;
+                            return None;
+                        }
+                        let (row, col) = (
+                            mouse.row - info.inner_rect.y,
+                            mouse.column - info.inner_rect.x,
+                        );
+                        self.selection = Some(Selection::anchor(
+                            info.id,
+                            row,
+                            col,
+                            self.pane_scroll_metrics(terminal_runtimes, info.id),
+                        ));
+                        return None;
+                    }
+
                     self.focus_pane(info.id);
                     if self.mode != Mode::Terminal {
                         self.mode = Mode::Terminal;
@@ -752,6 +850,76 @@ impl AppState {
                         DragTarget::ReleaseNotesScrollbar { .. }
                         | DragTarget::ProductAnnouncementScrollbar { .. }
                         | DragTarget::KeybindHelpScrollbar { .. } => {}
+                        DragTarget::FloatingPaneMove {
+                            pane_id,
+                            start_col,
+                            start_row,
+                            origin_x,
+                            origin_y,
+                        } => {
+                            // Track origin + total delta so the pane follows the
+                            // cursor instead of accelerating from re-applied deltas.
+                            let pane_id = *pane_id;
+                            let dx = mouse.column as i16 - *start_col as i16;
+                            let dy = mouse.row as i16 - *start_row as i16;
+                            let area = self.view.terminal_area;
+                            let new_x = (*origin_x as i32 + dx as i32)
+                                .clamp(0, area.width.saturating_sub(1) as i32)
+                                as u16;
+                            let new_y = (*origin_y as i32 + dy as i32)
+                                .clamp(0, area.height.saturating_sub(1) as i32)
+                                as u16;
+                            if let Some(ws) = self.active.and_then(|i| self.workspaces.get_mut(i)) {
+                                if let Some(pos) = ws.floating.positions.get(&pane_id).copied() {
+                                    ws.floating.set_position_clamped(
+                                        pane_id,
+                                        crate::layout::floating::FloatingPanePosition {
+                                            x: new_x,
+                                            y: new_y,
+                                            ..pos
+                                        },
+                                        area,
+                                    );
+                                }
+                            }
+                        }
+                        DragTarget::FloatingPaneResize {
+                            pane_id,
+                            start_col,
+                            start_row,
+                            origin_width,
+                            origin_height,
+                        } => {
+                            // Track origin size + total delta so the corner
+                            // follows the cursor smoothly instead of snapping.
+                            let pane_id = *pane_id;
+                            let dw = mouse.column as i16 - *start_col as i16;
+                            let dh = mouse.row as i16 - *start_row as i16;
+                            let area = self.view.terminal_area;
+                            if let Some(ws) = self.active.and_then(|i| self.workspaces.get_mut(i)) {
+                                if let Some(pos) = ws.floating.positions.get(&pane_id).copied() {
+                                    let new_w = (*origin_width as i32 + dw as i32).clamp(
+                                        crate::layout::floating::FloatingPanePosition::MIN_WIDTH
+                                            as i32,
+                                        area.width.saturating_sub(pos.x) as i32,
+                                    ) as u16;
+                                    let new_h = (*origin_height as i32 + dh as i32).clamp(
+                                        crate::layout::floating::FloatingPanePosition::MIN_HEIGHT
+                                            as i32,
+                                        area.height.saturating_sub(pos.y) as i32,
+                                    ) as u16;
+                                    ws.floating.set_position_clamped(
+                                        pane_id,
+                                        crate::layout::floating::FloatingPanePosition {
+                                            width: new_w,
+                                            height: new_h,
+                                            ..pos
+                                        },
+                                        area,
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1308,6 +1476,16 @@ impl AppState {
     }
 
     pub(super) fn pane_at(&self, col: u16, row: u16) -> Option<&PaneInfo> {
+        // Check floating panes first (top-most has priority)
+        for p in self.view.floating_pane_infos.iter().rev() {
+            if col >= p.rect.x
+                && col < p.rect.x + p.rect.width
+                && row >= p.rect.y
+                && row < p.rect.y + p.rect.height
+            {
+                return Some(p);
+            }
+        }
         self.view.pane_infos.iter().find(|p| {
             col >= p.inner_rect.x
                 && col < p.inner_rect.x + p.inner_rect.width
@@ -1322,7 +1500,11 @@ impl AppState {
     }
 
     pub(crate) fn pane_info_by_id(&self, pane_id: crate::layout::PaneId) -> Option<&PaneInfo> {
-        self.view.pane_infos.iter().find(|info| info.id == pane_id)
+        self.view
+            .pane_infos
+            .iter()
+            .chain(self.view.floating_pane_infos.iter())
+            .find(|info| info.id == pane_id)
     }
 
     pub(super) fn pane_frame_at(&self, col: u16, row: u16) -> Option<&PaneInfo> {
@@ -1736,7 +1918,7 @@ pub(super) fn wheel_routing(input_state: crate::pane::InputState) -> WheelRoutin
     }
 }
 
-fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
+pub(super) fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
     rect.width > 0
         && rect.height > 0
         && col >= rect.x
@@ -2986,6 +3168,67 @@ mod tests {
 
         let after = capture_snapshot(&app.state);
         assert_ne!(root_layout_ratio(&before), root_layout_ratio(&after));
+    }
+
+    #[test]
+    fn clicking_floating_pane_top_border_starts_move_without_selection_underflow() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let floating_id = ws.test_add_floating_pane();
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 40));
+        let info = app
+            .state
+            .view
+            .floating_pane_infos
+            .iter()
+            .find(|info| info.id == floating_id)
+            .expect("floating pane info")
+            .clone();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            info.rect.x + 2,
+            info.rect.y,
+        ));
+
+        assert!(app.state.selection.is_none());
+        assert!(matches!(
+            app.state.drag.as_ref().map(|drag| &drag.target),
+            Some(DragTarget::FloatingPaneMove { pane_id, .. }) if *pane_id == floating_id
+        ));
+    }
+
+    #[test]
+    fn pane_info_by_id_resolves_floating_panes() {
+        // Selection drag/copy resolve pane geometry through pane_info_by_id.
+        // Floating panes are not in view.pane_infos, so the lookup must also
+        // search floating_pane_infos or selection inside a floating pane
+        // silently fails to track and copies nothing.
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let floating_id = ws.test_add_floating_pane();
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 40));
+
+        assert!(
+            app.state
+                .view
+                .pane_infos
+                .iter()
+                .all(|info| info.id != floating_id),
+            "floating pane should not be in tiled pane_infos"
+        );
+
+        let info = app
+            .state
+            .pane_info_by_id(floating_id)
+            .expect("pane_info_by_id should resolve floating pane");
+        assert_eq!(info.id, floating_id);
     }
 
     #[test]

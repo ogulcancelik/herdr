@@ -10,6 +10,7 @@ use super::scrollbar::{render_pane_scrollbar, should_show_scrollbar};
 use super::widgets::panel_contrast_fg;
 use crate::app::state::Palette;
 use crate::app::{AppState, Mode};
+use crate::layout::floating::FloatingPanePosition;
 use crate::layout::PaneInfo;
 use crate::terminal::{TerminalRuntime, TerminalRuntimeRegistry};
 
@@ -362,6 +363,31 @@ pub(super) fn render_panes(
     }
 
     render_pane_borders(app, ws, frame);
+
+    // Render floating panes on top of tiled content
+    for info in &app.view.floating_pane_infos {
+        if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
+            let show_cursor = info.is_focused
+                && terminal_active
+                && !pane_is_scrolled_back(rt)
+                && app.pane_exposes_host_cursor(ws_idx, info.id);
+            let pane_inner = pane_inner_rect(info.rect, info.borders);
+            rt.render(frame, pane_inner, show_cursor);
+            render_pane_scrollbar(app, frame, info, rt);
+
+            render_selection_highlight(
+                &app.selection,
+                frame,
+                info.id,
+                pane_inner,
+                rt.scroll_metrics(),
+                &app.palette,
+                app.host_terminal_theme,
+            );
+            render_copy_mode_cursor(app, frame, info);
+        }
+    }
+    render_floating_pane_borders(app, ws, frame);
 }
 
 #[derive(Clone, Copy, Default)]
@@ -419,6 +445,72 @@ fn render_pane_borders(app: &AppState, ws: &crate::workspace::Workspace, frame: 
     }
 
     render_pane_border_titles(app, ws, frame);
+}
+
+/// Render borders (and titles) for floating panes. Floating panes never share
+/// edges with the tiled grid, so each is drawn as an independent box reusing
+/// the same line-cell machinery and title rendering as tiled panes.
+fn render_floating_pane_borders(
+    app: &AppState,
+    ws: &crate::workspace::Workspace,
+    frame: &mut Frame,
+) {
+    if !app.pane_borders || app.view.floating_pane_infos.is_empty() {
+        return;
+    }
+
+    let mut cells = std::collections::HashMap::<(u16, u16), LineCell>::new();
+    for info in &app.view.floating_pane_infos {
+        if info.rect.width < FloatingPanePosition::MIN_WIDTH
+            || info.rect.height < FloatingPanePosition::MIN_HEIGHT
+        {
+            continue;
+        }
+        add_pane_border_cells(&mut cells, info);
+    }
+
+    let buf = frame.buffer_mut();
+    let area = buf.area;
+    for ((x, y), line) in cells {
+        if x < area.x
+            || x >= area.x.saturating_add(area.width)
+            || y < area.y
+            || y >= area.y.saturating_add(area.height)
+        {
+            continue;
+        }
+        let symbol = line_cell_symbol(line);
+        if symbol.is_empty() {
+            continue;
+        }
+        let focused = app
+            .view
+            .floating_pane_infos
+            .iter()
+            .any(|info| info.is_focused && line_touches_pane(x, y, info, true));
+        let color = if focused {
+            app.palette.accent
+        } else {
+            app.palette.overlay0
+        };
+        let cell = &mut buf[(x, y)];
+        cell.set_symbol(symbol);
+        cell.set_style(Style::default().fg(color));
+    }
+
+    // Titles, drawn after borders so they overwrite the top edge.
+    let buf = frame.buffer_mut();
+    let area = buf.area;
+    for info in &app.view.floating_pane_infos {
+        if info.rect.width < FloatingPanePosition::MIN_WIDTH
+            || info.rect.height < FloatingPanePosition::MIN_HEIGHT
+        {
+            continue;
+        }
+        if let Some(title) = pane_border_title_for(app, ws, info) {
+            render_pane_border_title(app, buf, area, info, &title);
+        }
+    }
 }
 
 fn add_split_border_cells(
@@ -546,45 +638,65 @@ fn render_pane_border_titles(app: &AppState, ws: &crate::workspace::Workspace, f
     let buf = frame.buffer_mut();
     let area = buf.area;
     for info in &app.view.pane_infos {
-        if !info.borders.contains(Borders::TOP) || info.rect.width <= 4 {
-            continue;
-        }
-        let Some(title) = ws
-            .pane_state(info.id)
-            .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
-            .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders))
-            .and_then(|label| pane_border_title(&label, info.rect.width, info.is_focused))
-        else {
+        let Some(title) = pane_border_title_for(app, ws, info) else {
             continue;
         };
-        let y = info.rect.y;
-        if y < area.y || y >= area.y.saturating_add(area.height) {
-            continue;
+        render_pane_border_title(app, buf, area, info, &title);
+    }
+}
+
+/// Resolve the border title string for a pane, honoring width and the
+/// `show_agent_labels_on_pane_borders` setting. Returns `None` when no title
+/// should be drawn (top border absent, pane too narrow, or no label).
+fn pane_border_title_for(
+    app: &AppState,
+    ws: &crate::workspace::Workspace,
+    info: &PaneInfo,
+) -> Option<String> {
+    if !info.borders.contains(Borders::TOP) || info.rect.width <= 4 {
+        return None;
+    }
+    ws.pane_state(info.id)
+        .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
+        .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders))
+        .and_then(|label| pane_border_title(&label, info.rect.width, info.is_focused))
+}
+
+/// Draw a resolved title onto a single pane's top border.
+fn render_pane_border_title(
+    app: &AppState,
+    buf: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    info: &PaneInfo,
+    title: &str,
+) {
+    let y = info.rect.y;
+    if y < area.y || y >= area.y.saturating_add(area.height) {
+        return;
+    }
+    for (idx, ch) in title.chars().enumerate() {
+        let x = info.rect.x.saturating_add(1).saturating_add(idx as u16);
+        if x >= area.x.saturating_add(area.width)
+            || x >= info
+                .rect
+                .x
+                .saturating_add(info.rect.width)
+                .saturating_sub(1)
+        {
+            break;
         }
-        for (idx, ch) in title.chars().enumerate() {
-            let x = info.rect.x.saturating_add(1).saturating_add(idx as u16);
-            if x >= area.x.saturating_add(area.width)
-                || x >= info
-                    .rect
-                    .x
-                    .saturating_add(info.rect.width)
-                    .saturating_sub(1)
-            {
-                break;
-            }
-            let color = if info.is_focused {
-                app.palette.accent
-            } else {
-                app.palette.overlay0
-            };
-            let mut style = Style::default().fg(color);
-            if info.is_focused {
-                style = style.add_modifier(Modifier::BOLD);
-            }
-            let cell = &mut buf[(x, y)];
-            cell.set_symbol(&ch.to_string());
-            cell.set_style(style);
+        let color = if info.is_focused {
+            app.palette.accent
+        } else {
+            app.palette.overlay0
+        };
+        let mut style = Style::default().fg(color);
+        if info.is_focused {
+            style = style.add_modifier(Modifier::BOLD);
         }
+        let cell = &mut buf[(x, y)];
+        cell.set_symbol(&ch.to_string());
+        cell.set_style(style);
     }
 }
 

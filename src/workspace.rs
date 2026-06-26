@@ -163,6 +163,12 @@ pub struct Workspace {
     pub(crate) next_public_tab_number: usize,
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
+    /// Floating panes visible across all tabs in this workspace.
+    pub floating: crate::layout::floating::FloatingPanes,
+    /// Viewport/terminal state for floating panes. Separate from `floating`,
+    /// which holds only serializable layout (positions/order/focus). Floating
+    /// panes are not owned by any tab, so their `PaneState` lives here.
+    pub(crate) floating_pane_states: HashMap<PaneId, PaneState>,
     #[cfg(test)]
     pub(crate) test_runtimes: HashMap<PaneId, TerminalRuntime>,
 }
@@ -221,6 +227,8 @@ impl Workspace {
             next_public_tab_number: 2,
             tabs: vec![tab],
             active_tab: 0,
+            floating: crate::layout::floating::FloatingPanes::default(),
+            floating_pane_states: HashMap::new(),
             #[cfg(test)]
             test_runtimes: HashMap::new(),
         }
@@ -402,6 +410,8 @@ impl Workspace {
                 next_public_tab_number: 2,
                 tabs: vec![tab],
                 active_tab: 0,
+                floating: crate::layout::floating::FloatingPanes::default(),
+                floating_pane_states: HashMap::new(),
                 #[cfg(test)]
                 test_runtimes: HashMap::new(),
             },
@@ -433,6 +443,60 @@ impl Workspace {
                 .clone()
                 .unwrap_or_else(|| (tab_idx + 1).to_string()),
         )
+    }
+
+    pub fn focused_tiled_pane_id(&self) -> Option<PaneId> {
+        self.active_tab().map(|tab| tab.layout.focused())
+    }
+
+    pub fn effective_tab_index_for_pane(&self, pane_id: PaneId) -> Option<usize> {
+        self.find_tab_index_for_pane(pane_id).or_else(|| {
+            self.floating_pane_states
+                .contains_key(&pane_id)
+                .then_some(self.active_tab)
+        })
+    }
+
+    pub fn cwd_for_pane(
+        &self,
+        pane_id: PaneId,
+        terminals: &HashMap<TerminalId, TerminalState>,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) -> Option<PathBuf> {
+        if let Some(tab_idx) = self.find_tab_index_for_pane(pane_id) {
+            return self
+                .tabs
+                .get(tab_idx)?
+                .cwd_for_pane(pane_id, terminals, terminal_runtimes);
+        }
+
+        let terminal_id = self.terminal_id(pane_id)?;
+        terminal_runtimes
+            .get(terminal_id)
+            .and_then(|rt| rt.cwd())
+            .or_else(|| {
+                terminals
+                    .get(terminal_id)
+                    .map(|terminal| terminal.cwd.clone())
+            })
+    }
+
+    pub fn foreground_cwd_for_pane(
+        &self,
+        pane_id: PaneId,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) -> Option<PathBuf> {
+        if let Some(tab_idx) = self.find_tab_index_for_pane(pane_id) {
+            return self
+                .tabs
+                .get(tab_idx)?
+                .foreground_cwd_for_pane(pane_id, terminal_runtimes);
+        }
+
+        let terminal_id = self.terminal_id(pane_id)?;
+        terminal_runtimes
+            .get(terminal_id)
+            .and_then(|rt| rt.foreground_cwd())
     }
 
     pub fn switch_tab(&mut self, idx: usize) {
@@ -629,6 +693,82 @@ impl Workspace {
             )?;
         self.register_new_pane_with_number(new_pane.pane_id, pane_number);
         Ok(new_pane)
+    }
+
+    /// Create a floating pane that overlays the tiled content. Unlike a split,
+    /// the new pane is not placed in any tab's layout tree; its `PaneState`
+    /// lives in `floating_pane_states` and its position in `floating`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_floating_pane(
+        &mut self,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        shell_config: crate::pane::PaneShellConfig<'_>,
+        extra_env: Vec<(String, String)>,
+        area: ratatui::layout::Rect,
+    ) -> std::io::Result<crate::workspace::tab::NewPane> {
+        let pane_number = self.next_public_pane_number;
+        let tab_number = self
+            .active_tab()
+            .map(|tab| tab.number)
+            .expect("workspace must always have at least one tab");
+        let launch_env = self.launch_env_for_new_pane(tab_number, pane_number, extra_env);
+
+        let (events, render_notify, render_dirty) = {
+            let tab = self
+                .active_tab()
+                .expect("workspace must always have at least one tab");
+            (
+                tab.events.clone(),
+                tab.render_notify.clone(),
+                tab.render_dirty.clone(),
+            )
+        };
+
+        let new_id = PaneId::alloc();
+        let actual_cwd =
+            cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
+        let runtime = TerminalRuntime::spawn(
+            new_id,
+            rows,
+            cols,
+            actual_cwd.clone(),
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            shell_config,
+            &launch_env,
+            events,
+            render_notify,
+            render_dirty,
+        )?;
+        let terminal_id = TerminalId::alloc();
+        let terminal = TerminalState::new(terminal_id.clone(), actual_cwd);
+        self.floating_pane_states
+            .insert(new_id, PaneState::new(terminal_id));
+        self.floating.add(new_id, area);
+        self.register_new_pane_with_number(new_id, pane_number);
+        Ok(crate::workspace::tab::NewPane {
+            pane_id: new_id,
+            terminal,
+            runtime,
+        })
+    }
+
+    /// Remove a floating pane and its viewport state. Returns the detached
+    /// terminal id so the caller can tear down the runtime/terminal metadata.
+    pub fn remove_floating_pane(&mut self, pane_id: PaneId) -> Option<TerminalId> {
+        if !self.floating.remove(pane_id) {
+            return None;
+        }
+        let terminal_id = self
+            .floating_pane_states
+            .remove(&pane_id)
+            .map(|pane| pane.attached_terminal_id);
+        self.unregister_pane(pane_id);
+        terminal_id
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1104,18 +1244,35 @@ impl Workspace {
     }
 
     pub fn pane_state(&self, pane_id: PaneId) -> Option<&PaneState> {
-        self.tabs.iter().find_map(|tab| tab.panes.get(&pane_id))
+        self.tabs
+            .iter()
+            .find_map(|tab| tab.panes.get(&pane_id))
+            .or_else(|| self.floating_pane_states.get(&pane_id))
     }
 
     pub fn terminal_id(&self, pane_id: PaneId) -> Option<&TerminalId> {
-        self.tabs.iter().find_map(|tab| tab.terminal_id(pane_id))
+        self.tabs
+            .iter()
+            .find_map(|tab| tab.terminal_id(pane_id))
+            .or_else(|| {
+                self.floating_pane_states
+                    .get(&pane_id)
+                    .map(|pane| &pane.attached_terminal_id)
+            })
     }
 
     pub fn focused_pane_id(&self) -> Option<PaneId> {
-        self.active_tab().map(|tab| tab.layout.focused())
+        self.floating
+            .focused
+            .or_else(|| self.focused_tiled_pane_id())
     }
 
     pub fn close_pane(&mut self, pane_id: PaneId) -> bool {
+        if self.floating_pane_states.contains_key(&pane_id) {
+            self.remove_floating_pane(pane_id);
+            return false;
+        }
+
         let tab_idx = match self.find_tab_index_for_pane(pane_id) {
             Some(idx) => idx,
             None => return false,
@@ -1209,6 +1366,8 @@ impl Workspace {
             next_public_tab_number: 2,
             tabs: vec![tab],
             active_tab: 0,
+            floating: crate::layout::floating::FloatingPanes::default(),
+            floating_pane_states: HashMap::new(),
             test_runtimes: HashMap::new(),
         }
     }
@@ -1222,6 +1381,18 @@ impl Workspace {
         let new_id = tab.layout.split_focused(direction);
         tab.panes
             .insert(new_id, PaneState::new(TerminalId::alloc()));
+        self.register_new_pane(new_id);
+        new_id
+    }
+
+    /// Create a floating pane backed by viewport state only (no PTY), mirroring
+    /// `create_floating_pane` for state-level tests.
+    pub(crate) fn test_add_floating_pane(&mut self) -> PaneId {
+        let new_id = PaneId::alloc();
+        self.floating_pane_states
+            .insert(new_id, PaneState::new(TerminalId::alloc()));
+        self.floating
+            .add(new_id, ratatui::layout::Rect::new(0, 0, 80, 24));
         self.register_new_pane(new_id);
         new_id
     }
@@ -1371,6 +1542,40 @@ impl Workspace {
             }
         }
 
+        // Floating panes are live panes too: they own a public number and a
+        // terminal, but must never overlap with any tab's pane ids.
+        for (pane_id, pane) in &self.floating_pane_states {
+            assert!(
+                live_panes.insert(*pane_id),
+                "workspace {} floating pane {:?} also appears in a tab",
+                self.id,
+                pane_id
+            );
+            assert!(
+                self.public_pane_numbers.contains_key(pane_id),
+                "workspace {} live floating pane {:?} has no public pane number",
+                self.id,
+                pane_id
+            );
+            assert!(
+                terminal_ids.insert(pane.attached_terminal_id.clone()),
+                "workspace {} terminal {} is attached to multiple panes",
+                self.id,
+                pane.attached_terminal_id
+            );
+        }
+
+        // The floating layout order/positions must match the owned states.
+        let floating_state_ids: std::collections::HashSet<_> =
+            self.floating_pane_states.keys().copied().collect();
+        let floating_layout_ids: std::collections::HashSet<_> =
+            self.floating.order.iter().copied().collect();
+        assert_eq!(
+            floating_state_ids, floating_layout_ids,
+            "workspace {} floating layout order must match floating pane states",
+            self.id
+        );
+
         assert!(
             self.next_public_tab_number > 0,
             "workspace {} next_public_tab_number must be greater than 0",
@@ -1428,6 +1633,43 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn floating_pane_state_is_resolvable_and_outside_tabs() {
+        let mut ws = Workspace::test_new("floating");
+        let tiled_root = ws.active_tab().expect("tab").layout.focused();
+        let floating_id = ws.test_add_floating_pane();
+
+        // The floating pane resolves through the shared lookups.
+        assert!(ws.pane_state(floating_id).is_some());
+        assert!(ws.terminal_id(floating_id).is_some());
+
+        // It is not part of any tab's layout.
+        assert!(ws.find_tab_index_for_pane(floating_id).is_none());
+        let layout_panes = ws.active_tab().expect("tab").layout.pane_ids();
+        assert!(!layout_panes.contains(&floating_id));
+        assert!(layout_panes.contains(&tiled_root));
+
+        // Focus falls through to the floating pane.
+        assert_eq!(ws.focused_pane_id(), Some(floating_id));
+
+        ws.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn remove_floating_pane_returns_terminal_and_clears_state() {
+        let mut ws = Workspace::test_new("floating");
+        let floating_id = ws.test_add_floating_pane();
+        let terminal_id = ws.terminal_id(floating_id).cloned();
+
+        let removed = ws.remove_floating_pane(floating_id);
+        assert_eq!(removed, terminal_id);
+        assert!(ws.pane_state(floating_id).is_none());
+        assert!(!ws.public_pane_numbers.contains_key(&floating_id));
+        assert!(ws.floating.is_empty());
+
+        ws.assert_invariants_for_test();
+    }
 
     #[test]
     fn generated_workspace_ids_are_short_base32_handles() {
