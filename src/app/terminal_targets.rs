@@ -135,7 +135,7 @@ impl App {
         pane_id: crate::layout::PaneId,
     ) -> Option<TerminalTarget> {
         let ws = self.state.workspaces.get(ws_idx)?;
-        let tab_idx = ws.find_tab_index_for_pane(pane_id)?;
+        let tab_idx = ws.effective_tab_index_for_pane(pane_id)?;
         let terminal_id = ws.terminal_id(pane_id)?.to_string();
         Some(TerminalTarget {
             ws_idx,
@@ -153,7 +153,7 @@ impl App {
         pane_id: crate::layout::PaneId,
     ) -> Option<TerminalTargetCandidate> {
         let ws = self.state.workspaces.get(ws_idx)?;
-        let tab_idx = ws.find_tab_index_for_pane(pane_id)?;
+        let tab_idx = ws.effective_tab_index_for_pane(pane_id)?;
         let pane = ws.pane_state(pane_id)?;
         let terminal = self.state.terminals.get(&pane.attached_terminal_id)?;
         Some(TerminalTargetCandidate {
@@ -161,7 +161,7 @@ impl App {
             pane_id: self.public_pane_id(ws_idx, pane_id)?,
             workspace_id: self.public_workspace_id(ws_idx),
             tab_id: self.public_tab_id(ws_idx, tab_idx)?,
-            cwd: ws.tabs[tab_idx]
+            cwd: ws
                 .cwd_for_pane(pane_id, &self.state.terminals, &self.terminal_runtimes)
                 .map(|cwd| cwd.display().to_string()),
             agent_status: pane_agent_status(terminal.state, pane.seen),

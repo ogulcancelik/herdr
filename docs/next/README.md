@@ -242,6 +242,7 @@ Press `ctrl+b` to enter prefix mode. Default actions are prefix-first and tmux-l
 | `prefix+x` | close pane |
 | `prefix+b` | toggle sidebar |
 | `prefix+z` | zoom pane |
+| `prefix+f` | toggle floating pane |
 | `prefix+r` | resize mode |
 | `prefix+q` | detach |
 

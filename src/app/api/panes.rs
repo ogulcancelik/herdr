@@ -1150,7 +1150,7 @@ impl App {
             .state
             .workspaces
             .get(ws_idx)
-            .and_then(|ws| ws.find_tab_index_for_pane(pane_id))
+            .and_then(|ws| ws.effective_tab_index_for_pane(pane_id))
         else {
             return pane_not_found(id, &params.pane_id);
         };

@@ -741,6 +741,7 @@ pub struct ViewState {
     pub mobile_menu_hit_area: Rect,
     pub toast_hit_area: Rect,
     pub pane_infos: Vec<PaneInfo>,
+    pub floating_pane_infos: Vec<PaneInfo>,
     pub split_borders: Vec<SplitBorder>,
 }
 
@@ -1036,6 +1037,20 @@ pub(crate) enum DragTarget {
     },
     SidebarDivider,
     SidebarSectionDivider,
+    FloatingPaneMove {
+        pane_id: crate::layout::PaneId,
+        start_col: u16,
+        start_row: u16,
+        origin_x: u16,
+        origin_y: u16,
+    },
+    FloatingPaneResize {
+        pane_id: crate::layout::PaneId,
+        start_col: u16,
+        start_row: u16,
+        origin_width: u16,
+        origin_height: u16,
+    },
 }
 
 /// Active mouse drag on a split border or sidebar divider.
@@ -1681,6 +1696,7 @@ impl AppState {
                 mobile_menu_hit_area: Rect::default(),
                 toast_hit_area: Rect::default(),
                 pane_infos: Vec::new(),
+                floating_pane_infos: Vec::new(),
                 split_borders: Vec::new(),
             },
             drag: None,
@@ -1790,6 +1806,15 @@ impl AppState {
                             TerminalState::new(pane.attached_terminal_id.clone(), cwd),
                         );
                     }
+                }
+            }
+            for pane in ws.floating_pane_states.values() {
+                if !self.terminals.contains_key(&pane.attached_terminal_id) {
+                    let cwd = ws.identity_cwd.clone();
+                    self.terminals.insert(
+                        pane.attached_terminal_id.clone(),
+                        TerminalState::new(pane.attached_terminal_id.clone(), cwd),
+                    );
                 }
             }
         }

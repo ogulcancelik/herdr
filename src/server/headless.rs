@@ -2901,6 +2901,18 @@ impl HeadlessServer {
         let Some(ws_idx) = self.app.state.active else {
             retained_fallback!("no_active_workspace");
         };
+        // Floating panes overlay the tiled grid and are not part of
+        // `pane_infos`; the retained patch path only tracks tiled panes, so
+        // fall back to a full render whenever any floating pane is visible.
+        if self
+            .app
+            .state
+            .workspaces
+            .get(ws_idx)
+            .is_some_and(|ws| ws.floating.visible && !ws.floating.is_empty())
+        {
+            retained_fallback!("floating_panes_visible");
+        }
         let pane_infos = self.app.state.view.pane_infos.clone();
         if pane_infos.is_empty() {
             retained_fallback!("no_pane_info");

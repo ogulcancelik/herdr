@@ -187,9 +187,11 @@ impl App {
                     if let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) {
                         env.push(("HERDR_ACTIVE_PANE_ID".to_string(), public_pane_id));
                     }
-                    if let Some(pane_cwd) = workspace.active_tab().and_then(|tab| {
-                        tab.cwd_for_pane(pane_id, &self.state.terminals, &self.terminal_runtimes)
-                    }) {
+                    if let Some(pane_cwd) = workspace.cwd_for_pane(
+                        pane_id,
+                        &self.state.terminals,
+                        &self.terminal_runtimes,
+                    ) {
                         env.push((
                             "HERDR_ACTIVE_PANE_CWD".to_string(),
                             pane_cwd.display().to_string(),
@@ -606,6 +608,7 @@ pub(crate) enum NavigateAction {
     CyclePaneNext,
     CyclePanePrevious,
     LastPane,
+    ToggleFloatingPane,
     Help,
     Settings,
     ReloadConfig,
@@ -708,6 +711,7 @@ fn action_for_key(
         (&kb.split_horizontal, NavigateAction::SplitHorizontal),
         (&kb.close_pane, NavigateAction::ClosePane),
         (&kb.zoom, NavigateAction::Zoom),
+        (&kb.toggle_floating_pane, NavigateAction::ToggleFloatingPane),
         (&kb.resize_mode, NavigateAction::EnterResizeMode),
         (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
         (&kb.reload_config, NavigateAction::ReloadConfig),
@@ -928,6 +932,10 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::LastPane => {
             state.last_pane();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::ToggleFloatingPane => {
+            state.toggle_floating_pane(terminal_runtimes);
             leave_navigate_mode(state);
         }
         NavigateAction::Help => super::modal::open_keybind_help(state),

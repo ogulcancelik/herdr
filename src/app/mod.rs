@@ -561,6 +561,7 @@ impl App {
                 mobile_menu_hit_area: Rect::default(),
                 toast_hit_area: Rect::default(),
                 pane_infos: Vec::new(),
+                floating_pane_infos: Vec::new(),
                 split_borders: Vec::new(),
             },
             drag: None,
@@ -4149,6 +4150,28 @@ last_pane = "prefix+tab"
 
         assert_eq!(app.state.active, Some(1));
         assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(second_root));
+    }
+
+    #[test]
+    fn route_client_input_prefix_f_toggles_existing_floating_pane() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let floating_id = app.state.workspaces[0].test_add_floating_pane();
+
+        app.route_client_input(vec![0x02, b'f']);
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(!app.state.workspaces[0].floating.visible);
+        assert_eq!(app.state.workspaces[0].floating.focused, None);
+
+        app.route_client_input(vec![0x02, b'f']);
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app.state.workspaces[0].floating.visible);
+        assert_eq!(app.state.workspaces[0].floating.focused, Some(floating_id));
     }
 
     #[tokio::test]
