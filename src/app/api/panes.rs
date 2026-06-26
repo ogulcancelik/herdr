@@ -45,6 +45,15 @@ impl App {
         let Some((ws_idx, target_pane_id)) = target else {
             return encode_error(id, "pane_not_found", "pane not found");
         };
+        if self.state.workspaces.get(ws_idx).is_some_and(|ws| {
+            ws.pane_state(target_pane_id).is_some()
+                && ws.find_tab_index_for_pane(target_pane_id).is_none()
+        }) {
+            return pane_not_in_tiled_layout(
+                id,
+                self.public_pane_id(ws_idx, target_pane_id).as_deref(),
+            );
+        }
         let extra_env = match super::env::normalize_launch_env(params.env) {
             Ok(env) => env,
             Err((code, message)) => return encode_error(id, &code, message),
@@ -166,10 +175,7 @@ impl App {
             return encode_error(id, "pane_not_found", "pane not found");
         };
         let Some(tab_idx) = self.state.workspaces[ws_idx].find_tab_index_for_pane(pane_id) else {
-            return pane_not_found(
-                id,
-                &self.public_pane_id(ws_idx, pane_id).unwrap_or_default(),
-            );
+            return pane_not_in_tiled_layout(id, self.public_pane_id(ws_idx, pane_id).as_deref());
         };
         let Some(layout) = self.pane_layout_snapshot(ws_idx, tab_idx) else {
             return encode_error(id, "pane_layout_unavailable", "pane layout unavailable");
@@ -235,10 +241,7 @@ impl App {
             return encode_error(id, "pane_not_found", "pane not found");
         };
         let Some(tab_idx) = self.state.workspaces[ws_idx].find_tab_index_for_pane(pane_id) else {
-            return pane_not_found(
-                id,
-                &self.public_pane_id(ws_idx, pane_id).unwrap_or_default(),
-            );
+            return pane_not_in_tiled_layout(id, self.public_pane_id(ws_idx, pane_id).as_deref());
         };
         let Some(source_public_id) = self.public_pane_id(ws_idx, pane_id) else {
             return encode_error(id, "pane_not_found", "pane not found");
@@ -268,10 +271,7 @@ impl App {
             return encode_error(id, "pane_not_found", "pane not found");
         };
         let Some(tab_idx) = self.state.workspaces[ws_idx].find_tab_index_for_pane(pane_id) else {
-            return pane_not_found(
-                id,
-                &self.public_pane_id(ws_idx, pane_id).unwrap_or_default(),
-            );
+            return pane_not_in_tiled_layout(id, self.public_pane_id(ws_idx, pane_id).as_deref());
         };
         let Some(tab) = self
             .state
@@ -326,11 +326,9 @@ impl App {
         };
         let Some(tab_idx) = self.state.workspaces[ws_idx].find_tab_index_for_pane(source_pane_id)
         else {
-            return pane_not_found(
+            return pane_not_in_tiled_layout(
                 id,
-                &self
-                    .public_pane_id(ws_idx, source_pane_id)
-                    .unwrap_or_default(),
+                self.public_pane_id(ws_idx, source_pane_id).as_deref(),
             );
         };
         let Some(source_public_id) = self.public_pane_id(ws_idx, source_pane_id) else {
@@ -377,10 +375,7 @@ impl App {
             return encode_error(id, "pane_not_found", "pane not found");
         };
         let Some(tab_idx) = self.state.workspaces[ws_idx].find_tab_index_for_pane(pane_id) else {
-            return pane_not_found(
-                id,
-                &self.public_pane_id(ws_idx, pane_id).unwrap_or_default(),
-            );
+            return pane_not_in_tiled_layout(id, self.public_pane_id(ws_idx, pane_id).as_deref());
         };
         let Some(pane_public_id) = self.public_pane_id(ws_idx, pane_id) else {
             return encode_error(id, "pane_not_found", "pane not found");
@@ -445,11 +440,9 @@ impl App {
             let Some(tab_idx) =
                 self.state.workspaces[ws_idx].find_tab_index_for_pane(source_pane_id)
             else {
-                return pane_not_found(
+                return pane_not_in_tiled_layout(
                     id,
-                    &self
-                        .public_pane_id(ws_idx, source_pane_id)
-                        .unwrap_or_default(),
+                    self.public_pane_id(ws_idx, source_pane_id).as_deref(),
                 );
             };
             let target = self.directional_pane_target(ws_idx, tab_idx, source_pane_id, direction);
@@ -1064,10 +1057,7 @@ impl App {
             return encode_error(id, "pane_not_found", "pane not found");
         };
         let Some(tab_idx) = self.state.workspaces[ws_idx].find_tab_index_for_pane(pane_id) else {
-            return pane_not_found(
-                id,
-                &self.public_pane_id(ws_idx, pane_id).unwrap_or_default(),
-            );
+            return pane_not_in_tiled_layout(id, self.public_pane_id(ws_idx, pane_id).as_deref());
         };
         let Some(pane_public_id) = self.public_pane_id(ws_idx, pane_id) else {
             return encode_error(id, "pane_not_found", "pane not found");
@@ -1588,6 +1578,15 @@ fn pane_not_found(id: String, pane_id: &str) -> String {
     encode_error(id, "pane_not_found", format!("pane {pane_id} not found"))
 }
 
+fn pane_not_in_tiled_layout(id: String, pane_id: Option<&str>) -> String {
+    let message = pane_id
+        .map(|pane_id| {
+            format!("pane {pane_id} is a floating pane; this operation only supports tiled panes")
+        })
+        .unwrap_or_else(|| "floating panes do not support tiled layout operations".to_string());
+    encode_error(id, "pane_not_in_tiled_layout", message)
+}
+
 impl App {
     fn resolve_optional_pane(&self, pane_id: Option<&str>) -> Option<(usize, PaneId)> {
         match pane_id {
@@ -2016,6 +2015,56 @@ mod tests {
         assert_eq!(success.id, "req");
         assert_eq!(app.state.request_remove_linked_worktree, None);
         assert!(app.state.workspaces.is_empty());
+    }
+
+    #[tokio::test]
+    async fn api_pane_close_closes_floating_pane_without_closing_workspace() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let tiled_root = app.state.workspaces[0].tabs[0].root_pane;
+        let floating_id = app.state.workspaces[0].test_add_floating_pane();
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(floating_id)
+            .cloned()
+            .expect("floating pane has terminal");
+        app.state.terminals.insert(
+            terminal_id.clone(),
+            crate::terminal::TerminalState::new(terminal_id.clone(), "/tmp".into()),
+        );
+        let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        app.state.plugin_panes.insert(
+            floating_id,
+            crate::app::state::PluginPaneRecord {
+                plugin_id: "test.plugin".into(),
+                entrypoint: "float".into(),
+            },
+        );
+        let public_pane_id = app.public_pane_id(0, floating_id).unwrap();
+
+        let response = app.handle_pane_close(
+            "req".into(),
+            PaneTarget {
+                pane_id: public_pane_id.clone(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.id, "req");
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert!(app.state.workspaces[0].pane_state(floating_id).is_none());
+        assert!(app.state.workspaces[0].floating.is_empty());
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(tiled_root));
+        assert!(!app.state.terminals.contains_key(&terminal_id));
+        assert!(app.terminal_runtimes.get(&terminal_id).is_none());
+        assert!(!app.state.plugin_panes.contains_key(&floating_id));
+        assert!(app.event_hub.events_after(0).iter().any(|(_, event)| {
+            matches!(
+                &event.data,
+                EventData::PaneClosed { pane_id, .. } if pane_id == &public_pane_id
+            )
+        }));
     }
 
     #[test]
@@ -3171,6 +3220,101 @@ mod tests {
         assert_eq!(resize.layout.focused_pane_id, right_public);
         assert!((resize.layout.splits[0].ratio - 0.6).abs() < f32::EPSILON);
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(right));
+    }
+
+    #[test]
+    fn api_tiled_layout_operations_reject_floating_pane_focus() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let floating_id = app.state.workspaces[0].test_add_floating_pane();
+        let floating_public = app.public_pane_id(0, floating_id).unwrap();
+
+        let focus_response = app.handle_pane_focus_direction(
+            "focus".into(),
+            crate::api::schema::PaneFocusDirectionParams {
+                pane_id: None,
+                direction: PaneDirection::Right,
+            },
+        );
+        assert_eq!(
+            metadata_error_code(&focus_response),
+            "pane_not_in_tiled_layout"
+        );
+
+        let resize_response = app.handle_pane_resize(
+            "resize".into(),
+            crate::api::schema::PaneResizeParams {
+                pane_id: Some(floating_public.clone()),
+                direction: PaneDirection::Right,
+                amount: Some(0.1),
+            },
+        );
+        assert_eq!(
+            metadata_error_code(&resize_response),
+            "pane_not_in_tiled_layout"
+        );
+
+        let swap_response = app.handle_pane_swap(
+            "swap".into(),
+            crate::api::schema::PaneSwapParams {
+                pane_id: Some(floating_public),
+                direction: Some(PaneDirection::Right),
+                source_pane_id: None,
+                target_pane_id: None,
+            },
+        );
+        assert_eq!(
+            metadata_error_code(&swap_response),
+            "pane_not_in_tiled_layout"
+        );
+
+        let floating_public = app.public_pane_id(0, floating_id).unwrap();
+        let layout_response = app.handle_pane_layout(
+            "layout".into(),
+            crate::api::schema::PaneLayoutParams {
+                pane_id: Some(floating_public.clone()),
+            },
+        );
+        assert_eq!(
+            metadata_error_code(&layout_response),
+            "pane_not_in_tiled_layout"
+        );
+
+        let neighbor_response = app.handle_pane_neighbor(
+            "neighbor".into(),
+            crate::api::schema::PaneNeighborParams {
+                pane_id: Some(floating_public.clone()),
+                direction: PaneDirection::Right,
+            },
+        );
+        assert_eq!(
+            metadata_error_code(&neighbor_response),
+            "pane_not_in_tiled_layout"
+        );
+
+        let edges_response = app.handle_pane_edges(
+            "edges".into(),
+            crate::api::schema::PaneEdgesParams {
+                pane_id: Some(floating_public.clone()),
+            },
+        );
+        assert_eq!(
+            metadata_error_code(&edges_response),
+            "pane_not_in_tiled_layout"
+        );
+
+        let zoom_response = app.handle_pane_zoom(
+            "zoom".into(),
+            crate::api::schema::PaneZoomParams {
+                pane_id: Some(floating_public),
+                mode: PaneZoomMode::Toggle,
+            },
+        );
+        assert_eq!(
+            metadata_error_code(&zoom_response),
+            "pane_not_in_tiled_layout"
+        );
     }
 
     #[test]

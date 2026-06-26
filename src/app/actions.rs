@@ -1849,9 +1849,8 @@ impl AppState {
         let terminal_area = self.view.terminal_area;
 
         let follow_cwd = self.workspaces.get(ws_idx).and_then(|ws| {
-            ws.active_tab().and_then(|tab| {
-                tab.cwd_for_pane(tab.layout.focused(), &self.terminals, terminal_runtimes)
-            })
+            let pane_id = ws.focused_pane_id()?;
+            ws.cwd_for_pane(pane_id, &self.terminals, terminal_runtimes)
         });
         let cwd = Some(super::creation::resolve_new_terminal_cwd(
             &self.new_terminal_cwd,

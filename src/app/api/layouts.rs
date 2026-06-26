@@ -21,6 +21,22 @@ impl App {
         id: String,
         params: LayoutExportParams,
     ) -> String {
+        if let Some(pane_id_param) = params.pane_id.as_deref() {
+            if let Some((ws_idx, pane_id)) = self.parse_pane_id(pane_id_param) {
+                if self.state.workspaces.get(ws_idx).is_some_and(|ws| {
+                    ws.pane_state(pane_id).is_some()
+                        && ws.find_tab_index_for_pane(pane_id).is_none()
+                }) {
+                    return encode_error(
+                        id,
+                        "pane_not_in_tiled_layout",
+                        format!(
+                            "pane {pane_id_param} is a floating pane; this operation only supports tiled panes"
+                        ),
+                    );
+                }
+            }
+        }
         let Some((ws_idx, tab_idx)) = self.resolve_layout_export_target(&params) else {
             return encode_error(id, "layout_not_found", "layout target not found");
         };
@@ -634,6 +650,24 @@ mod tests {
         };
         assert_eq!(pane.label.as_deref(), Some("tests"));
         assert_eq!(pane.pane_id, Some(app.public_pane_id(0, right).unwrap()));
+    }
+
+    #[test]
+    fn layout_export_rejects_floating_pane_target() {
+        let mut app = app_with_workspace();
+        let floating_id = app.state.workspaces[0].test_add_floating_pane();
+        let floating_public = app.public_pane_id(0, floating_id).unwrap();
+
+        let response = app.handle_layout_export(
+            "req".into(),
+            LayoutExportParams {
+                tab_id: None,
+                pane_id: Some(floating_public),
+            },
+        );
+
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "pane_not_in_tiled_layout");
     }
 
     #[tokio::test]

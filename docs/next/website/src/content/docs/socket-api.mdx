@@ -126,6 +126,15 @@ pane.
 `pane.neighbor` and `pane.edges` include that same layout snapshot so clients
 can make the next decision without private layout state.
 
+Floating panes are temporary workspace overlays. They can be the active focused
+pane for terminal input, `pane.current`, `pane.read`, send-input APIs, and close
+operations, but they are not part of the tiled tab layout and are not restored
+from saved sessions. Tiled layout operations such as `pane.split`,
+`pane.focus_direction`, `pane.resize`, directional `pane.swap`, `pane.layout`,
+`pane.neighbor`, `pane.edges`, `layout.export`, and `layout.apply` operate only
+on tiled panes. When a floating pane is used with a tiled-only operation, Herdr
+returns `pane_not_in_tiled_layout`.
+
 `pane.process_info` returns the pane's shell pid, foreground process group id
 when available, and foreground processes with pid, name, argv/cmdline, and cwd
 when the platform exposes them.

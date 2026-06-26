@@ -399,7 +399,11 @@ fn focused_pane_info_for_cursor(app_state: &AppState) -> Option<&crate::layout::
             .iter()
             .find(|info| info.id == floating_id);
     }
-    app_state.view.pane_infos.iter().find(|info| info.is_focused)
+    app_state
+        .view
+        .pane_infos
+        .iter()
+        .find(|info| info.is_focused)
 }
 
 pub(crate) fn focused_terminal_cursor(
