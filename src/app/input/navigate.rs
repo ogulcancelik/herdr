@@ -750,12 +750,197 @@ pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateActi
     );
 }
 
-pub(super) fn execute_navigate_action_in_context(
+pub(crate) fn can_execute_navigate_action(
+    state: &AppState,
+    terminal_runtimes: Option<&TerminalRuntimeRegistry>,
+    action: NavigateAction,
+    context: ActionContext,
+) -> (bool, Option<String>) {
+    let active_workspace = state.active.and_then(|idx| state.workspaces.get(idx));
+    let has_active_workspace = active_workspace.is_some();
+    let has_active_tab = active_workspace.is_some_and(|ws| !ws.tabs.is_empty());
+    let has_multiple_tabs = active_workspace.is_some_and(|ws| ws.tabs.len() > 1);
+    let has_focused_pane = active_workspace
+        .and_then(|ws| ws.focused_pane_id())
+        .is_some();
+    let has_toast_target = state
+        .toast
+        .as_ref()
+        .is_some_and(|toast| toast.target.is_some());
+
+    match action {
+        NavigateAction::NewWorkspace
+        | NavigateAction::Help
+        | NavigateAction::Settings
+        | NavigateAction::ReloadConfig
+        | NavigateAction::Detach
+        | NavigateAction::WorkspacePicker => (true, None),
+        NavigateAction::OpenNotificationTarget => {
+            if has_toast_target {
+                (true, None)
+            } else {
+                (false, Some("no notification target".to_string()))
+            }
+        }
+        NavigateAction::SwitchWorkspace(idx) => {
+            if state.workspace_at_visible_position(idx).is_some() {
+                (true, None)
+            } else {
+                (false, Some("indexed shortcut only".to_string()))
+            }
+        }
+        NavigateAction::SwitchTab(idx) => {
+            if active_workspace.is_some_and(|ws| idx < ws.tabs.len()) {
+                (true, None)
+            } else {
+                (false, Some("indexed shortcut only".to_string()))
+            }
+        }
+        NavigateAction::FocusAgent(_) => (true, None),
+        NavigateAction::OpenWorktree | NavigateAction::NewWorktree => {
+            let Some(ws_idx) = workspace_action_target(state, context) else {
+                return (false, Some("no active workspace".to_string()));
+            };
+            if !workspace_can_start_worktree_action_with_context(state, terminal_runtimes, ws_idx) {
+                return (
+                    false,
+                    Some("managed linked worktrees cannot create sibling worktrees".to_string()),
+                );
+            }
+            (true, None)
+        }
+        NavigateAction::RemoveWorktree => {
+            let Some(ws_idx) = workspace_action_target(state, context) else {
+                return (false, Some("no active workspace".to_string()));
+            };
+            let Some(ws) = state.workspaces.get(ws_idx) else {
+                return (false, Some("no active workspace".to_string()));
+            };
+            if ws
+                .worktree_space()
+                .is_some_and(|space| space.is_linked_worktree)
+            {
+                (true, None)
+            } else {
+                (
+                    false,
+                    Some("active workspace is not a managed worktree".to_string()),
+                )
+            }
+        }
+        NavigateAction::RenameWorkspace | NavigateAction::CloseWorkspace => {
+            if workspace_action_target(state, context).is_some() {
+                (true, None)
+            } else {
+                (false, Some("no active workspace".to_string()))
+            }
+        }
+        NavigateAction::OpenNavigator
+        | NavigateAction::PreviousWorkspace
+        | NavigateAction::NextWorkspace
+        | NavigateAction::PreviousAgent
+        | NavigateAction::NextAgent
+        | NavigateAction::NewTab => {
+            if has_active_workspace {
+                (true, None)
+            } else {
+                (false, Some("no active workspace".to_string()))
+            }
+        }
+        NavigateAction::RenameTab => {
+            if has_active_tab {
+                (true, None)
+            } else {
+                (false, Some("no active tab".to_string()))
+            }
+        }
+        NavigateAction::PreviousTab | NavigateAction::NextTab => {
+            if has_active_tab {
+                (true, None)
+            } else {
+                (false, Some("no active workspace".to_string()))
+            }
+        }
+        NavigateAction::CloseTab => {
+            if !has_active_workspace {
+                (false, Some("no active workspace".to_string()))
+            } else if !has_multiple_tabs {
+                (false, Some("cannot close the last tab".to_string()))
+            } else {
+                (true, None)
+            }
+        }
+        NavigateAction::RenamePane | NavigateAction::ClosePane | NavigateAction::EditScrollback => {
+            if !has_active_workspace {
+                (false, Some("no active workspace".to_string()))
+            } else if !has_focused_pane {
+                (false, Some("no focused pane".to_string()))
+            } else {
+                (true, None)
+            }
+        }
+        NavigateAction::FocusPaneLeft
+        | NavigateAction::FocusPaneDown
+        | NavigateAction::FocusPaneUp
+        | NavigateAction::FocusPaneRight
+        | NavigateAction::SwapPaneLeft
+        | NavigateAction::SwapPaneDown
+        | NavigateAction::SwapPaneUp
+        | NavigateAction::SwapPaneRight
+        | NavigateAction::SplitVertical
+        | NavigateAction::SplitHorizontal
+        | NavigateAction::CopyMode
+        | NavigateAction::Zoom
+        | NavigateAction::EnterResizeMode
+        | NavigateAction::ToggleSidebar
+        | NavigateAction::CyclePaneNext
+        | NavigateAction::CyclePanePrevious
+        | NavigateAction::LastPane => {
+            if has_active_workspace {
+                (true, None)
+            } else {
+                (false, Some("no active workspace".to_string()))
+            }
+        }
+    }
+}
+
+fn workspace_can_start_worktree_action_with_context(
+    state: &AppState,
+    terminal_runtimes: Option<&TerminalRuntimeRegistry>,
+    ws_idx: usize,
+) -> bool {
+    let Some(ws) = state.workspaces.get(ws_idx) else {
+        return false;
+    };
+    if ws
+        .worktree_space()
+        .is_some_and(|space| space.is_linked_worktree)
+    {
+        return false;
+    }
+    let git_space = if let Some(terminal_runtimes) = terminal_runtimes {
+        ws.git_space().cloned().or_else(|| {
+            ws.resolved_identity_cwd_from(&state.terminals, terminal_runtimes)
+                .as_deref()
+                .and_then(crate::workspace::git_space_metadata)
+        })
+    } else {
+        ws.git_space().cloned()
+    };
+    !git_space.is_some_and(|space| space.is_linked_worktree)
+}
+
+pub(crate) fn execute_navigate_action_in_context(
     state: &mut AppState,
     terminal_runtimes: &mut TerminalRuntimeRegistry,
     action: NavigateAction,
     context: ActionContext,
 ) {
+    if !can_execute_navigate_action(state, Some(&*terminal_runtimes), action, context).0 {
+        return;
+    }
+
     let previous_mode = state.mode;
     match action {
         NavigateAction::NewWorkspace => {
@@ -763,17 +948,13 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::NewWorktree => {
-            if let Some(ws_idx) = workspace_action_target(state, context)
-                .filter(|idx| workspace_can_start_worktree_action(state, terminal_runtimes, *idx))
-            {
+            if let Some(ws_idx) = workspace_action_target(state, context) {
                 state.request_new_linked_worktree = Some(ws_idx);
                 leave_navigate_mode(state);
             }
         }
         NavigateAction::OpenWorktree => {
-            if let Some(ws_idx) = workspace_action_target(state, context)
-                .filter(|idx| workspace_can_start_worktree_action(state, terminal_runtimes, *idx))
-            {
+            if let Some(ws_idx) = workspace_action_target(state, context) {
                 state.request_open_existing_worktree = Some(ws_idx);
                 leave_navigate_mode(state);
             }
@@ -960,28 +1141,6 @@ fn workspace_action_target(state: &AppState, context: ActionContext) -> Option<u
     (idx < state.workspaces.len()).then_some(idx)
 }
 
-fn workspace_can_start_worktree_action(
-    state: &AppState,
-    terminal_runtimes: &TerminalRuntimeRegistry,
-    ws_idx: usize,
-) -> bool {
-    let Some(ws) = state.workspaces.get(ws_idx) else {
-        return false;
-    };
-    if ws
-        .worktree_space()
-        .is_some_and(|space| space.is_linked_worktree)
-    {
-        return false;
-    }
-    let git_space = ws.git_space().cloned().or_else(|| {
-        ws.resolved_identity_cwd_from(&state.terminals, terminal_runtimes)
-            .as_deref()
-            .and_then(crate::workspace::git_space_metadata)
-    });
-    !git_space.is_some_and(|space| space.is_linked_worktree)
-}
-
 fn leave_navigate_mode(state: &mut AppState) {
     if state.active.is_some() {
         state.mode = Mode::Terminal;
@@ -1009,11 +1168,7 @@ fn finish_custom_command_context(
 }
 
 fn leave_command_mode(state: &mut AppState) {
-    state.mode = if state.active.is_some() {
-        Mode::Terminal
-    } else {
-        Mode::Navigate
-    };
+    state.leave_command_mode();
 }
 
 fn write_scrollback_temp_file(content: &str) -> io::Result<std::path::PathBuf> {

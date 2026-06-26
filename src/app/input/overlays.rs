@@ -194,6 +194,14 @@ impl App {
 
         if self.state.mode == Mode::KeybindHelp {
             match mouse.kind {
+                MouseEventKind::Moved => {
+                    if let Some(row) = self
+                        .state
+                        .keybind_help_row_index_at(mouse.column, mouse.row)
+                    {
+                        self.keybind_help_hover_row(row);
+                    }
+                }
                 MouseEventKind::Down(MouseButton::Left)
                     if self
                         .state
@@ -217,6 +225,11 @@ impl App {
                                     .set_keybind_help_offset_from_bottom(offset_from_bottom);
                             }
                         }
+                    } else if let Some(row) = self
+                        .state
+                        .keybind_help_row_index_at(mouse.column, mouse.row)
+                    {
+                        self.keybind_help_click_row(row);
                     } else {
                         let rect = self.state.keybind_help_popup_rect();
                         let inside = mouse.column >= rect.x
@@ -628,7 +641,7 @@ impl AppState {
             && row < button.y + button.height
     }
 
-    fn keybind_help_body_rect(&self) -> Option<Rect> {
+    pub(crate) fn keybind_help_body_rect(&self) -> Option<Rect> {
         let inner = self.keybind_help_modal_inner()?;
         if inner.height < 6 || inner.width < 4 {
             return None;
@@ -636,14 +649,24 @@ impl AppState {
         Some(crate::ui::modal_stack_areas(inner, 2, 1, 0, 1).content)
     }
 
+    pub(crate) fn keybind_help_row_index_at(&self, col: u16, row: u16) -> Option<usize> {
+        let body = self.keybind_help_body_rect()?;
+        let metrics = self.keybind_help_scroll_metrics()?;
+        let text_area = crate::ui::release_notes_scrollbar_rect(body, metrics)
+            .map(|_| Rect::new(body.x, body.y, body.width.saturating_sub(1), body.height))
+            .unwrap_or(body);
+        if !rect_contains(text_area, col, row) {
+            return None;
+        }
+        Some(row.saturating_sub(text_area.y) as usize)
+    }
+
     fn keybind_help_scroll_metrics(&self) -> Option<crate::pane::ScrollMetrics> {
         let body = self.keybind_help_body_rect()?;
         let viewport_rows = body.height.max(1) as usize;
-        let wrap_width = body.width.max(1) as usize;
-        let total_rows = crate::ui::keybind_help_lines(self)
-            .into_iter()
-            .map(|(width, _)| width.max(1).div_ceil(wrap_width))
-            .sum::<usize>();
+        let total_rows = crate::app::command_palette::build_keybind_help_model(self)
+            .rows
+            .len();
         let max_offset_from_bottom = total_rows.saturating_sub(viewport_rows);
         Some(crate::pane::ScrollMetrics {
             offset_from_bottom: max_offset_from_bottom

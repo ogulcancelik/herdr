@@ -9,6 +9,7 @@ mod agent_resume;
 mod agents;
 mod api;
 mod api_helpers;
+pub(crate) mod command_palette;
 mod config_io;
 mod creation;
 mod ids;
@@ -539,7 +540,13 @@ impl App {
                     preview: announcement.preview,
                 }
             }),
-            keybind_help: state::KeybindHelpState { scroll: 0 },
+            keybind_help: state::KeybindHelpState {
+                scroll: 0,
+                query: String::new(),
+                search_focused: false,
+                selected: 0,
+                origin_mode: mode,
+            },
             navigator: state::NavigatorState::default(),
             copy_mode: None,
             workspace_scroll: 0,
@@ -642,6 +649,7 @@ impl App {
             plugin_commands_in_flight: 0,
             global_menu: state::MenuListState::new(0),
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
+            command_mode_return: None,
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
         };
@@ -1617,7 +1625,7 @@ impl App {
                 );
             }
             Mode::KeybindHelp => {
-                input::handle_keybind_help_key(&mut self.state, key_event);
+                self.handle_keybind_help_key(key_event);
             }
             Mode::GlobalMenu => {
                 input::handle_global_menu_key(&mut self.state, key_event);

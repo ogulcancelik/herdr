@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::borrow::Cow;
 
 use ratatui::{
@@ -14,19 +15,27 @@ use super::widgets::{
     modal_stack_areas, panel_contrast_fg, render_action_button, render_modal_header,
     render_modal_shell,
 };
-use crate::app::AppState;
+use crate::app::{
+    command_palette::{build_keybind_help_model, keybind_help_selected_row, KeybindHelpRow},
+    AppState,
+};
 
+#[cfg(test)]
 pub(super) type HelpEntry = (String, Cow<'static, str>);
+#[cfg(test)]
 pub(super) type HelpGroup = (&'static str, Vec<HelpEntry>);
 
+#[cfg(test)]
 fn help_entry(key: impl Into<String>, label: &'static str) -> HelpEntry {
     (key.into(), Cow::Borrowed(label))
 }
 
+#[cfg(test)]
 fn keybind_label(bindings: &crate::config::ActionKeybinds) -> String {
     bindings.label().unwrap_or_else(|| "unset".to_string())
 }
 
+#[cfg(test)]
 fn indexed_label(bindings: &[crate::config::IndexedKeybind]) -> String {
     if bindings.is_empty() {
         return "unset".to_string();
@@ -59,6 +68,7 @@ fn indexed_range_prefix(bindings: &[crate::config::IndexedKeybind]) -> Option<&s
     Some(prefix)
 }
 
+#[cfg(test)]
 pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
     let kb = &app.keybinds;
     let mut groups = Vec::new();
@@ -181,6 +191,7 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
     groups
 }
 
+#[cfg(test)]
 pub(crate) fn keybind_help_lines(app: &AppState) -> Vec<(usize, Line<'static>)> {
     let heading_style = Style::default()
         .fg(app.palette.accent)
@@ -246,9 +257,15 @@ pub(super) fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
             .bg(app.palette.accent)
             .add_modifier(Modifier::BOLD),
     );
+    let query_hint = if app.keybind_help.search_focused {
+        format!("search: {}", app.keybind_help.query)
+    } else if app.keybind_help.query.is_empty() {
+        "available commands and configured shortcuts (press / to filter)".to_string()
+    } else {
+        format!("search: {}", app.keybind_help.query)
+    };
     frame.render_widget(
-        Paragraph::new(" available commands and configured shortcuts")
-            .style(Style::default().fg(app.palette.overlay1)),
+        Paragraph::new(format!(" {query_hint}")).style(Style::default().fg(app.palette.overlay1)),
         header_rows[1],
     );
 
@@ -272,15 +289,70 @@ pub(super) fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
         })
         .unwrap_or(body_area);
 
-    let body = Paragraph::new(
-        keybind_help_lines(app)
-            .into_iter()
-            .map(|(_, line)| line)
-            .collect::<Vec<_>>(),
-    )
-    .wrap(Wrap { trim: false })
-    .scroll((app.keybind_help.scroll, 0));
-    frame.render_widget(body, text_area);
+    let model = build_keybind_help_model(app);
+    let start = app.keybind_help.scroll as usize;
+    let end = model
+        .rows
+        .len()
+        .min(start.saturating_add(text_area.height as usize));
+    let selected_row = keybind_help_selected_row(&model, app.keybind_help.selected);
+
+    for (visible_idx, row) in model.rows[start..end].iter().enumerate() {
+        let y = text_area.y + visible_idx as u16;
+        let row_rect = Rect::new(text_area.x, y, text_area.width, 1);
+        match row {
+            KeybindHelpRow::Spacer => {
+                frame.render_widget(Paragraph::new(""), row_rect);
+            }
+            KeybindHelpRow::Header(group) => {
+                frame.render_widget(
+                    Paragraph::new(format!(" {}", group.label())).style(
+                        Style::default()
+                            .fg(app.palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    row_rect,
+                );
+            }
+            KeybindHelpRow::Entry(entry_idx) => {
+                let Some(entry) = model.entries.get(*entry_idx) else {
+                    continue;
+                };
+                let row_absolute = start + visible_idx;
+                let is_selected = selected_row == Some(row_absolute);
+                let bg = if is_selected {
+                    app.palette.accent
+                } else {
+                    app.palette.panel_bg
+                };
+                let key_style = if is_selected {
+                    Style::default()
+                        .fg(panel_contrast_fg(&app.palette))
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                        .fg(app.palette.mauve)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD)
+                };
+                let label_style = if is_selected {
+                    Style::default().fg(panel_contrast_fg(&app.palette)).bg(bg)
+                } else {
+                    Style::default().fg(app.palette.text).bg(bg)
+                };
+                let padded_key = format!(" {:<28} ", entry.shortcuts);
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(padded_key, key_style),
+                        Span::styled(entry.label.clone(), label_style),
+                    ]))
+                    .wrap(Wrap { trim: false }),
+                    row_rect,
+                );
+            }
+        }
+    }
     if let Some(track) = track {
         render_scrollbar(
             frame,
@@ -294,14 +366,17 @@ pub(super) fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" scroll ", Style::default().fg(app.palette.overlay0)),
-            Span::styled("wheel ↑↓", Style::default().fg(app.palette.text)),
+            Span::styled("search", Style::default().fg(app.palette.overlay0)),
+            Span::styled(" / ", Style::default().fg(app.palette.text)),
             Span::styled("  ·  ", Style::default().fg(app.palette.overlay0)),
-            Span::styled("jump", Style::default().fg(app.palette.overlay0)),
-            Span::styled(" pgup / pgdn ", Style::default().fg(app.palette.text)),
+            Span::styled("move", Style::default().fg(app.palette.overlay0)),
+            Span::styled(" ↑↓ / ctrl+n,p ", Style::default().fg(app.palette.text)),
+            Span::styled("  ·  ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("run", Style::default().fg(app.palette.overlay0)),
+            Span::styled(" enter ", Style::default().fg(app.palette.text)),
             Span::styled("  ·  ", Style::default().fg(app.palette.overlay0)),
             Span::styled("close", Style::default().fg(app.palette.overlay0)),
-            Span::styled(" esc / enter ", Style::default().fg(app.palette.text)),
+            Span::styled(" esc ", Style::default().fg(app.palette.text)),
         ])),
         stack.footer.unwrap_or_default(),
     );

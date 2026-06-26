@@ -33,6 +33,7 @@ fn modified_url_click_modifier_matches_terminal_mouse_reporting() {
     assert_eq!(modified_url_click_modifier(), KeyModifiers::CONTROL);
 }
 
+mod command_palette;
 mod copy_mode;
 mod modal;
 mod mouse;
@@ -46,10 +47,11 @@ mod terminal;
 pub(crate) use self::{
     modal::{
         handle_confirm_close_key, handle_context_menu_key, handle_global_menu_key,
-        handle_keybind_help_key, handle_navigator_key, handle_rename_key, handle_resize_key,
-        insert_navigator_search_text, insert_rename_input_text,
+        handle_navigator_key, handle_rename_key, handle_resize_key, insert_navigator_search_text,
+        insert_rename_input_text,
     },
     navigate::terminal_direct_navigation_action,
+    navigate::{can_execute_navigate_action, ActionContext, NavigateAction},
     settings::open_settings_at,
 };
 use self::{
@@ -102,7 +104,7 @@ impl App {
                 }
                 Mode::Settings => self.handle_settings_key(key_event),
                 Mode::GlobalMenu => handle_global_menu_key(&mut self.state, key_event),
-                Mode::KeybindHelp => handle_keybind_help_key(&mut self.state, key_event),
+                Mode::KeybindHelp => self.handle_keybind_help_key(key_event),
                 Mode::Navigator => {
                     handle_navigator_key(&mut self.state, &self.terminal_runtimes, key_event)
                 }
@@ -154,6 +156,10 @@ impl App {
                     return false;
                 }
                 insert_navigator_search_text(&mut self.state, &self.terminal_runtimes, text);
+                true
+            }
+            Mode::KeybindHelp => {
+                self::command_palette::insert_keybind_help_search_text(&mut self.state, text);
                 true
             }
             _ => false,
@@ -464,6 +470,7 @@ pub(crate) fn modal_paste_target_active(state: &AppState) -> bool {
             .as_ref()
             .is_some_and(|open| open.search_focused),
         Mode::Navigator => state.navigator.search_focused,
+        Mode::KeybindHelp => state.keybind_help.search_focused,
         _ => false,
     }
 }

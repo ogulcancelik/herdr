@@ -16,6 +16,11 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return;
         }
+        if self.state.is_prefix_key(key) {
+            self.state.command_mode_return = Some(Mode::Copy);
+            self.state.mode = Mode::Prefix;
+            return;
+        }
         self.state.update_dismissed = true;
         self.state
             .handle_copy_mode_key(&self.terminal_runtimes, key);
@@ -1047,5 +1052,18 @@ mod tests {
         }
         assert_eq!(app.state.mode, Mode::Terminal);
         assert!(app.state.copy_mode.is_none());
+    }
+
+    #[tokio::test]
+    async fn copy_mode_prefix_key_enters_prefix_mode_with_copy_return_target() {
+        let (mut app, _) = app_with_copy_screen(b"alpha\n");
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.state.prefix_code = KeyCode::Char('b');
+        app.state.prefix_mods = KeyModifiers::CONTROL;
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+
+        assert_eq!(app.state.mode, Mode::Prefix);
+        assert_eq!(app.state.command_mode_return, Some(Mode::Copy));
     }
 }

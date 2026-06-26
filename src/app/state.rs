@@ -1246,6 +1246,10 @@ pub struct ProductAnnouncementState {
 
 pub struct KeybindHelpState {
     pub scroll: u16,
+    pub query: String,
+    pub search_focused: bool,
+    pub selected: usize,
+    pub origin_mode: Mode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1425,6 +1429,8 @@ pub struct AppState {
     pub global_menu: MenuListState,
     /// Resolved host terminal default colors for theming embedded panes.
     pub host_terminal_theme: TerminalTheme,
+    /// Optional return target when leaving prefix-driven command modes.
+    pub(crate) command_mode_return: Option<Mode>,
     /// Set when a persisted session snapshot would change.
     pub session_dirty: bool,
     /// Terminal runtimes that should be shut down by the app/runtime layer
@@ -1513,6 +1519,16 @@ impl AppState {
 
     pub fn is_prefix_key(&self, key: crate::input::TerminalKey) -> bool {
         crate::config::terminal_key_matches_combo(key, (self.prefix_code, self.prefix_mods))
+    }
+
+    pub(crate) fn leave_command_mode(&mut self) {
+        if let Some(mode) = self.command_mode_return.take() {
+            self.mode = mode;
+        } else if self.active.is_some() {
+            self.mode = Mode::Terminal;
+        } else {
+            self.mode = Mode::Navigate;
+        }
     }
 
     pub fn estimate_pane_size(&self) -> (u16, u16) {
@@ -1659,7 +1675,13 @@ impl AppState {
             name_input_replace_on_type: false,
             release_notes: None,
             product_announcement: None,
-            keybind_help: KeybindHelpState { scroll: 0 },
+            keybind_help: KeybindHelpState {
+                scroll: 0,
+                query: String::new(),
+                search_focused: false,
+                selected: 0,
+                origin_mode: Mode::Terminal,
+            },
             navigator: NavigatorState::default(),
             copy_mode: None,
             workspace_scroll: 0,
@@ -1771,6 +1793,7 @@ impl AppState {
             plugin_commands_in_flight: 0,
             global_menu: MenuListState::new(0),
             host_terminal_theme: TerminalTheme::default(),
+            command_mode_return: None,
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
         }
