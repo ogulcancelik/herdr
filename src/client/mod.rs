@@ -1138,6 +1138,30 @@ async fn run_client_loop(
                         "clipboard image paste trigger received, but local clipboard has no image"
                     );
                 }
+                #[cfg(unix)]
+                if let Some(image) = try_bridge_dragged_image_file(&data) {
+                    if image.bytes.len() > MAX_CLIPBOARD_IMAGE_PAYLOAD {
+                        warn!(
+                            bytes = image.bytes.len(),
+                            max = MAX_CLIPBOARD_IMAGE_PAYLOAD,
+                            "dragged image file is too large to bridge"
+                        );
+                    } else {
+                        info!(
+                            bytes = image.bytes.len(),
+                            extension = image.extension,
+                            "bridging dragged image file to remote server"
+                        );
+                        let msg = ClientMessage::ClipboardImage {
+                            extension: image.extension.to_owned(),
+                            data: image.bytes,
+                        };
+                        if let Err(e) = write_to_server(&mut write_stream, &msg) {
+                            return Err(ClientError::ConnectionLost(e));
+                        }
+                        continue;
+                    }
+                }
                 let msg = ClientMessage::Input { data };
                 if let Err(e) = write_to_server(&mut write_stream, &msg) {
                     return Err(ClientError::ConnectionLost(e));
@@ -1464,6 +1488,56 @@ fn should_bridge_clipboard_image_paste(
             if key.kind == crossterm::event::KeyEventKind::Press
                 && crate::config::terminal_key_matches_combo(*key, remote_image_paste_key)
     )
+}
+
+#[cfg(unix)]
+fn try_bridge_dragged_image_file(data: &[u8]) -> Option<crate::platform::ClipboardImage> {
+    let raw = if let Some(inner) = data
+        .strip_prefix(b"\x1b[200~")
+        .and_then(|d| d.strip_suffix(b"\x1b[201~"))
+    {
+        // Bracketed paste — only intercept if it looks like a single file path
+        std::str::from_utf8(inner).ok()?.trim().to_owned()
+    } else {
+        // Plain text — strip a single trailing newline and optional surrounding quotes
+        let s = std::str::from_utf8(data).ok()?;
+        let s = s.trim_end_matches('\n').trim_end_matches('\r');
+        // Must be on one line (no embedded newlines after trimming the trailing one)
+        if s.contains('\n') {
+            return None;
+        }
+        s.trim_matches('"').trim().to_owned()
+    };
+
+    // Require an absolute path so we don't accidentally intercept short filenames
+    if !raw.starts_with('/') {
+        return None;
+    }
+
+    let extension = std::path::Path::new(&raw)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_lowercase)?;
+
+    let extension: &'static str = match extension.as_str() {
+        "png" => "png",
+        "jpg" | "jpeg" => "jpg",
+        "gif" => "gif",
+        "webp" => "webp",
+        "bmp" => "bmp",
+        _ => return None,
+    };
+
+    let file = std::fs::File::open(&raw).ok()?;
+    let bytes =
+        match crate::platform::read_limited_reader(file, MAX_CLIPBOARD_IMAGE_PAYLOAD).ok()? {
+            crate::platform::LimitedRead::Complete(bytes) => bytes,
+            crate::platform::LimitedRead::Empty | crate::platform::LimitedRead::Oversized => {
+                return None
+            }
+        };
+
+    Some(crate::platform::ClipboardImage { bytes, extension })
 }
 
 // ---------------------------------------------------------------------------

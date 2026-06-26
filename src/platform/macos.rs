@@ -508,6 +508,10 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
 }
 
 pub fn read_clipboard_image() -> Option<ClipboardImage> {
+    read_clipboard_png().or_else(read_clipboard_image_from_file_url)
+}
+
+fn read_clipboard_png() -> Option<ClipboardImage> {
     let path = std::env::temp_dir().join(format!(
         "herdr-clipboard-image-{}-{}.png",
         std::process::id(),
@@ -546,6 +550,49 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
         bytes,
         extension: "png",
     })
+}
+
+// Fallback: when the clipboard holds a file URL (Finder copy or drag-and-drop),
+// read the file bytes directly if it's a recognised image type.
+fn read_clipboard_image_from_file_url() -> Option<ClipboardImage> {
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg("POSIX path of (the clipboard as «class furl»)")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let file_path = std::str::from_utf8(&output.stdout).ok()?.trim().to_owned();
+    if file_path.is_empty() {
+        return None;
+    }
+
+    let extension = std::path::Path::new(&file_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_lowercase)?;
+
+    let extension: &'static str = match extension.as_str() {
+        "png" => "png",
+        "jpg" | "jpeg" => "jpg",
+        "gif" => "gif",
+        "webp" => "webp",
+        "bmp" => "bmp",
+        _ => return None,
+    };
+
+    let file = std::fs::File::open(&file_path).ok()?;
+    let bytes = match read_limited_reader(file, crate::protocol::MAX_CLIPBOARD_IMAGE_PAYLOAD).ok()? {
+        LimitedRead::Complete(bytes) => bytes,
+        LimitedRead::Empty | LimitedRead::Oversized => return None,
+    };
+
+    Some(ClipboardImage { bytes, extension })
 }
 
 fn unique_timestamp_nanos() -> u128 {
