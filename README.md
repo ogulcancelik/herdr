@@ -178,7 +178,7 @@ automatic detection works out of the box. process name matching plus terminal ou
 
 | agent | idle / done | working | blocked |
 |-------|-------------|---------|---------|
-| [pi](https://pi.dev) | ✓ | ✓ | partial |
+| [pi](https://pi.dev) / [prime-agent](https://github.com/earendil-works/prime-agent) | ✓ | ✓ | partial |
 | [claude code](https://docs.anthropic.com/en/docs/claude-code) | ✓ | ✓ | ✓ |
 | [codex](https://github.com/openai/codex) | ✓ | ✓ | ✓ |
 | [droid](https://factory.ai) | ✓ | ✓ | ✓ |

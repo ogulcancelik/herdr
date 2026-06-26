@@ -94,6 +94,7 @@ fn enforce_agent_version_accepts_current_version() {
 
 fn clear_integration_path_env() {
     std::env::remove_var(PI_CODING_AGENT_DIR_ENV_VAR);
+    std::env::remove_var(PRIME_AGENT_CODING_AGENT_DIR_ENV_VAR);
     std::env::remove_var(CLAUDE_CONFIG_DIR_ENV_VAR);
     std::env::remove_var(CODEX_HOME_ENV_VAR);
     std::env::remove_var(COPILOT_HOME_ENV_VAR);
@@ -516,6 +517,81 @@ fn install_pi_expands_tilde_in_pi_coding_agent_dir_env() {
 
     std::env::remove_var("HOME");
     clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_pi_writes_to_prime_agent_extensions_dir() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let ext_dir = home.join(".prime/agent/extensions");
+    fs::create_dir_all(&ext_dir).unwrap();
+    std::env::set_var("HOME", &home);
+
+    let path = install_pi().unwrap();
+    let content = fs::read_to_string(&path).unwrap();
+
+    assert_eq!(path, ext_dir.join(PI_EXTENSION_INSTALL_NAME));
+    assert_eq!(content, PI_EXTENSION_ASSET);
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_pi_prefers_prime_agent_over_legacy_pi_dir() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let prime_ext_dir = home.join(".prime/agent/extensions");
+    let legacy_ext_dir = home.join(".pi/agent/extensions");
+    fs::create_dir_all(&prime_ext_dir).unwrap();
+    fs::create_dir_all(&legacy_ext_dir).unwrap();
+    std::env::set_var("HOME", &home);
+
+    let path = install_pi().unwrap();
+
+    assert_eq!(path, prime_ext_dir.join(PI_EXTENSION_INSTALL_NAME));
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_pi_uses_prime_agent_coding_agent_dir_env() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let agent_dir = base.join("custom-prime-agent");
+    let ext_dir = agent_dir.join("extensions");
+    fs::create_dir_all(&ext_dir).unwrap();
+    std::env::set_var(PRIME_AGENT_CODING_AGENT_DIR_ENV_VAR, &agent_dir);
+
+    let path = install_pi().unwrap();
+
+    assert_eq!(path, ext_dir.join(PI_EXTENSION_INSTALL_NAME));
+
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_pi_creates_extensions_dir_when_parent_exists() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let agent_dir = home.join(".prime/agent");
+    fs::create_dir_all(&agent_dir).unwrap();
+    std::env::set_var("HOME", &home);
+
+    let path = install_pi().unwrap();
+    assert!(path.is_file());
+    assert_eq!(
+        path,
+        agent_dir.join("extensions").join(PI_EXTENSION_INSTALL_NAME)
+    );
+
+    std::env::remove_var("HOME");
     let _ = fs::remove_dir_all(base);
 }
 

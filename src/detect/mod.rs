@@ -112,7 +112,7 @@ pub fn agent_label(agent: Agent) -> &'static str {
 pub fn parse_agent_label(agent: &str) -> Option<Agent> {
     let name = normalized_agent_lookup_name(agent);
     match name.as_str() {
-        "pi" => Some(Agent::Pi),
+        "pi" | "prime-agent" => Some(Agent::Pi),
         "claude" | "claude-code" => Some(Agent::Claude),
         "codex" => Some(Agent::Codex),
         "gemini" => Some(Agent::Gemini),
@@ -141,7 +141,7 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
     let name = normalized_agent_lookup_name(process_name);
     // Match against known binary names
     match name.as_str() {
-        "pi" => Some(Agent::Pi),
+        "pi" | "prime-agent" => Some(Agent::Pi),
         "claude" | "claude-code" => Some(Agent::Claude),
         "codex" => Some(Agent::Codex),
         "gemini" => Some(Agent::Gemini),
@@ -640,6 +640,7 @@ mod tests {
     #[test]
     fn parse_known_agent_labels() {
         assert_eq!(parse_agent_label("pi"), Some(Agent::Pi));
+        assert_eq!(parse_agent_label("prime-agent"), Some(Agent::Pi));
         assert_eq!(parse_agent_label("claude"), Some(Agent::Claude));
         assert_eq!(parse_agent_label("cursor-agent"), Some(Agent::Cursor));
         assert_eq!(parse_agent_label("devin-cli"), Some(Agent::Devin));
@@ -685,6 +686,8 @@ mod tests {
     #[test]
     fn identify_case_insensitive() {
         assert_eq!(identify_agent("Pi"), Some(Agent::Pi));
+        assert_eq!(identify_agent("prime-agent"), Some(Agent::Pi));
+        assert_eq!(identify_agent("Prime-Agent"), Some(Agent::Pi));
         assert_eq!(identify_agent("CLAUDE"), Some(Agent::Claude));
         assert_eq!(identify_agent("Codex"), Some(Agent::Codex));
         assert_eq!(identify_agent("Devin"), Some(Agent::Devin));

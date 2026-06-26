@@ -47,10 +47,14 @@ use super::{
 pub(crate) fn install_pi() -> io::Result<PathBuf> {
     let dir = pi_extension_dir()?;
     if !dir.is_dir() {
-        return Err(io::Error::other(format!(
-            "pi extension directory not found at {}. install pi and create the extensions directory first",
-            dir.display()
-        )));
+        if dir.parent().is_some_and(|parent| parent.is_dir()) {
+            fs::create_dir_all(&dir)?;
+        } else {
+            return Err(io::Error::other(format!(
+                "pi extension directory not found at {}. install prime-agent (or pi) and create the extensions directory first",
+                dir.display()
+            )));
+        }
     }
 
     let path = dir.join(PI_EXTENSION_INSTALL_NAME);

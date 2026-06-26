@@ -34,7 +34,7 @@ pub(crate) fn integration_target_command_names(
     target: crate::api::schema::IntegrationTarget,
 ) -> &'static [&'static str] {
     match target {
-        crate::api::schema::IntegrationTarget::Pi => &["pi"],
+        crate::api::schema::IntegrationTarget::Pi => &["pi", "prime-agent"],
         crate::api::schema::IntegrationTarget::Omp => &["omp"],
         crate::api::schema::IntegrationTarget::Claude => &["claude"],
         crate::api::schema::IntegrationTarget::Codex => &["codex"],

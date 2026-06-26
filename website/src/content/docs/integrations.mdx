@@ -60,7 +60,7 @@ Some integrations report native agent session references. Herdr uses official se
 
 Native session restore requires current Herdr integrations: Pi integration version `2`, OMP version `3`, Claude Code version `6`, Codex version `5`, GitHub Copilot CLI version `2`, Devin CLI version `2`, Droid version `2`, Kimi Code CLI version `3`, Qoder CLI version `2`, Cursor Agent CLI version `1`, OpenCode version `5`, Kilo Code CLI version `1`, or Hermes Agent version `2`. Check installed versions with `herdr integration status`.
 
-## Pi
+## Pi / Prime Agent
 
 Install the Pi integration:
 
@@ -68,13 +68,16 @@ Install the Pi integration:
 herdr integration install pi
 ```
 
-Herdr writes the bundled extension to:
+Herdr writes the bundled extension to the agent's extensions directory. Prime Agent (formerly Pi) uses `~/.prime/agent/extensions/` by default, or `~/.pi/agent/extensions/` for older installs:
 
 ```text
-~/.pi/agent/extensions/herdr-agent-state.ts
+~/.prime/agent/extensions/herdr-agent-state.ts   # Prime Agent (current)
+~/.pi/agent/extensions/herdr-agent-state.ts       # Pi (legacy)
 ```
 
-If `PI_CODING_AGENT_DIR` is set, Herdr writes to `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts` instead. The extensions directory must already exist. Uninstall removes only that extension file.
+If `PRIME_AGENT_CODING_AGENT_DIR` (or the legacy `PI_CODING_AGENT_DIR`) is set, Herdr writes to `$PRIME_AGENT_CODING_AGENT_DIR/extensions/herdr-agent-state.ts` instead. Herdr creates the extensions directory if the agent directory already exists. Uninstall removes only that extension file.
+
+The `pi` and `prime-agent` commands are both detected for agent awareness and integration availability.
 
 ## OMP
 

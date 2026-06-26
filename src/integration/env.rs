@@ -10,6 +10,7 @@ pub(crate) const HERDR_TAB_ID_ENV_VAR: &str = "HERDR_TAB_ID";
 pub(crate) const HERDR_WORKSPACE_ID_ENV_VAR: &str = "HERDR_WORKSPACE_ID";
 
 pub(crate) const PI_CODING_AGENT_DIR_ENV_VAR: &str = "PI_CODING_AGENT_DIR";
+pub(crate) const PRIME_AGENT_CODING_AGENT_DIR_ENV_VAR: &str = "PRIME_AGENT_CODING_AGENT_DIR";
 pub(crate) const CLAUDE_CONFIG_DIR_ENV_VAR: &str = "CLAUDE_CONFIG_DIR";
 pub(crate) const CODEX_HOME_ENV_VAR: &str = "CODEX_HOME";
 pub(crate) const KIMI_CODE_HOME_ENV_VAR: &str = "KIMI_CODE_HOME";
@@ -22,16 +23,39 @@ pub(crate) fn apply_pane_base_env(cmd: &mut CommandBuilder) {
 }
 
 pub(crate) fn pi_extension_dir() -> io::Result<PathBuf> {
-    Ok(
-        config_dir_from_env_or_home(PI_CODING_AGENT_DIR_ENV_VAR, &[".pi", "agent"])?
-            .join("extensions"),
-    )
+    // Prime Agent (formerly "pi") renamed its config directory from
+    // ~/.pi/agent to ~/.prime/agent and its env var from
+    // PI_CODING_AGENT_DIR to PRIME_AGENT_CODING_AGENT_DIR.
+    // Check the new env var first, then the legacy one. If neither is
+    // set, prefer the new ~/.prime/agent path when it exists, falling
+    // back to ~/.pi/agent for older installs.
+    if let Some(dir) = config_dir_from_env(PRIME_AGENT_CODING_AGENT_DIR_ENV_VAR) {
+        return Ok(dir.join("extensions"));
+    }
+    if let Some(dir) = config_dir_from_env(PI_CODING_AGENT_DIR_ENV_VAR) {
+        return Ok(dir.join("extensions"));
+    }
+
+    let new_dir = home_dir()?.join(".prime").join("agent").join("extensions");
+    if new_dir.is_dir() {
+        return Ok(new_dir);
+    }
+
+    let prime_agent_dir = home_dir()?.join(".prime").join("agent");
+    if prime_agent_dir.is_dir() {
+        return Ok(new_dir);
+    }
+
+    Ok(home_dir()?.join(".pi").join("agent").join("extensions"))
 }
 
 pub(crate) fn omp_extension_dir() -> io::Result<PathBuf> {
     Ok(
-        config_dir_from_env_or_home(PI_CODING_AGENT_DIR_ENV_VAR, &[".omp", "agent"])?
-            .join("extensions"),
+        config_dir_from_envs_or_home(
+            &[PRIME_AGENT_CODING_AGENT_DIR_ENV_VAR, PI_CODING_AGENT_DIR_ENV_VAR],
+            &[".omp", "agent"],
+        )?
+        .join("extensions"),
     )
 }
 
@@ -76,6 +100,32 @@ pub(crate) fn config_dir_from_env_or_home(
         path.push(segment);
     }
     Ok(path)
+}
+
+/// Like config_dir_from_env_or_home but checks multiple env vars in order.
+/// The first set env var wins; if none are set, falls back to home + segments.
+pub(crate) fn config_dir_from_envs_or_home(
+    env_vars: &[&str],
+    home_relative_segments: &[&str],
+) -> io::Result<PathBuf> {
+    for env_var in env_vars {
+        if let Some(value) = std::env::var_os(env_var).filter(|value| !value.is_empty()) {
+            return expand_tilde_path(PathBuf::from(value));
+        }
+    }
+
+    let mut path = home_dir()?;
+    for segment in home_relative_segments {
+        path.push(segment);
+    }
+    Ok(path)
+}
+
+/// Returns the directory from an env var if set, or None.
+pub(crate) fn config_dir_from_env(env_var: &str) -> Option<io::Result<PathBuf>> {
+    std::env::var_os(env_var)
+        .filter(|value| !value.is_empty())
+        .map(|value| expand_tilde_path(PathBuf::from(value)))
 }
 
 pub(crate) fn expand_tilde_path(path: PathBuf) -> io::Result<PathBuf> {
