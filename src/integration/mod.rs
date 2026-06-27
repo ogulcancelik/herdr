@@ -24,7 +24,7 @@ const PI_EXTENSION_INSTALL_NAME: &str = "herdr-agent-state.ts";
 const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/herdr-agent-state.ts");
 const PI_INTEGRATION_VERSION: u32 = 4;
 const OMP_EXTENSION_INSTALL_NAME: &str = "herdr-omp-agent-state.ts";
-const OMP_EXTENSION_ASSET: &str = include_str!("assets/omp/herdr-agent-state.ts");
+const OMP_EXTENSION_ASSET: &str = include_str!("assets/omp/herdr-omp-agent-state.ts");
 const OMP_INTEGRATION_VERSION: u32 = 4;
 const CLAUDE_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "herdr-agent-state.ps1"
@@ -140,7 +140,7 @@ const DROID_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 9] = [
 ];
 const OPENCODE_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state.js";
 const OPENCODE_PLUGIN_ASSET: &str = include_str!("assets/opencode/herdr-agent-state.js");
-const OPENCODE_INTEGRATION_VERSION: u32 = 7;
+const OPENCODE_INTEGRATION_VERSION: u32 = 8;
 const KILO_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state.js";
 const KILO_PLUGIN_ASSET: &str = include_str!("assets/kilo/herdr-agent-state.js");
 const KILO_INTEGRATION_VERSION: u32 = 2;

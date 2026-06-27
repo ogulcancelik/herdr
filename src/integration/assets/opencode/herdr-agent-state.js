@@ -2,7 +2,7 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=opencode
-// HERDR_INTEGRATION_VERSION=7
+// HERDR_INTEGRATION_VERSION=8
 
 import net from "node:net";
 
@@ -131,6 +131,23 @@ export const HerdrAgentStatePlugin = async () => {
         childSessions.add(info.id);
       }
       if (sessionID && childSessions.has(sessionID)) {
+        // Child session events are dropped so they cannot clobber the pane's
+        // root-agent state, but a subagent waiting on the user must still
+        // surface as blocked (and clear once answered). Report state only,
+        // without an agent_session_id, so the pane keeps the root session.
+        switch (type) {
+          case "permission.asked":
+          case "question.asked":
+            await reportState("blocked");
+            break;
+          case "permission.replied":
+          case "question.replied":
+          case "question.rejected":
+            await reportState("working");
+            break;
+          default:
+            break;
+        }
         return;
       }
 
