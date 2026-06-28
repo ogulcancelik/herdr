@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Added `pageup`/`pagedown` (and `pgup`/`pgdn` aliases) support to the keybinding parser, allowing bindings such as `ctrl+pageup` and `ctrl+pagedown`.
+
 ### Fixed
 - Native Windows clients running inside Alacritty now preserve mouse reports and `ctrl+j` input instead of leaking mouse escape sequences into panes. `shift+enter` remains dependent on whether the outer terminal reports it as a distinct modified Enter key. (#792)
 

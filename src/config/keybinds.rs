@@ -1093,6 +1093,8 @@ pub fn format_key_combo(binding: KeyCombo) -> String {
         KeyCode::Right => "right".to_string(),
         KeyCode::Up => "up".to_string(),
         KeyCode::Down => "down".to_string(),
+        KeyCode::PageUp => "pageup".to_string(),
+        KeyCode::PageDown => "pagedown".to_string(),
         KeyCode::F(n) => format!("f{n}"),
         _ => format!("{:?}", code).to_lowercase(),
     };
@@ -1203,6 +1205,8 @@ pub(crate) fn parse_key_combo(s: &str) -> Option<KeyCombo> {
         "right" => KeyCode::Right,
         "up" => KeyCode::Up,
         "down" => KeyCode::Down,
+        "pageup" | "pgup" => KeyCode::PageUp,
+        "pagedown" | "pgdn" => KeyCode::PageDown,
         "minus" => KeyCode::Char('-'),
         "comma" => KeyCode::Char(','),
         "period" => KeyCode::Char('.'),
@@ -1431,6 +1435,24 @@ mod tests {
             parse_key_combo("alt+é"),
             Some((KeyCode::Char('é'), KeyModifiers::ALT))
         );
+    }
+
+    #[test]
+    fn parses_page_key_combos() {
+        let cases = [
+            ("pageup", KeyCode::PageUp, KeyModifiers::empty()),
+            ("pagedown", KeyCode::PageDown, KeyModifiers::empty()),
+            ("ctrl+pageup", KeyCode::PageUp, KeyModifiers::CONTROL),
+            ("ctrl+pagedown", KeyCode::PageDown, KeyModifiers::CONTROL),
+            ("shift+pageup", KeyCode::PageUp, KeyModifiers::SHIFT),
+            ("alt+pageup", KeyCode::PageUp, KeyModifiers::ALT),
+            ("pgup", KeyCode::PageUp, KeyModifiers::empty()),
+            ("pgdn", KeyCode::PageDown, KeyModifiers::empty()),
+        ];
+
+        for (input, code, modifiers) in cases {
+            assert_eq!(parse_key_combo(input), Some((code, modifiers)), "{input}");
+        }
     }
 
     #[test]
