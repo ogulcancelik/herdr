@@ -27,10 +27,10 @@ function sessionIDFromProperties(properties) {
 }
 
 function stateFromSessionStatus(status) {
-  if (typeof status !== "string") {
-    return undefined;
-  }
-  switch (status.toLowerCase()) {
+  // session.status carries { type: "idle" | "busy" | "retry" }; older builds used a bare string.
+  const kind = typeof status === "string" ? status : status?.type;
+  if (typeof kind !== "string") return undefined;
+  switch (kind.toLowerCase()) {
     case "idle":
       return "idle";
     case "active":
@@ -39,6 +39,7 @@ function stateFromSessionStatus(status) {
     case "running":
     case "streaming":
     case "working":
+    case "retry":
       return "working";
     default:
       return undefined;
