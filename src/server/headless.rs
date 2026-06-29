@@ -1842,6 +1842,14 @@ impl HeadlessServer {
                 }
                 true
             }
+            AppEvent::PrefixInputSource { active } => {
+                // Input-source switching is a client-local host side effect; forward it to the
+                // foreground client (which owns the real TIS switch + run-loop pump), like clipboard.
+                self.send_to_foreground_client(ServerMessage::PrefixInputSource {
+                    active: *active,
+                });
+                true
+            }
             AppEvent::StateChanged { pane_id, agent, .. } => {
                 // Capture toast before handling.
                 let toast_before = self.app.state.toast.clone();
@@ -7741,6 +7749,64 @@ next_tab = ""
         assert!(
             !server.clients.contains_key(&1),
             "failed targeted send should remove the broken foreground client"
+        );
+    }
+
+    #[test]
+    fn prefix_input_source_targets_foreground_client_only() {
+        let mut server = test_headless_server();
+        let (background_tx, background_control_rx, _background_rx) = test_client_writer();
+        let (foreground_tx, foreground_control_rx, _foreground_rx) = test_client_writer();
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(background_tx),
+            ),
+        );
+        server.clients.insert(
+            2,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                Some(foreground_tx),
+            ),
+        );
+        server.foreground_client_id = Some(2);
+        server.sync_foreground_client_state();
+        // Drain any setup messages (e.g. mouse-capture sync) before exercising the event.
+        while foreground_control_rx
+            .recv_timeout(Duration::from_millis(20))
+            .is_ok()
+        {}
+
+        let changed = server
+            .handle_internal_event_with_forwarding(AppEvent::PrefixInputSource { active: true });
+
+        assert!(changed);
+        match read_server_message(
+            foreground_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("foreground prefix input-source message"),
+        ) {
+            ServerMessage::PrefixInputSource { active } => assert!(active),
+            other => panic!("expected prefix input-source message, got {other:?}"),
+        }
+        assert!(
+            background_control_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "background client should not receive prefix input-source changes"
         );
     }
 

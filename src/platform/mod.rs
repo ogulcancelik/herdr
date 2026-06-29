@@ -154,6 +154,9 @@ pub(crate) fn switch_to_ascii_input_source() -> Option<InputSourceRestore> {
     None
 }
 
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn pump_input_source_runloop() {}
+
 /// Switches the host keyboard input source while prefix mode is active.
 ///
 /// `App` drives this through a trait so the prefix-mode transitions can be
@@ -179,6 +182,9 @@ pub(crate) struct RealPrefixInputSource {
 impl PrefixInputSource for RealPrefixInputSource {
     fn switch_to_ascii(&mut self) {
         if self.restore.is_none() {
+            // Drain pending input-source-change notifications so the read below is fresh (see
+            // `pump_input_source_runloop`); a no-op on non-macOS.
+            pump_input_source_runloop();
             self.restore = switch_to_ascii_input_source();
         }
     }

@@ -67,6 +67,17 @@ impl App {
             return;
         }
 
+        if let AppEvent::PrefixInputSource { active } = ev {
+            // Monolithic path applies the switch here; server mode forwards it to the client first
+            // (see HeadlessServer::handle_internal_event_with_forwarding) and never reaches this.
+            if active {
+                self.prefix_input_source.switch_to_ascii();
+            } else {
+                self.prefix_input_source.restore();
+            }
+            return;
+        }
+
         if let AppEvent::GitStatusRefreshed {
             results,
             cache_updates,

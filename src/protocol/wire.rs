@@ -656,6 +656,14 @@ pub enum ServerMessage {
         /// True when Herdr mouse UI is enabled or the focused pane app requests mouse reporting.
         enabled: bool,
     },
+
+    /// Apply the prefix-mode ASCII input-source change on the foreground client.
+    /// `active = true` → switch to an ASCII-capable source (saving the current one);
+    /// `active = false` → restore the saved source.
+    PrefixInputSource {
+        /// Whether the ASCII input source should be active.
+        active: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1402,6 +1410,17 @@ mod tests {
         let (decoded, _): (ServerMessage, _) =
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn server_prefix_input_source_roundtrip() {
+        for active in [true, false] {
+            let msg = ServerMessage::PrefixInputSource { active };
+            let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+            let (decoded, _): (ServerMessage, _) =
+                bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+            assert_eq!(msg, decoded);
+        }
     }
 
     // ---- Framing ----

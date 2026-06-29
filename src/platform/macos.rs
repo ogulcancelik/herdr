@@ -97,6 +97,34 @@ extern "C" {
         buffer_size: CfIndex,
         encoding: u32,
     ) -> Boolean;
+
+    #[link_name = "kCFRunLoopDefaultMode"]
+    static CF_RUN_LOOP_DEFAULT_MODE: CfStringRef;
+
+    #[link_name = "CFRunLoopRunInMode"]
+    fn cf_run_loop_run_in_mode(
+        mode: CfStringRef,
+        seconds: f64,
+        return_after_source_handled: Boolean,
+    ) -> libc::c_int;
+}
+
+/// Pump the main thread's run loop once (non-blocking) so the process receives the
+/// `kTISNotifySelectedKeyboardInputSourceChanged` notification and refreshes the per-process cache
+/// that `TISCopyCurrentKeyboardInputSource` reads. That notification arrives only via the main
+/// thread's run loop, so a process that never runs a CFRunLoop (the headless server) reads a stale
+/// source. Must run on the main thread.
+pub(crate) fn pump_input_source_runloop() {
+    debug_assert!(
+        // SAFETY: `pthread_main_np` is always safe to call.
+        unsafe { libc::pthread_main_np() } != 0,
+        "pump_input_source_runloop must run on the main thread"
+    );
+    // SAFETY: `CFRunLoopRunInMode` is thread-safe; a 0-second call drains the ready sources and
+    // returns immediately (no blocking). `CF_RUN_LOOP_DEFAULT_MODE` is a framework-owned constant.
+    unsafe {
+        let _ = cf_run_loop_run_in_mode(CF_RUN_LOOP_DEFAULT_MODE, 0.0, 0);
+    }
 }
 
 #[derive(Debug)]
