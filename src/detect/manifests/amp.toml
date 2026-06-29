@@ -1,7 +1,7 @@
 id = "amp"
-version = "2026.06.10.1"
+version = "2026.06.29.1"
 min_engine_version = 1
-updated_at = "2026-06-10T00:00:00Z"
+updated_at = "2026-06-29T00:00:00Z"
 aliases = ["amp-local"]
 
 [[rules]]
@@ -21,9 +21,11 @@ any = [
 ]
 
 [[rules]]
-id = "esc_cancel_working"
+id = "activity_footer_working"
 state = "working"
 priority = 100
 region = "whole_recent"
 visible_working = true
-contains = ["esc to cancel"]
+# Working renders the prompt-box bottom-left corner as `╰ <spinner> <verb>`;
+# idle renders it as `╰────`. So: content (whitespace) after the corner = busy.
+line_regex = ['^\s*╰\s']
