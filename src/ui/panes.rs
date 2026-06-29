@@ -320,7 +320,8 @@ pub(super) fn render_panes(
             rt.render(frame, info.inner_rect, show_cursor);
             render_pane_scrollbar(app, frame, info, rt);
 
-            let should_dim = !info.is_focused && multi_pane && !terminal_active;
+            let prefix_no_hint = app.mode == Mode::Prefix && !app.prefix_hint;
+            let should_dim = !info.is_focused && multi_pane && !terminal_active && !prefix_no_hint;
             if should_dim {
                 let inner = info.inner_rect;
                 let buf = frame.buffer_mut();

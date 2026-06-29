@@ -448,7 +448,11 @@ pub fn render_with_runtime_registry(
             render_mobile_panel(app, terminal_runtimes, frame, frame.area())
         }
         Mode::Navigate => render_navigate_overlay(app, frame, terminal_area),
-        Mode::Prefix => render_prefix_overlay(app, frame, terminal_area),
+        Mode::Prefix => {
+            if app.prefix_hint {
+                render_prefix_overlay(app, frame, terminal_area);
+            }
+        }
         Mode::Copy => render_copy_mode_overlay(app, frame, terminal_area),
         Mode::Resize => render_resize_overlay(app, frame, terminal_area),
         Mode::ConfirmClose => render_confirm_close_overlay(app, frame, terminal_area),
