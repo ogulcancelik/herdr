@@ -798,6 +798,8 @@ pub struct UiConfig {
     /// Accent color for highlights, borders, and navigation UI.
     /// Accepts hex (#89b4fa), named colors (cyan, blue), or RGB (rgb(137,180,250)).
     pub accent: String,
+    /// Symbol shown next to a zoomed tab's name in the tab bar. Empty hides it. Default: "⛶".
+    pub zoom_indicator: String,
     /// Optional visual toast notifications for background workspace events.
     pub toast: ToastConfig,
     /// Play sounds when agents change state in background workspaces.
@@ -986,6 +988,7 @@ impl Default for UiConfig {
             show_agent_labels_on_pane_borders: false,
             agent_panel_sort: AgentPanelSortConfig::Spaces,
             accent: "cyan".into(),
+            zoom_indicator: "⛶".into(),
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
         }

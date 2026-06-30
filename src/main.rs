@@ -292,6 +292,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"
 
+# Symbol shown next to a zoomed tab's name in the tab bar. Set "" to hide it.
+# zoom_indicator = "⛶"
+
 # Background notification popup delivery
 [ui.toast]
 # off = disable pop-up notifications
