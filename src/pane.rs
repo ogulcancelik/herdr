@@ -121,6 +121,7 @@ struct PendingAgentRelease {
 struct SpawnInitialState<'a> {
     detected_agent: Option<Agent>,
     history_ansi: Option<&'a str>,
+    windows_powershell_prompt_cwd_reporting: bool,
 }
 
 fn active_pending_release(
@@ -1289,9 +1290,7 @@ fn pane_shell_command_builder_for_target(
         cmd.env("SHELL", resolve_shell_for_login_mode(&shell)?);
         Ok(cmd)
     } else {
-        let mut cmd = CommandBuilder::new(&shell);
-        apply_windows_powershell_cwd_reporting(&mut cmd, &shell);
-        Ok(cmd)
+        Ok(CommandBuilder::new(&shell))
     }
 }
 
@@ -1300,18 +1299,20 @@ fn pane_shell_command_builder(shell_config: PaneShellConfig<'_>) -> io::Result<C
 }
 
 #[cfg(windows)]
-fn apply_windows_powershell_cwd_reporting(cmd: &mut CommandBuilder, shell: &str) {
-    if !is_windows_powershell_shell(shell) {
-        return;
+pub(crate) fn uses_windows_powershell_prompt_cwd_reporting(
+    shell_config: PaneShellConfig<'_>,
+) -> bool {
+    if shell_mode_uses_login_shell(shell_config.mode, cfg!(target_os = "macos")) {
+        return false;
     }
-    cmd.arg("-NoExit");
-    cmd.arg("-Command");
-    cmd.arg(windows_powershell_cwd_prompt_wrapper());
+    is_windows_powershell_shell(&pane_shell(shell_config.default_shell))
 }
 
 #[cfg(not(windows))]
-fn apply_windows_powershell_cwd_reporting(cmd: &mut CommandBuilder, shell: &str) {
-    let _ = (cmd, shell);
+pub(crate) fn uses_windows_powershell_prompt_cwd_reporting(
+    _shell_config: PaneShellConfig<'_>,
+) -> bool {
+    false
 }
 
 #[cfg(windows)]
@@ -1325,11 +1326,6 @@ fn is_windows_powershell_shell(shell: &str) -> bool {
         name.as_str(),
         "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe"
     )
-}
-
-#[cfg(windows)]
-fn windows_powershell_cwd_prompt_wrapper() -> &'static str {
-    r#"$global:__HERDR_ORIGINAL_PROMPT = if (Test-Path Function:\prompt) { (Get-Command prompt -CommandType Function).ScriptBlock } else { { "PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) " } }; function global:prompt { try { if ($PWD.Provider.Name -eq 'FileSystem') { $uri = ([System.Uri]$PWD.ProviderPath).AbsoluteUri; [Console]::Write("$([char]27)]7;$uri$([char]7)") } } catch {}; & $global:__HERDR_ORIGINAL_PROMPT }"#
 }
 
 fn usable_reported_cwd(cwd: std::path::PathBuf) -> Option<std::path::PathBuf> {
@@ -1499,6 +1495,8 @@ impl PaneRuntime {
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
     ) -> std::io::Result<Self> {
+        let windows_powershell_prompt_cwd_reporting =
+            uses_windows_powershell_prompt_cwd_reporting(shell_config);
         let mut cmd = pane_shell_command_builder(shell_config)?;
         cmd.cwd(cwd);
         apply_pane_terminal_env(&mut cmd);
@@ -1517,6 +1515,7 @@ impl PaneRuntime {
             SpawnInitialState {
                 detected_agent: None,
                 history_ansi: initial_history_ansi,
+                windows_powershell_prompt_cwd_reporting,
             },
         )
     }
@@ -1770,6 +1769,9 @@ impl PaneRuntime {
         }
         let pane_terminal = GhosttyPaneTerminal::new(terminal, response_tx.clone())?;
         pane_terminal.apply_host_terminal_theme(host_terminal_theme);
+        pane_terminal.set_windows_powershell_prompt_cwd_reporting(
+            initial_state.windows_powershell_prompt_cwd_reporting,
+        );
         if let Some(ansi) = initial_state.history_ansi {
             pane_terminal.seed_history_ansi(ansi);
         }
@@ -2553,6 +2555,7 @@ impl PaneRuntime {
         {
             return Some(cwd);
         }
+
         let pid = self.child_pid.load(Ordering::Relaxed);
         crate::platform::process_cwd(pid)
     }
@@ -2821,23 +2824,17 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_powershell_shell_builder_wraps_cwd_reporting_prompt() {
+    fn windows_powershell_shell_builder_launches_plain_shell() {
         let cmd = pane_shell_command_builder_for_target(
             PaneShellConfig::new("powershell.exe", crate::config::ShellModeConfig::NonLogin),
             false,
         )
         .unwrap();
-        let argv: Vec<_> = cmd
-            .get_argv()
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
 
-        assert_eq!(argv[0], "powershell.exe");
-        assert!(argv.iter().any(|arg| arg == "-NoExit"));
-        assert!(argv
-            .iter()
-            .any(|arg| arg.contains("]7;") && arg.contains("Function:\\prompt")));
+        assert_eq!(
+            cmd.get_argv(),
+            &[std::ffi::OsString::from("powershell.exe")]
+        );
     }
 
     #[test]

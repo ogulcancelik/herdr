@@ -1029,6 +1029,8 @@ fn help_commands_exit_successfully() {
     let help_cases: &[&[&str]] = &[
         &["-h"],
         &["--help"],
+        &["api", "-h"],
+        &["api", "schema", "-h"],
         &["status", "-h"],
         &["server", "-h"],
         &["workspace", "-h"],
@@ -1070,6 +1072,91 @@ fn root_help_hides_explicit_client_command() {
         !stdout.contains("herdr client"),
         "root help should not advertise the internal client command: {stdout}"
     );
+}
+
+#[test]
+fn root_help_advertises_api_schema_command_group() {
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .arg("--help")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("herdr api <subcommand>"),
+        "root help should advertise the api command group: {stdout}"
+    );
+}
+
+#[test]
+fn api_schema_default_output_is_a_short_summary() {
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .args(["api", "schema"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Herdr API schema"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("Use `herdr api schema --json`"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.len() < 400,
+        "summary should stay small enough for terminal output: {stdout}"
+    );
+}
+
+#[test]
+fn api_schema_json_prints_bundled_schema() {
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .args(["api", "schema", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let schema: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(schema
+        .get("protocol")
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|protocol| protocol > 0));
+    assert_eq!(
+        schema
+            .get("schemas")
+            .and_then(serde_json::Value::as_object)
+            .map(serde_json::Map::len),
+        Some(5)
+    );
+}
+
+#[test]
+fn api_schema_output_writes_bundled_schema_to_file() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let schema_path = base.join("herdr-api.schema.json");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .args(["api", "schema", "--output"])
+        .arg(&schema_path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("wrote API schema"),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let schema: serde_json::Value =
+        serde_json::from_slice(&fs::read(&schema_path).unwrap()).unwrap();
+    assert!(schema
+        .get("protocol")
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|protocol| protocol > 0));
+
+    cleanup_test_base(&base);
 }
 
 #[test]
@@ -1441,7 +1528,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {full_stdout}"
     );
     assert!(
-        full_stdout.contains("  protocol: 14"),
+        full_stdout.contains("  protocol: 15"),
         "stdout: {full_stdout}"
     );
     assert!(full_stdout.contains("server:\n"), "stdout: {full_stdout}");
@@ -1474,7 +1561,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {server_stdout}"
     );
     assert!(
-        server_stdout.contains("protocol: 14"),
+        server_stdout.contains("protocol: 15"),
         "stdout: {server_stdout}"
     );
 
@@ -1486,7 +1573,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {client_stdout}"
     );
     assert!(
-        client_stdout.contains("protocol: 14"),
+        client_stdout.contains("protocol: 15"),
         "stdout: {client_stdout}"
     );
     assert!(
@@ -1496,7 +1583,7 @@ fn status_commands_report_client_and_server_versions() {
 
     let full_json = run_cli_json(&socket_path, &["status", "--json"]);
     assert_eq!(full_json["client"]["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(full_json["client"]["protocol"], 14);
+    assert_eq!(full_json["client"]["protocol"], 15);
     assert_eq!(full_json["server"]["status"], "running");
     assert_eq!(full_json["server"]["running"], true);
     assert_eq!(full_json["server"]["compatible"], true);
@@ -1510,12 +1597,12 @@ fn status_commands_report_client_and_server_versions() {
     let server_json = run_cli_json(&socket_path, &["status", "server", "--json"]);
     assert_eq!(server_json["status"], "running");
     assert_eq!(server_json["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(server_json["protocol"], 14);
+    assert_eq!(server_json["protocol"], 15);
     assert_eq!(server_json["compatible"], true);
 
     let client_json = run_cli_json(&socket_path, &["status", "client", "--json"]);
     assert_eq!(client_json["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(client_json["protocol"], 14);
+    assert_eq!(client_json["protocol"], 15);
     assert!(client_json["binary"]
         .as_str()
         .is_some_and(|path| !path.is_empty()));

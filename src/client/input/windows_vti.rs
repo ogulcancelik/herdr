@@ -194,6 +194,7 @@ struct WindowsInputMapper {
 #[derive(Default)]
 struct WindowsInputPump {
     framer: crate::raw_input::RawInputFramer,
+    paste_from_win32_key_records: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -203,9 +204,11 @@ enum PlatformInputItem {
     PasteAwareBytes {
         paste_bytes: Vec<u8>,
         raw_bytes: Vec<u8>,
+        win32_paste_bytes: Vec<u8>,
     },
     PasteAwareKey {
         bytes: Vec<u8>,
+        win32_paste_bytes: Vec<u8>,
         events: Vec<crate::protocol::ClientInputEvent>,
     },
 }
@@ -227,28 +230,52 @@ impl WindowsInputPump {
     fn process(&mut self, item: PlatformInputItem) -> Vec<crate::protocol::ClientInputEvent> {
         match item {
             PlatformInputItem::Bytes(bytes) => {
-                Self::raw_events_to_client_events(self.framer.push(&bytes))
+                let raw_events = self.framer.push(&bytes);
+                self.process_raw_events(raw_events)
             }
             PlatformInputItem::Semantic(event) => {
-                let mut events = Self::raw_events_to_client_events(self.framer.flush_timeout());
+                let raw_events = self.framer.flush_timeout();
+                let mut events = self.process_raw_events(raw_events);
                 events.push(event);
                 events
             }
             PlatformInputItem::PasteAwareBytes {
                 paste_bytes,
                 raw_bytes,
+                win32_paste_bytes,
+            } => {
+                let pending_paste = self.framer.has_pending_bracketed_paste();
+                let decode_win32_record = self.paste_from_win32_key_records || !pending_paste;
+                let raw_events = if decode_win32_record {
+                    if pending_paste {
+                        self.framer.push(&win32_paste_bytes)
+                    } else {
+                        self.framer.push(&raw_bytes)
+                    }
+                } else {
+                    self.framer.push(&paste_bytes)
+                };
+                if decode_win32_record && self.framer.has_pending_bracketed_paste() {
+                    self.paste_from_win32_key_records = true;
+                }
+                self.process_raw_events(raw_events)
+            }
+            PlatformInputItem::PasteAwareKey {
+                bytes,
+                win32_paste_bytes,
+                events,
             } => {
                 if self.framer.has_pending_bracketed_paste() {
-                    Self::raw_events_to_client_events(self.framer.push(&paste_bytes))
+                    let bytes = if self.paste_from_win32_key_records {
+                        &win32_paste_bytes
+                    } else {
+                        &bytes
+                    };
+                    let raw_events = self.framer.push(bytes);
+                    self.process_raw_events(raw_events)
                 } else {
-                    Self::raw_events_to_client_events(self.framer.push(&raw_bytes))
-                }
-            }
-            PlatformInputItem::PasteAwareKey { bytes, events } => {
-                if self.framer.has_pending_bracketed_paste() {
-                    Self::raw_events_to_client_events(self.framer.push(&bytes))
-                } else {
-                    let mut output = Self::raw_events_to_client_events(self.framer.flush_timeout());
+                    let raw_events = self.framer.flush_timeout();
+                    let mut output = self.process_raw_events(raw_events);
                     output.extend(events);
                     output
                 }
@@ -257,7 +284,21 @@ impl WindowsInputPump {
     }
 
     fn idle(&mut self) -> Vec<crate::protocol::ClientInputEvent> {
-        Self::raw_events_to_client_events(self.framer.flush_timeout())
+        let raw_events = self.framer.flush_timeout();
+        self.process_raw_events(raw_events)
+    }
+
+    fn process_raw_events(
+        &mut self,
+        events: Vec<crate::raw_input::RawInputEvent>,
+    ) -> Vec<crate::protocol::ClientInputEvent> {
+        if events
+            .iter()
+            .any(|event| matches!(event, crate::raw_input::RawInputEvent::Paste(_)))
+        {
+            self.paste_from_win32_key_records = false;
+        }
+        Self::raw_events_to_client_events(events)
     }
 
     fn raw_events_to_client_events(
@@ -363,6 +404,7 @@ impl WindowsInputMapper {
                 if let Some((bytes, event)) = self.synthetic_modified_key_event(key, kind) {
                     flush_pending_win32_before_items = true;
                     items.push(PlatformInputItem::PasteAwareKey {
+                        win32_paste_bytes: bytes.clone(),
                         bytes,
                         events: vec![event],
                     });
@@ -379,7 +421,11 @@ impl WindowsInputMapper {
 
         let events = self.translate_semantic_key_events(key);
         let items = if let Some(bytes) = self.paste_payload_bytes_for_key(key) {
-            vec![PlatformInputItem::PasteAwareKey { bytes, events }]
+            vec![PlatformInputItem::PasteAwareKey {
+                win32_paste_bytes: bytes.clone(),
+                bytes,
+                events,
+            }]
         } else {
             events
                 .into_iter()
@@ -415,14 +461,18 @@ impl WindowsInputMapper {
                     items.push(PlatformInputItem::Bytes(bytes))
                 }
                 WindowsWin32InputModeItem::Key { bytes, record } => {
+                    let win32_paste_bytes =
+                        self.paste_payload_bytes_for_key(record).unwrap_or_default();
                     if let Some(raw_bytes) = self.win32_input_mode_key_record_raw_bytes(record) {
                         items.push(PlatformInputItem::PasteAwareBytes {
                             paste_bytes: bytes,
                             raw_bytes,
+                            win32_paste_bytes,
                         });
                     } else {
                         items.push(PlatformInputItem::PasteAwareKey {
                             bytes,
+                            win32_paste_bytes,
                             events: self.translate_semantic_key_events(record),
                         })
                     }
@@ -441,14 +491,13 @@ impl WindowsInputMapper {
         }
 
         if !record.key_down
-            || record.virtual_key_code != 0
+            || record.repeat_count.max(1) != 1
             || windows_key_modifiers(record.control_key_state).bits() != 0
         {
             return None;
         }
 
         self.synthetic_utf16_unit_to_bytes(record.unicode)
-            .map(|bytes| bytes.repeat(record.repeat_count.max(1) as usize))
     }
 
     fn with_pending_win32_flush(
@@ -1063,6 +1112,42 @@ mod tests {
             .collect()
     }
 
+    fn win32_input_mode_encoded_key_bytes(bytes: &[u8]) -> Vec<WindowsInputRecord> {
+        bytes
+            .iter()
+            .flat_map(|byte| {
+                let vk = match *byte {
+                    b'\x1b' => 0x1b,
+                    b'\r' => 0x0d,
+                    b'[' => 0xdb,
+                    b'~' => 0xc0,
+                    b'0'..=b'9' | b'A'..=b'Z' => u16::from(*byte),
+                    b'a'..=b'z' => u16::from(byte.to_ascii_uppercase()),
+                    _ => 0,
+                };
+                format!("\x1b[{vk};0;{byte};1;0;1_")
+                    .chars()
+                    .map(key_char)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn win32_input_mode_encoded_record(record: WindowsKeyRecord) -> Vec<WindowsInputRecord> {
+        format!(
+            "\x1b[{};{};{};{};{};{}_",
+            record.virtual_key_code,
+            record.virtual_scan_code,
+            record.unicode,
+            u16::from(record.key_down),
+            record.control_key_state,
+            record.repeat_count,
+        )
+        .chars()
+        .map(key_char)
+        .collect()
+    }
+
     #[test]
     fn vti_bracketed_paste_records_emit_single_paste() {
         let records = "\x1b[200~alpha\rbravo\rcharlie\x1b[201~"
@@ -1074,6 +1159,68 @@ mod tests {
             vec![crate::protocol::ClientInputEvent::Paste {
                 text: "alpha\rbravo\rcharlie".into(),
             }]
+        );
+    }
+
+    #[test]
+    fn vti_win32_input_mode_bracketed_paste_key_records_emit_single_paste() {
+        let records = win32_input_mode_encoded_key_bytes(
+            b"\x1b[200~About\ragent multiplexer that lives in your terminal.\x1b[201~",
+        );
+
+        assert_eq!(
+            translate(records),
+            vec![crate::protocol::ClientInputEvent::Paste {
+                text: "About\ragent multiplexer that lives in your terminal.".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn vti_win32_input_mode_decoded_paste_handles_shift_repeats_and_releases() {
+        let mut records = win32_input_mode_encoded_key_bytes(b"\x1b[200~");
+        records.extend(win32_input_mode_encoded_record(WindowsKeyRecord {
+            key_down: true,
+            repeat_count: 2,
+            virtual_key_code: 0x41,
+            virtual_scan_code: 30,
+            unicode: b'A'.into(),
+            control_key_state: 0x0010,
+        }));
+        records.extend(win32_input_mode_encoded_record(WindowsKeyRecord {
+            key_down: false,
+            repeat_count: 1,
+            virtual_key_code: 0x41,
+            virtual_scan_code: 30,
+            unicode: b'A'.into(),
+            control_key_state: 0x0010,
+        }));
+        records.extend(win32_input_mode_encoded_key_bytes(b"\x1b[201~"));
+
+        assert_eq!(
+            translate(records),
+            vec![crate::protocol::ClientInputEvent::Paste { text: "AA".into() }]
+        );
+    }
+
+    #[test]
+    fn vti_win32_input_mode_decoded_paste_flag_clears_after_raw_completion() {
+        let mut records = win32_input_mode_encoded_key_bytes(b"\x1b[200~");
+        records.extend("one\x1b[201~".chars().map(key_char));
+        records.extend(
+            "\x1b[200~x\x1b[65;30;97;1;0;1_y\x1b[201~"
+                .chars()
+                .map(key_char),
+        );
+
+        assert_eq!(
+            translate(records),
+            vec![
+                crate::protocol::ClientInputEvent::Paste { text: "one".into() },
+                crate::protocol::ClientInputEvent::Paste {
+                    text: "x\x1b[65;30;97;1;0;1_y".into(),
+                },
+            ]
         );
     }
 

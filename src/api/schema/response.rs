@@ -16,29 +16,30 @@ use super::plugins::{
     PluginPaneInfo,
 };
 use super::server::ServerCapabilities;
+use super::session::SessionSnapshot;
 use super::tabs::TabInfo;
 use super::workspaces::WorkspaceInfo;
 use super::worktrees::{WorktreeInfo, WorktreeSourceInfo};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SuccessResponse {
     pub id: String,
     pub result: ResponseResult,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ErrorResponse {
     pub id: String,
     pub error: ErrorBody,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ErrorBody {
     pub code: String,
     pub message: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseResult {
     Pong {
@@ -46,6 +47,9 @@ pub enum ResponseResult {
         protocol: u32,
         #[serde(default)]
         capabilities: Option<ServerCapabilities>,
+    },
+    SessionSnapshot {
+        snapshot: Box<SessionSnapshot>,
     },
     WorkspaceInfo {
         workspace: WorkspaceInfo,
@@ -128,6 +132,9 @@ pub enum ResponseResult {
         layout: LayoutDescription,
     },
     LayoutApply {
+        layout: LayoutDescription,
+    },
+    LayoutSplitRatioSet {
         layout: LayoutDescription,
     },
     PaneNeighbor {
@@ -227,7 +234,7 @@ pub enum ResponseResult {
     Ok {},
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentManifestInfo {
     pub agent: String,
     pub source: String,

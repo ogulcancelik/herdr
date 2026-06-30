@@ -131,7 +131,7 @@ herdr --remote workbox
 herdr --remote ssh://you@yourserver:2222
 ```
 
-Remote attach adds fallback SSH keepalives by default while preserving your own SSH config. Set `[remote].manage_ssh_config = false` to use plain `ssh`.
+Remote attach adds fallback SSH keepalives and connection reuse by default while preserving your own SSH config. Set `[remote].manage_ssh_config = false` to use plain `ssh`.
 
 Direct attach connects your current terminal to one server-owned terminal:
 
@@ -170,7 +170,13 @@ not a gui window, not a web dashboard, not electron. herdr runs inside whatever 
 
 ## agents can use herdr too
 
-The local Unix socket lets agents create workspaces, split or zoom panes, spawn helpers, read output, and wait for state changes. Start with the [socket API docs](https://herdr.dev/docs/socket-api/) and [`SKILL.md`](./SKILL.md).
+The local Unix socket lets agents create workspaces, split or zoom panes, spawn helpers, read output, and wait for state changes. Install the reusable skill with:
+
+```bash
+npx skills add ogulcancelik/herdr --skill herdr -g
+```
+
+Start with the [agent skill docs](https://herdr.dev/docs/agent-skill/), [socket API docs](https://herdr.dev/docs/socket-api/), and [`SKILL.md`](./SKILL.md).
 
 ## supported agents
 

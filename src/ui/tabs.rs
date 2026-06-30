@@ -257,7 +257,6 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     let Some(ws) = app.workspaces.get(active_ws_idx) else {
         return;
     };
-
     let p = &app.palette;
 
     frame.render_widget(

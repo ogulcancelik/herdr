@@ -9,6 +9,7 @@ use crate::server::render_stream::ClientRenderState;
 pub(crate) enum ClientConnectionMode {
     App,
     TerminalAttach { terminal_id: String },
+    TerminalObserve { terminal_id: String },
 }
 
 pub(crate) type RenderTarget = (
@@ -220,7 +221,7 @@ pub(crate) fn latest_app_client(clients: &HashMap<u64, ClientConnection>) -> Opt
         .map(|(&client_id, _)| client_id)
 }
 
-pub(crate) fn terminal_attach_client_ids(
+pub(crate) fn terminal_stream_client_ids(
     clients: &HashMap<u64, ClientConnection>,
     terminal_id: &str,
 ) -> Vec<u64> {
@@ -228,6 +229,9 @@ pub(crate) fn terminal_attach_client_ids(
         .iter()
         .filter_map(|(&client_id, client)| match &client.mode {
             ClientConnectionMode::TerminalAttach {
+                terminal_id: attached,
+            }
+            | ClientConnectionMode::TerminalObserve {
                 terminal_id: attached,
             } if attached == terminal_id => Some(client_id),
             _ => None,
@@ -244,7 +248,11 @@ pub(crate) fn render_targets(
         .filter(|(_, client)| {
             client.writer.is_some()
                 && (client.is_full_app_client()
-                    || matches!(client.mode, ClientConnectionMode::TerminalAttach { .. }))
+                    || matches!(
+                        client.mode,
+                        ClientConnectionMode::TerminalAttach { .. }
+                            | ClientConnectionMode::TerminalObserve { .. }
+                    ))
         })
         .map(|(&client_id, client)| {
             (

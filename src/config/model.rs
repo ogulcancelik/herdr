@@ -64,7 +64,9 @@ pub enum ToastDelivery {
     System,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema, Default,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum ToastHerdrPosition {
     TopLeft,
@@ -102,6 +104,14 @@ impl AgentPanelSortConfig {
             Self::Priority => "priority",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarCollapsedModeConfig {
+    #[default]
+    Compact,
+    Hidden,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -238,7 +248,7 @@ impl Default for SessionConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigReloadStatus {
     Applied,
@@ -761,6 +771,8 @@ pub struct UiConfig {
     pub sidebar_min_width: u16,
     /// Maximum sidebar width (columns) when expanded. Default: 36.
     pub sidebar_max_width: u16,
+    /// Collapsed sidebar presentation. Default: compact.
+    pub sidebar_collapsed_mode: SidebarCollapsedModeConfig,
     /// Terminal width at or below which Herdr uses the mobile single-column layout. Default: 64.
     pub mobile_width_threshold: u16,
     /// Capture mouse input for Herdr's mouse UI. Default: true.
@@ -781,6 +793,8 @@ pub struct UiConfig {
     pub pane_gaps: bool,
     /// Show agent labels in split pane borders when no manual pane label is set. Default: false.
     pub show_agent_labels_on_pane_borders: bool,
+    /// Hide the tab row when the workspace has one tab. Default: false.
+    pub hide_tab_bar_when_single_tab: bool,
     /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
     pub agent_panel_sort: AgentPanelSortConfig,
     /// Accent color for highlights, borders, and navigation UI.
@@ -830,8 +844,8 @@ pub struct AdvancedConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct RemoteConfig {
-    /// Add a keepalive fallback under the user's ssh config for the `--remote`
-    /// bridge. Set false to run plain ssh unchanged. Default: true.
+    /// Add keepalive fallbacks and private connection reuse for `herdr --remote`.
+    /// Set false to run plain ssh unchanged. Default: true.
     pub manage_ssh_config: bool,
 }
 
@@ -961,6 +975,7 @@ impl Default for UiConfig {
             sidebar_width: 26,
             sidebar_min_width: 18,
             sidebar_max_width: 36,
+            sidebar_collapsed_mode: SidebarCollapsedModeConfig::Compact,
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
             mouse_capture: true,
             right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),
@@ -971,6 +986,7 @@ impl Default for UiConfig {
             pane_borders: true,
             pane_gaps: true,
             show_agent_labels_on_pane_borders: false,
+            hide_tab_bar_when_single_tab: false,
             agent_panel_sort: AgentPanelSortConfig::Spaces,
             accent: "cyan".into(),
             toast: ToastConfig::default(),
@@ -1182,17 +1198,20 @@ agent_panel_scope = "current"
         assert!(default_config.ui.pane_borders);
         assert!(default_config.ui.pane_gaps);
         assert!(!default_config.ui.show_agent_labels_on_pane_borders);
+        assert!(!default_config.ui.hide_tab_bar_when_single_tab);
 
         let toml = r#"
 [ui]
 pane_borders = false
 pane_gaps = true
 show_agent_labels_on_pane_borders = true
+hide_tab_bar_when_single_tab = true
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(!config.ui.pane_borders);
         assert!(config.ui.pane_gaps);
         assert!(config.ui.show_agent_labels_on_pane_borders);
+        assert!(config.ui.hide_tab_bar_when_single_tab);
     }
 
     #[test]
@@ -1306,6 +1325,25 @@ mobile_width_threshold = 96
         assert_eq!(config.ui.sidebar_min_width, 12);
         assert_eq!(config.ui.sidebar_max_width, 80);
         assert_eq!(config.ui.mobile_width_threshold, 96);
+    }
+
+    #[test]
+    fn sidebar_collapsed_mode_defaults_compact_and_parses_hidden() {
+        let default_config = Config::default();
+        assert_eq!(
+            default_config.ui.sidebar_collapsed_mode,
+            SidebarCollapsedModeConfig::Compact
+        );
+
+        let toml = r#"
+[ui]
+sidebar_collapsed_mode = "hidden"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.ui.sidebar_collapsed_mode,
+            SidebarCollapsedModeConfig::Hidden
+        );
     }
 
     #[test]

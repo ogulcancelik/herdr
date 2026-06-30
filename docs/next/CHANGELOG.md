@@ -2,8 +2,22 @@
 
 ## Unreleased
 
+### Added
+- Added `ui.sidebar_collapsed_mode = "hidden"` to make a collapsed sidebar use zero width while keeping the existing compact rail as the default. (#842)
+- Added `session.snapshot` to bootstrap client runtime state in one socket API response before subscribing to events.
+- Added `herdr api schema` to inspect the bundled socket API schema, with `--json` for the full JSON Schema document and `--output PATH` for file output.
+- Added `herdr terminal session observe` for read-only live ANSI terminal streams that bridge processes can consume as newline-delimited JSON.
+- Added `herdr terminal session control` for bridge processes that need live ANSI frames plus input, resize, scroll, release, and takeover authority.
+- Added `ui.hide_tab_bar_when_single_tab` to hide the tab row when a workspace has one tab. (#448)
+
+### Changed
+- Bumped the client/server protocol version to 15 for socket API placement mutation event and response compatibility.
+
 ### Fixed
 - Native Windows clients running inside Alacritty now preserve mouse reports and `ctrl+j` input instead of leaking mouse escape sequences into panes. `shift+enter` remains dependent on whether the outer terminal reports it as a distinct modified Enter key. (#792)
+- OMP integration state now recovers after resumed sessions such as `omp -c` and reports Ask/tool approval waits as blocked instead of leaving the pane working or stuck on the previous OMP session. (#879)
+- Remote attach now discovers compatible Homebrew, mise, and Nix profile installs before offering to install a sidecar binary to `~/.local/bin/herdr`. (#840)
+- `herdr --remote` now reuses one OpenSSH connection across setup probes, installs, server checks, and the final bridge when `[remote].manage_ssh_config` is enabled, so password-based hosts prompt once instead of once per setup command. (#888)
 
 ## [0.7.1] - 2026-06-24
 

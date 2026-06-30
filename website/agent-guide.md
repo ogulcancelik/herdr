@@ -67,7 +67,7 @@ Important framing for new users: Herdr does not require learning keybindings. Th
 
 Herdr ships `SKILL.md` (https://raw.githubusercontent.com/ogulcancelik/herdr/master/SKILL.md), an instruction file that teaches a coding agent to control Herdr from inside a pane — splitting panes, running commands without stealing focus, reading output, waiting on other agents.
 
-Once the human is set up, offer to install it into your own harness so future sessions know Herdr natively. You know your own conventions best; install it wherever your global reusable instructions live. For example: Claude Code installs it as a skill (e.g. `~/.claude/skills/herdr/SKILL.md`); Codex and similar agents include it from their global instructions file (e.g. `~/.codex/AGENTS.md`); agents without a skill system can paste it into global custom instructions. Ask the human before writing to their config locations, and use the GitHub copy above as the source of truth.
+Once the human is set up, offer to install it into your own harness so future sessions know Herdr natively. For agents supported by the open skills CLI, use `npx skills add ogulcancelik/herdr --skill herdr -g`. Agents without a skill system can paste the GitHub copy above into global custom instructions. Ask the human before writing to their config locations, and use the GitHub copy above as the source of truth.
 
 ## Configuration
 

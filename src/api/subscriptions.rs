@@ -120,6 +120,10 @@ impl ActiveSubscription {
                 event_kind: crate::api::schema::EventKind::WorkspaceRenamed,
                 last_sequence: 0,
             })),
+            Subscription::WorkspaceMoved {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::WorkspaceMoved,
+                last_sequence: 0,
+            })),
             Subscription::WorkspaceClosed {} => Ok(Self::Event(ActiveEventSubscription {
                 event_kind: crate::api::schema::EventKind::WorkspaceClosed,
                 last_sequence: 0,
@@ -154,6 +158,10 @@ impl ActiveSubscription {
             })),
             Subscription::TabRenamed {} => Ok(Self::Event(ActiveEventSubscription {
                 event_kind: crate::api::schema::EventKind::TabRenamed,
+                last_sequence: 0,
+            })),
+            Subscription::TabMoved {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::TabMoved,
                 last_sequence: 0,
             })),
             Subscription::PaneCreated {} => Ok(Self::Event(ActiveEventSubscription {

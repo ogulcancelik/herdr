@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use support::{
     cleanup_test_base, register_runtime_dir, register_spawned_herdr_pid,
-    unregister_spawned_herdr_pid,
+    unregister_spawned_herdr_pid, CURRENT_PROTOCOL,
 };
 
 fn unique_test_dir() -> PathBuf {
@@ -595,9 +595,12 @@ fn client_handshake_succeeds() {
 
     // Send Hello with the current protocol version, 80 cols, 24 rows.
     let (version, error) =
-        client_handshake(&mut stream, 14, 80, 24).expect("handshake should succeed");
+        client_handshake(&mut stream, CURRENT_PROTOCOL, 80, 24).expect("handshake should succeed");
 
-    assert_eq!(version, 14, "server should report protocol version 14");
+    assert_eq!(
+        version, CURRENT_PROTOCOL,
+        "server should report current protocol version"
+    );
     assert!(
         error.is_none(),
         "handshake should not have an error: {:?}",
@@ -626,7 +629,10 @@ fn client_handshake_rejects_incompatible_version() {
     let (version, error) = client_handshake(&mut stream, 0, 80, 24)
         .expect("should read Welcome response even on rejection");
 
-    assert_eq!(version, 14, "server should report its version 14");
+    assert_eq!(
+        version, CURRENT_PROTOCOL,
+        "server should report its current protocol version"
+    );
     assert!(
         error.is_some(),
         "version 0 should be rejected with an error"
@@ -651,10 +657,10 @@ fn client_handshake_clamps_small_terminal_size() {
     // Send Hello with 0x0 terminal size — should be clamped.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
 
-    let (version, error) = client_handshake(&mut stream, 14, 0, 0)
+    let (version, error) = client_handshake(&mut stream, CURRENT_PROTOCOL, 0, 0)
         .expect("handshake with 0x0 should succeed (server clamps)");
 
-    assert_eq!(version, 14);
+    assert_eq!(version, CURRENT_PROTOCOL);
     assert!(
         error.is_none(),
         "0x0 size should be accepted (clamped): {:?}",
@@ -714,9 +720,9 @@ fn no_hello_client_closed_within_five_seconds() {
     // Verify the server is still healthy — a proper client can still connect.
     let mut good_stream =
         UnixStream::connect(&client_socket).expect("should connect after no-hello client");
-    let (version, error) = client_handshake(&mut good_stream, 14, 80, 24)
+    let (version, error) = client_handshake(&mut good_stream, CURRENT_PROTOCOL, 80, 24)
         .expect("proper handshake should still work after no-hello client");
-    assert_eq!(version, 14);
+    assert_eq!(version, CURRENT_PROTOCOL);
     assert!(error.is_none());
 
     // API should still work.

@@ -161,6 +161,23 @@ impl App {
         encode_success(id, ResponseResult::PaneInfo { pane })
     }
 
+    pub(super) fn handle_pane_focus(&mut self, id: String, target: PaneTarget) -> String {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
+            return pane_not_found(id, &target.pane_id);
+        };
+        let Some(_tab_idx) = self.state.workspaces[ws_idx].find_tab_index_for_pane(pane_id) else {
+            return pane_not_found(id, &target.pane_id);
+        };
+
+        self.state.focus_pane_in_workspace(ws_idx, pane_id);
+        self.state.mode = Mode::Terminal;
+
+        let Some(pane) = self.pane_info(ws_idx, pane_id) else {
+            return pane_not_found(id, &target.pane_id);
+        };
+        encode_success(id, ResponseResult::PaneInfo { pane })
+    }
+
     pub(super) fn handle_pane_layout(&mut self, id: String, params: PaneLayoutParams) -> String {
         let Some((ws_idx, pane_id)) = self.resolve_optional_pane(params.pane_id.as_deref()) else {
             return encode_error(id, "pane_not_found", "pane not found");
@@ -1617,7 +1634,11 @@ impl App {
         find_in_direction(source, direction.into(), &panes)
     }
 
-    fn pane_layout_snapshot(&self, ws_idx: usize, tab_idx: usize) -> Option<PaneLayoutSnapshot> {
+    pub(super) fn pane_layout_snapshot(
+        &self,
+        ws_idx: usize,
+        tab_idx: usize,
+    ) -> Option<PaneLayoutSnapshot> {
         let ws = self.state.workspaces.get(ws_idx)?;
         let tab = ws.tabs.get(tab_idx)?;
         let area = self.state.view.terminal_area;
@@ -3201,6 +3222,51 @@ mod tests {
         assert_eq!(focus.focused_pane_id, Some(right_public.clone()));
         assert_eq!(focus.layout.focused_pane_id, right_public);
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(right));
+    }
+
+    #[test]
+    fn api_pane_focus_focuses_direct_target_across_tabs_and_workspaces() {
+        let mut app = app_with_linked_worktree();
+        app.state.workspaces.push(Workspace::test_new("other"));
+        let target_tab_idx = app.state.workspaces[1].test_add_tab(Some("target"));
+        app.state.workspaces[1].switch_tab(target_tab_idx);
+        let target_pane = app.state.workspaces[1].tabs[target_tab_idx].root_pane;
+        app.state.ensure_test_terminals();
+        let target_public = app.public_pane_id(1, target_pane).unwrap();
+        app.state.switch_workspace(0);
+        assert_eq!(app.state.active, Some(0));
+
+        let response = app.handle_pane_focus(
+            "req".into(),
+            crate::api::schema::PaneTarget {
+                pane_id: target_public.clone(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("expected pane info response");
+        };
+        assert_eq!(pane.pane_id, target_public);
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.workspaces[1].active_tab, target_tab_idx);
+        assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(target_pane));
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn api_pane_focus_rejects_invalid_pane_id() {
+        let mut app = app_with_linked_worktree();
+
+        let response = app.handle_pane_focus(
+            "req".into(),
+            crate::api::schema::PaneTarget {
+                pane_id: "pane_missing".into(),
+            },
+        );
+
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "pane_not_found");
     }
 
     #[test]

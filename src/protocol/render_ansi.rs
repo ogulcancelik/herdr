@@ -31,7 +31,7 @@ use std::io::Write;
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::protocol::{CellData, FrameData};
+use crate::protocol::{underline_style_from_modifier, CellData, FrameData};
 
 /// Bytes produced by a [`BlitEncoder`] for one terminal frame.
 pub(crate) struct EncodedBlit {
@@ -294,7 +294,13 @@ fn modifier_to_sgr_parts(val: u16) -> Vec<&'static str> {
         parts.push("3");
     }
     if val & UNDERLINED != 0 {
-        parts.push("4");
+        parts.push(match underline_style_from_modifier(val) {
+            2 => "4:2",
+            3 => "4:3",
+            4 => "4:4",
+            5 => "4:5",
+            _ => "4",
+        });
     }
     if val & SLOW_BLINK != 0 {
         parts.push("5");
@@ -840,6 +846,18 @@ mod tests {
     #[test]
     fn build_sgr_resets_previous_modifiers_when_cell_is_plain() {
         assert_eq!(build_sgr(0x00_00_00_00, 0x00_00_00_00, 0), "\x1b[0;39;49m");
+    }
+
+    #[test]
+    fn build_sgr_preserves_curly_underline_style() {
+        let modifier = crate::protocol::modifier_to_u16(
+            crate::protocol::modifier_with_underline_style(ratatui::style::Modifier::UNDERLINED, 3),
+        );
+
+        assert_eq!(
+            build_sgr(0x00_00_00_00, 0x00_00_00_00, modifier),
+            "\x1b[0;4:3;39;49m"
+        );
     }
 
     #[test]

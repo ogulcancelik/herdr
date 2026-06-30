@@ -9,7 +9,14 @@ repository = "https://github.com/ogulcancelik/herdr"
 homepage = "https://herdr.dev"
 keywords = ["terminal", "tui", "ai", "agents", "multiplexer"]
 categories = ["command-line-utilities"]
-include = ["src/**/*", "assets/sounds/*", "README.md", "LICENSE", "Cargo.toml"]
+include = [
+    "src/**/*",
+    "assets/sounds/*",
+    "docs/next/api/herdr-api.schema.json",
+    "README.md",
+    "LICENSE",
+    "Cargo.toml",
+]
 
 [dependencies]
 base64 = "0.22.1"
@@ -31,6 +38,7 @@ toml = "0.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 unicode-width = "0.2"
+schemars = { version = "1.2.1", features = ["derive"] }
 
 [patch.crates-io]
 portable-pty = { path = "vendor/portable-pty" }

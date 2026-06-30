@@ -421,7 +421,7 @@ fn encode_legacy_inner(key: KeyEvent) -> Vec<u8> {
                     '\\' | '4' => vec![28],
                     ']' | '5' => vec![29],
                     '^' | '6' => vec![30],
-                    '_' | '7' | '-' => vec![31],
+                    '_' | '/' | '7' | '-' => vec![31],
                     _ => vec![ch as u8],
                 }
             } else {
@@ -497,6 +497,12 @@ mod tests {
     fn legacy_ctrl_c() {
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(encode_key(key, KeyboardProtocol::Legacy), vec![3]);
+    }
+
+    #[test]
+    fn legacy_ctrl_slash_aliases_ctrl_underscore() {
+        let key = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL);
+        assert_eq!(encode_key(key, KeyboardProtocol::Legacy), vec![31]);
     }
 
     #[test]

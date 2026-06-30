@@ -7,7 +7,7 @@ use super::common::SplitDirection;
 use super::panes::PaneInfo;
 use super::workspaces::WorkspaceWorktreeInfo;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginLinkParams {
     pub path: String,
     #[serde(default = "super::common::default_true")]
@@ -16,23 +16,23 @@ pub struct PluginLinkParams {
     pub source: Option<PluginSourceInfo>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct PluginListParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginUnlinkParams {
     pub plugin_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginSetEnabledParams {
     pub plugin_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct InstalledPluginInfo {
     pub plugin_id: String,
     pub name: String,
@@ -64,7 +64,7 @@ pub struct InstalledPluginInfo {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginSourceInfo {
     #[serde(default)]
     pub kind: PluginSourceKind,
@@ -99,7 +99,9 @@ impl Default for PluginSourceInfo {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginSourceKind {
     #[default]
@@ -221,14 +223,14 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginManifestBuild {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platforms: Option<Vec<PluginPlatform>>,
     pub command: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginManifestAction {
     pub id: String,
     pub title: String,
@@ -241,7 +243,7 @@ pub struct PluginManifestAction {
     pub command: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginManifestEventHook {
     pub on: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -249,7 +251,7 @@ pub struct PluginManifestEventHook {
     pub command: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginManifestPane {
     pub id: String,
     pub title: String,
@@ -262,7 +264,7 @@ pub struct PluginManifestPane {
     pub command: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginManifestLinkHandler {
     pub id: String,
     pub title: String,
@@ -272,13 +274,13 @@ pub struct PluginManifestLinkHandler {
     pub platforms: Option<Vec<PluginPlatform>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct PluginActionListParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct PluginLogListParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_id: Option<String>,
@@ -286,7 +288,7 @@ pub struct PluginLogListParams {
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginActionInvokeParams {
     pub action_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -295,7 +297,7 @@ pub struct PluginActionInvokeParams {
     pub context: Option<PluginInvocationContext>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginCommandLogInfo {
     pub log_id: String,
     pub plugin_id: String,
@@ -318,7 +320,7 @@ pub struct PluginCommandLogInfo {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginCommandStatus {
     Running,
@@ -326,7 +328,7 @@ pub enum PluginCommandStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginPlatform {
     Linux,
@@ -334,7 +336,7 @@ pub enum PluginPlatform {
     Windows,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginActionContext {
     Global,
@@ -344,7 +346,7 @@ pub enum PluginActionContext {
     Selection,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginInvocationContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
@@ -378,7 +380,7 @@ pub struct PluginInvocationContext {
     pub link_handler_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginActionInfo {
     pub plugin_id: String,
     pub action_id: String,
@@ -398,7 +400,7 @@ impl PluginActionInfo {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginPaneOpenParams {
     pub plugin_id: String,
     pub entrypoint: String,
@@ -418,7 +420,9 @@ pub struct PluginPaneOpenParams {
     pub env: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginPanePlacement {
     #[default]
@@ -428,17 +432,17 @@ pub enum PluginPanePlacement {
     Zoomed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginPaneFocusParams {
     pub pane_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginPaneCloseParams {
     pub pane_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginPaneInfo {
     pub plugin_id: String,
     pub entrypoint: String,

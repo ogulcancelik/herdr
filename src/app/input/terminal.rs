@@ -45,12 +45,7 @@ impl App {
             if action == super::navigate::NavigateAction::EditScrollback {
                 self.launch_focused_scrollback_editor();
             } else {
-                super::navigate::execute_navigate_action_in_context(
-                    &mut self.state,
-                    &mut self.terminal_runtimes,
-                    action,
-                    super::navigate::ActionContext::Direct,
-                );
+                self.execute_tui_navigate_action(action, super::navigate::ActionContext::Direct);
             }
             return None;
         }

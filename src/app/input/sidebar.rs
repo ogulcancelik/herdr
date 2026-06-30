@@ -497,6 +497,7 @@ mod tests {
     use super::super::{app_for_mouse_test, capture_snapshot, mouse, unique_temp_path};
     use crate::{
         app::state::{AgentPanelSort, DragTarget, Mode},
+        config::SidebarCollapsedModeConfig,
         detect::Agent,
         workspace::Workspace,
     };
@@ -966,6 +967,19 @@ mod tests {
         ));
 
         assert!(!app.state.sidebar_collapsed);
+    }
+
+    #[test]
+    fn hidden_collapsed_sidebar_has_no_mouse_expand_hotspot() {
+        let mut app = app_for_mouse_test();
+        app.state.sidebar_collapsed = true;
+        app.state.sidebar_collapsed_mode = SidebarCollapsedModeConfig::Hidden;
+        app.state.view.sidebar_rect = Rect::new(0, 0, 0, 20);
+        app.state.view.terminal_area = Rect::new(0, 0, 80, 20);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 0, 19));
+
+        assert!(app.state.sidebar_collapsed);
     }
 
     #[test]

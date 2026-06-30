@@ -45,8 +45,7 @@ mod terminal;
 
 pub(crate) use self::{
     modal::{
-        handle_confirm_close_key, handle_context_menu_key, handle_global_menu_key,
-        handle_keybind_help_key, handle_navigator_key, handle_rename_key, handle_resize_key,
+        handle_global_menu_key, handle_keybind_help_key, handle_navigator_key,
         insert_navigator_search_text, insert_rename_input_text,
     },
     navigate::terminal_direct_navigation_action,
@@ -56,6 +55,7 @@ use self::{
     modal::{
         modal_action_from_key, ModalAction, ONBOARDING_WELCOME_ACTIONS, RELEASE_NOTES_ACTIONS,
     },
+    mouse::MouseAction,
     settings::SettingsAction,
 };
 use super::state::{AppState, Mode};
@@ -86,19 +86,15 @@ impl App {
                 Mode::ProductAnnouncement => self.handle_product_announcement_key(key_event),
                 Mode::Prefix | Mode::Navigate | Mode::Copy => unreachable!(),
                 Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
-                    handle_rename_key(&mut self.state, key_event)
+                    self.handle_rename_key_via_api(key_event)
                 }
                 Mode::NewLinkedWorktree => self.handle_worktree_create_key(key_event),
                 Mode::OpenExistingWorktree => self.handle_worktree_open_key(key_event),
                 Mode::ConfirmRemoveWorktree => self.handle_worktree_remove_key(key_event),
-                Mode::Resize => handle_resize_key(&mut self.state, key),
-                Mode::ConfirmClose => handle_confirm_close_key(&mut self.state, key_event),
+                Mode::Resize => self.handle_resize_key_via_api(key),
+                Mode::ConfirmClose => self.handle_confirm_close_key_via_api(key_event),
                 Mode::ContextMenu => {
-                    handle_context_menu_key(
-                        &mut self.state,
-                        &mut self.terminal_runtimes,
-                        key_event,
-                    );
+                    self.handle_context_menu_key_via_api(key_event);
                 }
                 Mode::Settings => self.handle_settings_key(key_event),
                 Mode::GlobalMenu => handle_global_menu_key(&mut self.state, key_event),
@@ -259,24 +255,74 @@ impl App {
         let previous_agent_panel_sort = self.state.agent_panel_sort;
         let previous_settings_section = self.state.settings.section;
         if !handled_pane_double_click {
+            let right_button = matches!(
+                mouse.kind,
+                MouseEventKind::Down(MouseButton::Right)
+                    | MouseEventKind::Up(MouseButton::Right)
+                    | MouseEventKind::Drag(MouseButton::Right)
+            );
+            let intentional_pane_press = matches!(
+                mouse.kind,
+                MouseEventKind::Down(MouseButton::Left | MouseButton::Middle)
+            );
+            if !right_button
+                && intentional_pane_press
+                && matches!(self.state.mode, Mode::Terminal | Mode::Resize)
+            {
+                if let (Some(ws_idx), Some(info)) = (
+                    self.state.active,
+                    self.state.pane_at(mouse.column, mouse.row).cloned(),
+                ) {
+                    self.focus_pane_internal_via_api(ws_idx, info.id);
+                }
+            }
             if let Some(action) = self.state.handle_mouse(&mut self.terminal_runtimes, mouse) {
                 match action {
-                    SettingsAction::SaveTheme(name) => self.save_theme(&name),
-                    SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
-                    SettingsAction::SaveToastDelivery(delivery) => {
-                        self.save_toast_delivery(delivery)
+                    MouseAction::Settings(action) => match action {
+                        SettingsAction::SaveTheme(name) => self.save_theme(&name),
+                        SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
+                        SettingsAction::SaveToastDelivery(delivery) => {
+                            self.save_toast_delivery(delivery)
+                        }
+                        SettingsAction::SaveAgentBorderLabels(enabled) => {
+                            self.save_agent_border_labels(enabled)
+                        }
+                        SettingsAction::SavePaneHistory(enabled) => {
+                            self.save_pane_history_persistence(enabled)
+                        }
+                        SettingsAction::SaveSwitchAsciiInputSourceInPrefix(enabled) => {
+                            self.save_switch_ascii_input_source_in_prefix(enabled)
+                        }
+                        SettingsAction::InstallRecommendedIntegrations => {
+                            self.install_recommended_integrations()
+                        }
+                    },
+                    MouseAction::FocusWorkspace { ws_idx } => {
+                        self.focus_workspace_idx_via_api(ws_idx)
                     }
-                    SettingsAction::SaveAgentBorderLabels(enabled) => {
-                        self.save_agent_border_labels(enabled)
+                    MouseAction::FocusTab { tab_idx } => self.focus_tab_idx_via_api(tab_idx),
+                    MouseAction::FocusPane { ws_idx, pane_id } => {
+                        self.focus_pane_internal_via_api(ws_idx, pane_id)
                     }
-                    SettingsAction::SavePaneHistory(enabled) => {
-                        self.save_pane_history_persistence(enabled)
+                    MouseAction::FocusToastTarget => self.focus_toast_target_via_api(),
+                    MouseAction::MoveWorkspace {
+                        source_ws_idx,
+                        insert_idx,
+                    } => self.move_workspace_via_api(source_ws_idx, insert_idx),
+                    MouseAction::MoveTab {
+                        ws_idx,
+                        source_tab_idx,
+                        insert_idx,
+                    } => self.move_tab_via_api(ws_idx, source_tab_idx, insert_idx),
+                    MouseAction::SetSplitRatio { path, ratio } => {
+                        self.set_split_ratio_via_api(path, ratio)
                     }
-                    SettingsAction::SaveSwitchAsciiInputSourceInPrefix(enabled) => {
-                        self.save_switch_ascii_input_source_in_prefix(enabled)
+                    MouseAction::RenameModal(action) => {
+                        self.apply_rename_mouse_action_via_api(action)
                     }
-                    SettingsAction::InstallRecommendedIntegrations => {
-                        self.install_recommended_integrations()
+                    MouseAction::ConfirmCloseAccept => self.confirm_close_accept_via_api(),
+                    MouseAction::ContextMenu { menu, idx } => {
+                        self.apply_context_menu_action_via_api(menu, idx)
                     }
                 }
             }

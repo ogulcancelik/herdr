@@ -8,6 +8,7 @@ mod layouts;
 mod panes;
 pub(crate) mod plugins;
 mod responses;
+mod session;
 mod tabs;
 mod workspaces;
 mod worktrees;
@@ -16,6 +17,8 @@ use super::{api_helpers::pane_agent_status, App, Mode, OverlayPaneState, ToastKi
 use crate::events::AppEvent;
 
 const API_NOTIFICATION_RATE_LIMIT: Duration = Duration::from_secs(1);
+#[cfg(windows)]
+const WINDOWS_POWERSHELL_AGENT_EXIT_RESPAWN_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeExitAction {
@@ -24,6 +27,36 @@ enum RuntimeExitAction {
 }
 
 impl App {
+    pub(crate) fn dispatch_tui_api_request(
+        &mut self,
+        id: &'static str,
+        method: crate::api::schema::Method,
+    ) -> String {
+        self.handle_api_request(crate::api::schema::Request {
+            id: id.to_string(),
+            method,
+        })
+    }
+
+    pub(crate) fn dispatch_tui_deferred_api_request(
+        &mut self,
+        id: &'static str,
+        method: crate::api::schema::Method,
+    ) -> Option<String> {
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        if !self.handle_deferred_worktree_api_request(
+            crate::api::schema::Request {
+                id: id.to_string(),
+                method,
+            },
+            respond_to,
+        ) {
+            return None;
+        }
+
+        response_rx.try_recv().ok()
+    }
+
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
         if let AppEvent::ClipboardWrite { content } = ev {
             #[cfg(not(test))]
@@ -204,6 +237,8 @@ impl App {
         self.sync_full_lifecycle_authority_detection_pauses();
         if terminal_cwd_reported {
             self.mark_git_status_refresh_due(Instant::now());
+            self.render_dirty.store(true, Ordering::Release);
+            self.render_notify.notify_one();
         }
         for update in &pane_updates {
             self.refresh_new_herdr_toast_context_for_update(update, &previous_toast);
@@ -394,10 +429,35 @@ impl App {
             return RuntimeExitAction::ClosePane;
         };
 
-        if terminal.respawn_shell_on_exit {
+        if terminal.respawn_shell_on_exit || self.should_respawn_shell_after_agent_exit(terminal) {
             RuntimeExitAction::RespawnShell
         } else {
             RuntimeExitAction::ClosePane
+        }
+    }
+
+    fn should_respawn_shell_after_agent_exit(
+        &self,
+        terminal: &crate::terminal::TerminalState,
+    ) -> bool {
+        #[cfg(not(windows))]
+        {
+            let _ = terminal;
+            false
+        }
+
+        #[cfg(windows)]
+        {
+            if !terminal.agent_process_exited_within(
+                Instant::now(),
+                WINDOWS_POWERSHELL_AGENT_EXIT_RESPAWN_GRACE,
+            ) {
+                return false;
+            }
+
+            crate::pane::uses_windows_powershell_prompt_cwd_reporting(
+                crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
+            )
         }
     }
 
@@ -806,6 +866,7 @@ impl App {
                     },
                 );
             }
+            Method::SessionSnapshot(_) => return self.handle_session_snapshot(request.id),
             Method::WorkspaceList(_) => return self.handle_workspace_list(request.id),
             Method::WorkspaceGet(target) => return self.handle_workspace_get(request.id, target),
             Method::WorkspaceCreate(params) => {
@@ -816,6 +877,9 @@ impl App {
             }
             Method::WorkspaceRename(params) => {
                 return self.handle_workspace_rename(request.id, params);
+            }
+            Method::WorkspaceMove(params) => {
+                return self.handle_workspace_move(request.id, params);
             }
             Method::WorkspaceClose(target) => {
                 return self.handle_workspace_close(request.id, target)
@@ -843,6 +907,7 @@ impl App {
             Method::TabCreate(params) => return self.handle_tab_create(request.id, params),
             Method::TabFocus(target) => return self.handle_tab_focus(request.id, target),
             Method::TabRename(params) => return self.handle_tab_rename(request.id, params),
+            Method::TabMove(params) => return self.handle_tab_move(request.id, params),
             Method::TabClose(target) => return self.handle_tab_close(request.id, target),
             Method::AgentList(_) => return self.handle_agent_list(request.id),
             Method::AgentGet(target) => return self.handle_agent_get(request.id, target),
@@ -862,6 +927,9 @@ impl App {
             }
             Method::LayoutExport(params) => return self.handle_layout_export(request.id, params),
             Method::LayoutApply(params) => return self.handle_layout_apply(request.id, params),
+            Method::LayoutSetSplitRatio(params) => {
+                return self.handle_layout_set_split_ratio(request.id, params);
+            }
             Method::PaneNeighbor(params) => return self.handle_pane_neighbor(request.id, params),
             Method::PaneEdges(params) => return self.handle_pane_edges(request.id, params),
             Method::PaneFocusDirection(params) => {
@@ -871,6 +939,7 @@ impl App {
             Method::PaneList(params) => return self.handle_pane_list(request.id, params),
             Method::PaneCurrent(params) => return self.handle_pane_current(request.id, params),
             Method::PaneGet(target) => return self.handle_pane_get(request.id, target),
+            Method::PaneFocus(target) => return self.handle_pane_focus(request.id, target),
             Method::PaneRename(params) => return self.handle_pane_rename(request.id, params),
             Method::PaneRead(params) => return self.handle_pane_read(request.id, params),
             Method::PaneReportAgent(params) => {
@@ -1721,6 +1790,64 @@ mod tests {
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_powershell_exit_after_agent_process_exit_respawns_shell() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let workspace = crate::workspace::Workspace::test_new("powershell");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.default_shell = "powershell.exe".into();
+        app.state.shell_mode = crate::config::ShellModeConfig::NonLogin;
+
+        app.handle_internal_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(crate::detect::Agent::OpenCode),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: true,
+            observed_at: std::time::Instant::now(),
+        });
+
+        assert_eq!(
+            app.runtime_exit_action(pane_id),
+            RuntimeExitAction::RespawnShell
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_powershell_exit_without_recent_agent_process_exit_closes_pane() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let workspace = crate::workspace::Workspace::test_new("powershell");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.default_shell = "powershell.exe".into();
+        app.state.shell_mode = crate::config::ShellModeConfig::NonLogin;
+
+        assert_eq!(
+            app.runtime_exit_action(pane_id),
+            RuntimeExitAction::ClosePane
+        );
     }
 
     #[test]

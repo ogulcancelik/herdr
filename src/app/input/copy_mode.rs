@@ -126,6 +126,12 @@ impl AppState {
         }
 
         match (key.code, key.modifiers) {
+            (KeyCode::Char('b'), mods) if mods.contains(KeyModifiers::CONTROL) => {
+                self.scroll_copy_mode_page(terminal_runtimes, -1, false)
+            }
+            (KeyCode::Char('f'), mods) if mods.contains(KeyModifiers::CONTROL) => {
+                self.scroll_copy_mode_page(terminal_runtimes, 1, false)
+            }
             (KeyCode::Char('u'), mods) if mods.contains(KeyModifiers::CONTROL) => {
                 self.scroll_copy_mode_page(terminal_runtimes, -1, true)
             }
@@ -759,19 +765,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn copy_mode_ignores_prefix_key() {
-        let (mut app, _) = app_with_copy_screen(b"foo bar\n");
+    async fn copy_mode_ctrl_b_uses_page_up() {
+        let bytes = numbered_lines_bytes(64);
+        let (mut app, pane_id) = app_with_copy_scrollback(&bytes);
         app.state.enter_copy_mode(&app.terminal_runtimes);
-        if let Some(copy_mode) = app.state.copy_mode.as_mut() {
-            copy_mode.cursor_row = 0;
-            copy_mode.cursor_col = 4;
-        }
+        let height = app.state.copy_mode.expect("copy mode").cursor_row + 1;
+        let expected_lines = copy_mode_page_lines(height, false);
 
         app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
 
-        let copy_mode = app.state.copy_mode.expect("copy mode");
         assert_eq!(app.state.mode, Mode::Copy);
-        assert_eq!(copy_mode.cursor_col, 4);
+        assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), expected_lines);
+    }
+
+    #[tokio::test]
+    async fn copy_mode_ctrl_f_uses_page_down() {
+        let bytes = numbered_lines_bytes(64);
+        let (mut app, pane_id) = app_with_copy_scrollback(&bytes);
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        let height = app.state.copy_mode.expect("copy mode").cursor_row + 1;
+        let page_lines = copy_mode_page_lines(height, false);
+        app.state
+            .set_pane_scroll_offset(&app.terminal_runtimes, pane_id, page_lines);
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+
+        assert_eq!(app.state.mode, Mode::Copy);
+        assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), 0);
     }
 
     #[tokio::test]

@@ -17,6 +17,22 @@ Most automation should start with the CLI wrappers. Use the raw socket API only 
 
 The layers share the same control surface.
 
+## Schema
+
+The installed CLI can print the socket protocol schema bundled with that Herdr
+binary:
+
+```bash
+herdr api schema
+herdr api schema --json
+herdr api schema --output herdr-api.schema.json
+```
+
+Plain `herdr api schema` prints a short summary. `--json` prints the full JSON
+Schema document for tools, and `--output PATH` writes that document to a file.
+The schema covers raw requests, success responses, error responses, emitted
+events, and subscription events.
+
 ## What you can control
 
 The socket API can:
@@ -83,17 +99,27 @@ Raw socket method names use dot notation:
 | Server | `ping`, `server.stop`, `server.reload_config`, `server.agent_manifests`, `server.reload_agent_manifests` |
 | Notification | `notification.show` |
 | Client | `client.window_title.set`, `client.window_title.clear` |
-| Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.close` |
+| Session | `session.snapshot` |
+| Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
-| Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.close` |
+| Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
-| Layout | `layout.export`, `layout.apply` |
+| Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send`, `agent.rename`, `agent.focus`, `agent.start` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
 | Plugins | `plugin.link`, `plugin.list`, `plugin.unlink`, `plugin.enable`, `plugin.disable`, `plugin.action.list`, `plugin.action.invoke`, `plugin.log.list`, `plugin.pane.open`, `plugin.pane.focus`, `plugin.pane.close` |
 
 Some CLI commands are conveniences around these methods. For example, `herdr agent wait` resolves an agent target and then subscribes to pane agent state events.
+
+`session.snapshot` returns a one-time bootstrap snapshot for clients that keep
+their own local runtime cache. The response includes version/protocol metadata,
+focused workspace/tab/pane ids, workspace records, tab records, pane records,
+tab layout snapshots, and agent records. It is not a subscription; after reading
+it, subscribe to resource events and update the local cache from those events.
+Call `session.snapshot` again after reconnecting or when the local cache may be
+stale. Attached worktree provenance is included on workspace records. Full repo
+worktree discovery remains `worktree.list`.
 
 Pane control methods use public pane ids such as `w1:p1`. Methods whose
 schema makes `pane_id` optional use the server's active focused pane when it is
@@ -175,6 +201,13 @@ not preserve live PTYs, scrollback, or running processes.
     }
   }
 }
+```
+
+`layout.set_split_ratio` updates an existing split in a tab layout. The response
+is `type: "layout_split_ratio_set"` with the updated portable `layout`.
+
+```json
+{"id":"req_ratio","method":"layout.set_split_ratio","params":{"tab_id":"w1:t1","path":[],"ratio":0.6}}
 ```
 
 Process-launching methods accept an `env` object. Herdr applies those key/value
@@ -587,7 +620,11 @@ Subscribe to events when you need a long-lived stream:
 
 The first response acknowledges the subscription. Later lines are pushed events.
 
-Workspace event subscriptions include `workspace.created`, `workspace.updated`, `workspace.renamed`, `workspace.closed`, and `workspace.focused`. Workspace events describe Herdr UI/runtime lifecycle. `workspace.created` includes optional `workspace.worktree` provenance when the workspace belongs to a worktree group. `workspace.closed` includes a final `workspace` snapshot when Herdr can still identify it before removal.
+Workspace event subscriptions include `workspace.created`, `workspace.updated`, `workspace.renamed`, `workspace.moved`, `workspace.closed`, and `workspace.focused`. Workspace events describe Herdr UI/runtime lifecycle. `workspace.created` includes optional `workspace.worktree` provenance when the workspace belongs to a worktree group. `workspace.moved` includes the moved `workspace_id`, requested `insert_index`, and updated ordered `workspaces` list. `workspace.closed` includes a final `workspace` snapshot when Herdr can still identify it before removal.
+Tab event subscriptions include `tab.created`, `tab.closed`, `tab.focused`,
+`tab.renamed`, and `tab.moved`. `tab.moved` includes the moved `tab_id`,
+`workspace_id`, requested `insert_index`, and updated ordered `tabs` list for
+that workspace.
 Pane event subscriptions include `pane.created`, `pane.closed`, `pane.focused`,
 `pane.moved`, `pane.exited`, `pane.agent_detected`,
 `pane.output_matched`, and `pane.agent_status_changed`.

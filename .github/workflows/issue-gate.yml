@@ -32,7 +32,7 @@ jobs:
             ];
             const requiredEnvironmentFields = [
               /^\s*(?:-\s*)?Herdr version:[^\S\r\n]*\S.*$/m,
-              /^\s*(?:-\s*)?Update channel(?: \(stable or preview\))?:[^\S\r\n]*(?:stable|preview)\b.*$/im,
+              /^\s*(?:-\s*)?Update channel(?: \([^)]+\))?:[^\S\r\n]*\S.*$/im,
               /^\s*(?:-\s*)?Operating system:[^\S\r\n]*\S.*$/m,
               /^\s*(?:-\s*)?Terminal:[^\S\r\n]*\S.*$/m,
             ];

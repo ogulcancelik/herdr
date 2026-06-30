@@ -4,7 +4,7 @@ use ratatui::layout::Direction;
 
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, LayoutApplyParams, LayoutDescription, LayoutExportParams,
-    LayoutNode, LayoutPane, ResponseResult, SplitDirection,
+    LayoutNode, LayoutPane, LayoutSetSplitRatioParams, ResponseResult, SplitDirection,
 };
 use crate::app::{App, Mode};
 use crate::layout::{Node, PaneId};
@@ -212,6 +212,38 @@ impl App {
             return encode_error(id, "layout_apply_failed", "new layout unavailable");
         };
         encode_success(id, ResponseResult::LayoutApply { layout })
+    }
+
+    pub(super) fn handle_layout_set_split_ratio(
+        &mut self,
+        id: String,
+        params: LayoutSetSplitRatioParams,
+    ) -> String {
+        if !params.ratio.is_finite() {
+            return encode_error(id, "invalid_ratio", "ratio must be finite");
+        }
+        let Some((ws_idx, tab_idx)) = self.resolve_layout_export_target(&LayoutExportParams {
+            tab_id: params.tab_id,
+            pane_id: params.pane_id,
+        }) else {
+            return encode_error(id, "layout_not_found", "layout target not found");
+        };
+
+        let changed = self
+            .state
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|ws| ws.tabs.get_mut(tab_idx))
+            .is_some_and(|tab| tab.layout.set_ratio_at(&params.path, params.ratio));
+        if !changed {
+            return encode_error(id, "split_not_found", "split path not found");
+        }
+
+        self.schedule_session_save();
+        let Some(layout) = self.layout_description(ws_idx, tab_idx) else {
+            return encode_error(id, "layout_not_found", "layout unavailable");
+        };
+        encode_success(id, ResponseResult::LayoutSplitRatioSet { layout })
     }
 
     fn resolve_layout_export_target(&self, params: &LayoutExportParams) -> Option<(usize, usize)> {
@@ -634,6 +666,49 @@ mod tests {
         };
         assert_eq!(pane.label.as_deref(), Some("tests"));
         assert_eq!(pane.pane_id, Some(app.public_pane_id(0, right).unwrap()));
+    }
+
+    #[test]
+    fn layout_set_split_ratio_updates_existing_split() {
+        let mut app = app_with_workspace();
+        app.state.workspaces[0].test_split(Direction::Horizontal);
+
+        let response = app.handle_layout_set_split_ratio(
+            "req".into(),
+            LayoutSetSplitRatioParams {
+                tab_id: None,
+                pane_id: None,
+                path: vec![],
+                ratio: 0.72,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::LayoutSplitRatioSet { layout } = success.result else {
+            panic!("expected layout split ratio set response");
+        };
+        let LayoutNode::Split { ratio, .. } = layout.root else {
+            panic!("expected split layout root");
+        };
+        assert!((ratio - 0.72).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn layout_set_split_ratio_rejects_missing_split() {
+        let mut app = app_with_workspace();
+
+        let response = app.handle_layout_set_split_ratio(
+            "req".into(),
+            LayoutSetSplitRatioParams {
+                tab_id: None,
+                pane_id: None,
+                path: vec![],
+                ratio: 0.72,
+            },
+        );
+
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "split_not_found");
     }
 
     #[tokio::test]

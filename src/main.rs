@@ -244,6 +244,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Maximum sidebar width when expanded (columns)
 # sidebar_max_width = 36
 
+# Collapsed sidebar presentation: "compact" keeps the narrow status rail, "hidden" uses zero width.
+# sidebar_collapsed_mode = "compact"
+
 # Terminal width at or below which Herdr uses the mobile single-column layout.
 # Increase this for foldables, tablets, or wide phone terminals.
 # mobile_width_threshold = 64
@@ -280,6 +283,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 # Show detected/reported agent labels in split pane borders when no manual pane name is set.
 # show_agent_labels_on_pane_borders = false
+
+# Hide the tab row when a workspace has exactly one tab.
+# New tabs can still be created with the configured keybinding.
+# hide_tab_bar_when_single_tab = false
 
 # Agent panel ordering: "spaces" (grouped by space) or "priority" (attention queue).
 # "workspaces" is accepted as an alias for "spaces".
@@ -324,13 +331,14 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # resume_agents_on_restore = true
 
 [remote]
-# Whether herdr manages the ssh config used for the `herdr --remote` bridge.
-# When true (default), herdr runs the bridge ssh through a generated config that
+# Whether herdr manages the ssh config used for `herdr --remote`.
+# When true (default), herdr runs remote ssh through a generated config that
 # includes your ~/.ssh/config first and adds ServerAliveInterval/
-# ServerAliveCountMax as a fallback (so any keepalive you set yourself still
-# wins) to survive idle network/NAT timeouts. Set false to run plain ssh against
-# your ssh config unchanged — this does not force keepalive off, it only stops
-# herdr from adding its own.
+# ServerAliveCountMax as fallbacks (so any keepalive values you set yourself
+# still win) to survive idle network/NAT timeouts. Herdr also uses a private
+# per-attach OpenSSH control socket to reuse the first authenticated connection.
+# Set false to run plain ssh against your ssh config unchanged — this does not
+# force keepalive or multiplexing off, it only stops herdr from adding its own.
 # manage_ssh_config = true
 
 [experimental]
@@ -486,6 +494,7 @@ fn main() -> io::Result<()> {
         println!("       herdr channel set <stable|preview>");
         println!("       herdr server stop");
         println!("       herdr server reload-config");
+        println!("       herdr api <subcommand> ...");
         println!("       herdr config <subcommand> ...");
         println!("       herdr channel <subcommand> ...");
         println!("       herdr workspace <subcommand> ...");
@@ -525,6 +534,10 @@ fn main() -> io::Result<()> {
             (
                 "herdr channel <subcommand>",
                 "Manage the stable or preview update channel",
+            ),
+            (
+                "herdr api <subcommand>",
+                "Inspect the bundled socket API schema",
             ),
             (
                 "herdr workspace <subcommand>",

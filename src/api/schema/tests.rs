@@ -2,6 +2,49 @@ use std::collections::HashMap;
 
 use super::*;
 
+fn protocol_schema_entry<T: schemars::JsonSchema>(name: &str) -> serde_json::Value {
+    let mut schema = serde_json::to_value(schemars::schema_for!(T)).unwrap();
+    rewrite_schema_refs(&mut schema, name);
+    schema
+}
+
+fn rewrite_schema_refs(value: &mut serde_json::Value, schema_name: &str) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(serde_json::Value::String(reference)) = object.get_mut("$ref") {
+                if let Some(path) = reference.strip_prefix("#/") {
+                    *reference = format!("#/schemas/{schema_name}/{path}");
+                }
+            }
+            for child in object.values_mut() {
+                rewrite_schema_refs(child, schema_name);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                rewrite_schema_refs(item, schema_name);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn protocol_schema_document() -> serde_json::Value {
+    serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Herdr API",
+        "schema_version": 1,
+        "protocol": crate::protocol::PROTOCOL_VERSION,
+        "schemas": {
+            "request": protocol_schema_entry::<Request>("request"),
+            "success_response": protocol_schema_entry::<SuccessResponse>("success_response"),
+            "error_response": protocol_schema_entry::<ErrorResponse>("error_response"),
+            "event": protocol_schema_entry::<EventEnvelope>("event"),
+            "subscription_event": protocol_schema_entry::<SubscriptionEventEnvelope>("subscription_event"),
+        },
+    })
+}
+
 #[test]
 fn request_uses_dot_method_names() {
     let request = Request {
@@ -16,6 +59,61 @@ fn request_uses_dot_method_names() {
 
     let json = serde_json::to_value(&request).unwrap();
     assert_eq!(json["method"], "workspace.create");
+}
+
+#[test]
+fn bundled_protocol_schema_refs_resolve_inside_bundle() {
+    fn assert_no_standalone_refs(value: &serde_json::Value) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(serde_json::Value::String(reference)) = object.get("$ref") {
+                    assert!(
+                        !reference.starts_with("#/$defs/"),
+                        "schema bundle contains standalone ref {reference}"
+                    );
+                }
+                for child in object.values() {
+                    assert_no_standalone_refs(child);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    assert_no_standalone_refs(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assert_no_standalone_refs(&protocol_schema_document());
+}
+
+#[test]
+fn generated_protocol_schema_artifact_is_current() {
+    let actual = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&protocol_schema_document()).unwrap()
+    );
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("docs/next/api/herdr-api.schema.json");
+
+    if std::env::var_os("HERDR_UPDATE_API_SCHEMA").is_some() {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &actual).unwrap();
+        return;
+    }
+
+    let expected = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+        panic!(
+            "failed to read {}; run `HERDR_UPDATE_API_SCHEMA=1 just test-one generated_protocol_schema_artifact_is_current`: {err}",
+            path.display()
+        )
+    });
+    assert_eq!(
+        expected,
+        actual,
+        "generated API schema artifact is stale; run `HERDR_UPDATE_API_SCHEMA=1 just test-one generated_protocol_schema_artifact_is_current`"
+    );
 }
 
 #[test]
@@ -250,18 +348,39 @@ fn pane_process_info_request_round_trips() {
 
 #[test]
 fn event_envelope_round_trips() {
-    let event = EventEnvelope {
-        event: EventKind::PaneOutputChanged,
-        data: EventData::PaneOutputChanged {
-            pane_id: "p_1".into(),
-            workspace_id: "w_1".into(),
-            revision: 42,
+    let events = [
+        EventEnvelope {
+            event: EventKind::PaneOutputChanged,
+            data: EventData::PaneOutputChanged {
+                pane_id: "p_1".into(),
+                workspace_id: "w_1".into(),
+                revision: 42,
+            },
         },
-    };
+        EventEnvelope {
+            event: EventKind::WorkspaceMoved,
+            data: EventData::WorkspaceMoved {
+                workspace_id: "w_1".into(),
+                insert_index: 2,
+                workspaces: vec![],
+            },
+        },
+        EventEnvelope {
+            event: EventKind::TabMoved,
+            data: EventData::TabMoved {
+                tab_id: "w_1:1".into(),
+                workspace_id: "w_1".into(),
+                insert_index: 1,
+                tabs: vec![],
+            },
+        },
+    ];
 
-    let json = serde_json::to_string(&event).unwrap();
-    let restored: EventEnvelope = serde_json::from_str(&json).unwrap();
-    assert_eq!(restored, event);
+    for event in events {
+        let json = serde_json::to_string(&event).unwrap();
+        let restored: EventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, event);
+    }
 }
 
 #[test]
@@ -351,6 +470,40 @@ fn success_response_round_trips() {
     };
 
     let json = serde_json::to_string(&response).unwrap();
+    let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, response);
+}
+
+#[test]
+fn session_snapshot_request_and_response_round_trip() {
+    let request = Request {
+        id: "req_snapshot".into(),
+        method: Method::SessionSnapshot(EmptyParams::default()),
+    };
+    let json = serde_json::to_string(&request).unwrap();
+    assert!(json.contains("\"method\":\"session.snapshot\""));
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, request);
+
+    let response = SuccessResponse {
+        id: "req_snapshot".into(),
+        result: ResponseResult::SessionSnapshot {
+            snapshot: Box::new(SessionSnapshot {
+                version: "0.1.2".into(),
+                protocol: 15,
+                focused_workspace_id: None,
+                focused_tab_id: None,
+                focused_pane_id: None,
+                workspaces: Vec::new(),
+                tabs: Vec::new(),
+                panes: Vec::new(),
+                layouts: Vec::new(),
+                agents: Vec::new(),
+            }),
+        },
+    };
+    let json = serde_json::to_string(&response).unwrap();
+    assert!(json.contains("\"type\":\"session_snapshot\""));
     let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
     assert_eq!(restored, response);
 }
@@ -700,6 +853,92 @@ fn layout_export_apply_round_trip() {
     let json = serde_json::to_string(&response).unwrap();
     let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
     assert_eq!(restored, response);
+
+    let response = SuccessResponse {
+        id: "layout_ratio".into(),
+        result: ResponseResult::LayoutSplitRatioSet {
+            layout: LayoutDescription {
+                workspace_id: "w1".into(),
+                tab_id: "w1:1".into(),
+                zoomed: false,
+                focused_pane_id: "w1-1".into(),
+                root: LayoutNode::Pane {
+                    pane: LayoutPane {
+                        pane_id: Some("w1-1".into()),
+                        ..Default::default()
+                    },
+                },
+            },
+        },
+    };
+    let json = serde_json::to_string(&response).unwrap();
+    assert!(json.contains("\"type\":\"layout_split_ratio_set\""));
+    let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, response);
+}
+
+#[test]
+fn authority_mutation_requests_round_trip() {
+    let workspace_move = Request {
+        id: "move_ws".into(),
+        method: Method::WorkspaceMove(WorkspaceMoveParams {
+            workspace_id: "w1".into(),
+            insert_index: 2,
+        }),
+    };
+    let json = serde_json::to_value(&workspace_move).unwrap();
+    assert_eq!(json["method"], "workspace.move");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, workspace_move);
+
+    let tab_move = Request {
+        id: "move_tab".into(),
+        method: Method::TabMove(TabMoveParams {
+            tab_id: "w1:1".into(),
+            insert_index: 1,
+        }),
+    };
+    let json = serde_json::to_value(&tab_move).unwrap();
+    assert_eq!(json["method"], "tab.move");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, tab_move);
+
+    let pane_focus = Request {
+        id: "focus_pane".into(),
+        method: Method::PaneFocus(PaneTarget {
+            pane_id: "w1:1".into(),
+        }),
+    };
+    let json = serde_json::to_value(&pane_focus).unwrap();
+    assert_eq!(json["method"], "pane.focus");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, pane_focus);
+
+    let split_ratio = Request {
+        id: "set_ratio".into(),
+        method: Method::LayoutSetSplitRatio(LayoutSetSplitRatioParams {
+            tab_id: Some("w1:1".into()),
+            pane_id: None,
+            path: vec![false, true],
+            ratio: 0.6,
+        }),
+    };
+    let json = serde_json::to_value(&split_ratio).unwrap();
+    assert_eq!(json["method"], "layout.set_split_ratio");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, split_ratio);
+
+    let subscription = Request {
+        id: "sub_moves".into(),
+        method: Method::EventsSubscribe(EventsSubscribeParams {
+            subscriptions: vec![Subscription::WorkspaceMoved {}, Subscription::TabMoved {}],
+        }),
+    };
+    let json = serde_json::to_string(&subscription).unwrap();
+    assert!(json.contains("\"type\":\"workspace.moved\""));
+    assert!(json.contains("\"type\":\"tab.moved\""));
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, subscription);
 }
 
 #[test]

@@ -2671,20 +2671,134 @@ fn omp_extension_refreshes_session_ref_before_agent_start_state() {
     assert!(report_session < publish_state);
 }
 
+fn omp_handler(event: &str) -> &'static str {
+    let start = OMP_EXTENSION_ASSET
+        .find(&format!("pi.on(\"{event}\""))
+        .unwrap_or_else(|| panic!("omp extension registers {event} handler"));
+    let rest = &OMP_EXTENSION_ASSET[start..];
+    let end = rest[1..]
+        .find("\n\n  pi.")
+        .map(|offset| offset + 1)
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
+
 #[test]
-fn omp_session_hook_ignores_non_ui_sessions() {
-    let session_start_handler = OMP_EXTENSION_ASSET
-        .find("pi.on(\"session_start\"")
-        .expect("omp extension registers session_start handler");
-    let non_ui_guard = OMP_EXTENSION_ASSET
+fn omp_root_activation_requires_ui_context() {
+    let activator = OMP_EXTENSION_ASSET
+        .find("function activateRootSession(ctx: any, sessionStartSource = \"startup\"): boolean")
+        .expect("omp extension should centralize root session activation");
+    let helper = &OMP_EXTENSION_ASSET[activator..];
+    let non_ui_guard = helper
         .find("ctx?.hasUI !== true")
-        .expect("omp extension checks UI context");
-    let session_report = OMP_EXTENSION_ASSET
-        .find("void reportSession()")
+        .expect("omp extension checks UI context before activating");
+    let root_session = helper
+        .find("rootSession = true;")
+        .expect("omp extension activates root session after UI guard");
+    let session_report = helper
+        .find("void reportSession(sessionStartSource);")
         .expect("omp extension reports root session");
 
-    assert!(session_start_handler < non_ui_guard);
-    assert!(non_ui_guard < session_report);
+    assert!(non_ui_guard < root_session);
+    assert!(root_session < session_report);
+}
+
+#[test]
+fn omp_session_start_and_switch_use_root_activation() {
+    let session_start = OMP_EXTENSION_ASSET
+        .find("pi.on(\"session_start\", (_event, ctx)")
+        .expect("omp extension registers session_start handler");
+    let session_start_handler = &OMP_EXTENSION_ASSET[session_start..];
+    session_start_handler
+        .find("if (!activateRootSession(ctx))")
+        .expect("omp session_start handler should activate root session");
+
+    let session_switch = OMP_EXTENSION_ASSET
+        .find("pi.on(\"session_switch\", (event, ctx)")
+        .expect("omp extension registers session_switch handler");
+    let session_switch_handler = &OMP_EXTENSION_ASSET[session_switch..];
+    session_switch_handler
+        .find("if (!activateRootSession(ctx, event?.reason || \"resume\"))")
+        .expect("omp session_switch handler should activate root session with switch reason");
+}
+
+#[test]
+fn omp_session_reports_include_start_source() {
+    let report_session = OMP_EXTENSION_ASSET
+        .find("function reportSession(sessionStartSource = \"startup\"): Promise<void>")
+        .expect("omp extension should label session reports with a lifecycle source");
+    let helper = &OMP_EXTENSION_ASSET[report_session..];
+    let session_source = helper
+        .find("session_start_source: sessionStartSource")
+        .expect("omp session reports should include the lifecycle source");
+    let session_ref = helper
+        .find("...sessionRef")
+        .expect("omp session reports should include the native session ref");
+
+    assert!(session_source < session_ref);
+}
+
+#[test]
+fn omp_socket_requests_are_serialized() {
+    let queue = OMP_EXTENSION_ASSET
+        .find("let requestQueue = Promise.resolve();")
+        .expect("omp extension should keep socket reports ordered");
+    let send_request = OMP_EXTENSION_ASSET[queue..]
+        .find("function sendRequest(request: unknown): Promise<void>")
+        .expect("omp extension should wrap socket sends in an ordered queue");
+    let queued_send = OMP_EXTENSION_ASSET[queue + send_request..]
+        .find("requestQueue = requestQueue.then(")
+        .expect("omp extension should serialize socket requests through the queue");
+    let raw_send = OMP_EXTENSION_ASSET[queue + send_request..]
+        .find("sendRequestNow(request)")
+        .expect("omp extension should enqueue the raw socket send");
+
+    assert!(queued_send < raw_send);
+}
+
+#[test]
+fn omp_runtime_events_can_activate_root_session_after_resume() {
+    for event in [
+        "agent_start",
+        "tool_approval_requested",
+        "tool_approval_resolved",
+        "tool_execution_start",
+        "tool_execution_end",
+    ] {
+        let handler = omp_handler(event);
+        handler
+            .find("!rootSession && !activateRootSession(ctx)")
+            .unwrap_or_else(|| panic!("omp {event} handler should recover missing root session"));
+    }
+}
+
+#[test]
+fn omp_ask_and_approval_events_report_blocked_state() {
+    let approval_handler = omp_handler("tool_approval_requested");
+    approval_handler
+        .find("activateBlocked(label);")
+        .expect("approval requests should block the pane");
+
+    let approval_resolved = omp_handler("tool_approval_resolved");
+    approval_resolved
+        .find("deactivateBlocked();")
+        .expect("approval resolution should unblock the pane");
+
+    let ask_handler = omp_handler("tool_execution_start");
+    ask_handler
+        .find("event?.toolName !== \"ask\"")
+        .expect("tool execution handler should only treat Ask as blocked");
+    ask_handler
+        .find("activateBlocked(askBlockedMessage(event.args));")
+        .expect("Ask start should block the pane");
+
+    let ask_end_handler = omp_handler("tool_execution_end");
+    ask_end_handler
+        .find("event?.toolName !== \"ask\"")
+        .expect("tool execution end should only treat Ask as blocked");
+    ask_end_handler
+        .find("deactivateBlocked();")
+        .expect("Ask end should unblock the pane");
 }
 
 #[test]

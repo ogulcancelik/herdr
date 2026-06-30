@@ -353,6 +353,7 @@ pub struct CellStyle {
     pub invisible: bool,
     pub strikethrough: bool,
     pub overline: bool,
+    pub underline: u8,
     pub underlined: bool,
 }
 
@@ -370,8 +371,16 @@ impl From<ffi::GhosttyStyle> for CellStyle {
             invisible: value.invisible,
             strikethrough: value.strikethrough,
             overline: value.overline,
+            underline: normalize_underline_style(value.underline),
             underlined: value.underline != 0,
         }
+    }
+}
+
+fn normalize_underline_style(value: std::os::raw::c_int) -> u8 {
+    match value {
+        0..=5 => value as u8,
+        _ => 1,
     }
 }
 

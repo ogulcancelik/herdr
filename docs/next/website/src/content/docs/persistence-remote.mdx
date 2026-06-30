@@ -63,11 +63,11 @@ Then attach with:
 herdr --remote workbox
 ```
 
-Remote attach supports Linux and macOS hosts on x86_64 and aarch64. Herdr checks the remote platform, prefers a matching `herdr` already on the remote `PATH`, then checks `~/.local/bin/herdr`. If no matching binary exists, interactive runs prompt to install one to `~/.local/bin/herdr`; non-interactive runs fail instead of modifying the host. If `~/.local/bin` is not on the remote `PATH`, Herdr warns after install.
+Remote attach supports Linux and macOS hosts on x86_64 and aarch64. Herdr checks the remote platform, prefers a matching `herdr` already on the remote `PATH`, then checks common direct, Homebrew, mise, and Nix profile install paths. If no matching binary exists, interactive runs prompt to install one to `~/.local/bin/herdr`; non-interactive runs fail instead of modifying the host. If `~/.local/bin` is not on the remote `PATH`, Herdr warns after install.
 
 Native Windows `herdr --remote` is not part of the Windows beta. From Windows, SSH into the server and run `herdr` there.
 
-By default, `herdr --remote` runs the bridge through a temporary SSH config that includes your SSH config first, then adds fallback keepalive settings. Existing user keepalive settings win. Set `[remote].manage_ssh_config = false` to use plain `ssh` without Herdr's generated bridge config.
+By default, `herdr --remote` runs remote setup and the bridge through a temporary SSH config that includes your SSH config first, then adds fallback keepalive settings and a private per-attach control socket for connection reuse. Existing user keepalive settings win. Set `[remote].manage_ssh_config = false` to use plain `ssh` without Herdr's generated config or control socket.
 
 By default, remote attach uses the normal restart/stop flow if it needs to replace or restart a running remote server. To opt into experimental live handoff for a supported running remote server, pass `--handoff`:
 
@@ -120,6 +120,30 @@ Only one writable direct attach client owns input and resize for a terminal. Use
 ```bash
 herdr terminal attach term_abc123 --takeover
 ```
+
+For third-party bridges that only need rendered terminal bytes, use a read-only
+terminal session observer:
+
+```bash
+herdr terminal session observe w1:p1 --cols 120 --rows 40
+```
+
+It prints newline-delimited JSON `terminal.frame` records with base64 ANSI
+bytes, then a `terminal.closed` record when the server closes the stream.
+Multiple observers can watch the same terminal without taking input, resize,
+scroll, or takeover ownership.
+
+For an interactive bridge, use a writable terminal session controller:
+
+```bash
+herdr terminal session control w1:p1 --takeover --cols 120 --rows 40
+```
+
+Control mode prints the same newline-delimited frame records and reads
+newline-delimited JSON commands on stdin. `terminal.input` sends text or
+base64 bytes, `terminal.resize` changes the controller viewport,
+`terminal.scroll` scrolls the attached viewport, and `terminal.release` closes
+the controller. Only one controller owns input and resize at a time.
 
 ## Single-process escape hatch
 

@@ -206,8 +206,8 @@ impl TileLayout {
     }
 
     /// Set the ratio of a split node at the given path.
-    pub fn set_ratio_at(&mut self, path: &[bool], ratio: f32) {
-        set_ratio_at(&mut self.root, path, ratio.clamp(0.1, 0.9));
+    pub fn set_ratio_at(&mut self, path: &[bool], ratio: f32) -> bool {
+        set_ratio_at(&mut self.root, path, ratio.clamp(0.1, 0.9))
     }
 
     /// Adjust the nearest split in the given direction for the focused pane.
@@ -577,7 +577,7 @@ fn remove_pane(node: Node, target: PaneId) -> Option<Node> {
     }
 }
 
-fn set_ratio_at(node: &mut Node, path: &[bool], new_ratio: f32) {
+fn set_ratio_at(node: &mut Node, path: &[bool], new_ratio: f32) -> bool {
     if let Node::Split {
         ratio,
         first,
@@ -587,11 +587,14 @@ fn set_ratio_at(node: &mut Node, path: &[bool], new_ratio: f32) {
     {
         if path.is_empty() {
             *ratio = new_ratio;
+            true
         } else if path[0] {
-            set_ratio_at(second, &path[1..], new_ratio);
+            set_ratio_at(second, &path[1..], new_ratio)
         } else {
-            set_ratio_at(first, &path[1..], new_ratio);
+            set_ratio_at(first, &path[1..], new_ratio)
         }
+    } else {
+        false
     }
 }
 

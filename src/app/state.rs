@@ -1349,6 +1349,7 @@ pub struct AppState {
     pub sidebar_width_source: SidebarWidthSource,
     pub sidebar_width_auto: bool,
     pub sidebar_collapsed: bool,
+    pub sidebar_collapsed_mode: crate::config::SidebarCollapsedModeConfig,
     /// Ratio of sidebar height allocated to the workspaces section.
     pub sidebar_section_split: f32,
     pub agent_panel_sort: AgentPanelSort,
@@ -1365,6 +1366,7 @@ pub struct AppState {
     pub pane_borders: bool,
     pub pane_gaps: bool,
     pub show_agent_labels_on_pane_borders: bool,
+    pub hide_tab_bar_when_single_tab: bool,
     pub pane_history_persistence: bool,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
     /// the pane requested `?25l`. See `[experimental] reveal_hidden_cursor_for_cjk_ime`.
@@ -1708,6 +1710,7 @@ impl AppState {
             sidebar_width_source: SidebarWidthSource::ConfigDefault,
             sidebar_width_auto: false,
             sidebar_collapsed: false,
+            sidebar_collapsed_mode: crate::config::SidebarCollapsedModeConfig::Compact,
             sidebar_section_split: 0.5,
             agent_panel_sort: AgentPanelSort::Spaces,
             next_agent_state_change_seq: 0,
@@ -1721,6 +1724,7 @@ impl AppState {
             pane_borders: true,
             pane_gaps: false,
             show_agent_labels_on_pane_borders: false,
+            hide_tab_bar_when_single_tab: false,
             pane_history_persistence: false,
             reveal_hidden_cursor_for_cjk_ime: false,
             cjk_ime_agent_filter_configured: false,

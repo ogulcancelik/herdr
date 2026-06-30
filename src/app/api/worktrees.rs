@@ -611,6 +611,7 @@ impl App {
         });
     }
 
+    #[cfg(test)]
     pub(crate) fn emit_worktree_opened_for_workspace(&mut self, ws_idx: usize, already_open: bool) {
         let Some(worktree) = self.worktree_info_for_workspace(ws_idx) else {
             return;

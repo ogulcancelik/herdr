@@ -927,7 +927,7 @@ samp {
 }
 
 .hero-lede {
-    max-width: 520px;
+    max-width: 560px;
     margin: 1.25rem 0 0;
     color: var(--ink-soft);
     font-size: clamp(1rem, 1.8vw, 1.2rem);

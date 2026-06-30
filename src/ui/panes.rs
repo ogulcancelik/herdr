@@ -21,18 +21,13 @@ pub(crate) fn pane_is_scrolled_back(rt: &TerminalRuntime) -> bool {
         .is_some_and(|metrics| metrics.offset_from_bottom > 0)
 }
 
-fn pane_border_title(label: &str, pane_width: u16, focused: bool) -> Option<String> {
+fn pane_border_title(label: &str, pane_width: u16, _focused: bool) -> Option<String> {
     let label = label.trim();
     if label.is_empty() || pane_width <= 4 {
         return None;
     }
-    if focused {
-        let max_label_width = pane_width.saturating_sub(5) as usize;
-        Some(format!("▌ {} ", truncate_end(label, max_label_width)))
-    } else {
-        let max_label_width = pane_width.saturating_sub(4) as usize;
-        Some(format!(" {} ", truncate_end(label, max_label_width)))
-    }
+    let max_label_width = pane_width.saturating_sub(4) as usize;
+    Some(format!(" {} ", truncate_end(label, max_label_width)))
 }
 
 fn stable_terminal_inner_rect(pane_inner: Rect) -> Rect {
@@ -802,7 +797,7 @@ mod tests {
         );
         assert_eq!(
             pane_border_title(" claude ", 20, true).as_deref(),
-            Some("▌ claude ")
+            Some(" claude ")
         );
         assert_eq!(pane_border_title("", 20, false), None);
         assert_eq!(
@@ -811,7 +806,7 @@ mod tests {
         );
         assert_eq!(
             pane_border_title("abcdef", 8, true).as_deref(),
-            Some("▌ ab… ")
+            Some(" abc… ")
         );
         assert_eq!(pane_border_title("abcdef", 4, false), None);
     }

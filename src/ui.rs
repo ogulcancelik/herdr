@@ -153,7 +153,7 @@ pub(crate) fn compute_view_without_resizing_panes(
     );
 }
 
-fn resize_background_tab_panes_to_terminal_area(
+fn resize_background_tab_panes_to_area(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     terminal_area: Rect,
@@ -166,6 +166,38 @@ fn resize_background_tab_panes_to_terminal_area(
             }
             resize_tab_panes(app, terminal_runtimes, tab, terminal_area, cell_size);
         }
+    }
+}
+
+fn resize_background_tab_panes_for_desktop(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    main_area: Rect,
+    cell_size: crate::kitty_graphics::HostCellSize,
+) {
+    for (ws_idx, ws) in app.workspaces.iter().enumerate() {
+        let (_, terminal_area) = desktop_tab_bar_and_terminal_area(app, ws, main_area);
+        for (tab_idx, tab) in ws.tabs.iter().enumerate() {
+            if app.active == Some(ws_idx) && tab_idx == ws.active_tab_index() {
+                continue;
+            }
+            resize_tab_panes(app, terminal_runtimes, tab, terminal_area, cell_size);
+        }
+    }
+}
+
+fn desktop_tab_bar_and_terminal_area(
+    app: &AppState,
+    ws: &crate::workspace::Workspace,
+    main_area: Rect,
+) -> (Rect, Rect) {
+    let hide_single_tab_bar = app.hide_tab_bar_when_single_tab && ws.tabs.len() == 1;
+    if !hide_single_tab_bar && main_area.height > 1 {
+        let [tab_bar_rect, terminal_area] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(main_area);
+        (tab_bar_rect, terminal_area)
+    } else {
+        (Rect::default(), main_area)
     }
 }
 
@@ -182,7 +214,10 @@ fn compute_view_internal(
     }
 
     let sidebar_w = if app.sidebar_collapsed {
-        COLLAPSED_WIDTH
+        match app.sidebar_collapsed_mode {
+            crate::config::SidebarCollapsedModeConfig::Compact => COLLAPSED_WIDTH,
+            crate::config::SidebarCollapsedModeConfig::Hidden => 0,
+        }
     } else {
         app.sidebar_width
             .clamp(app.sidebar_min_width, app.sidebar_max_width)
@@ -191,14 +226,11 @@ fn compute_view_internal(
     let [sidebar_area, main_area] =
         Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Min(1)]).areas(area);
 
-    let has_tabs = app.active.and_then(|i| app.workspaces.get(i)).is_some();
-    let (tab_bar_rect, terminal_area) = if has_tabs && main_area.height > 1 {
-        let [tab_bar_rect, terminal_area] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(main_area);
-        (tab_bar_rect, terminal_area)
-    } else {
-        (Rect::default(), main_area)
-    };
+    let (tab_bar_rect, terminal_area) = app
+        .active
+        .and_then(|i| app.workspaces.get(i))
+        .map(|ws| desktop_tab_bar_and_terminal_area(app, ws, main_area))
+        .unwrap_or((Rect::default(), main_area));
 
     if !app.sidebar_collapsed {
         app.workspace_scroll = normalized_workspace_scroll(app, sidebar_area, app.workspace_scroll);
@@ -220,7 +252,7 @@ fn compute_view_internal(
 
     let tab_bar_view = app
         .active
-        .and_then(|i| app.workspaces.get(i))
+        .and_then(|ws_idx| app.workspaces.get(ws_idx))
         .map(|ws| {
             compute_tab_bar_view(
                 ws,
@@ -253,12 +285,7 @@ fn compute_view_internal(
         cell_size,
     );
     if resize_panes {
-        resize_background_tab_panes_to_terminal_area(
-            app,
-            terminal_runtimes,
-            terminal_area,
-            cell_size,
-        );
+        resize_background_tab_panes_for_desktop(app, terminal_runtimes, main_area, cell_size);
     }
 
     let toast_hit_area = app
@@ -334,12 +361,7 @@ fn compute_mobile_view(
         cell_size,
     );
     if resize_panes {
-        resize_background_tab_panes_to_terminal_area(
-            app,
-            terminal_runtimes,
-            terminal_area,
-            cell_size,
-        );
+        resize_background_tab_panes_to_area(app, terminal_runtimes, terminal_area, cell_size);
     }
     let header_hits = compute_mobile_header_hit_areas(app, header_rect);
 
@@ -385,10 +407,12 @@ pub fn render_with_runtime_registry(
 
     if app.view.layout == ViewLayout::Mobile {
         render_mobile_header(app, terminal_runtimes, frame, app.view.mobile_header_rect);
-    } else if app.sidebar_collapsed {
-        render_sidebar_collapsed(app, frame, sidebar_area);
-    } else {
-        render_sidebar(app, terminal_runtimes, frame, sidebar_area);
+    } else if sidebar_area.width > 0 {
+        if app.sidebar_collapsed {
+            render_sidebar_collapsed(app, frame, sidebar_area);
+        } else {
+            render_sidebar(app, terminal_runtimes, frame, sidebar_area);
+        }
     }
     if app.view.layout != ViewLayout::Mobile {
         render_tab_bar(app, frame, tab_bar_area);
@@ -720,6 +744,101 @@ mod tests {
     }
 
     #[test]
+    fn hide_tab_bar_when_single_tab_toggles_geometry_with_tab_count() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.hide_tab_bar_when_single_tab = true;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+        let single_tab_terminal_area = app.view.terminal_area;
+        assert_eq!(app.view.tab_bar_rect, Rect::default());
+        assert_eq!(single_tab_terminal_area, Rect::new(26, 0, 54, 20));
+        assert!(app.view.tab_hit_areas.is_empty());
+        assert_eq!(app.view.new_tab_hit_area, Rect::default());
+
+        app.workspaces[0].test_add_tab(Some("logs"));
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+
+        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 0, 54, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(26, 1, 54, 19));
+        assert_eq!(app.view.tab_hit_areas.len(), 2);
+        assert!(app.view.tab_hit_areas.iter().all(|rect| rect.width > 0));
+        assert!(app.view.new_tab_hit_area.width > 0);
+
+        assert!(app.workspaces[0].close_tab(1));
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+
+        assert_eq!(app.view.terminal_area, single_tab_terminal_area);
+        assert_eq!(app.view.tab_bar_rect, Rect::default());
+        assert!(app.view.tab_hit_areas.is_empty());
+        assert_eq!(app.view.new_tab_hit_area, Rect::default());
+    }
+
+    #[tokio::test]
+    async fn hide_tab_bar_when_single_tab_resizes_background_tabs_per_workspace() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.hide_tab_bar_when_single_tab = true;
+
+        let mut one_tab_workspace = Workspace::test_new("one");
+        let one_tab_pane = one_tab_workspace.tabs[0].root_pane;
+        let one_tab_runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(10, 5, b"");
+        one_tab_workspace.tabs[0]
+            .runtimes
+            .insert(one_tab_pane, one_tab_runtime);
+
+        let mut two_tab_workspace = Workspace::test_new("two");
+        let background_tab = two_tab_workspace.test_add_tab(Some("logs"));
+        let two_tab_pane = two_tab_workspace.tabs[background_tab].root_pane;
+        let two_tab_runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(10, 5, b"");
+        two_tab_workspace.tabs[background_tab]
+            .runtimes
+            .insert(two_tab_pane, two_tab_runtime);
+
+        app.workspaces = vec![one_tab_workspace, two_tab_workspace];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+
+        let one_tab_size = app.workspaces[0].tabs[0].runtimes[&one_tab_pane].current_size();
+        let two_tab_size =
+            app.workspaces[1].tabs[background_tab].runtimes[&two_tab_pane].current_size();
+        assert_eq!(one_tab_size, (20, 53));
+        assert_eq!(two_tab_size, (19, 53));
+    }
+
+    #[tokio::test]
+    async fn mobile_background_tabs_use_mobile_terminal_area() {
+        let mut app = crate::app::state::AppState::test_new();
+
+        let mut workspace = Workspace::test_new("mobile");
+        let background_tab = workspace.test_add_tab(Some("logs"));
+        let background_pane = workspace.tabs[background_tab].root_pane;
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(10, 5, b"");
+        workspace.tabs[background_tab]
+            .runtimes
+            .insert(background_pane, runtime);
+
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 44, 20));
+
+        assert_eq!(app.view.layout, ViewLayout::Mobile);
+        assert_eq!(app.view.terminal_area, Rect::new(0, 2, 44, 18));
+        assert_eq!(
+            app.workspaces[0].tabs[background_tab].runtimes[&background_pane].current_size(),
+            (18, 43)
+        );
+    }
+
+    #[test]
     fn product_announcement_renders_above_config_diagnostic() {
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![Workspace::test_new("one")];
@@ -788,6 +907,28 @@ mod tests {
         compute_view(&mut app, Rect::new(0, 0, 100, 20));
 
         assert_eq!(app.view.sidebar_rect.width, 22);
+    }
+
+    #[test]
+    fn hidden_collapsed_sidebar_uses_full_width_terminal_area() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.sidebar_collapsed = true;
+        app.sidebar_collapsed_mode = crate::config::SidebarCollapsedModeConfig::Hidden;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+
+        assert_eq!(app.view.sidebar_rect, Rect::new(0, 0, 0, 20));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(0, 0, 80, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(0, 1, 80, 19));
+        assert!(app.view.workspace_card_areas.is_empty());
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
     }
 
     #[test]
