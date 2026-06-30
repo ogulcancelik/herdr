@@ -3112,10 +3112,18 @@ impl HeadlessServer {
                         hyperlinks_started,
                     );
                     let frame_started = crate::render_prof::timer();
-                    let frame = FrameData::from_ratatui_buffer_with_hyperlinks(
+                    let mut frame = FrameData::from_ratatui_buffer_with_hyperlinks(
                         &buffer,
                         cursor,
                         &hyperlinks,
+                    );
+                    let underline_styles = crate::server::render_stream::visible_underline_styles(
+                        &self.app.state,
+                        &self.app.terminal_runtimes,
+                    );
+                    crate::server::render_stream::apply_terminal_underline_styles(
+                        &mut frame,
+                        &underline_styles,
                     );
                     crate::render_prof::duration_since("full_render.frame_build", frame_started);
                     frame
@@ -3147,10 +3155,15 @@ impl HeadlessServer {
                         hyperlinks_started,
                     );
                     let frame_started = crate::render_prof::timer();
-                    let frame = FrameData::from_ratatui_buffer_with_hyperlinks(
+                    let mut frame = FrameData::from_ratatui_buffer_with_hyperlinks(
                         &buffer,
                         cursor,
                         &hyperlinks,
+                    );
+                    let underline_styles = runtime.visible_underline_styles(area);
+                    crate::server::render_stream::apply_terminal_underline_styles(
+                        &mut frame,
+                        &underline_styles,
                     );
                     crate::render_prof::duration_since("full_render.frame_build", frame_started);
                     frame
@@ -6671,6 +6684,42 @@ next_tab = ""
                 .expect("full frame"),
         );
         assert_frame_data_eq(&retained_frame, &full_frame);
+    }
+
+    #[tokio::test]
+    async fn retained_pty_update_preserves_foreground_color() {
+        let initial = b"aaaa";
+        let update = b"\r\x1b[38;5;171mZ\x1b[0m";
+        let (mut server, client_rx, pane_id) = retained_test_server(initial);
+
+        server.render_and_stream();
+        let _ = client_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("initial baseline");
+
+        server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("runtime")
+            .test_process_pty_bytes(update);
+
+        assert!(server.render_retained_pty_update_and_stream());
+
+        let frame = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("retained frame"),
+        );
+        let cell = frame
+            .cells
+            .iter()
+            .find(|cell| cell.symbol == "Z")
+            .expect("updated colored cell");
+        assert_eq!(
+            cell.fg,
+            crate::protocol::color_to_u32(ratatui::style::Color::Indexed(171))
+        );
     }
 
     #[tokio::test]

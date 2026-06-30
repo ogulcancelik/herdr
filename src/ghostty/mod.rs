@@ -345,6 +345,7 @@ pub struct CellStyle {
     pub fg_color: Option<CellColor>,
     pub bg_color: Option<CellColor>,
     pub underline_color: Option<CellColor>,
+    pub underline_style: crate::protocol::UnderlineStyle,
     pub bold: bool,
     pub italic: bool,
     pub faint: bool,
@@ -353,7 +354,6 @@ pub struct CellStyle {
     pub invisible: bool,
     pub strikethrough: bool,
     pub overline: bool,
-    pub underlined: bool,
 }
 
 impl From<ffi::GhosttyStyle> for CellStyle {
@@ -362,6 +362,7 @@ impl From<ffi::GhosttyStyle> for CellStyle {
             fg_color: cell_color_from_style_color(value.fg_color),
             bg_color: cell_color_from_style_color(value.bg_color),
             underline_color: cell_color_from_style_color(value.underline_color),
+            underline_style: underline_style_from_raw(value.underline),
             bold: value.bold,
             italic: value.italic,
             faint: value.faint,
@@ -370,8 +371,28 @@ impl From<ffi::GhosttyStyle> for CellStyle {
             invisible: value.invisible,
             strikethrough: value.strikethrough,
             overline: value.overline,
-            underlined: value.underline != 0,
         }
+    }
+}
+
+fn underline_style_from_raw(value: std::os::raw::c_int) -> crate::protocol::UnderlineStyle {
+    match value as ffi::GhosttySgrUnderline {
+        ffi::GhosttySgrUnderline_GHOSTTY_SGR_UNDERLINE_SINGLE => {
+            crate::protocol::UnderlineStyle::Single
+        }
+        ffi::GhosttySgrUnderline_GHOSTTY_SGR_UNDERLINE_DOUBLE => {
+            crate::protocol::UnderlineStyle::Double
+        }
+        ffi::GhosttySgrUnderline_GHOSTTY_SGR_UNDERLINE_CURLY => {
+            crate::protocol::UnderlineStyle::Curly
+        }
+        ffi::GhosttySgrUnderline_GHOSTTY_SGR_UNDERLINE_DOTTED => {
+            crate::protocol::UnderlineStyle::Dotted
+        }
+        ffi::GhosttySgrUnderline_GHOSTTY_SGR_UNDERLINE_DASHED => {
+            crate::protocol::UnderlineStyle::Dashed
+        }
+        _ => crate::protocol::UnderlineStyle::None,
     }
 }
 

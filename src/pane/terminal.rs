@@ -250,6 +250,13 @@ impl PaneTerminal {
         self.ghostty.visible_hyperlinks(area)
     }
 
+    pub fn visible_underline_styles(
+        &self,
+        area: Rect,
+    ) -> Vec<((u16, u16), crate::protocol::UnderlineStyle)> {
+        self.ghostty.visible_underline_styles(area)
+    }
+
     pub fn kitty_image_placements_with_data_filter<F>(
         &self,
         needs_data: F,
@@ -1156,6 +1163,17 @@ impl GhosttyPaneTerminal {
             .unwrap_or_default()
     }
 
+    pub fn visible_underline_styles(
+        &self,
+        area: Rect,
+    ) -> Vec<((u16, u16), crate::protocol::UnderlineStyle)> {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|mut core| ghostty_visible_underline_styles(&mut core, area).ok())
+            .unwrap_or_default()
+    }
+
     pub fn kitty_image_placements_with_data_filter<F>(
         &self,
         needs_data: F,
@@ -1511,7 +1529,11 @@ fn ghostty_collect_dirty_patch(
                     Ok(symbol) => symbol.to_owned(),
                     Err(_) => ghostty_blank_symbol_for_width(basic.wide).to_owned(),
                 };
-                patch_cells.push(cell_data_from_style(symbol, style));
+                patch_cells.push(cell_data_from_style(
+                    symbol,
+                    style,
+                    basic.style.underline_style,
+                ));
                 x += 1;
             }
             while x < area_width {
@@ -1580,6 +1602,36 @@ fn ghostty_visible_hyperlinks(
         y += 1;
     }
     Ok(links)
+}
+
+fn ghostty_visible_underline_styles(
+    core: &mut GhosttyPaneCore,
+    area: Rect,
+) -> Result<Vec<((u16, u16), crate::protocol::UnderlineStyle)>, crate::ghostty::Error> {
+    let GhosttyPaneCore {
+        terminal,
+        render_state,
+        ..
+    } = core;
+    render_state.update(terminal)?;
+    let mut row_iterator = crate::ghostty::RowIterator::new()?;
+    let mut row_cells = crate::ghostty::RowCells::new()?;
+    let mut rows = render_state.populate_row_iterator(&mut row_iterator)?;
+    let mut styles = Vec::new();
+    let mut y = 0u16;
+    while y < area.height && rows.next() {
+        let mut cells = rows.populate_cells(&mut row_cells)?;
+        let mut x = 0u16;
+        while x < area.width && cells.next() {
+            let style = cells.basic_data()?.style.underline_style;
+            if style != crate::protocol::UnderlineStyle::None {
+                styles.push(((area.x + x, area.y + y), style));
+            }
+            x += 1;
+        }
+        y += 1;
+    }
+    Ok(styles)
 }
 
 fn ghostty_visible_text(core: &mut GhosttyPaneCore) -> Result<String, crate::ghostty::Error> {
@@ -1840,10 +1892,15 @@ fn blank_cell_data(default_fg: Option<Color>, default_bg: Option<Color>) -> Cell
     cell_data_from_style(
         " ".to_string(),
         ghostty_default_style(default_fg, default_bg),
+        crate::protocol::UnderlineStyle::None,
     )
 }
 
-fn cell_data_from_style(symbol: String, style: Style) -> CellData {
+fn cell_data_from_style(
+    symbol: String,
+    style: Style,
+    underline_style: crate::protocol::UnderlineStyle,
+) -> CellData {
     CellData {
         symbol: if symbol.is_empty() {
             " ".to_string()
@@ -1852,7 +1909,11 @@ fn cell_data_from_style(symbol: String, style: Style) -> CellData {
         },
         fg: crate::protocol::color_to_u32(style.fg.unwrap_or(Color::Reset)),
         bg: crate::protocol::color_to_u32(style.bg.unwrap_or(Color::Reset)),
+        underline_color: crate::protocol::color_to_u32(
+            style.underline_color.unwrap_or(Color::Reset),
+        ),
         modifier: crate::protocol::modifier_to_u16(style.add_modifier),
+        underline_style,
         skip: false,
         hyperlink: None,
     }
@@ -1926,7 +1987,7 @@ fn ghostty_cell_style(
     if basic.style.blink {
         modifiers |= Modifier::SLOW_BLINK;
     }
-    if basic.style.underlined {
+    if basic.style.underline_style != crate::protocol::UnderlineStyle::None {
         modifiers |= Modifier::UNDERLINED;
     }
     if basic.style.strikethrough {
@@ -3609,25 +3670,30 @@ mod tests {
         let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
         let pane_id = PaneId::from_raw(1);
 
-        let result =
-            pane.process_pty_bytes(pane_id, 0, b"\x1bP+q6E6F7065;536D756C78;4D7\x1b\\", &tx);
+        let result = pane.process_pty_bytes(pane_id, 0, b"\x1bP+q6E6F7065;4D7\x1b\\", &tx);
 
         assert!(result.terminal_responses.is_empty());
         assert!(rx.try_recv().is_err());
     }
 
     #[test]
-    fn process_pty_bytes_returns_underline_color_xtgettcap_query_responses() {
+    fn process_pty_bytes_returns_underline_xtgettcap_query_responses() {
         let (tx, mut rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
         let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
         let pane_id = PaneId::from_raw(1);
 
-        let result = pane.process_pty_bytes(pane_id, 0, b"\x1bP+q5375;536574756C63\x1b\\", &tx);
+        let result = pane.process_pty_bytes(
+            pane_id,
+            0,
+            b"\x1bP+q536D756C78;5375;536574756C63\x1b\\",
+            &tx,
+        );
 
         assert_eq!(
             result.terminal_responses,
             vec![
+                expected_xtgettcap_response("536D756C78", Some(b"\\E[4:%p1%dm")),
                 expected_xtgettcap_response("5375", None),
                 expected_xtgettcap_response(
                     "536574756C63",
@@ -3657,6 +3723,37 @@ mod tests {
         let style = terminal.backend().buffer()[(0, 0)].style();
         assert!(style.add_modifier.contains(Modifier::UNDERLINED));
         assert_eq!(style.underline_color, Some(Color::Rgb(17, 34, 51)));
+    }
+
+    #[test]
+    fn dirty_patch_preserves_curly_underline_style() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut ratatui_terminal = ratatui::Terminal::new(backend).unwrap();
+        ratatui_terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+            .unwrap();
+        {
+            let mut core = pane.core.lock().unwrap();
+            core.terminal.write(b"\x1b[4:3;58:2::255:0:0mU");
+        }
+
+        let patch = match pane.collect_dirty_patch(20, 5) {
+            TerminalDirtyPatchOutcome::Patch(patch) => patch,
+            other => panic!("expected dirty patch, got {other:?}"),
+        };
+
+        assert_eq!(
+            patch.rows[0].1[0].underline_style,
+            crate::protocol::UnderlineStyle::Curly
+        );
+        assert_eq!(
+            patch.rows[0].1[0].underline_color,
+            crate::protocol::color_to_u32(Color::Rgb(255, 0, 0))
+        );
+        assert_ne!(patch.rows[0].1[0].modifier & Modifier::UNDERLINED.bits(), 0);
     }
 
     #[test]

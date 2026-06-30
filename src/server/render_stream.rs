@@ -6,7 +6,9 @@ use ratatui::layout::{Position, Rect, Size};
 use crate::app::state::AppState;
 use crate::app::Mode;
 use crate::protocol::render_ansi::{BlitEncoder, EncodedBlit};
-use crate::protocol::{CursorState, FrameData, RenderEncoding, ServerMessage, TerminalFrame};
+use crate::protocol::{
+    CursorState, FrameData, RenderEncoding, ServerMessage, TerminalFrame, UnderlineStyle,
+};
 use crate::terminal::TerminalRuntimeRegistry;
 
 /// Per-client render baseline for the negotiated render encoding.
@@ -384,6 +386,53 @@ pub(crate) fn visible_hyperlinks(
     links
 }
 
+pub(crate) fn visible_underline_styles(
+    app_state: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+) -> Vec<((u16, u16), UnderlineStyle)> {
+    let Some(ws_idx) = app_state.active else {
+        return Vec::new();
+    };
+    let Some(tab) = app_state
+        .workspaces
+        .get(ws_idx)
+        .and_then(crate::workspace::Workspace::active_tab)
+    else {
+        return Vec::new();
+    };
+
+    let mut styles = Vec::new();
+    for info in &app_state.view.pane_infos {
+        if let Some(runtime) = tab
+            .terminal_id(info.id)
+            .and_then(|terminal_id| terminal_runtimes.get(terminal_id))
+        {
+            styles.extend(runtime.visible_underline_styles(info.inner_rect));
+        }
+    }
+    styles
+}
+
+pub(crate) fn apply_terminal_underline_styles(
+    frame: &mut FrameData,
+    styles: &[((u16, u16), UnderlineStyle)],
+) {
+    const UNDERLINED: u16 = 1 << 3;
+    let width = usize::from(frame.width);
+    for &((x, y), style) in styles {
+        if x >= frame.width || y >= frame.height {
+            continue;
+        }
+        let idx = usize::from(y) * width + usize::from(x);
+        let Some(cell) = frame.cells.get_mut(idx) else {
+            continue;
+        };
+        if cell.modifier & UNDERLINED != 0 {
+            cell.underline_style = style;
+        }
+    }
+}
+
 pub(crate) fn focused_terminal_cursor(
     app_state: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -510,4 +559,48 @@ fn focused_terminal_suppresses_host_cursor(
     app_state
         .runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)
         .is_some_and(crate::terminal::TerminalRuntime::synchronized_output_active)
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::style::Modifier;
+
+    use super::*;
+    use crate::protocol::CellData;
+
+    fn cell(modifier: u16) -> CellData {
+        CellData {
+            symbol: "x".to_owned(),
+            fg: 0,
+            bg: 0,
+            underline_color: 0,
+            modifier,
+            underline_style: UnderlineStyle::None,
+            skip: false,
+            hyperlink: None,
+        }
+    }
+
+    #[test]
+    fn apply_terminal_underline_styles_only_updates_underlined_cells() {
+        let mut frame = FrameData {
+            cells: vec![cell(Modifier::UNDERLINED.bits()), cell(0)],
+            width: 2,
+            height: 1,
+            cursor: None,
+            hyperlinks: Vec::new(),
+            graphics: Vec::new(),
+        };
+
+        apply_terminal_underline_styles(
+            &mut frame,
+            &[
+                ((0, 0), UnderlineStyle::Curly),
+                ((1, 0), UnderlineStyle::Dotted),
+            ],
+        );
+
+        assert_eq!(frame.cells[0].underline_style, UnderlineStyle::Curly);
+        assert_eq!(frame.cells[1].underline_style, UnderlineStyle::None);
+    }
 }

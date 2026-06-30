@@ -566,7 +566,7 @@ fn client_handshake(
 
 fn connect_raw_client(client_socket: &Path, cols: u16, rows: u16) -> UnixStream {
     let mut stream = UnixStream::connect(client_socket).expect("should connect to client socket");
-    client_handshake(&mut stream, 14, cols, rows).expect("handshake should succeed");
+    client_handshake(&mut stream, 15, cols, rows).expect("handshake should succeed");
     stream
 }
 
@@ -606,7 +606,9 @@ struct CellWire {
     symbol: String,
     fg: u32,
     bg: u32,
+    underline_color: u32,
     modifier: u16,
+    underline_style: u32,
     skip: bool,
     hyperlink: Option<u32>,
 }
@@ -729,7 +731,14 @@ fn frame_text(frame: &FrameWire) -> String {
 
     for row in frame.cells.chunks(row_width) {
         for cell in row {
-            let _ = (cell.fg, cell.bg, cell.modifier, cell.skip);
+            let _ = (
+                cell.fg,
+                cell.bg,
+                cell.underline_color,
+                cell.modifier,
+                cell.underline_style,
+                cell.skip,
+            );
             full_text.push_str(&cell.symbol);
         }
         full_text.push('\n');

@@ -327,6 +327,13 @@ impl TerminalRuntime {
         self.0.visible_hyperlinks(area)
     }
 
+    pub fn visible_underline_styles(
+        &self,
+        area: Rect,
+    ) -> Vec<((u16, u16), crate::protocol::UnderlineStyle)> {
+        self.0.visible_underline_styles(area)
+    }
+
     pub fn kitty_image_placements_with_data_filter<F>(
         &self,
         needs_data: F,
