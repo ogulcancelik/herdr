@@ -1146,6 +1146,7 @@ mod tests {
             last_agent_state_change_seq: None,
             custom_status: None,
             state_labels: std::collections::HashMap::new(),
+            cwd_label: None,
         }
     }
 

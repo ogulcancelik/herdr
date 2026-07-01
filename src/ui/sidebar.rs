@@ -29,6 +29,7 @@ pub(crate) struct AgentPanelEntry {
     pub last_agent_state_change_seq: Option<u64>,
     pub custom_status: Option<String>,
     pub state_labels: std::collections::HashMap<String, String>,
+    pub cwd_label: Option<String>,
 }
 
 fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
@@ -125,18 +126,29 @@ fn agent_panel_entries_with_runtimes(
             let workspace_label = ws.display_name_from(&app.terminals, terminal_runtimes);
             ws.pane_details(&app.terminals)
                 .into_iter()
-                .map(move |detail| AgentPanelEntry {
-                    ws_idx,
-                    tab_idx: detail.tab_idx,
-                    pane_id: detail.pane_id,
-                    primary_label: workspace_label.clone(),
-                    primary_tab_label: multi_tab.then_some(detail.tab_label),
-                    agent_label: Some(detail.agent_label),
-                    state: detail.state,
-                    seen: detail.seen,
-                    last_agent_state_change_seq: detail.last_agent_state_change_seq,
-                    custom_status: detail.custom_status,
-                    state_labels: detail.state_labels,
+                .map(move |detail| {
+                    let cwd_label = ws.tabs[detail.tab_idx]
+                        .terminal_id(detail.pane_id)
+                        .and_then(|tid| terminal_runtimes.get(tid))
+                        .and_then(|rt| rt.cwd())
+                        .unwrap_or_else(|| detail.cwd.clone())
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(String::from);
+                    AgentPanelEntry {
+                        ws_idx,
+                        tab_idx: detail.tab_idx,
+                        pane_id: detail.pane_id,
+                        primary_label: workspace_label.clone(),
+                        primary_tab_label: multi_tab.then_some(detail.tab_label),
+                        agent_label: Some(detail.agent_label),
+                        state: detail.state,
+                        seen: detail.seen,
+                        last_agent_state_change_seq: detail.last_agent_state_change_seq,
+                        custom_status: detail.custom_status,
+                        state_labels: detail.state_labels,
+                        cwd_label,
+                    }
                 })
         })
         .collect();
@@ -1098,12 +1110,19 @@ fn render_agent_detail(
 
         let primary_label =
             format_agent_panel_primary_label(detail, body.width.saturating_sub(3) as usize);
-        let name_line = Line::from(vec![
+        let mut name_spans = vec![
             Span::styled(" ", Style::default()),
             Span::styled(icon, icon_style),
             Span::styled(" ", Style::default()),
             Span::styled(primary_label, name_style),
-        ]);
+        ];
+        if let Some(cwd_label) = &detail.cwd_label {
+            name_spans.push(Span::styled(
+                format!(" ({cwd_label})"),
+                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+            ));
+        }
+        let name_line = Line::from(name_spans);
         frame.render_widget(
             Paragraph::new(name_line).style(row_style),
             Rect::new(body.x, row_y, body.width, 1),
@@ -1406,6 +1425,7 @@ mod tests {
             last_agent_state_change_seq: None,
             custom_status: None,
             state_labels: std::collections::HashMap::new(),
+            cwd_label: None,
         };
 
         let label = format_agent_panel_primary_label(&entry, 18);
