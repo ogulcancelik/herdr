@@ -155,7 +155,10 @@ fn validate_running_server_compatibility() -> io::Result<()> {
         )));
     };
 
-    if status.protocol == Some(crate::protocol::PROTOCOL_VERSION) {
+    if status
+        .protocol
+        .is_some_and(crate::protocol::protocol_version_supported)
+    {
         return Ok(());
     }
 
@@ -531,6 +534,35 @@ test "$sid" = "$$"
             err.to_string().contains("status API is unavailable"),
             "unexpected error: {err}"
         );
+        std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn validate_running_server_compatibility_accepts_min_supported_protocol() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = unique_test_dir("min-protocol");
+        let path = dir.join("api.sock");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, &path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            assert!(request.contains("ping"));
+            let body = format!(
+                "{{\"id\":\"autodetect:server:status\",\"result\":{{\"type\":\"pong\",\"version\":\"0.5.5\",\"protocol\":{}}}}}\n",
+                crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION
+            );
+            stream.write_all(body.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+
+        validate_running_server_compatibility().unwrap();
+        let _ = handle.join();
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(dir);
     }

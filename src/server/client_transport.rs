@@ -1111,6 +1111,73 @@ new_tab = "ctrl+notakey"
     }
 
     #[test]
+    fn handshake_accepts_min_supported_protocol_version() {
+        let (mut client_stream, server_stream, _path) =
+            local_stream_pair("client-handshake-min-protocol");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let handshake_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            handle_client_handshake(server_stream, 42, &server_event_tx, &handshake_quit)
+        });
+
+        protocol::write_message(
+            &mut client_stream,
+            &ClientMessage::Hello {
+                version: crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION,
+                cols: 100,
+                rows: 30,
+                cell_width_px: 8,
+                cell_height_px: 16,
+                requested_encoding: RenderEncoding::SemanticFrame,
+                keybindings: ClientKeybindings::Server,
+                launch_mode: ClientLaunchMode::App,
+            },
+        )
+        .expect("write hello");
+
+        let welcome: ServerMessage =
+            protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).expect("read welcome");
+        match welcome {
+            ServerMessage::Welcome {
+                version,
+                encoding,
+                error,
+            } => {
+                assert_eq!(version, PROTOCOL_VERSION);
+                assert_eq!(encoding, RenderEncoding::SemanticFrame);
+                assert_eq!(error, None);
+            }
+            other => panic!("expected Welcome, got {other:?}"),
+        }
+
+        match server_event_rx
+            .blocking_recv()
+            .expect("client connected event")
+        {
+            ServerEvent::ClientConnected {
+                client_id,
+                cols,
+                rows,
+                writer,
+                ..
+            } => {
+                assert_eq!(client_id, 42);
+                assert_eq!((cols, rows), (100, 30));
+                drop(writer);
+            }
+            other => panic!("expected ClientConnected, got {other:?}"),
+        }
+
+        drop(client_stream);
+        should_quit.store(true, Ordering::Release);
+        handle
+            .join()
+            .expect("handshake thread join")
+            .expect("handshake thread result");
+    }
+
+    #[test]
     fn handshake_marks_terminal_attach_launch_mode() {
         let (mut client_stream, server_stream, _path) =
             local_stream_pair("client-handshake-terminal-attach");

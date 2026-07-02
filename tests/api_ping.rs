@@ -303,7 +303,7 @@ fn ping_over_socket_returns_version() {
     assert_eq!(value["result"]["type"], "pong");
     assert_eq!(value["result"]["version"], env!("CARGO_PKG_VERSION"));
     // Intentionally hardcoded so wire protocol bumps require updating this test.
-    // Changing this value means old clients/servers are no longer compatible.
+    // Changing this value means the advertised current protocol changed.
     assert_eq!(value["result"]["protocol"], 15);
 
     cleanup_spawned_herdr(child, base);

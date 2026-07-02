@@ -12,8 +12,16 @@ use serde::{Deserialize, Serialize};
 // Protocol constants
 // ---------------------------------------------------------------------------
 
+/// Oldest protocol version accepted by this build.
+pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 14;
+
 /// Current protocol version. Bumped when wire format changes incompatibly.
 pub const PROTOCOL_VERSION: u32 = 15;
+
+/// Returns whether a protocol version is supported by this build.
+pub fn protocol_version_supported(version: u32) -> bool {
+    (MIN_SUPPORTED_PROTOCOL_VERSION..=PROTOCOL_VERSION).contains(&version)
+}
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -899,10 +907,9 @@ pub enum VersionCheck {
 ///
 /// Current rules:
 /// - Version 0 (pre-persistence client) is always rejected.
-/// - Matching major versions are accepted.
+/// - Versions in the supported range are accepted.
 /// - A client with a newer version than the server is rejected.
-/// - A client with an older version than the server is rejected
-///   (backward compatibility is not yet supported).
+/// - A client older than the minimum supported version is rejected.
 pub fn check_client_version(client_version: u32) -> VersionCheck {
     if client_version == 0 {
         return VersionCheck::Incompatible(
@@ -910,11 +917,11 @@ pub fn check_client_version(client_version: u32) -> VersionCheck {
         );
     }
 
-    if client_version == PROTOCOL_VERSION {
+    if protocol_version_supported(client_version) {
         VersionCheck::Compatible
-    } else if client_version < PROTOCOL_VERSION {
+    } else if client_version < MIN_SUPPORTED_PROTOCOL_VERSION {
         VersionCheck::Incompatible(format!(
-            "client version {client_version} is older than server version {PROTOCOL_VERSION}; please upgrade your herdr client"
+            "client version {client_version} is older than the minimum supported version {MIN_SUPPORTED_PROTOCOL_VERSION}; please upgrade your herdr client"
         ))
     } else {
         VersionCheck::Incompatible(format!(
@@ -1605,7 +1612,7 @@ mod tests {
     // ---- Version negotiation ----
 
     #[test]
-    fn version_compatible() {
+    fn current_version_compatible() {
         assert_eq!(
             check_client_version(PROTOCOL_VERSION),
             VersionCheck::Compatible
@@ -1613,8 +1620,16 @@ mod tests {
     }
 
     #[test]
+    fn minimum_supported_version_compatible() {
+        assert_eq!(
+            check_client_version(MIN_SUPPORTED_PROTOCOL_VERSION),
+            VersionCheck::Compatible
+        );
+    }
+
+    #[test]
     fn version_older_client_rejected() {
-        let result = check_client_version(PROTOCOL_VERSION - 1);
+        let result = check_client_version(MIN_SUPPORTED_PROTOCOL_VERSION - 1);
         assert!(matches!(result, VersionCheck::Incompatible(_)));
         if let VersionCheck::Incompatible(msg) = result {
             assert!(msg.contains("older"), "error should mention older version");

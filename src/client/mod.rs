@@ -41,7 +41,7 @@ use crate::protocol::MAX_CLIPBOARD_IMAGE_PAYLOAD;
 use crate::protocol::{
     self, AttachScrollDirection, AttachScrollSource, ClientKeybindings, ClientLaunchMode,
     ClientMessage, NotifyKind, RenderEncoding, ServerMessage, MAX_FRAME_SIZE,
-    MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
+    MAX_GRAPHICS_FRAME_SIZE, MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 use crate::server::socket_paths::client_socket_path;
 
@@ -662,6 +662,7 @@ fn is_remote_client_process() -> bool {
 const LOCAL_HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(unix)]
 const REMOTE_HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(60);
+const SERVER_STATUS_PROTOCOL_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
 fn handshake_read_timeout() -> Duration {
     #[cfg(unix)]
@@ -682,6 +683,27 @@ fn requested_keybindings() -> ClientKeybindings {
             .map(|keys_toml| ClientKeybindings::Local { keys_toml })
             .unwrap_or(ClientKeybindings::Server),
         _ => ClientKeybindings::Server,
+    }
+}
+
+fn preferred_client_protocol_version(required_min_version: u32) -> u32 {
+    let Ok(Some(status)) = crate::api::read_runtime_status_at(
+        &crate::api::socket_path(),
+        SERVER_STATUS_PROTOCOL_PROBE_TIMEOUT,
+    ) else {
+        return PROTOCOL_VERSION;
+    };
+
+    let Some(server_protocol) = status.protocol else {
+        return PROTOCOL_VERSION;
+    };
+
+    if server_protocol >= required_min_version
+        && protocol::protocol_version_supported(server_protocol)
+    {
+        server_protocol
+    } else {
+        PROTOCOL_VERSION
     }
 }
 
@@ -718,6 +740,7 @@ fn set_handshake_recv_timeout(
 /// response. Returns Ok(()) on success, or an error if the server rejects us.
 fn do_handshake(
     stream: &mut LocalStream,
+    protocol_version: u32,
     cols: u16,
     rows: u16,
     cell_width_px: u32,
@@ -731,7 +754,7 @@ fn do_handshake(
 
     // Send Hello.
     let hello = ClientMessage::Hello {
-        version: PROTOCOL_VERSION,
+        version: protocol_version,
         cols,
         rows,
         cell_width_px,
@@ -911,6 +934,7 @@ fn connect_terminal_session_stream(
 
     match do_handshake(
         &mut stream,
+        preferred_client_protocol_version(PROTOCOL_VERSION),
         cols,
         rows,
         0,
@@ -1142,6 +1166,7 @@ fn run_client_with_mode(
     // Perform handshake while the stream is still in blocking mode.
     let negotiated_encoding = match do_handshake(
         &mut stream,
+        preferred_client_protocol_version(MIN_SUPPORTED_PROTOCOL_VERSION),
         cols,
         rows,
         cell_width_px,
@@ -2034,6 +2059,67 @@ mod tests {
                 restore_env_var(key, value);
             }
         }
+    }
+
+    #[cfg(unix)]
+    fn preferred_protocol_with_fake_status(server_protocol: u32, required_min_version: u32) -> u32 {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::path::PathBuf::from(format!(
+            "/tmp/hcp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s");
+        let listener = UnixListener::bind(&path).unwrap();
+        let path_string = path.to_string_lossy().to_string();
+        let _env = EnvVarGuard::set(crate::api::SOCKET_PATH_ENV_VAR, &path_string);
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            assert!(request.contains("ping"));
+            let body = format!(
+                "{{\"id\":\"client:status\",\"result\":{{\"type\":\"pong\",\"version\":\"0.5.5\",\"protocol\":{server_protocol}}}}}\n"
+            );
+            stream.write_all(body.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let selected = preferred_client_protocol_version(required_min_version);
+        let _ = handle.join();
+        let _ = std::fs::remove_dir_all(dir);
+        selected
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preferred_client_protocol_version_downgrades_to_supported_running_server() {
+        let _guard = env_lock().lock().unwrap();
+        assert_eq!(
+            preferred_protocol_with_fake_status(
+                MIN_SUPPORTED_PROTOCOL_VERSION,
+                MIN_SUPPORTED_PROTOCOL_VERSION,
+            ),
+            MIN_SUPPORTED_PROTOCOL_VERSION
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preferred_client_protocol_version_keeps_current_for_v15_only_features() {
+        let _guard = env_lock().lock().unwrap();
+        assert_eq!(
+            preferred_protocol_with_fake_status(MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION),
+            PROTOCOL_VERSION
+        );
     }
 
     #[test]

@@ -192,7 +192,7 @@ fn protocol_label(protocol: Option<u32>) -> String {
 
 fn compatibility_label(protocol: Option<u32>) -> &'static str {
     match protocol {
-        Some(protocol) if protocol == crate::protocol::PROTOCOL_VERSION => "yes",
+        Some(protocol) if crate::protocol::protocol_version_supported(protocol) => "yes",
         Some(_) => "no",
         None => "unknown",
     }
@@ -276,7 +276,7 @@ fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
                     live_handoff: capabilities.live_handoff,
                     detached_server_daemon: capabilities.detached_server_daemon,
                 }),
-            compatible: protocol.map(|value| value == crate::protocol::PROTOCOL_VERSION),
+            compatible: protocol.map(crate::protocol::protocol_version_supported),
             socket: api::socket_path().display().to_string(),
             session: crate::session::active_name(),
             restart_needed: restart_needed_bool(server),
