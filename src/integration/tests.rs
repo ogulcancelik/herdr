@@ -2631,24 +2631,35 @@ fn pi_extension_refreshes_session_ref_before_agent_start_state() {
 }
 
 #[test]
-fn omp_extension_releases_only_for_quit_session_shutdown() {
-    let release_policy = OMP_EXTENSION_ASSET
-        .find("function shouldReleaseOnSessionShutdown")
-        .expect("omp extension should centralize session shutdown release policy");
-    let quit_check = OMP_EXTENSION_ASSET
-        .find("reason === \"quit\"")
-        .expect("omp extension should release only for true quit shutdowns");
-    let shutdown_handler = OMP_EXTENSION_ASSET
-        .find("pi.on(\"session_shutdown\", async (event)")
-        .expect("omp extension should inspect the session_shutdown event");
-    let guarded_release = OMP_EXTENSION_ASSET[shutdown_handler..]
-        .find("if (shouldReleaseOnSessionShutdown(event))")
-        .expect("omp extension should guard releaseAgent by shutdown reason");
+fn omp_extension_releases_on_session_shutdown() {
+    let handler = omp_handler("session_shutdown");
 
-    assert!(release_policy < shutdown_handler);
-    assert!(release_policy < quit_check);
-    assert!(quit_check < shutdown_handler);
-    assert!(guarded_release > 0);
+    assert!(handler.contains("releaseAgent()"));
+    assert!(!OMP_EXTENSION_ASSET.contains("reason === \"quit\""));
+    assert!(!OMP_EXTENSION_ASSET.contains("shouldReleaseOnSessionShutdown"));
+}
+
+#[test]
+fn omp_extension_uses_native_retry_events() {
+    assert!(OMP_EXTENSION_ASSET.contains("pi.on(\"auto_retry_start\""));
+    assert!(OMP_EXTENSION_ASSET.contains("pi.on(\"auto_retry_end\""));
+    assert!(!OMP_EXTENSION_ASSET.contains("retryableErrorPattern"));
+    assert!(!OMP_EXTENSION_ASSET.contains("HERDR_OMP_RETRY_GRACE_MS"));
+}
+
+#[test]
+fn omp_extension_reports_compaction_as_working() {
+    assert!(OMP_EXTENSION_ASSET.contains("pi.on(\"auto_compaction_start\""));
+    assert!(OMP_EXTENSION_ASSET.contains("pi.on(\"auto_compaction_end\""));
+    assert!(OMP_EXTENSION_ASSET.contains("agentActive || retryHoldActive || compactionActive"));
+}
+
+#[test]
+fn omp_extension_maps_error_stop_to_blocked() {
+    let handler = omp_handler("agent_end");
+
+    assert!(handler.contains("stopReason === \"error\""));
+    assert!(!handler.contains("retryableErrorMessage"));
 }
 
 #[test]

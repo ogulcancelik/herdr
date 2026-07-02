@@ -59,9 +59,6 @@ type QueuedState = {
 };
 
 const idleDebounceMs = parseDurationEnv("HERDR_OMP_IDLE_DEBOUNCE_MS", 250);
-const retryGraceMs = parseDurationEnv("HERDR_OMP_RETRY_GRACE_MS", 2500);
-const retryableErrorPattern =
-  /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i;
 let reportSeq = Date.now() * 1000;
 let currentAgentSessionId: string | undefined;
 let currentAgentSessionPath: string | undefined;
@@ -168,16 +165,6 @@ function releaseAgent(): Promise<void> {
   });
 }
 
-function shouldReleaseOnSessionShutdown(event: any): boolean {
-  // OMP tears down and rebinds extension runtimes for internal lifecycle actions
-  // such as /reload, /new, /resume, and /fork. Those do not mean the pane's
-  // agent process has exited, and releasing hook authority there can suppress
-  // legitimate reports from the replacement runtime. Only a user/process quit
-  // should release Herdr's full-lifecycle authority.
-  const reason = event?.reason;
-  return reason === "quit";
-}
-
 let sendInFlight = false;
 let queuedState: QueuedState | undefined;
 
@@ -218,20 +205,6 @@ function lastAssistantMessage(messages: unknown[]): any | undefined {
   return undefined;
 }
 
-function retryableErrorMessage(event: any): string | undefined {
-  const messages = Array.isArray(event?.messages) ? event.messages : [];
-  const assistant = lastAssistantMessage(messages);
-  if (assistant?.stopReason !== "error") {
-    return undefined;
-  }
-
-  const errorMessage = String(assistant.errorMessage ?? "");
-  if (!retryableErrorPattern.test(errorMessage)) {
-    return undefined;
-  }
-  return errorMessage || "retryable provider error";
-}
-
 function askBlockedMessage(args: any): string {
   const questions = Array.isArray(args?.questions) ? args.questions : [];
   const firstQuestion = questions.find((question: any) => typeof question?.question === "string");
@@ -248,6 +221,7 @@ export default function (pi) {
 
   let agentActive = false;
   let retryHoldActive = false;
+  let compactionActive = false;
   let failureBlocked = false;
   let failureMessage: string | undefined;
   let blockedCount = 0;
@@ -255,7 +229,6 @@ export default function (pi) {
   let lastState: AgentState | undefined;
   let lastMessage: string | undefined;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
-  let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let rootSession = false;
 
   function clearTimer(timer: ReturnType<typeof setTimeout> | undefined) {
@@ -266,9 +239,7 @@ export default function (pi) {
 
   function clearPendingTimers() {
     clearTimer(idleTimer);
-    clearTimer(retryTimer);
     idleTimer = undefined;
-    retryTimer = undefined;
   }
 
   function clearFailureState() {
@@ -284,7 +255,7 @@ export default function (pi) {
     if (failureBlocked) {
       return { state: "blocked" as const, message: failureMessage };
     }
-    if (agentActive || retryHoldActive) {
+    if (agentActive || retryHoldActive || compactionActive) {
       return { state: "working" as const, message: undefined };
     }
     return { state: "idle" as const, message: undefined };
@@ -310,22 +281,6 @@ export default function (pi) {
     idleTimer.unref?.();
   }
 
-  function holdForRetry(message: string) {
-    clearPendingTimers();
-    retryHoldActive = true;
-    failureBlocked = false;
-    failureMessage = message;
-    publishState();
-
-    retryTimer = setTimeout(() => {
-      retryTimer = undefined;
-      retryHoldActive = false;
-      failureBlocked = true;
-      publishState();
-    }, retryGraceMs);
-    retryTimer.unref?.();
-  }
-
   function activateRootSession(ctx: any, sessionStartSource = "startup"): boolean {
     if (ctx?.hasUI !== true) {
       return false;
@@ -340,6 +295,7 @@ export default function (pi) {
     clearPendingTimers();
     clearFailureState();
     agentActive = false;
+    compactionActive = false;
     blockedCount = 0;
     blockedMessage = undefined;
   }
@@ -433,35 +389,84 @@ export default function (pi) {
     deactivateBlocked();
   });
 
+  pi.on("auto_retry_start", (event, ctx) => {
+    if (!rootSession && !activateRootSession(ctx)) {
+      return;
+    }
+    clearTimer(idleTimer);
+    idleTimer = undefined;
+    retryHoldActive = true;
+    failureBlocked = false;
+    failureMessage = undefined;
+    publishState();
+  });
+
+  pi.on("auto_retry_end", (event, ctx) => {
+    if (!rootSession && !activateRootSession(ctx)) {
+      return;
+    }
+    retryHoldActive = false;
+    if (!event?.success) {
+      failureBlocked = true;
+      failureMessage = event?.finalError || "provider error";
+    }
+    publishState();
+  });
+
+  pi.on("auto_compaction_start", (_event, ctx) => {
+    if (!rootSession && !activateRootSession(ctx)) {
+      return;
+    }
+    clearTimer(idleTimer);
+    idleTimer = undefined;
+    compactionActive = true;
+    publishState();
+  });
+
+  pi.on("auto_compaction_end", () => {
+    if (!rootSession) {
+      return;
+    }
+    compactionActive = false;
+    publishState();
+  });
+
   pi.on("agent_end", (event) => {
     if (!rootSession) {
       return;
     }
-    if (!agentActive) {
-      // OMP can emit duplicate/late end events while auto-retry is already
-      // holding the pane in Working. Do not let an unqualified duplicate end
-      // cancel the retry hold and publish a false Idle.
+    if (retryHoldActive) {
+      // omp emits late/superseded end events while auto-retry is holding the
+      // pane in Working (event-controller.ts documents the reordering); the
+      // retry events are authoritative here.
       return;
     }
-
+    if (!agentActive && !failureBlocked) {
+      return; // duplicate/late end after we already settled
+    }
     agentActive = false;
 
-    const retryableMessage = retryableErrorMessage(event);
-    if (retryableMessage) {
-      holdForRetry(retryableMessage);
+    const assistant = lastAssistantMessage(event?.messages ?? []);
+    if (assistant?.stopReason === "error") {
+      failureBlocked = true;
+      failureMessage = assistant.errorMessage || failureMessage || "agent error";
+      publishState();
       return;
     }
-
+    // "stop", "toolUse", "length", "aborted", or no assistant: settled normally
+    // (an Esc during a retry wait ends here with stopReason "aborted" and must
+    // clear a failure set by the preceding auto_retry_end).
     scheduleIdle();
   });
 
-  pi.on("session_shutdown", async (event) => {
+  // session_shutdown fires only from AgentSession.dispose() (process exit:
+  // Ctrl+C, /exit, SIGTERM) and RPC shutdown; /new, /resume, and /fork fire
+  // session_switch on the live runner instead.
+  pi.on("session_shutdown", async () => {
     if (!rootSession) {
       return;
     }
     clearPendingTimers();
-    if (shouldReleaseOnSessionShutdown(event)) {
-      await releaseAgent();
-    }
+    await releaseAgent();
   });
 }
