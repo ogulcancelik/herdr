@@ -343,6 +343,15 @@ typedef enum GHOSTTY_ENUM_TYPED {
    */
   GHOSTTY_KITTY_IMAGE_DATA_DATA_LEN = 8,
 
+  /**
+   * Timestamp of the image's most recent transmission, in nanoseconds.
+   * The epoch is unspecified; only equality and ordering between values
+   * read from the same terminal are meaningful.
+   *
+   * Output type: uint64_t *
+   */
+  GHOSTTY_KITTY_IMAGE_DATA_TRANSMIT_TIME_NS = 9,
+
   GHOSTTY_KITTY_IMAGE_DATA_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyKittyGraphicsImageData;
 

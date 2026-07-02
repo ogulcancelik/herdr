@@ -178,6 +178,7 @@ pub const ImageData = enum(c_int) {
     compression = 6,
     data_ptr = 7,
     data_len = 8,
+    transmit_time_ns = 9,
 
     pub fn OutType(comptime self: ImageData) type {
         return switch (self) {
@@ -187,6 +188,7 @@ pub const ImageData = enum(c_int) {
             .compression => ImageCompression,
             .data_ptr => [*]const u8,
             .data_len => usize,
+            .transmit_time_ns => u64,
         };
     }
 };
@@ -258,9 +260,20 @@ fn imageGetTyped(
         .compression => out.* = image.compression,
         .data_ptr => out.* = image.data.ptr,
         .data_len => out.* = image.data.len,
+        .transmit_time_ns => out.* = instantNanos(image.transmit_time),
     }
 
     return .success;
+}
+
+/// Flattens an Instant's platform timestamp to nanoseconds for the C API.
+/// The epoch is unspecified; only equality and ordering are meaningful.
+fn instantNanos(instant: std.time.Instant) u64 {
+    if (@TypeOf(instant.timestamp) == u64) return instant.timestamp;
+    const ts = instant.timestamp;
+    const sec: u64 = @intCast(@max(ts.sec, 0));
+    const nsec: u64 = @intCast(@max(ts.nsec, 0));
+    return sec *| std.time.ns_per_s +| nsec;
 }
 
 pub fn placement_iterator_new(
@@ -975,6 +988,48 @@ test "image_get_handle and image_get with transmitted image" {
     var data_len: usize = undefined;
     try testing.expectEqual(Result.success, image_get(img, .data_len, @ptrCast(&data_len)));
     try testing.expect(data_len > 0);
+}
+
+test "image_get transmit_time_ns changes on retransmission" {
+    if (comptime !build_options.kitty_graphics) return error.SkipZigTest;
+
+    var t: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &t,
+        .{ .cols = 80, .rows = 24, .max_scrollback = 0 },
+    ));
+    defer terminal_c.free(t);
+
+    const cmd = "\x1b_Ga=T,t=d,f=24,i=1,p=1,s=1,v=2;////////\x1b\\";
+    terminal_c.vt_write(t, cmd.ptr, cmd.len);
+
+    var graphics: KittyGraphics = undefined;
+    try testing.expectEqual(Result.success, terminal_c.get(
+        t,
+        .kitty_graphics,
+        @ptrCast(&graphics),
+    ));
+
+    var first: u64 = undefined;
+    try testing.expectEqual(Result.success, image_get(
+        image_get_handle(graphics, 1),
+        .transmit_time_ns,
+        @ptrCast(&first),
+    ));
+    try testing.expect(first > 0);
+
+    std.Thread.sleep(1 * std.time.ns_per_ms);
+    const retransmit = "\x1b_Ga=t,t=d,f=24,i=1,s=1,v=2;AAAAAAAA\x1b\\";
+    terminal_c.vt_write(t, retransmit.ptr, retransmit.len);
+
+    var second: u64 = undefined;
+    try testing.expectEqual(Result.success, image_get(
+        image_get_handle(graphics, 1),
+        .transmit_time_ns,
+        @ptrCast(&second),
+    ));
+    try testing.expect(second > first);
 }
 
 test "placement_rect with transmit and display" {
