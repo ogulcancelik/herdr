@@ -45,11 +45,12 @@ status: active
 
 patch: `vendor/patches/libghostty-vt/0002-expose-kitty-image-transmit-time-ns.patch`
 
-herdr issue: to be filed alongside the kitty fingerprint fix (streaming kitty
-clients froze on frames whose changes escaped the sampled fingerprint)
+herdr issue: https://github.com/ogulcancelik/herdr/issues/947
 
-upstream discussion: none yet; the accessor is a candidate for upstreaming to
-the libghostty-vt C API
+upstream discussion: https://github.com/ghostty-org/ghostty/discussions/13177
+(proposes extending the kitty graphics inspection C API from
+https://github.com/ghostty-org/ghostty/pull/12145, which has no transmit
+time/serial accessor yet)
 
 introduced upstream: not yet
 
