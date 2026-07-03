@@ -1,0 +1,13 @@
+id = "caveman"
+version = "2026.07.03.1"
+min_engine_version = 1
+updated_at = "2026-07-03T00:00:00Z"
+aliases = ["caveman-code", "herdr:caveman"]
+
+[[rules]]
+id = "working_literal"
+state = "working"
+priority = 100
+region = "whole_recent"
+visible_working = true
+contains = ["Working..."]

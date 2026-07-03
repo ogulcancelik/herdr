@@ -69,5 +69,9 @@ id = "qodercli"
 path = "qodercli.toml"
 
 [[agents]]
+id = "caveman"
+path = "caveman.toml"
+
+[[agents]]
 id = "copilot"
 path = "github-copilot.toml"

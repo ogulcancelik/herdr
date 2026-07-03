@@ -2,11 +2,12 @@ use std::io;
 
 use super::registry::{integration_target_label, integration_target_supported};
 use super::targets::{
-    install_claude, install_codex, install_copilot, install_cursor, install_devin, install_droid,
-    install_hermes, install_kilo, install_kimi, install_omp, install_opencode, install_pi,
-    install_qodercli, uninstall_claude, uninstall_codex, uninstall_copilot, uninstall_cursor,
-    uninstall_devin, uninstall_droid, uninstall_hermes, uninstall_kilo, uninstall_kimi,
-    uninstall_omp, uninstall_opencode, uninstall_pi, uninstall_qodercli,
+    install_caveman, install_claude, install_codex, install_copilot, install_cursor, install_devin,
+    install_droid, install_hermes, install_kilo, install_kimi, install_omp, install_opencode,
+    install_pi, install_qodercli, uninstall_caveman, uninstall_claude, uninstall_codex,
+    uninstall_copilot, uninstall_cursor, uninstall_devin, uninstall_droid, uninstall_hermes,
+    uninstall_kilo, uninstall_kimi, uninstall_omp, uninstall_opencode, uninstall_pi,
+    uninstall_qodercli,
 };
 use super::version::{agent_version_requirement, enforce_agent_version};
 use super::{KIMI_MIN_VERSION, PI_EXTENSION_INSTALL_NAME};
@@ -189,6 +190,13 @@ fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Re
                 ),
                 format!("updated cursor hooks at {}", installed.hooks_path.display()),
             ]
+        }
+        crate::api::schema::IntegrationTarget::Caveman => {
+            let installed = install_caveman()?;
+            vec![format!(
+                "installed caveman integration to {}",
+                installed.extension_path.display()
+            )]
         }
     };
 
@@ -516,6 +524,20 @@ pub(crate) fn uninstall_target(
                 ));
             }
             messages
+        }
+        crate::api::schema::IntegrationTarget::Caveman => {
+            let result = uninstall_caveman()?;
+            if result.removed_extension {
+                vec![format!(
+                    "removed caveman integration extension at {}",
+                    result.extension_path.display()
+                )]
+            } else {
+                vec![format!(
+                    "no caveman integration extension found at {}",
+                    result.extension_path.display()
+                )]
+            }
         }
     };
 

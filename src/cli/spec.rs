@@ -731,7 +731,7 @@ fn integration_target_arg() -> Arg {
         .required(true)
         .value_parser([
             "pi", "omp", "claude", "codex", "copilot", "devin", "droid", "kimi", "opencode",
-            "kilo", "hermes", "qodercli", "cursor",
+            "kilo", "hermes", "qodercli", "cursor", "caveman",
         ])
 }
 

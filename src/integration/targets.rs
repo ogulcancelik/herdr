@@ -13,30 +13,30 @@ use super::config_edit::{
     remove_simple_command_hook,
 };
 use super::env::{
-    claude_dir, codex_dir, copilot_dir, cursor_dir, devin_dir, droid_dir, hermes_dir,
-    hermes_plugin_dir, kilo_dir, kimi_dir, omp_extension_dir, opencode_dir, pi_extension_dir,
-    qodercli_dir,
+    caveman_extension_dir, claude_dir, codex_dir, copilot_dir, cursor_dir, devin_dir, droid_dir,
+    hermes_dir, hermes_plugin_dir, kilo_dir, kimi_dir, omp_extension_dir, opencode_dir,
+    pi_extension_dir, qodercli_dir,
 };
 use super::file_ops::{
     make_executable, remove_dir_all_if_exists, remove_file_if_exists, remove_legacy_bash_hook_file,
 };
 use super::types::{
-    ClaudeInstallPaths, ClaudeUninstallResult, CodexInstallPaths, CodexUninstallResult,
-    CopilotInstallPaths, CopilotUninstallResult, CursorInstallPaths, CursorUninstallResult,
-    DevinInstallPaths, DevinUninstallResult, DroidInstallPaths, DroidUninstallResult,
-    HermesInstallPaths, HermesUninstallResult, KiloInstallPaths, KiloUninstallResult,
-    KimiInstallPaths, KimiUninstallResult, OmpInstallPaths, OmpUninstallResult,
-    OpenCodeInstallPaths, OpenCodeUninstallResult, PiUninstallResult, QodercliInstallPaths,
-    QodercliUninstallResult,
+    CavemanInstallPaths, CavemanUninstallResult, ClaudeInstallPaths, ClaudeUninstallResult,
+    CodexInstallPaths, CodexUninstallResult, CopilotInstallPaths, CopilotUninstallResult,
+    CursorInstallPaths, CursorUninstallResult, DevinInstallPaths, DevinUninstallResult,
+    DroidInstallPaths, DroidUninstallResult, HermesInstallPaths, HermesUninstallResult,
+    KiloInstallPaths, KiloUninstallResult, KimiInstallPaths, KimiUninstallResult, OmpInstallPaths,
+    OmpUninstallResult, OpenCodeInstallPaths, OpenCodeUninstallResult, PiUninstallResult,
+    QodercliInstallPaths, QodercliUninstallResult,
 };
 use super::{
-    CLAUDE_HOOK_ASSET, CLAUDE_HOOK_INSTALL_NAME, CODEX_HOOK_ASSET, CODEX_HOOK_INSTALL_NAME,
-    COPILOT_HOOK_ASSET, COPILOT_HOOK_EVENTS, COPILOT_HOOK_INSTALL_NAME,
-    COPILOT_REMOVED_LIFECYCLE_HOOK_EVENTS, CURSOR_HOOK_ASSET, CURSOR_HOOK_INSTALL_NAME,
-    DEVIN_HOOK_ASSET, DEVIN_HOOK_EVENTS, DEVIN_HOOK_INSTALL_NAME,
-    DEVIN_REMOVED_LIFECYCLE_HOOK_EVENTS, DROID_HOOK_ASSET, DROID_HOOK_EVENTS,
-    DROID_HOOK_INSTALL_NAME, DROID_REMOVED_LIFECYCLE_HOOK_EVENTS, HERMES_PLUGIN_INIT_ASSET,
-    HERMES_PLUGIN_INIT_INSTALL_NAME, HERMES_PLUGIN_MANIFEST_ASSET,
+    CAVEMAN_EXTENSION_ASSET, CAVEMAN_EXTENSION_INSTALL_NAME, CLAUDE_HOOK_ASSET,
+    CLAUDE_HOOK_INSTALL_NAME, CODEX_HOOK_ASSET, CODEX_HOOK_INSTALL_NAME, COPILOT_HOOK_ASSET,
+    COPILOT_HOOK_EVENTS, COPILOT_HOOK_INSTALL_NAME, COPILOT_REMOVED_LIFECYCLE_HOOK_EVENTS,
+    CURSOR_HOOK_ASSET, CURSOR_HOOK_INSTALL_NAME, DEVIN_HOOK_ASSET, DEVIN_HOOK_EVENTS,
+    DEVIN_HOOK_INSTALL_NAME, DEVIN_REMOVED_LIFECYCLE_HOOK_EVENTS, DROID_HOOK_ASSET,
+    DROID_HOOK_EVENTS, DROID_HOOK_INSTALL_NAME, DROID_REMOVED_LIFECYCLE_HOOK_EVENTS,
+    HERMES_PLUGIN_INIT_ASSET, HERMES_PLUGIN_INIT_INSTALL_NAME, HERMES_PLUGIN_MANIFEST_ASSET,
     HERMES_PLUGIN_MANIFEST_INSTALL_NAME, KILO_PLUGIN_ASSET, KILO_PLUGIN_INSTALL_NAME,
     KIMI_HOOK_ASSET, KIMI_HOOK_INSTALL_NAME, OMP_EXTENSION_ASSET, OMP_EXTENSION_INSTALL_NAME,
     OPENCODE_PLUGIN_ASSET, OPENCODE_PLUGIN_INSTALL_NAME, PI_EXTENSION_ASSET,
@@ -56,6 +56,31 @@ pub(crate) fn install_pi() -> io::Result<PathBuf> {
     let path = dir.join(PI_EXTENSION_INSTALL_NAME);
     fs::write(&path, PI_EXTENSION_ASSET)?;
     Ok(path)
+}
+
+pub(crate) fn install_caveman() -> io::Result<CavemanInstallPaths> {
+    let dir = caveman_extension_dir()?;
+    if !dir.is_dir() {
+        if dir.parent().is_some_and(|parent| parent.is_dir()) {
+            fs::create_dir_all(&dir)?;
+        } else {
+            return Err(io::Error::other(format!(
+                "caveman extension directory not found at {}. install caveman and create the extensions directory first",
+                dir.display()
+            )));
+        }
+    }
+
+    if !dir.is_dir() {
+        return Err(io::Error::other(format!(
+            "caveman extension directory not found at {}. install caveman and create the extensions directory first",
+            dir.display()
+        )));
+    }
+
+    let extension_path = dir.join(CAVEMAN_EXTENSION_INSTALL_NAME);
+    fs::write(&extension_path, CAVEMAN_EXTENSION_ASSET)?;
+    Ok(CavemanInstallPaths { extension_path })
 }
 
 pub(crate) fn install_omp() -> io::Result<OmpInstallPaths> {
@@ -538,6 +563,16 @@ pub(crate) fn uninstall_pi() -> io::Result<PiUninstallResult> {
     let removed_extension = remove_file_if_exists(&extension_path)?;
 
     Ok(PiUninstallResult {
+        extension_path,
+        removed_extension,
+    })
+}
+
+pub(crate) fn uninstall_caveman() -> io::Result<CavemanUninstallResult> {
+    let extension_path = caveman_extension_dir()?.join(CAVEMAN_EXTENSION_INSTALL_NAME);
+    let removed_extension = remove_file_if_exists(&extension_path)?;
+
+    Ok(CavemanUninstallResult {
         extension_path,
         removed_extension,
     })

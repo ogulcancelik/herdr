@@ -3102,3 +3102,223 @@ fn install_cursor_errors_when_config_dir_missing() {
     std::env::remove_var(CURSOR_CONFIG_DIR_ENV_VAR);
     let _ = fs::remove_dir_all(base);
 }
+
+#[test]
+fn install_caveman_writes_embedded_asset_to_caveman_extensions_dir() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let ext_dir = home.join(".cave/agent/extensions");
+    fs::create_dir_all(&ext_dir).unwrap();
+    std::env::set_var("HOME", &home);
+
+    let installed = install_caveman().unwrap();
+    let content = fs::read_to_string(&installed.extension_path).unwrap();
+
+    assert_eq!(
+        installed.extension_path,
+        ext_dir.join(CAVEMAN_EXTENSION_INSTALL_NAME)
+    );
+    assert_eq!(content, CAVEMAN_EXTENSION_ASSET);
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_caveman_creates_extensions_dir_when_agent_dir_exists() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let agent_dir = home.join(".cave/agent");
+    let ext_dir = agent_dir.join("extensions");
+    fs::create_dir_all(&agent_dir).unwrap();
+    std::env::set_var("HOME", &home);
+
+    let installed = install_caveman().unwrap();
+
+    assert_eq!(
+        installed.extension_path,
+        ext_dir.join(CAVEMAN_EXTENSION_INSTALL_NAME)
+    );
+    assert!(ext_dir.is_dir());
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_caveman_is_idempotent() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let ext_dir = home.join(".cave/agent/extensions");
+    fs::create_dir_all(&ext_dir).unwrap();
+    std::env::set_var("HOME", &home);
+
+    let first = install_caveman().unwrap();
+    let second = install_caveman().unwrap();
+
+    assert_eq!(first.extension_path, second.extension_path);
+    assert_eq!(
+        fs::read_to_string(&first.extension_path).unwrap(),
+        CAVEMAN_EXTENSION_ASSET
+    );
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn uninstall_caveman_removes_extension_when_present() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let ext_dir = home.join(".cave/agent/extensions");
+    fs::create_dir_all(&ext_dir).unwrap();
+    fs::write(
+        ext_dir.join(CAVEMAN_EXTENSION_INSTALL_NAME),
+        CAVEMAN_EXTENSION_ASSET,
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+
+    let result = uninstall_caveman().unwrap();
+
+    assert_eq!(
+        result.extension_path,
+        ext_dir.join(CAVEMAN_EXTENSION_INSTALL_NAME)
+    );
+    assert!(result.removed_extension);
+    assert!(!result.extension_path.exists());
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn uninstall_caveman_handles_missing_extension() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let ext_dir = home.join(".cave/agent/extensions");
+    fs::create_dir_all(&ext_dir).unwrap();
+    std::env::set_var("HOME", &home);
+
+    let result = uninstall_caveman().unwrap();
+
+    assert_eq!(
+        result.extension_path,
+        ext_dir.join(CAVEMAN_EXTENSION_INSTALL_NAME)
+    );
+    assert!(!result.removed_extension);
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_caveman_errors_when_extension_dir_missing() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    fs::create_dir_all(&home).unwrap();
+    std::env::set_var("HOME", &home);
+
+    let err = install_caveman().unwrap_err().to_string();
+
+    assert!(err.contains("caveman extension directory not found"));
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn caveman_v1_integration_status_is_current() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let ext_dir = home.join(".cave/agent/extensions");
+    fs::create_dir_all(&ext_dir).unwrap();
+    fs::write(
+        ext_dir.join(CAVEMAN_EXTENSION_INSTALL_NAME),
+        CAVEMAN_EXTENSION_ASSET,
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+
+    let statuses = installed_integration_statuses();
+    let caveman = statuses
+        .iter()
+        .find(|status| status.target == crate::api::schema::IntegrationTarget::Caveman)
+        .expect("caveman integration status");
+    assert_eq!(caveman.state, IntegrationStatusKind::Current);
+    assert_eq!(caveman.installed_version, Some(CAVEMAN_INTEGRATION_VERSION));
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn caveman_extension_asset_contains_required_session_refs() {
+    assert!(CAVEMAN_EXTENSION_ASSET.contains("agent_session_path"));
+    assert!(CAVEMAN_EXTENSION_ASSET.contains("agent_session_id"));
+    assert!(CAVEMAN_EXTENSION_ASSET.contains("pane.report_agent_session"));
+    assert!(CAVEMAN_EXTENSION_ASSET.contains("pane.report_agent\""));
+    assert!(CAVEMAN_EXTENSION_ASSET.contains("pane.release_agent"));
+    assert!(CAVEMAN_EXTENSION_ASSET.contains("source = \"herdr:caveman\""));
+    assert!(CAVEMAN_EXTENSION_ASSET.contains("agent: \"caveman\""));
+    assert!(CAVEMAN_EXTENSION_ASSET.contains("HERDR_INTEGRATION_ID=caveman"));
+    assert!(CAVEMAN_EXTENSION_ASSET.contains("HERDR_INTEGRATION_VERSION=1"));
+    assert!(CAVEMAN_EXTENSION_ASSET.contains("pi.on(\"agent_start\""));
+    assert!(CAVEMAN_EXTENSION_ASSET.contains("pi.on(\"agent_end\""));
+    assert!(CAVEMAN_EXTENSION_ASSET.contains("pi.on(\"session_shutdown\""));
+}
+
+#[test]
+fn caveman_extension_releases_only_for_quit_session_shutdown() {
+    let release_policy = CAVEMAN_EXTENSION_ASSET
+        .find("function shouldReleaseOnSessionShutdown")
+        .expect("caveman extension should centralize session shutdown release policy");
+    let quit_check = CAVEMAN_EXTENSION_ASSET
+        .find("reason === \"quit\"")
+        .expect("caveman extension should release only for true quit shutdowns");
+    let shutdown_handler = CAVEMAN_EXTENSION_ASSET
+        .find("pi.on(\"session_shutdown\", async (event)")
+        .expect("caveman extension should inspect the session_shutdown event");
+    let guarded_release = CAVEMAN_EXTENSION_ASSET[shutdown_handler..]
+        .find("if (shouldReleaseOnSessionShutdown(event))")
+        .expect("caveman extension should guard releaseAgent by shutdown reason");
+
+    assert!(release_policy < shutdown_handler);
+    assert!(release_policy < quit_check);
+    assert!(quit_check < shutdown_handler);
+    assert!(guarded_release > 0);
+}
+
+#[test]
+fn caveman_extension_refreshes_session_ref_before_agent_start_state() {
+    let agent_start = CAVEMAN_EXTENSION_ASSET
+        .find("pi.on(\"agent_start\", (_event, ctx)")
+        .expect("caveman extension should receive agent_start context");
+    let handler = &CAVEMAN_EXTENSION_ASSET[agent_start..];
+    let update_session = handler
+        .find("updateSessionRef(ctx);")
+        .expect("caveman extension should refresh the active session on agent_start");
+    let report_session = handler
+        .find("void reportSession();")
+        .expect("caveman extension should report the refreshed session before state");
+    let publish_state = handler
+        .find("publishState();")
+        .expect("caveman extension should publish working state after refreshing session");
+
+    assert!(update_session < report_session);
+    assert!(report_session < publish_state);
+}
+
+#[test]
+fn caveman_command_names_include_both_aliases() {
+    let names = integration_target_command_names(crate::api::schema::IntegrationTarget::Caveman);
+    assert!(names.contains(&"caveman"));
+    assert!(names.contains(&"caveman-code"));
+}

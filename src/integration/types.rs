@@ -74,11 +74,22 @@ pub(crate) struct CursorInstallPaths {
 }
 
 #[derive(Debug)]
+pub(crate) struct CavemanInstallPaths {
+    pub extension_path: PathBuf,
+}
+
+#[derive(Debug)]
 pub(crate) struct CursorUninstallResult {
     pub hook_path: PathBuf,
     pub hooks_path: PathBuf,
     pub removed_hook_file: bool,
     pub updated_hooks: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct CavemanUninstallResult {
+    pub extension_path: PathBuf,
+    pub removed_extension: bool,
 }
 
 #[derive(Debug)]

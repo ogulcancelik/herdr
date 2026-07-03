@@ -98,6 +98,14 @@ pub(crate) fn expand_tilde_path(path: PathBuf) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+pub(crate) fn caveman_dir() -> io::Result<PathBuf> {
+    Ok(home_dir()?.join(".cave/agent"))
+}
+
+pub(crate) fn caveman_extension_dir() -> io::Result<PathBuf> {
+    Ok(caveman_dir()?.join("extensions"))
+}
+
 pub(crate) fn opencode_dir() -> io::Result<PathBuf> {
     Ok(home_dir()?.join(".config/opencode"))
 }

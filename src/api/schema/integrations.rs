@@ -26,6 +26,7 @@ pub enum IntegrationTarget {
     Hermes,
     Qodercli,
     Cursor,
+    Caveman,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

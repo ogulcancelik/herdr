@@ -2,6 +2,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use super::env::caveman_extension_dir;
 use super::env::*;
 
 pub(crate) fn integration_target_label(
@@ -21,6 +22,7 @@ pub(crate) fn integration_target_label(
         crate::api::schema::IntegrationTarget::Hermes => "hermes",
         crate::api::schema::IntegrationTarget::Qodercli => "qodercli",
         crate::api::schema::IntegrationTarget::Cursor => "cursor",
+        crate::api::schema::IntegrationTarget::Caveman => "caveman",
     }
 }
 
@@ -47,6 +49,7 @@ pub(crate) fn integration_target_command_names(
         crate::api::schema::IntegrationTarget::Hermes => &["hermes"],
         crate::api::schema::IntegrationTarget::Qodercli => qodercli_command_names(),
         crate::api::schema::IntegrationTarget::Cursor => cursor_command_names(),
+        crate::api::schema::IntegrationTarget::Caveman => &["caveman", "caveman-code"],
     }
 }
 
@@ -251,7 +254,7 @@ fn integration_specs() -> [(
     crate::api::schema::IntegrationTarget,
     io::Result<PathBuf>,
     u32,
-); 13] {
+); 14] {
     [
         (
             crate::api::schema::IntegrationTarget::Pi,
@@ -320,6 +323,11 @@ fn integration_specs() -> [(
             crate::api::schema::IntegrationTarget::Cursor,
             cursor_dir().map(|dir| dir.join(super::CURSOR_HOOK_INSTALL_NAME)),
             super::CURSOR_INTEGRATION_VERSION,
+        ),
+        (
+            crate::api::schema::IntegrationTarget::Caveman,
+            caveman_extension_dir().map(|dir| dir.join(super::CAVEMAN_EXTENSION_INSTALL_NAME)),
+            super::CAVEMAN_INTEGRATION_VERSION,
         ),
     ]
 }
