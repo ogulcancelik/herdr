@@ -174,7 +174,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
     let prepared_remote = prepare_remote_herdr(&remote_ssh, remote.live_handoff)?;
     ensure_remote_server_ready(
         &remote_ssh,
-        &prepared_remote.remote_herdr,
+        prepared_remote.remote_herdr(),
         prepared_remote.installed_or_replaced,
         prepared_remote.stop_after_install_approved,
         remote.live_handoff,
@@ -285,7 +285,7 @@ impl RemotePlatform {
 }
 
 #[derive(Debug, Clone)]
-struct RemoteHerdr {
+pub(crate) struct RemoteHerdr {
     install_suffix: String,
     shell_path: String,
     platform: RemotePlatform,
@@ -426,20 +426,36 @@ struct RemoteReleaseAsset {
     sha256: Option<String>,
 }
 
-struct PreparedRemoteHerdr {
+pub(crate) struct PreparedRemoteHerdr {
     remote_herdr: RemoteHerdr,
     installed_or_replaced: bool,
     stop_after_install_approved: bool,
 }
 
+impl PreparedRemoteHerdr {
+    pub(crate) fn remote_herdr(&self) -> &RemoteHerdr {
+        &self.remote_herdr
+    }
+}
+
 #[derive(Clone)]
-struct ManagedSshOptions {
+pub(crate) struct ManagedSshOptions {
     config_path: PathBuf,
     control_path: PathBuf,
 }
 
-struct ManagedSshConfig {
+/// Owns the temporary managed ssh config on disk. Dropping it removes the
+/// config directory, so the paths inside [`ManagedSshOptions`] dangle once
+/// this value drops. Callers must keep the `ManagedSshConfig` alive for as
+/// long as they use its options, as `RemoteSsh` does.
+pub(crate) struct ManagedSshConfig {
     options: ManagedSshOptions,
+}
+
+impl ManagedSshConfig {
+    pub(crate) fn options(&self) -> &ManagedSshOptions {
+        &self.options
+    }
 }
 
 impl Drop for ManagedSshConfig {
@@ -450,13 +466,13 @@ impl Drop for ManagedSshConfig {
     }
 }
 
-struct RemoteSsh {
+pub(crate) struct RemoteSsh {
     target: String,
     managed_config: Option<ManagedSshConfig>,
 }
 
 impl RemoteSsh {
-    fn new(target: String, manage_ssh_config: bool) -> Self {
+    pub(crate) fn new(target: String, manage_ssh_config: bool) -> Self {
         let managed_config = if manage_ssh_config {
             write_managed_ssh_config()
                 .inspect_err(|err| {
@@ -477,8 +493,8 @@ impl RemoteSsh {
         &self.target
     }
 
-    fn options(&self) -> Option<&ManagedSshOptions> {
-        self.managed_config.as_ref().map(|config| &config.options)
+    pub(crate) fn options(&self) -> Option<&ManagedSshOptions> {
+        self.managed_config.as_ref().map(|config| config.options())
     }
 
     fn command(&self) -> Command {
@@ -623,7 +639,7 @@ impl InstallSource {
     }
 }
 
-fn prepare_remote_herdr(
+pub(crate) fn prepare_remote_herdr(
     ssh: &RemoteSsh,
     live_handoff_enabled: bool,
 ) -> io::Result<PreparedRemoteHerdr> {
@@ -1577,7 +1593,7 @@ fn confirm_remote_install(
     Ok(())
 }
 
-fn remote_bridge_command(remote_herdr: &RemoteHerdr, session_name: &str) -> String {
+pub(crate) fn remote_bridge_command(remote_herdr: &RemoteHerdr, session_name: &str) -> String {
     let mut command = format!("exec {}", remote_herdr.shell_path);
     if session_name != crate::session::DEFAULT_SESSION_NAME {
         command.push_str(" --session ");
@@ -1636,14 +1652,14 @@ fn command_failed(context: &str, output: &Output) -> io::Error {
     }
 }
 
-struct SshStdioBridge {
+pub(crate) struct SshStdioBridge {
     local_socket: PathBuf,
     should_stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl SshStdioBridge {
-    fn start(
+    pub(crate) fn start(
         target: String,
         remote_herdr: RemoteHerdr,
         local_socket: PathBuf,
@@ -1764,7 +1780,7 @@ fn ssh_config_quote(path: &str) -> String {
 /// first-value-wins rule keeps any `ServerAlive*` the user set there (including
 /// an explicit `0` to disable it). Herdr's keepalive values apply only when
 /// the user has none.
-fn write_managed_ssh_config() -> io::Result<ManagedSshConfig> {
+pub(crate) fn write_managed_ssh_config() -> io::Result<ManagedSshConfig> {
     use std::os::unix::fs::OpenOptionsExt;
 
     let dir = private_ssh_config_dir()?;

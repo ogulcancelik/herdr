@@ -146,3 +146,32 @@ pub(crate) fn run_remote_client_bridge() -> std::io::Result<()> {
         "remote client bridge is not supported on Windows yet",
     ))
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bridge_pieces_are_constructible_without_interactive_flow() {
+        // Compile-time API check from outside the `unix` child module: these
+        // must stay reachable for server code such as the ssh transport.
+        // Reverting any of the `pub(crate)` visibilities breaks this test.
+        let _bridge_start: fn(
+            String,
+            RemoteHerdr,
+            std::path::PathBuf,
+            String,
+            Option<&ManagedSshOptions>,
+        ) -> std::io::Result<SshStdioBridge> = SshStdioBridge::start;
+        let _prepare: fn(&RemoteSsh, bool) -> std::io::Result<PreparedRemoteHerdr> =
+            prepare_remote_herdr;
+        let _bridge_command: fn(&RemoteHerdr, &str) -> String = remote_bridge_command;
+        let _write_config: fn() -> std::io::Result<ManagedSshConfig> = write_managed_ssh_config;
+        let _ssh_new: fn(String, bool) -> RemoteSsh = RemoteSsh::new;
+        let _ssh_options: fn(&RemoteSsh) -> Option<&ManagedSshOptions> = RemoteSsh::options;
+        let _prepared_herdr: fn(&PreparedRemoteHerdr) -> &RemoteHerdr =
+            PreparedRemoteHerdr::remote_herdr;
+        let _config_options: fn(&ManagedSshConfig) -> &ManagedSshOptions =
+            ManagedSshConfig::options;
+    }
+}
