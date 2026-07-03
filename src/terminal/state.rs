@@ -416,8 +416,16 @@ impl TerminalState {
             return None;
         }
         let session_ref = session_ref.map(|session_ref| {
-            self.conflicting_same_owner_session_ref(&source, &agent_label, &session_ref, None)
-                .unwrap_or(session_ref)
+            if self.lifecycle_hook_report_replaces_persisted_session(
+                &source,
+                &agent_label,
+                &session_ref,
+            ) {
+                session_ref
+            } else {
+                self.conflicting_same_owner_session_ref(&source, &agent_label, &session_ref, None)
+                    .unwrap_or(session_ref)
+            }
         });
         if self.live_full_lifecycle_hook_authority_conflicts_with_session(
             &source,
@@ -853,6 +861,26 @@ impl TerminalState {
                 })
             },
         )
+    }
+
+    fn lifecycle_hook_report_replaces_persisted_session(
+        &self,
+        source: &str,
+        agent_label: &str,
+        session_ref: &crate::agent_resume::AgentSessionRef,
+    ) -> bool {
+        self.hook_authority.is_none()
+            && (source, agent_label) == ("herdr:mastracode", "mastracode")
+            && self
+                .persisted_agent_session
+                .as_ref()
+                .is_some_and(|session| {
+                    session.source == source
+                        && session.agent == agent_label
+                        && session.session_ref.kind == crate::agent_resume::AgentSessionRefKind::Id
+                        && session_ref.kind == crate::agent_resume::AgentSessionRefKind::Id
+                        && session.session_ref.value != session_ref.value
+                })
     }
 
     fn session_start_source_allows_session_replacement(
@@ -2307,40 +2335,94 @@ mod tests {
     // Regression for #614: a same-pane restart must reacquire lifecycle authority.
     #[test]
     fn omp_reacquires_full_lifecycle_hook_after_release_with_fresh_session_ref() {
+        assert_full_lifecycle_hook_reacquires_after_release_with_fresh_session_ref(
+            "herdr:omp",
+            "omp",
+        );
+    }
+
+    #[test]
+    fn mastracode_reacquires_full_lifecycle_hook_after_release_with_fresh_session_ref() {
+        assert_full_lifecycle_hook_reacquires_after_release_with_fresh_session_ref(
+            "herdr:mastracode",
+            "mastracode",
+        );
+    }
+
+    #[test]
+    fn mastracode_lifecycle_report_replaces_restored_thread_ref() {
         let mut terminal = test_terminal();
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:mastracode".into(),
+            agent: "mastracode".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("mastracode-old").unwrap(),
+        });
+
+        let mutation = terminal
+            .set_hook_authority_with_session_ref(
+                "herdr:mastracode".into(),
+                "mastracode".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("mastracode-new"),
+                Some(20),
+            )
+            .expect("fresh MastraCode thread should replace restored thread id");
+
+        assert!(mutation.session_ref_changed);
+        assert_eq!(
+            terminal.current_session_identity_for_persistence(),
+            Some((
+                "herdr:mastracode".into(),
+                "mastracode".into(),
+                crate::agent_resume::AgentSessionRefKind::Id,
+                "mastracode-new".into()
+            ))
+        );
+    }
+
+    fn assert_full_lifecycle_hook_reacquires_after_release_with_fresh_session_ref(
+        source: &str,
+        agent_label: &str,
+    ) {
+        let mut terminal = test_terminal();
+        let old_session = format!("{agent_label}-old");
+        let new_session = format!("{agent_label}-new");
+
         terminal.set_hook_authority_with_session_ref(
-            "herdr:omp".into(),
-            "omp".into(),
+            source.into(),
+            agent_label.into(),
             AgentState::Working,
             None,
             None,
-            crate::agent_resume::AgentSessionRef::id("omp-old"),
+            crate::agent_resume::AgentSessionRef::id(&old_session),
             Some(20),
         );
-        terminal.release_agent("herdr:omp", "omp", Some(21));
+        terminal.release_agent(source, agent_label, Some(21));
 
         // A late report from the released run keeps its old session ref and stays
-        // suppressed, so a just-exited omp cannot resurrect the pane.
+        // suppressed, so a just-exited agent cannot resurrect the pane.
         let stale = terminal.set_hook_authority_with_session_ref(
-            "herdr:omp".into(),
-            "omp".into(),
+            source.into(),
+            agent_label.into(),
             AgentState::Working,
             None,
             None,
-            crate::agent_resume::AgentSessionRef::id("omp-old"),
+            crate::agent_resume::AgentSessionRef::id(&old_session),
             Some(22),
         );
         assert!(stale.is_none());
         assert!(terminal.hook_authority.is_none());
 
-        // A fresh omp run carries a new session ref and reacquires authority.
+        // A fresh run carries a new session ref and reacquires authority.
         let fresh = terminal.set_hook_authority_with_session_ref(
-            "herdr:omp".into(),
-            "omp".into(),
+            source.into(),
+            agent_label.into(),
             AgentState::Working,
             None,
             None,
-            crate::agent_resume::AgentSessionRef::id("omp-new"),
+            crate::agent_resume::AgentSessionRef::id(&new_session),
             Some(23),
         );
         assert!(fresh.is_some());

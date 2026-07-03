@@ -179,6 +179,24 @@ const QODERCLI_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 12] = [
 const CURSOR_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const CURSOR_HOOK_ASSET: &str = include_str!("assets/cursor/herdr-agent-state.sh");
 const CURSOR_INTEGRATION_VERSION: u32 = 1;
+const MASTRACODE_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
+const MASTRACODE_HOOK_ASSET: &str = include_str!("assets/mastracode/herdr-agent-state.sh");
+const MASTRACODE_INTEGRATION_VERSION: u32 = 1;
+const MASTRACODE_HOOK_TIMEOUT_MS: u64 = 10_000;
+const MASTRACODE_HOOK_EVENTS: [(&str, &str); 12] = [
+    ("SessionStart", "idle"),
+    ("UserPromptSubmit", "working"),
+    ("AgentStart", "working"),
+    ("PreToolUse", "working"),
+    ("PermissionRequest", "blocked"),
+    ("PermissionResult", "working"),
+    ("SubagentStart", "working"),
+    ("SubagentEnd", "working"),
+    ("Interrupt", "idle"),
+    ("AgentEnd", "idle"),
+    ("Stop", "idle"),
+    ("SessionEnd", "release"),
+];
 const INTEGRATION_VERSION_MARKER: &str = "HERDR_INTEGRATION_VERSION=";
 
 pub(crate) const INSTALL_WARNING_PREFIX: &str = "warning:";

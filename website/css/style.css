@@ -1942,7 +1942,7 @@ td:last-child {
 
 .agent-grid {
     display: grid;
-    grid-template-columns: repeat(7, minmax(0, 1fr));
+    grid-template-columns: repeat(8, minmax(0, 1fr));
     gap: 0.6rem;
 }
 
@@ -2336,10 +2336,6 @@ td:last-child {
 
     .agent-grid {
         grid-template-columns: repeat(4, minmax(0, 1fr));
-    }
-
-    .agent-card:nth-child(8) {
-        grid-column-start: auto;
     }
 
     .mobile-proof,

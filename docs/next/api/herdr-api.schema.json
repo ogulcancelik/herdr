@@ -1512,7 +1512,8 @@
             "kilo",
             "hermes",
             "qodercli",
-            "cursor"
+            "cursor",
+            "mastracode"
           ],
           "type": "string"
         },
@@ -5927,7 +5928,8 @@
             "kilo",
             "hermes",
             "qodercli",
-            "cursor"
+            "cursor",
+            "mastracode"
           ],
           "type": "string"
         },
