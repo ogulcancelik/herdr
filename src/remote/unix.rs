@@ -614,7 +614,15 @@ impl Drop for RemoteSsh {
     }
 }
 
-fn apply_managed_ssh_options(command: &mut Command, options: Option<&ManagedSshOptions>) {
+/// Applies the managed ssh config/control-socket/keepalive options prepared
+/// by [`write_managed_ssh_config`] to an ssh invocation. Raised to
+/// `pub(crate)` (from module-private) for the link transport (`SshTransport`
+/// in `src/server/host_transport.rs`), which spawns its own per-channel ssh
+/// commands the same way `bridge_connection` does.
+pub(crate) fn apply_managed_ssh_options(
+    command: &mut Command,
+    options: Option<&ManagedSshOptions>,
+) {
     let Some(options) = options else {
         return;
     };
@@ -1623,8 +1631,7 @@ pub(crate) fn remote_bridge_command(remote_herdr: &RemoteHerdr, session_name: &s
 
 /// Same shape as `remote_bridge_command`, but targets the JSON API socket
 /// instead of the binary client socket. Consumed by the multi-host link
-/// transport (SshTransport); unused by non-test code until that lands.
-#[allow(dead_code)]
+/// transport (SshTransport::open_api in src/server/host_transport.rs).
 pub(crate) fn remote_api_bridge_command(remote_herdr: &RemoteHerdr, session_name: &str) -> String {
     let mut command = remote_bridge_command_prefix(remote_herdr, session_name);
     command.push_str(" remote-api-bridge");

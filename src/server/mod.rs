@@ -8,6 +8,8 @@ pub(crate) mod clipboard_image;
 pub(crate) mod handoff;
 pub mod headless;
 pub(crate) mod host_link;
+#[cfg(unix)]
+pub(crate) mod host_transport;
 pub(crate) mod keybindings;
 pub(crate) mod notifications;
 pub(crate) mod render_stream;

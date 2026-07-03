@@ -182,5 +182,7 @@ mod tests {
             PreparedRemoteHerdr::remote_herdr;
         let _config_options: fn(&ManagedSshConfig) -> &ManagedSshOptions =
             ManagedSshConfig::options;
+        let _apply_options: fn(&mut std::process::Command, Option<&ManagedSshOptions>) =
+            apply_managed_ssh_options;
     }
 }
