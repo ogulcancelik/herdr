@@ -50,11 +50,8 @@ if hook_input_file:
 
 request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
 report_seq = time.time_ns()
-run_id = hook_input.get("run_id")
 session_id = hook_input.get("session_id")
-if isinstance(run_id, str) and run_id:
-    agent_session_id = run_id
-elif isinstance(session_id, str) and session_id:
+if isinstance(session_id, str) and session_id:
     agent_session_id = session_id
 else:
     agent_session_id = None

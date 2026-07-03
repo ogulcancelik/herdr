@@ -2592,7 +2592,8 @@ fn bundled_integration_assets_report_session_refs() {
     assert!(!CURSOR_HOOK_ASSET.contains("pane.release_agent"));
     assert!(MASTRACODE_HOOK_ASSET.contains("HERDR_INTEGRATION_ID=mastracode"));
     assert!(MASTRACODE_HOOK_ASSET.contains("HERDR_INTEGRATION_VERSION=1"));
-    assert!(MASTRACODE_HOOK_ASSET.contains("run_id"));
+    assert!(MASTRACODE_HOOK_ASSET.contains("session_id"));
+    assert!(!MASTRACODE_HOOK_ASSET.contains("run_id"));
     assert!(MASTRACODE_HOOK_ASSET.contains("agent_session_id"));
     assert!(MASTRACODE_HOOK_ASSET.contains("pane.report_agent"));
     assert!(MASTRACODE_HOOK_ASSET.contains("pane.release_agent"));
