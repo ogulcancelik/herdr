@@ -1936,6 +1936,21 @@ impl AppState {
             }
         }
 
+        // Host tag cross-check: once the host-link registry lives in server
+        // state (Task 8/9), extend this to assert every terminal with
+        // `host: Some(_)` has a matching entry in `RemotePaneRegistry`. For
+        // now the tag is inert -- every terminal defaults to `host: None`,
+        // so this only guards the shape of the tag itself.
+        for terminal in self.terminals.values() {
+            if let Some(host) = &terminal.host {
+                assert!(
+                    !host.as_str().is_empty(),
+                    "terminal {} has an empty host tag",
+                    terminal.id
+                );
+            }
+        }
+
         let assert_live_pane = |pane_id: PaneId, context: &str| {
             assert!(
                 pane_ids.contains(&pane_id),

@@ -70,6 +70,8 @@ impl WorkspaceGitStatusSnapshot {
     }
 }
 
+// Monotonic within a server run; never reuses a value. Public-id
+// monotonicity is load-bearing for remote_pane.rs replay suppression.
 static NEXT_WORKSPACE_ID: AtomicU64 = AtomicU64::new(1);
 const PUBLIC_ID_ALPHABET: &[u8; 32] = b"123456789ABCDEFGHJKMNPQRSTVWXYZ0";
 
@@ -1147,6 +1149,8 @@ impl Workspace {
         self.register_new_pane_with_number(pane_id, self.next_public_pane_number);
     }
 
+    // Public pane numbers only ever grow within a run (max(number + 1));
+    // that monotonicity is load-bearing for remote_pane.rs replay suppression.
     fn register_new_pane_with_number(&mut self, pane_id: PaneId, number: usize) {
         self.public_pane_numbers.insert(pane_id, number);
         self.next_public_pane_number = self.next_public_pane_number.max(number + 1);

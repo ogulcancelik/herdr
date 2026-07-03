@@ -65,6 +65,29 @@ pub struct TerminalStateMutation {
     pub session_ref_changed: bool,
 }
 
+/// Identifies which remote host link owns a terminal's remote pane, for
+/// terminals adopted from a remote server via the multi-host bridge.
+///
+/// This wraps the same alias string a `crate::server::host_link::HostLinkId`
+/// carries, but is a distinct type: `terminal/` sits below `server/` in the
+/// dependency graph (state is separated from runtime -- see CLAUDE.md, and
+/// note `crate::server` already imports from `crate::app` and `crate::app`
+/// imports from `crate::terminal`, never the reverse), so this module must
+/// not import server-layer types. The server layer converts between the two
+/// at the single point where it applies `HostEvent` to `AppState` (Task 8/9).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TerminalHostTag(String);
+
+impl TerminalHostTag {
+    // Only read by AppState::assert_invariants_for_test() today, which is
+    // itself only reachable from test code; a real reader arrives with
+    // adoption in Task 7-9.
+    #[allow(dead_code)]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Pure state for a server-owned terminal.
 ///
 /// During the migration this is still one-to-one with a pane-backed PTY, but
@@ -93,6 +116,13 @@ pub struct TerminalState {
     pub respawn_shell_on_exit: bool,
     recent_agent_process_exit_at: Option<Instant>,
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
+    /// `None` for locally spawned terminals. Always `None` today: nothing
+    /// constructs `Some` yet -- adoption lands in Task 7-9, which will also
+    /// wire the corresponding `RemotePaneRegistry` cross-check into
+    /// `AppState::assert_invariants_for_test()`.
+    // Only read by that (test-only-reachable) invariant check today.
+    #[allow(dead_code)]
+    pub host: Option<TerminalHostTag>,
 }
 
 impl TerminalState {
@@ -120,6 +150,7 @@ impl TerminalState {
             respawn_shell_on_exit: false,
             recent_agent_process_exit_at: None,
             pending_agent_resume_plan: None,
+            host: None,
         }
     }
 
