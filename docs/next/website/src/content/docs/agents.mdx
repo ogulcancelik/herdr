@@ -28,7 +28,7 @@ Automatic detection works out of the box for common coding agents. The important
 | Codex | screen manifest | session |
 | Cursor Agent CLI | screen manifest | session |
 | Amp | screen manifest | none |
-| Grok CLI | screen manifest | none |
+| Grok CLI | screen manifest | session |
 | Antigravity CLI | screen manifest | none |
 | Kiro CLI | screen manifest | none |
 | Maki | screen manifest | none |
@@ -45,7 +45,7 @@ For agents without complete lifecycle hooks, Herdr identifies the foreground pro
 
 The screen snapshot comes from the recent bottom of the pane buffer, not the scrolled viewport. If you scroll back in Herdr, detection still follows the live agent UI at the bottom.
 
-Claude Code, Codex, GitHub Copilot CLI, Droid, Qoder CLI, and Cursor Agent CLI integrations are intentionally not lifecycle authorities. They provide native session identity for restore, but their hooks do not cover the whole lifecycle. They can miss permission approval results, escape interrupts, or other transitions. For those agents, Herdr still uses screen manifest detection.
+Claude Code, Codex, GitHub Copilot CLI, Droid, Qoder CLI, Cursor Agent CLI, and Grok CLI integrations are intentionally not lifecycle authorities. They provide native session identity for restore, but their hooks do not cover the whole lifecycle. They can miss permission approval results, escape interrupts, or other transitions. For those agents, Herdr still uses screen manifest detection.
 
 ## VMs and sandbox wrappers
 

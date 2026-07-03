@@ -121,6 +121,7 @@
 - Added `herdr terminal session control` for bridge processes that need live ANSI frames plus input, resize, scroll, release, and takeover authority.
 - Added `ui.hide_tab_bar_when_single_tab` to hide the tab row when a workspace has one tab. (#448)
 - Added Japanese and Simplified Chinese website docs.
+- Added `herdr integration install grok` for Grok CLI (Grok Build) hooks that report session ids through Herdr's socket API. Grok state stays screen-detected. When native agent session restore is enabled, Herdr can resume Grok panes with `grok --resume <id>`.
 
 ### Changed
 - The mobile switcher now starts from an agents-first summary and renders worktrees as a tree, making narrow terminals easier to scan.
