@@ -4218,6 +4218,48 @@ fn wait_agent_status_exits_immediately_when_status_already_matches() {
 }
 
 #[test]
+fn wait_agent_status_times_out_when_status_does_not_match() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_cli_timeout_1","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    assert_eq!(created["result"]["type"], "workspace_created");
+
+    let waited = run_cli(
+        &socket_path,
+        &[
+            "wait",
+            "agent-status",
+            "1-1",
+            "--status",
+            "blocked",
+            "--timeout",
+            "100",
+        ],
+    );
+    assert!(!waited.status.success());
+    assert!(
+        String::from_utf8_lossy(&waited.stderr)
+            .contains("timed out waiting for agent status change"),
+        "stderr: {}",
+        String::from_utf8_lossy(&waited.stderr)
+    );
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
 fn wait_agent_status_exits_when_done_status_matches() {
     let base = unique_test_dir();
     let config_home = base.join("config");

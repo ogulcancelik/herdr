@@ -917,14 +917,23 @@ impl TerminalState {
             session_start_source.as_deref(),
         );
         if self.current_session_owner_conflicts(&source, &agent_label)
-            || self
-                .conflicting_same_owner_session_ref(
+            && !(session_replacement_allowed
+                && self.foreground_agent_confirms_session_owner(
                     &source,
                     &agent_label,
                     &session_ref,
-                    session_start_source.as_deref(),
-                )
-                .is_some()
+                ))
+        {
+            return None;
+        }
+        if self
+            .conflicting_same_owner_session_ref(
+                &source,
+                &agent_label,
+                &session_ref,
+                session_start_source.as_deref(),
+            )
+            .is_some()
         {
             return None;
         }
@@ -975,6 +984,19 @@ impl TerminalState {
         };
         crate::detect::parse_agent_label(agent_label)
             .is_some_and(|hook_agent| hook_agent != detected_agent)
+    }
+
+    fn foreground_agent_confirms_session_owner(
+        &self,
+        source: &str,
+        agent_label: &str,
+        session_ref: &crate::agent_resume::AgentSessionRef,
+    ) -> bool {
+        let Some(detected_agent) = self.detected_agent else {
+            return false;
+        };
+        crate::detect::parse_agent_label(agent_label) == Some(detected_agent)
+            && crate::agent_resume::plan(source, agent_label, session_ref).is_some()
     }
 
     fn accept_hook_report(&mut self, source: &str, seq: Option<u64>) -> bool {
@@ -3497,6 +3519,126 @@ mod tests {
                 session.session_ref.value.as_str()
             )),
             Some(("herdr:droid", "droid", "droid-session"))
+        );
+    }
+
+    #[test]
+    fn foreground_agent_session_replaces_stale_different_owner_session_ref() {
+        let mut terminal = test_terminal();
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
+        });
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+
+        let mutation = terminal
+            .set_agent_session_ref_for_session_start(
+                "herdr:claude".into(),
+                "claude".into(),
+                crate::agent_resume::AgentSessionRef::id("claude-session"),
+                Some(21),
+                Some("resume".into()),
+            )
+            .expect("foreground claude should replace stale codex session");
+
+        assert!(mutation.session_ref_changed);
+        assert_eq!(
+            terminal.persisted_agent_session.as_ref().map(|session| (
+                session.source.as_str(),
+                session.agent.as_str(),
+                session.session_ref.value.as_str()
+            )),
+            Some(("herdr:claude", "claude", "claude-session"))
+        );
+    }
+
+    #[test]
+    fn foreground_agent_session_requires_lifecycle_source_to_replace_different_owner() {
+        let mut terminal = test_terminal();
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
+        });
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+
+        let mutation = terminal.set_agent_session_ref_for_session_start(
+            "herdr:claude".into(),
+            "claude".into(),
+            crate::agent_resume::AgentSessionRef::id("claude-session"),
+            Some(21),
+            None,
+        );
+
+        assert!(mutation.is_none());
+        assert_eq!(
+            terminal.persisted_agent_session.as_ref().map(|session| (
+                session.source.as_str(),
+                session.agent.as_str(),
+                session.session_ref.value.as_str()
+            )),
+            Some(("herdr:codex", "codex", "codex-session"))
+        );
+    }
+
+    #[test]
+    fn different_owner_session_ref_requires_matching_detected_agent() {
+        for detected_agent in [None, Some(Agent::Codex)] {
+            let mut terminal = test_terminal();
+            terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
+            });
+            terminal.set_detected_state(detected_agent, AgentState::Idle);
+
+            let mutation = terminal.set_agent_session_ref_for_session_start(
+                "herdr:claude".into(),
+                "claude".into(),
+                crate::agent_resume::AgentSessionRef::id("claude-session"),
+                Some(21),
+                Some("resume".into()),
+            );
+
+            assert!(mutation.is_none(), "{detected_agent:?} should not replace");
+            assert_eq!(
+                terminal.persisted_agent_session.as_ref().map(|session| (
+                    session.source.as_str(),
+                    session.agent.as_str(),
+                    session.session_ref.value.as_str()
+                )),
+                Some(("herdr:codex", "codex", "codex-session"))
+            );
+        }
+    }
+
+    #[test]
+    fn custom_session_report_does_not_replace_different_owner_session_ref() {
+        let mut terminal = test_terminal();
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
+        });
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+
+        let mutation = terminal.set_agent_session_ref_for_session_start(
+            "custom:claude".into(),
+            "claude".into(),
+            crate::agent_resume::AgentSessionRef::id("claude-session"),
+            Some(21),
+            Some("resume".into()),
+        );
+
+        assert!(mutation.is_none());
+        assert_eq!(
+            terminal.persisted_agent_session.as_ref().map(|session| (
+                session.source.as_str(),
+                session.agent.as_str(),
+                session.session_ref.value.as_str()
+            )),
+            Some(("herdr:codex", "codex", "codex-session"))
         );
     }
 

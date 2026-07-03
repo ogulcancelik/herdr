@@ -14,11 +14,11 @@ use crate::api::schema::{
     ErrorBody, ErrorResponse, Method, Request, ResponseResult, ServerCapabilities, SuccessResponse,
 };
 use crate::api::subscriptions::ActiveSubscription;
-use crate::api::wait::wait_for_output;
+use crate::api::wait::{wait_for_event, wait_for_output};
 use crate::api::{request_changes_ui, socket_path, ApiRequestMessage, ApiRequestSender, EventHub};
 use crate::ipc::{
-    bind_local_listener, remove_socket_file_if_owned, socket_file_identity, LocalStream,
-    SocketFileIdentity,
+    bind_local_listener, is_connection_closed_error, local_stream_peer_closed,
+    remove_socket_file_if_owned, socket_file_identity, LocalStream, SocketFileIdentity,
 };
 
 const SOCKET_PERMISSION_MODE: u32 = 0o600;
@@ -189,6 +189,38 @@ fn handle_connection(
                     &request_id,
                     method,
                     "stream_closed",
+                    changes_ui,
+                ),
+                Err(err) => {
+                    crate::logging::api_request_failed(&request_id, method, &err.to_string())
+                }
+            }
+            result
+        }
+        Method::EventsWait(params) => {
+            let Some(response) = wait_for_event(
+                request_id.clone(),
+                params,
+                &mut stream,
+                api_tx,
+                event_hub,
+                running,
+            )?
+            else {
+                crate::logging::api_request_completed(
+                    &request_id,
+                    method,
+                    "client_disconnected",
+                    changes_ui,
+                );
+                return Ok(());
+            };
+            let result = write_text_line_allow_disconnect(&mut stream, &response);
+            match &result {
+                Ok(()) => crate::logging::api_request_completed(
+                    &request_id,
+                    method,
+                    api_response_outcome(&response),
                     changes_ui,
                 ),
                 Err(err) => {
@@ -515,40 +547,7 @@ pub(super) fn should_stop_connection(
         return Ok(true);
     }
 
-    probe_stream_closed(stream)
-}
-
-fn probe_stream_closed(stream: &mut LocalStream) -> std::io::Result<bool> {
-    stream.set_nonblocking(true)?;
-    let mut probe = [0u8; 1];
-    let status = match stream.read(&mut probe) {
-        Ok(0) => Ok(true),
-        Ok(_) => Ok(true),
-        Err(err)
-            if matches!(
-                err.kind(),
-                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-            ) =>
-        {
-            Ok(false)
-        }
-        Err(err) if is_connection_closed_error(&err) => Ok(true),
-        Err(err) => Err(err),
-    };
-    stream.set_nonblocking(false)?;
-    status
-}
-
-fn is_connection_closed_error(err: &std::io::Error) -> bool {
-    matches!(
-        err.kind(),
-        std::io::ErrorKind::BrokenPipe
-            | std::io::ErrorKind::ConnectionAborted
-            | std::io::ErrorKind::ConnectionReset
-            | std::io::ErrorKind::NotConnected
-            | std::io::ErrorKind::UnexpectedEof
-            | std::io::ErrorKind::WriteZero
-    )
+    local_stream_peer_closed(stream)
 }
 
 fn dispatch_to_app(request: Request, api_tx: &ApiRequestSender) -> String {
@@ -620,6 +619,7 @@ fn error_response_json(id: String, code: &str, message: String) -> String {
 mod tests {
     use super::*;
     use interprocess::local_socket::traits::Listener as _;
+    use std::collections::HashMap;
     use std::io::{BufRead, BufReader};
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
@@ -652,6 +652,64 @@ mod tests {
         let client = crate::ipc::connect_local_stream(&path).unwrap();
         let server = listener.accept().unwrap();
         (client, server, path)
+    }
+
+    fn pane_info(
+        pane_id: &str,
+        agent_status: crate::api::schema::AgentStatus,
+    ) -> crate::api::schema::PaneInfo {
+        crate::api::schema::PaneInfo {
+            pane_id: pane_id.into(),
+            terminal_id: "term_1".into(),
+            workspace_id: "ws_1".into(),
+            tab_id: "tab_1".into(),
+            focused: true,
+            cwd: None,
+            foreground_cwd: None,
+            label: None,
+            agent: Some("pi".into()),
+            title: None,
+            display_agent: None,
+            agent_status,
+            custom_status: None,
+            state_labels: HashMap::new(),
+            agent_session: None,
+            revision: 0,
+        }
+    }
+
+    fn spawn_pane_get_responder(
+        agent_status: crate::api::schema::AgentStatus,
+    ) -> (ApiRequestSender, std::thread::JoinHandle<()>) {
+        let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        let responder = std::thread::spawn(move || {
+            while let Some(msg) = api_rx.blocking_recv() {
+                match msg.request.method {
+                    Method::PaneGet(_) => msg
+                        .respond_to
+                        .send(
+                            serde_json::to_string(&SuccessResponse {
+                                id: msg.request.id,
+                                result: ResponseResult::PaneInfo {
+                                    pane: pane_info("pane_1", agent_status),
+                                },
+                            })
+                            .unwrap(),
+                        )
+                        .unwrap(),
+                    Method::EventsWait(_) => msg
+                        .respond_to
+                        .send(error_response_json(
+                            msg.request.id,
+                            "unexpected_dispatch",
+                            "events.wait should be handled by the api server".into(),
+                        ))
+                        .unwrap(),
+                    other => panic!("unexpected request: {other:?}"),
+                }
+            }
+        });
+        (api_tx, responder)
     }
 
     #[test]
@@ -781,6 +839,60 @@ mod tests {
         let response = thread.join().unwrap();
         let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed.id, "req_2");
+    }
+
+    #[test]
+    fn events_wait_agent_status_returns_initial_match() {
+        let (api_tx, responder) =
+            spawn_pane_get_responder(crate::api::schema::AgentStatus::Blocked);
+
+        let (mut client, server, _path) = local_stream_pair("api-events-wait-initial");
+        client
+            .write_all(br#"{"id":"wait_1","method":"events.wait","params":{"match_event":{"event":"pane_agent_status_changed","pane_id":"pane_1","agent_status":"blocked"},"timeout_ms":1000}}"#)
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+
+        let running = Arc::new(AtomicBool::new(true));
+        let event_hub = EventHub::default();
+        handle_connection(server, &api_tx, &event_hub, &running, None).unwrap();
+
+        let response: serde_json::Value = serde_json::from_str(&read_line(&mut client)).unwrap();
+        assert_eq!(response["id"], "wait_1");
+        assert_eq!(response["result"]["type"], "wait_matched");
+        assert_eq!(
+            response["result"]["event"]["data"]["agent_status"],
+            "blocked"
+        );
+        drop(api_tx);
+        responder.join().unwrap();
+    }
+
+    #[test]
+    fn events_wait_agent_status_times_out_server_side() {
+        let (api_tx, responder) =
+            spawn_pane_get_responder(crate::api::schema::AgentStatus::Unknown);
+
+        let (mut client, server, _path) = local_stream_pair("api-events-wait-timeout");
+        client
+            .write_all(br#"{"id":"wait_2","method":"events.wait","params":{"match_event":{"event":"pane_agent_status_changed","pane_id":"pane_1","agent_status":"blocked"},"timeout_ms":30}}"#)
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+
+        let running = Arc::new(AtomicBool::new(true));
+        let event_hub = EventHub::default();
+        handle_connection(server, &api_tx, &event_hub, &running, None).unwrap();
+
+        let response: serde_json::Value = serde_json::from_str(&read_line(&mut client)).unwrap();
+        assert_eq!(response["id"], "wait_2");
+        assert_eq!(response["error"]["code"], "timeout");
+        assert_eq!(
+            response["error"]["message"],
+            "timed out waiting for event match"
+        );
+        drop(api_tx);
+        responder.join().unwrap();
     }
 
     #[test]

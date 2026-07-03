@@ -198,7 +198,7 @@ next_tab = ["prefix+n", "ctrl+alt+]"]
 
 `last_pane` switches back to the last focused pane across workspaces and tabs. It is unset by default because the tmux-style pane binding `prefix+l` is already used for pane-right focus.
 
-`remote_image_paste` is only active in `herdr --remote`. It is the local-client shortcut that sends a local clipboard image to the remote pane. Set it to an empty string to disable the raw-key shortcut; terminal paste-image signals still work when the outer terminal sends them.
+`remote_image_paste` is only active in `herdr --remote`. It is the local-client shortcut that sends a local clipboard image to the remote pane. Set it to an empty string to disable the raw-key shortcut; remote terminal paste-image signals still work when the outer terminal sends them.
 
 Key strings accept plain keys, modifier combinations such as `ctrl+a`, `shift+n`, `alt+1`, `cmd+k`, and special keys such as `enter`, `tab`, `esc`, `left`, `right`, `up`, and `down`. Named punctuation such as `minus`, `comma`, `ampersand`, `plus`, and `backtick` is also accepted. Plain direct printable keys such as `n` are unsafe because they intercept typing; use `prefix+n` unless you intentionally want a direct binding. The `navigate_workspace_*` and `navigate_pane_*` fields are navigate-mode-only and may use plain keys such as `j` or `k`; they must not use `prefix+`, `esc`, `enter`, `tab`, `shift+tab`, `left`, `right`, or unmodified `1` through `9`. Left and right arrows are permanent aliases for pane-left and pane-right navigation. These navigate-mode shortcuts are independent from general action bindings such as `focus_pane_down = "prefix+j"`; when both use the same key, the navigate-mode shortcut wins while navigate mode is open. Alt, Cmd/Super, and punctuation with modifiers depend on your terminal and tmux settings.
 
@@ -303,6 +303,7 @@ sidebar_max_width = 36
 sidebar_collapsed_mode = "compact"
 mobile_width_threshold = 64
 mouse_capture = true
+host_cursor = "auto"
 right_click_passthrough_modifier = ""
 redraw_on_focus_gained = true
 mouse_scroll_lines = 3
@@ -327,6 +328,8 @@ The agent panel shows all agents across all spaces. `agent_panel_sort` can be `s
 `confirm_close` controls whether closing a workspace asks for confirmation. `prompt_new_tab_name` controls whether new tabs ask for a label first.
 
 Set `mouse_capture = false` if you want your terminal to handle normal clicks, such as command-clicking URLs. With mouse capture enabled, Ctrl-click opens pane links when your terminal sends that modified click to Herdr. This includes macOS; Cmd-click is not reported separately from plain click while Herdr captures mouse input. Use Shift-Ctrl-click on Linux or Shift-Cmd-click on macOS for the terminal-native bypass path.
+
+`host_cursor` controls whether Herdr uses the outer terminal's native cursor or draws its own cursor as terminal cell content. The default, `auto`, draws Herdr's cursor on Windows to avoid ConPTY cursor flicker during active redraws, and uses the native cursor elsewhere. Set it to `native` to always use the outer terminal cursor, or `drawn` to always use Herdr's drawn cursor.
 
 Set `right_click_passthrough_modifier = "ctrl"` if you want Ctrl-right-click, hold, and drag gestures inside mouse-reporting pane apps to reach the app instead of opening Herdr's pane menu. The default is empty, which disables this passthrough. Supported modifiers are `ctrl`, `alt`, `cmd`, `super`, `meta`, and `hyper`; `shift` is rejected because many terminals reserve Shift+mouse for their own mouse bypass.
 

@@ -50,6 +50,7 @@ Plugins support `windows` as a manifest platform in preview. GitHub install, loc
 | Clipboard image paste to agents | unverified |
 | CJK hidden-cursor reveal | beta |
 | Kitty graphics rendering | unverified |
+| Host cursor rendering | beta |
 
 Herdr can launch panes in the right directory and can create the initial workspace from the directory where you started Herdr. PowerShell directory changes after startup are different: the process field Herdr can inspect does not reliably track later logical `cd` changes. Use Herdr integrations or prompt shell integration for live cwd reporting.
 
@@ -57,15 +58,28 @@ Windows Terminal may support image paste paths for specific agents, but Herdr's 
 
 Kitty graphics remains experimental and is not claimed as Windows-supported yet. Leave `experimental.kitty_graphics = false` unless you are specifically testing image rendering in Windows Terminal.
 
+## Known caveats
+
+### Cursor rendering
+
+Windows terminals run Herdr through ConPTY, and native terminal cursors can flicker, jump, or briefly show stale positions during active full-screen redraws. Herdr's default `host_cursor = "auto"` draws Herdr's cursor as terminal cell content on Windows, while Linux and macOS keep using the native terminal cursor. The Windows trade-off is a steady non-blinking cursor inside Herdr instead of the outer terminal's native blink, shape, and cursor color.
+
+To opt back into the outer terminal cursor on Windows, set:
+
+```toml
+[ui]
+host_cursor = "native"
+```
+
+### Keyboard and mouse
+
+Windows terminals do not all report modified keys in the same shape. Herdr preserves mouse reporting and `ctrl+j` in Windows Terminal and Alacritty on Windows, but `shift+enter` only works when the outer terminal reports it as a distinct modified Enter key. If Windows or the terminal reports it as plain Enter, Herdr forwards plain Enter.
+
 ## Copy and paste
 
 Herdr's pane text copy works on Windows beta. Drag-select text inside a pane to copy through Herdr.
 
 For text paste, use `ctrl+shift+v` in Windows Terminal. Multiline text paste is bracketed so shells and agent prompts receive it as one paste instead of submitting each line separately. Hold `shift` and right-click to use the outer terminal paste action instead of sending the click through Herdr.
-
-## Keyboard and mouse limitations
-
-Windows terminals do not all report modified keys in the same shape. Herdr preserves mouse reporting and `ctrl+j` in Windows Terminal and Alacritty on Windows, but `shift+enter` only works when the outer terminal reports it as a distinct modified Enter key. If Windows or the terminal reports it as plain Enter, Herdr forwards plain Enter.
 
 ## Not supported on Windows beta
 

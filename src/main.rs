@@ -90,6 +90,7 @@ mod server;
 mod session;
 mod sound;
 mod terminal;
+mod terminal_modes;
 mod terminal_notify;
 mod terminal_theme;
 mod ui;
@@ -255,6 +256,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Set false to let the terminal handle normal clicks, such as Cmd-clicking URLs.
 # Pane apps like lazygit and btop can still receive mouse when they request it.
 # mouse_capture = true
+
+# Host cursor policy: "auto", "native", or "drawn".
+# "auto" draws Herdr's own cursor on Windows to avoid ConPTY cursor flicker, and uses the native terminal cursor elsewhere.
+# "native" always uses the outer terminal cursor. "drawn" always draws Herdr's cursor as terminal cell content.
+# host_cursor = "auto"
 
 # Optional modifier that forwards right-click hold/drag gestures to pane apps instead of opening Herdr's pane menu.
 # Empty/off disables this. Shift is intentionally unsupported because terminals commonly reserve Shift+mouse.
@@ -707,6 +713,7 @@ fn main() -> io::Result<()> {
             DisableBracketedPaste,
             DisableMouseCapture
         );
+        let _ = crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout());
         let _ = set_host_color_scheme_reports(false);
         let _ = pop_keyboard_enhancement_flags();
         ratatui::restore();
@@ -728,6 +735,7 @@ fn main() -> io::Result<()> {
 
     let result = rt.block_on(async {
         let mut terminal = ratatui::init();
+        crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout())?;
         if config.ui.mouse_capture {
             execute!(io::stdout(), EnableMouseCapture)?;
         } else {
@@ -772,6 +780,7 @@ fn main() -> io::Result<()> {
             DisableBracketedPaste,
             DisableMouseCapture
         )?;
+        crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout())?;
         set_host_color_scheme_reports(false)?;
         ratatui::restore();
 

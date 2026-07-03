@@ -193,7 +193,8 @@ pub struct HeadlessServer {
     app: app::App,
     #[cfg(unix)]
     api_tx: Option<api::ApiRequestSender>,
-    #[cfg(unix)]
+    // Kept on every platform so dropping HeadlessServer owns API server shutdown.
+    #[cfg_attr(windows, allow(dead_code))]
     api_server: Option<api::ServerHandle>,
     #[cfg(unix)]
     client_listener: LocalListener,
@@ -246,9 +247,9 @@ fn apply_terminal_attach_scroll(
         AttachScrollDirection::Down => MouseEventKind::ScrollDown,
     };
     if let AttachScrollSource::PageKey { input } = source {
-        let host_scroll = runtime.input_state().is_some_and(|input_state| {
-            !input_state.alternate_screen && !input_state.mouse_reporting_enabled()
-        });
+        let host_scroll = runtime
+            .input_state()
+            .is_some_and(crate::pane::InputState::plain_page_keys_use_host_scrollback);
         if host_scroll {
             match direction {
                 AttachScrollDirection::Up => runtime.scroll_up(lines.max(1) as usize),
@@ -386,13 +387,11 @@ impl HeadlessServer {
         let (server_config_diagnostic, server_config_diagnostic_without_keybindings) =
             server_config_diagnostic_summaries(config_diagnostics);
         #[cfg(not(unix))]
-        let _ = (&api_tx, &api_server);
-
+        let _ = api_tx;
         Ok(Self {
             app,
             #[cfg(unix)]
             api_tx,
-            #[cfg(unix)]
             api_server,
             #[cfg(unix)]
             client_listener: listener,
@@ -3216,6 +3215,7 @@ impl HeadlessServer {
             && self.app.state.copy_mode.is_none()
             && self.app.state.context_menu.is_none()
             && self.app.state.toast.is_none()
+            && self.app.state.copy_feedback.is_none()
             && !self.app.full_redraw_pending
     }
 
@@ -4172,7 +4172,6 @@ mod tests {
             app,
             #[cfg(unix)]
             api_tx: None,
-            #[cfg(unix)]
             api_server: None,
             #[cfg(unix)]
             client_listener: listener,
@@ -5276,14 +5275,17 @@ next_tab = ""
         rt.shutdown_timeout(Duration::from_millis(100));
     }
 
-    #[test]
-    fn terminal_attach_page_key_host_scrolls_plain_terminal() {
+    fn with_terminal_attach_page_key_runtime(
+        initial_bytes: &[u8],
+        initial_scroll: usize,
+        test: impl FnOnce(&crate::terminal::TerminalRuntime, &mut mpsc::Receiver<Bytes>),
+    ) {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("test runtime");
         let _runtime_guard = rt.enter();
-        let mut bytes = Vec::new();
+        let mut bytes = initial_bytes.to_vec();
         for line in 0..80 {
             bytes.extend_from_slice(format!("line {line:02}\r\n").as_bytes());
         }
@@ -5291,9 +5293,20 @@ next_tab = ""
             crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
                 20, 5, 4096, &bytes, 4,
             );
+        if initial_scroll > 0 {
+            runtime.scroll_up(initial_scroll);
+        }
 
+        test(&runtime, &mut input_rx);
+
+        drop(runtime);
+        drop(_runtime_guard);
+        rt.shutdown_timeout(Duration::from_millis(100));
+    }
+
+    fn apply_terminal_attach_page_up(runtime: &crate::terminal::TerminalRuntime) {
         apply_terminal_attach_scroll(
-            &runtime,
+            runtime,
             AttachScrollSource::PageKey {
                 input: b"\x1b[5~".to_vec(),
             },
@@ -5303,111 +5316,80 @@ next_tab = ""
             None,
             0,
         )
-        .expect("page key scroll");
+        .expect("page key");
+    }
 
-        assert_eq!(
-            runtime
-                .scroll_metrics()
-                .expect("scroll metrics")
-                .offset_from_bottom,
-            4
-        );
-        assert!(input_rx.try_recv().is_err());
-        drop(runtime);
-        drop(_runtime_guard);
-        rt.shutdown_timeout(Duration::from_millis(100));
+    #[test]
+    fn terminal_attach_page_key_host_scrolls_plain_terminal() {
+        with_terminal_attach_page_key_runtime(b"", 0, |runtime, input_rx| {
+            apply_terminal_attach_page_up(runtime);
+
+            assert_eq!(
+                runtime
+                    .scroll_metrics()
+                    .expect("scroll metrics")
+                    .offset_from_bottom,
+                4
+            );
+            assert!(input_rx.try_recv().is_err());
+        });
     }
 
     #[test]
     fn terminal_attach_page_key_forwards_when_mouse_reporting() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("test runtime");
-        let _runtime_guard = rt.enter();
-        let mut bytes = b"\x1b[?1000h".to_vec();
-        for line in 0..80 {
-            bytes.extend_from_slice(format!("line {line:02}\r\n").as_bytes());
-        }
-        let (runtime, mut input_rx) =
-            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
-                20, 5, 4096, &bytes, 4,
+        with_terminal_attach_page_key_runtime(b"\x1b[?1000h", 3, |runtime, input_rx| {
+            apply_terminal_attach_page_up(runtime);
+
+            assert_eq!(
+                runtime
+                    .scroll_metrics()
+                    .expect("scroll metrics")
+                    .offset_from_bottom,
+                0
             );
-        runtime.scroll_up(3);
+            assert_eq!(
+                input_rx.try_recv().expect("forwarded page key"),
+                Bytes::from_static(b"\x1b[5~")
+            );
+        });
+    }
 
-        apply_terminal_attach_scroll(
-            &runtime,
-            AttachScrollSource::PageKey {
-                input: b"\x1b[5~".to_vec(),
-            },
-            AttachScrollDirection::Up,
-            4,
-            None,
-            None,
-            0,
-        )
-        .expect("page key forward");
+    #[test]
+    fn terminal_attach_page_key_forwards_when_application_cursor() {
+        with_terminal_attach_page_key_runtime(b"\x1b[?1h", 3, |runtime, input_rx| {
+            apply_terminal_attach_page_up(runtime);
 
-        assert_eq!(
-            runtime
-                .scroll_metrics()
-                .expect("scroll metrics")
-                .offset_from_bottom,
-            0
-        );
-        assert_eq!(
-            input_rx.try_recv().expect("forwarded page key"),
-            Bytes::from_static(b"\x1b[5~")
-        );
-        drop(runtime);
-        drop(_runtime_guard);
-        rt.shutdown_timeout(Duration::from_millis(100));
+            assert_eq!(
+                runtime
+                    .scroll_metrics()
+                    .expect("scroll metrics")
+                    .offset_from_bottom,
+                0
+            );
+            assert_eq!(
+                input_rx.try_recv().expect("forwarded page key"),
+                Bytes::from_static(b"\x1b[5~")
+            );
+        });
     }
 
     #[test]
     fn terminal_attach_page_key_forwards_in_alternate_screen_without_mouse_reporting() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("test runtime");
-        let _runtime_guard = rt.enter();
-        let mut bytes = b"\x1b[?1049h".to_vec();
-        for line in 0..80 {
-            bytes.extend_from_slice(format!("line {line:02}\r\n").as_bytes());
-        }
-        let (runtime, mut input_rx) =
-            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
-                20, 5, 4096, &bytes, 4,
+        with_terminal_attach_page_key_runtime(b"\x1b[?1049h", 3, |runtime, input_rx| {
+            apply_terminal_attach_page_up(runtime);
+
+            assert_eq!(
+                runtime
+                    .scroll_metrics()
+                    .expect("scroll metrics")
+                    .offset_from_bottom,
+                0
             );
-        runtime.scroll_up(3);
-
-        apply_terminal_attach_scroll(
-            &runtime,
-            AttachScrollSource::PageKey {
-                input: b"\x1b[5~".to_vec(),
-            },
-            AttachScrollDirection::Up,
-            4,
-            None,
-            None,
-            0,
-        )
-        .expect("page key forward");
-
-        assert_eq!(
-            runtime
-                .scroll_metrics()
-                .expect("scroll metrics")
-                .offset_from_bottom,
-            0
-        );
-        assert_eq!(
-            input_rx.try_recv().expect("forwarded page key"),
-            Bytes::from_static(b"\x1b[5~")
-        );
-        drop(runtime);
-        drop(_runtime_guard);
-        rt.shutdown_timeout(Duration::from_millis(100));
+            assert_eq!(
+                input_rx.try_recv().expect("forwarded page key"),
+                Bytes::from_static(b"\x1b[5~")
+            );
+        });
     }
 
     #[test]
@@ -7271,6 +7253,48 @@ next_tab = ""
         assert!(
             client_rx.recv_timeout(Duration::from_millis(50)).is_err(),
             "retained path should not stream a frame that can overwrite toast cells"
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_pty_update_declines_while_copy_feedback_is_visible() {
+        let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
+        server.app.state.copy_feedback = Some(crate::app::state::CopyFeedback {
+            message: "copied to clipboard".to_owned(),
+        });
+        server.render_and_stream();
+        let initial = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial frame"),
+        );
+        let initial_text = frame_text(&initial);
+        assert!(
+            initial_text.contains("copied to clipboard"),
+            "expected initial full frame to include copy feedback"
+        );
+
+        let feedback_row = initial_text
+            .lines()
+            .position(|line| line.contains("copied to clipboard"))
+            .expect("copy feedback row") as u16;
+        let inner_rect = server.app.state.view.pane_infos[0].inner_rect;
+        let pane_row = feedback_row
+            .checked_sub(inner_rect.y)
+            .expect("copy feedback should overlap the pane")
+            + 1;
+        assert!(pane_row <= inner_rect.height);
+        let runtime = server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("runtime");
+        runtime.test_process_pty_bytes(format!("\x1b[{pane_row};1Hzzzz").as_bytes());
+
+        assert!(!server.render_retained_pty_update_and_stream());
+        assert!(
+            client_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "retained path should not stream a frame that can overwrite copy feedback cells"
         );
     }
 

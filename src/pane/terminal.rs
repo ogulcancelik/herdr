@@ -97,6 +97,10 @@ impl InputState {
     pub fn mouse_reporting_enabled(self) -> bool {
         self.mouse_protocol_mode.reporting_enabled()
     }
+
+    pub fn plain_page_keys_use_host_scrollback(self) -> bool {
+        !self.alternate_screen && !self.mouse_reporting_enabled() && !self.application_cursor
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2689,30 +2693,36 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_release_still_encoded_for_report_event_pane() {
+    fn ghostty_report_event_pane_keeps_basic_compatibility_keys_legacy() {
         let (tx, _rx) = mpsc::channel(4);
         // Push kitty flags including REPORT_EVENT_TYPES (0b10) + DISAMBIGUATE (0b1).
         let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         terminal.write(b"\x1b[>3u");
         let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
 
-        let release = pane.encode_terminal_key(
-            crate::input::TerminalKey::new(
-                crossterm::event::KeyCode::Enter,
-                crossterm::event::KeyModifiers::empty(),
-            )
-            .with_kind(crossterm::event::KeyEventKind::Release),
-            pane.keyboard_protocol().unwrap(),
-        );
-        let parsed =
-            crate::input::parse_terminal_key_sequence(std::str::from_utf8(&release).unwrap())
-                .unwrap();
-        assert_eq!(parsed.code, crossterm::event::KeyCode::Enter);
-        assert_eq!(
-            parsed.kind,
-            crossterm::event::KeyEventKind::Release,
-            "report-event pane should encode a release, got {release:?}"
-        );
+        for (code, expected) in [
+            (crossterm::event::KeyCode::Enter, b"\r".as_slice()),
+            (crossterm::event::KeyCode::Backspace, b"\x7f".as_slice()),
+        ] {
+            let press = pane.encode_terminal_key(
+                crate::input::TerminalKey::new(code, crossterm::event::KeyModifiers::empty()),
+                pane.keyboard_protocol().unwrap(),
+            );
+            assert_eq!(
+                press, expected,
+                "{code:?} press should stay legacy-compatible without REPORT_ALL_KEYS"
+            );
+
+            let release = pane.encode_terminal_key(
+                crate::input::TerminalKey::new(code, crossterm::event::KeyModifiers::empty())
+                    .with_kind(crossterm::event::KeyEventKind::Release),
+                pane.keyboard_protocol().unwrap(),
+            );
+            assert!(
+                release.is_empty(),
+                "{code:?} release should not fall back to legacy bytes, got {release:?}"
+            );
+        }
     }
 
     #[test]
@@ -2936,6 +2946,47 @@ mod tests {
         let encoded = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
 
         assert_eq!(encoded, b"\x1b[127;3u");
+    }
+
+    #[test]
+    fn ghostty_pane_characterizes_ctrl_backspace_encoding() {
+        let (tx, _rx) = mpsc::channel(4);
+        let legacy = GhosttyPaneTerminal::new(
+            crate::ghostty::Terminal::new(80, 24, 0).unwrap(),
+            tx.clone(),
+        )
+        .unwrap();
+
+        let ctrl_backspace = crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Backspace,
+            crossterm::event::KeyModifiers::CONTROL,
+        );
+        assert_eq!(
+            legacy.encode_terminal_key(ctrl_backspace, crate::input::KeyboardProtocol::Legacy),
+            b"\x08"
+        );
+
+        let plain_backspace = crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Backspace,
+            crossterm::event::KeyModifiers::empty(),
+        );
+        assert_eq!(
+            legacy.encode_terminal_key(plain_backspace, crate::input::KeyboardProtocol::Legacy),
+            b"\x7f"
+        );
+
+        let kitty = GhosttyPaneTerminal::new(
+            crate::ghostty::Terminal::new(80, 24, 0).unwrap(),
+            tx.clone(),
+        )
+        .unwrap();
+        let pane_id = PaneId::from_raw(1);
+        kitty.process_pty_bytes(pane_id, 0, b"\x1b[>1u", &tx);
+
+        assert_eq!(
+            kitty.encode_terminal_key(ctrl_backspace, crate::input::KeyboardProtocol::Legacy),
+            b"\x1b[127;5u"
+        );
     }
 
     #[test]
