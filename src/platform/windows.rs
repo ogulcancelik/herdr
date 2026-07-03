@@ -23,7 +23,7 @@ use windows_sys::{
             },
             Threading::{
                 GetExitCodeProcess, OpenProcess, TerminateProcess, PROCESS_BASIC_INFORMATION,
-                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, PROCESS_VM_READ,
             },
         },
         UI::Shell::{CommandLineToArgvW, ShellExecuteW},
@@ -357,19 +357,20 @@ fn session_processes_from_entries(child_pid: u32, entries: &[WindowsProcessEntry
     pids
 }
 
-pub fn signal_processes(pids: &[u32], signal: Signal) {
+pub fn signal_processes(pids: &[u32], signal: Signal) -> bool {
     if signal == Signal::Hangup {
-        return;
+        return false;
     }
 
     for &pid in pids {
-        let Some(process) = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION) else {
+        let Some(process) = ProcessHandle::open(pid, PROCESS_TERMINATE) else {
             continue;
         };
         unsafe {
             TerminateProcess(process.0, 1);
         }
     }
+    true
 }
 
 pub fn process_exists(pid: u32) -> bool {

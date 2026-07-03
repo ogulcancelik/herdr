@@ -930,7 +930,7 @@ fn collect_positive_pids(pids: Vec<libc::pid_t>, count: usize) -> Vec<u32> {
         .collect()
 }
 
-pub fn signal_processes(pids: &[u32], signal: Signal) {
+pub fn signal_processes(pids: &[u32], signal: Signal) -> bool {
     let sig = match signal {
         Signal::Hangup => libc::SIGHUP,
         Signal::Terminate => libc::SIGTERM,
@@ -945,6 +945,7 @@ pub fn signal_processes(pids: &[u32], signal: Signal) {
             libc::kill(pid as libc::c_int, sig);
         }
     }
+    true
 }
 
 pub fn process_exists(pid: u32) -> bool {

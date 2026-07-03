@@ -1139,8 +1139,9 @@ fn shutdown_pane_processes(
             std::time::Duration::from_millis(250),
         ),
     ] {
-        crate::platform::signal_processes(&pids, signal);
-        if wait_for_processes_to_exit(&pids, child_pid, child_wait_completed, grace) {
+        if crate::platform::signal_processes(&pids, signal)
+            && wait_for_processes_to_exit(&pids, child_pid, child_wait_completed, grace)
+        {
             info!(
                 pane = pane_id.raw(),
                 pid = child_pid,

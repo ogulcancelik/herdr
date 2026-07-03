@@ -313,7 +313,7 @@ pub fn session_processes(child_pid: u32) -> Vec<u32> {
     pids
 }
 
-pub fn signal_processes(pids: &[u32], signal: Signal) {
+pub fn signal_processes(pids: &[u32], signal: Signal) -> bool {
     let sig = match signal {
         Signal::Hangup => libc::SIGHUP,
         Signal::Terminate => libc::SIGTERM,
@@ -328,6 +328,7 @@ pub fn signal_processes(pids: &[u32], signal: Signal) {
             libc::kill(pid as i32, sig);
         }
     }
+    true
 }
 
 pub fn process_exists(pid: u32) -> bool {
