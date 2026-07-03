@@ -4,13 +4,12 @@
   rustPlatform,
   callPackage,
   runCommand,
-  writeShellScriptBin,
   zig_0_15,
   zstd,
   pkg-config,
   git,
-  apple-sdk ? null,
   cctools ? null,
+  xcbuild ? null,
 }:
 
 let
@@ -27,25 +26,6 @@ let
         '') entries}
       '';
   };
-
-  darwinSdkRoot = "${apple-sdk}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk";
-  darwinDeveloperDir = "${apple-sdk}/Platforms/MacOSX.platform/Developer";
-  darwinXcodeSelect = writeShellScriptBin "xcode-select" ''
-    if [ "$1" = "--print-path" ]; then
-      echo ${lib.escapeShellArg darwinDeveloperDir}
-      exit 0
-    fi
-    echo "unsupported xcode-select invocation: $*" >&2
-    exit 1
-  '';
-  darwinXcrun = writeShellScriptBin "xcrun" ''
-    if [ "$1" = "--sdk" ] && [ "$3" = "--show-sdk-path" ]; then
-      echo ${lib.escapeShellArg darwinSdkRoot}
-      exit 0
-    fi
-    echo "unsupported xcrun invocation: $*" >&2
-    exit 1
-  '';
 in
 rustPlatform.buildRustPackage {
   pname = "herdr";
@@ -78,8 +58,7 @@ rustPlatform.buildRustPackage {
   ]
   ++ lib.optionals stdenv.hostPlatform.isDarwin [
     cctools
-    darwinXcodeSelect
-    darwinXcrun
+    xcbuild
   ];
 
   env = {
@@ -87,9 +66,6 @@ rustPlatform.buildRustPackage {
     LIBGHOSTTY_VT_SIMD = "true";
     LIBGHOSTTY_VT_ZIG_SYSTEM_DIR = zigDeps;
     ZIG = lib.getExe zig_0_15;
-  }
-  // lib.optionalAttrs stdenv.hostPlatform.isDarwin {
-    SDKROOT = darwinSdkRoot;
   };
 
   preBuild = ''
