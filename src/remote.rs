@@ -147,6 +147,14 @@ pub(crate) fn run_remote_client_bridge() -> std::io::Result<()> {
     ))
 }
 
+#[cfg(windows)]
+pub(crate) fn run_remote_api_bridge() -> std::io::Result<()> {
+    debug_assert!(!crate::platform::capabilities().remote_attach);
+    Err(std::io::Error::other(
+        "remote api bridge is not supported on Windows yet",
+    ))
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -166,6 +174,7 @@ mod tests {
         let _prepare: fn(&RemoteSsh, bool) -> std::io::Result<PreparedRemoteHerdr> =
             prepare_remote_herdr;
         let _bridge_command: fn(&RemoteHerdr, &str) -> String = remote_bridge_command;
+        let _api_bridge_command: fn(&RemoteHerdr, &str) -> String = remote_api_bridge_command;
         let _write_config: fn() -> std::io::Result<ManagedSshConfig> = write_managed_ssh_config;
         let _ssh_new: fn(String, bool) -> RemoteSsh = RemoteSsh::new;
         let _ssh_options: fn(&RemoteSsh) -> Option<&ManagedSshOptions> = RemoteSsh::options;

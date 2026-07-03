@@ -193,13 +193,26 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
 
 pub(crate) fn run_remote_client_bridge() -> io::Result<()> {
     ensure_remote_server_running()?;
+    bridge_stdio_to_socket(
+        crate::server::socket_paths::client_socket_path(),
+        "client socket",
+    )
+}
 
-    let socket_path = crate::server::socket_paths::client_socket_path();
+/// Mirrors `run_remote_client_bridge()`, bridging SSH stdio to the remote's
+/// JSON API socket instead of the binary client socket. The multi-host link
+/// transport (SshTransport) speaks line-delimited JSON over this stdio pipe.
+pub(crate) fn run_remote_api_bridge() -> io::Result<()> {
+    ensure_remote_server_running()?;
+    bridge_stdio_to_socket(crate::api::socket_path(), "API socket")
+}
+
+fn bridge_stdio_to_socket(socket_path: PathBuf, socket_label: &str) -> io::Result<()> {
     let stream = UnixStream::connect(&socket_path).map_err(|err| {
         io::Error::new(
             err.kind(),
             format!(
-                "failed to connect to remote Herdr client socket {}: {err}",
+                "failed to connect to remote Herdr {socket_label} {}: {err}",
                 socket_path.display()
             ),
         )
@@ -1593,13 +1606,28 @@ fn confirm_remote_install(
     Ok(())
 }
 
-pub(crate) fn remote_bridge_command(remote_herdr: &RemoteHerdr, session_name: &str) -> String {
+fn remote_bridge_command_prefix(remote_herdr: &RemoteHerdr, session_name: &str) -> String {
     let mut command = format!("exec {}", remote_herdr.shell_path);
     if session_name != crate::session::DEFAULT_SESSION_NAME {
         command.push_str(" --session ");
         command.push_str(&shell_quote(session_name));
     }
+    command
+}
+
+pub(crate) fn remote_bridge_command(remote_herdr: &RemoteHerdr, session_name: &str) -> String {
+    let mut command = remote_bridge_command_prefix(remote_herdr, session_name);
     command.push_str(" remote-client-bridge");
+    command
+}
+
+/// Same shape as `remote_bridge_command`, but targets the JSON API socket
+/// instead of the binary client socket. Consumed by the multi-host link
+/// transport (SshTransport); unused by non-test code until that lands.
+#[allow(dead_code)]
+pub(crate) fn remote_api_bridge_command(remote_herdr: &RemoteHerdr, session_name: &str) -> String {
+    let mut command = remote_bridge_command_prefix(remote_herdr, session_name);
+    command.push_str(" remote-api-bridge");
     command
 }
 
@@ -2355,6 +2383,16 @@ mod tests {
             remote_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME),
             "exec \"$HOME/.local/bin/herdr\" remote-client-bridge"
         );
+    }
+
+    #[test]
+    fn remote_api_bridge_command_targets_api_socket_mode() {
+        let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
+            os: "linux",
+            arch: "x86_64",
+        });
+        let cmd = remote_api_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME);
+        assert!(cmd.ends_with("remote-api-bridge"), "got: {cmd}");
     }
 
     #[test]
