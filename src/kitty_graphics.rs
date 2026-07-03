@@ -272,6 +272,14 @@ fn encode_graphics_update(
     host_placements: &mut HashMap<(u32, u32), PlacementSignature>,
     sources: &mut HashMap<(PaneId, u32), u32>,
 ) {
+    // Prune sources that are no longer visible: a stale entry would keep its
+    // old host image referenced and block the superseded-image delete.
+    let current_sources: HashSet<(PaneId, u32)> = placements
+        .iter()
+        .map(|placement| (placement.pane_id, placement.placement.image_id))
+        .collect();
+    sources.retain(|source, _| current_sources.contains(source));
+
     let mut current_placements = HashSet::new();
     for placement in placements {
         let clipped = clipped_placement(placement);
@@ -1217,6 +1225,56 @@ mod tests {
         let update = String::from_utf8_lossy(&bytes);
         assert!(!update.contains("a=d,d=I"), "shared host image survives");
         assert_eq!(images.len(), 2);
+    }
+
+    #[test]
+    fn stale_source_entry_does_not_block_superseded_image_delete() {
+        fn twin_placement() -> HostPlacement {
+            let mut twin = test_placement(5, 5);
+            twin.placement.image_id = 8;
+            twin.placement.placement_id = 4;
+            twin
+        }
+
+        let mut images = HashMap::new();
+        let mut placements = HashMap::new();
+        let mut sources = HashMap::new();
+        let mut bytes = Vec::new();
+
+        encode_graphics_update(
+            &mut bytes,
+            &[test_placement(0, 0), twin_placement()],
+            false,
+            &mut images,
+            &mut placements,
+            &mut sources,
+        );
+        assert_eq!(images.len(), 1);
+        assert_eq!(sources.len(), 2);
+        let shared_host_id = *images.keys().next().expect("uploaded host image");
+
+        // The twin source is gone and the survivor changed content: the
+        // vanished source's stale entry must not keep the old host image
+        // alive.
+        bytes.clear();
+        let mut changed = test_placement(0, 0);
+        changed.placement.data_fingerprint = 43;
+        encode_graphics_update(
+            &mut bytes,
+            &[changed],
+            false,
+            &mut images,
+            &mut placements,
+            &mut sources,
+        );
+
+        let update = String::from_utf8_lossy(&bytes);
+        assert!(
+            update.contains(&format!("a=d,d=I,i={shared_host_id}")),
+            "old host image is deleted once its last live source moves on"
+        );
+        assert_eq!(images.len(), 1);
+        assert_eq!(sources.len(), 1);
     }
 
     #[test]
