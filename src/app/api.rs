@@ -455,9 +455,10 @@ impl App {
                 return false;
             }
 
-            crate::pane::uses_windows_powershell_prompt_cwd_reporting(
-                crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
-            )
+            crate::pane::uses_windows_powershell_pane_shell(crate::pane::PaneShellConfig::new(
+                &self.state.default_shell,
+                self.state.shell_mode,
+            ))
         }
     }
 
@@ -1153,6 +1154,27 @@ fn agent_manifest_info(
         remote_update_error: remote.as_ref().and_then(|status| status.last_error.clone()),
         remote_last_checked_unix: remote.and_then(|status| status.last_checked_unix),
         warning: summary.warning,
+    }
+}
+
+#[cfg(test)]
+pub(super) mod test_support {
+    pub(crate) fn exiting_test_command() -> &'static str {
+        #[cfg(windows)]
+        {
+            "C:\\Windows\\System32\\whoami.exe"
+        }
+        #[cfg(not(windows))]
+        {
+            "/usr/bin/true"
+        }
+    }
+
+    pub(crate) fn shutdown_test_runtimes(app: &mut crate::app::App) {
+        let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
+        for (_terminal_id, runtime) in runtimes {
+            runtime.shutdown();
+        }
     }
 }
 

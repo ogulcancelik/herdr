@@ -820,14 +820,27 @@ impl App {
 
         let path = write_scrollback_temp_file(&scrollback)?;
 
-        let quoted_path = shell_quote(&path.display().to_string());
-        let command = format!(
-            r#"scrollback_file={quoted_path}; eval "${{EDITOR:-vi}} \"\$scrollback_file\""; status=$?; rm -f "$scrollback_file"; exit $status"#
-        );
-        if let Err(err) = self.spawn_pane_command(&command, vec![path.clone()]) {
-            let _ = fs::remove_file(&path);
-            return Err(err);
-        }
+        let argv = match crate::platform::scrollback_editor_argv(&path) {
+            Ok(argv) => argv,
+            Err(err) => {
+                let _ = fs::remove_file(&path);
+                return Err(err);
+            }
+        };
+        let (env, _) = self.custom_command_env();
+        let new_pane = match self.spawn_overlay_argv_command(&argv, None, env, vec![path.clone()]) {
+            Ok((_, new_pane)) => new_pane,
+            Err(err) => {
+                let _ = fs::remove_file(&path);
+                return Err(err);
+            }
+        };
+        let terminal_id = new_pane.terminal.id.clone();
+        self.terminal_runtimes
+            .insert(terminal_id.clone(), new_pane.runtime);
+        self.state
+            .remove_alias_shadowed_by_new_pane(new_pane.pane_id);
+        self.state.terminals.insert(terminal_id, new_pane.terminal);
 
         if let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) {
             self.state.toast = Some(crate::app::state::ToastNotification {
@@ -1675,22 +1688,6 @@ fn unique_scrollback_path(attempt: u32) -> std::path::PathBuf {
         "herdr-scrollback-{}-{nanos}-{attempt}.txt",
         std::process::id()
     ))
-}
-
-fn shell_quote(value: &str) -> String {
-    if !value.is_empty()
-        && value.chars().all(|ch| {
-            ch.is_ascii_alphanumeric()
-                || matches!(
-                    ch,
-                    '@' | '%' | '_' | '+' | '=' | ':' | ',' | '.' | '/' | '-'
-                )
-        })
-    {
-        return value.to_string();
-    }
-
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]
@@ -2797,6 +2794,13 @@ last_pane = "prefix+tab"
         assert!(content.contains("alpha"));
         assert!(content.contains("beta"));
         assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(
+            app.state.terminals.values().any(|terminal| terminal
+                .launch_argv
+                .as_ref()
+                .is_some_and(|argv| argv.first().is_some_and(|program| program == "/bin/sh"))),
+            "scrollback editor should launch through argv overlay path"
+        );
 
         let _ = std::fs::remove_file(output_path);
     }

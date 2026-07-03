@@ -1223,12 +1223,34 @@ impl<'a> PaneShellConfig<'a> {
     }
 }
 
+/// Target platform for shell launch policy. Parameterized (instead of raw
+/// `cfg!` checks at each decision point) so every branch stays testable on
+/// every host platform.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ShellLaunchTarget {
+    Windows,
+    Macos,
+    OtherUnix,
+}
+
+impl ShellLaunchTarget {
+    fn current() -> Self {
+        if cfg!(windows) {
+            Self::Windows
+        } else if cfg!(target_os = "macos") {
+            Self::Macos
+        } else {
+            Self::OtherUnix
+        }
+    }
+}
+
 fn shell_mode_uses_login_shell(
     mode: crate::config::ShellModeConfig,
-    target_is_macos: bool,
+    target: ShellLaunchTarget,
 ) -> bool {
     match mode {
-        crate::config::ShellModeConfig::Auto => target_is_macos,
+        crate::config::ShellModeConfig::Auto => target == ShellLaunchTarget::Macos,
         crate::config::ShellModeConfig::Login => true,
         crate::config::ShellModeConfig::NonLogin => false,
     }
@@ -1280,46 +1302,74 @@ fn resolve_shell_for_login_mode(shell: &str) -> io::Result<String> {
         })
 }
 
+/// Sourced via `-NoExit -Command` when launching PowerShell on Windows. It
+/// wraps whatever `prompt` function the user's profile left behind so each
+/// prompt render appends the cwd as OSC 9;9 — the sequence Windows Terminal
+/// and ConEmu standardized for shell integration. PowerShell never updates
+/// its Win32 process cwd on `Set-Location`, so prompt-time reporting is the
+/// only reliable cwd source on Windows.
+///
+/// The snippet must not contain double quotes: powershell.exe parses its
+/// command line with its own rules that disagree with the ArgvQuote escaping
+/// portable-pty applies, and embedded `\"` sequences get corrupted in
+/// transit. Single-quoted strings and `[char]` codes keep the round-trip
+/// byte-exact, and the OSC 9;9 payload is emitted unquoted (the original
+/// ConEmu form, which the cwd tracker accepts).
+///
+/// The original prompt must be invoked before any other statement in the
+/// wrapper: anything that runs first resets `$?`, so a status-aware user
+/// prompt would show success after a failed command (verified on 5.1).
+pub(crate) const WINDOWS_POWERSHELL_SHELL_INTEGRATION_COMMAND: &str = r"if ($null -eq $global:__HerdrOriginalPrompt) { $global:__HerdrOriginalPrompt = $function:prompt; function global:prompt { $out = @(& $global:__HerdrOriginalPrompt) -join ' '; $loc = $ExecutionContext.SessionState.Path.CurrentLocation; if ($loc.Provider.Name -eq 'FileSystem') { $esc = [string][char]27; $out += $esc + ']9;9;' + $loc.ProviderPath + $esc + '\' }; $out } }";
+
 fn pane_shell_command_builder_for_target(
     shell_config: PaneShellConfig<'_>,
-    target_is_macos: bool,
+    target: ShellLaunchTarget,
 ) -> io::Result<CommandBuilder> {
     let shell = pane_shell(shell_config.default_shell);
-    if shell_mode_uses_login_shell(shell_config.mode, target_is_macos) {
+    if shell_mode_uses_login_shell(shell_config.mode, target) {
         let mut cmd = CommandBuilder::new_default_prog();
         cmd.env("SHELL", resolve_shell_for_login_mode(&shell)?);
         Ok(cmd)
     } else {
-        Ok(CommandBuilder::new(&shell))
+        let mut cmd = CommandBuilder::new(&shell);
+        if uses_windows_powershell_pane_shell_for_target(shell_config, target) {
+            cmd.args([
+                "-NoExit",
+                "-Command",
+                WINDOWS_POWERSHELL_SHELL_INTEGRATION_COMMAND,
+            ]);
+        }
+        Ok(cmd)
     }
 }
 
 fn pane_shell_command_builder(shell_config: PaneShellConfig<'_>) -> io::Result<CommandBuilder> {
-    pane_shell_command_builder_for_target(shell_config, cfg!(target_os = "macos"))
+    pane_shell_command_builder_for_target(shell_config, ShellLaunchTarget::current())
 }
 
-#[cfg(windows)]
-pub(crate) fn uses_windows_powershell_prompt_cwd_reporting(
+/// True when panes launch an interactive PowerShell directly on Windows.
+/// Gates the prompt-based cwd reporting pipeline and the agent-exit shell
+/// respawn recovery.
+pub(crate) fn uses_windows_powershell_pane_shell(shell_config: PaneShellConfig<'_>) -> bool {
+    uses_windows_powershell_pane_shell_for_target(shell_config, ShellLaunchTarget::current())
+}
+
+fn uses_windows_powershell_pane_shell_for_target(
     shell_config: PaneShellConfig<'_>,
+    target: ShellLaunchTarget,
 ) -> bool {
-    if shell_mode_uses_login_shell(shell_config.mode, cfg!(target_os = "macos")) {
-        return false;
-    }
-    is_windows_powershell_shell(&pane_shell(shell_config.default_shell))
+    target == ShellLaunchTarget::Windows
+        && !shell_mode_uses_login_shell(shell_config.mode, target)
+        && is_powershell_shell(&pane_shell(shell_config.default_shell))
 }
 
-#[cfg(not(windows))]
-pub(crate) fn uses_windows_powershell_prompt_cwd_reporting(
-    _shell_config: PaneShellConfig<'_>,
-) -> bool {
-    false
-}
-
-#[cfg(windows)]
-fn is_windows_powershell_shell(shell: &str) -> bool {
-    let name = Path::new(shell)
-        .file_name()
-        .and_then(std::ffi::OsStr::to_str)
+fn is_powershell_shell(shell: &str) -> bool {
+    // Split on both separators by hand: `Path::file_name` only treats `\` as
+    // a separator on Windows hosts, and this predicate must evaluate Windows
+    // shell paths correctly from tests on any host.
+    let name = shell
+        .rsplit(['/', '\\'])
+        .next()
         .unwrap_or(shell)
         .to_ascii_lowercase();
     matches!(
@@ -1496,7 +1546,7 @@ impl PaneRuntime {
         render_dirty: Arc<AtomicBool>,
     ) -> std::io::Result<Self> {
         let windows_powershell_prompt_cwd_reporting =
-            uses_windows_powershell_prompt_cwd_reporting(shell_config);
+            uses_windows_powershell_pane_shell(shell_config);
         let mut cmd = pane_shell_command_builder(shell_config)?;
         cmd.cwd(cwd);
         apply_pane_terminal_env(&mut cmd);
@@ -2765,19 +2815,23 @@ mod tests {
     fn shell_mode_auto_uses_login_shell_only_on_macos() {
         assert!(shell_mode_uses_login_shell(
             crate::config::ShellModeConfig::Auto,
-            true
+            ShellLaunchTarget::Macos
         ));
         assert!(!shell_mode_uses_login_shell(
             crate::config::ShellModeConfig::Auto,
-            false
+            ShellLaunchTarget::OtherUnix
+        ));
+        assert!(!shell_mode_uses_login_shell(
+            crate::config::ShellModeConfig::Auto,
+            ShellLaunchTarget::Windows
         ));
         assert!(shell_mode_uses_login_shell(
             crate::config::ShellModeConfig::Login,
-            false
+            ShellLaunchTarget::OtherUnix
         ));
         assert!(!shell_mode_uses_login_shell(
             crate::config::ShellModeConfig::NonLogin,
-            true
+            ShellLaunchTarget::Macos
         ));
     }
 
@@ -2786,7 +2840,7 @@ mod tests {
     fn login_shell_builder_uses_default_prog_with_resolved_shell_env() {
         let cmd = pane_shell_command_builder_for_target(
             PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::Login),
-            false,
+            ShellLaunchTarget::OtherUnix,
         )
         .unwrap();
         assert!(cmd.is_default_prog());
@@ -2801,7 +2855,7 @@ mod tests {
     fn auto_shell_builder_uses_login_shell_on_macos_target() {
         let cmd = pane_shell_command_builder_for_target(
             PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::Auto),
-            true,
+            ShellLaunchTarget::Macos,
         )
         .unwrap();
         assert!(cmd.is_default_prog());
@@ -2815,26 +2869,112 @@ mod tests {
     fn auto_shell_builder_keeps_direct_shell_on_non_macos_target() {
         let cmd = pane_shell_command_builder_for_target(
             PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::Auto),
-            false,
+            ShellLaunchTarget::OtherUnix,
         )
         .unwrap();
         assert!(!cmd.is_default_prog());
         assert_eq!(cmd.get_argv(), &[std::ffi::OsString::from("/bin/sh")]);
     }
 
-    #[cfg(windows)]
     #[test]
-    fn windows_powershell_shell_builder_launches_plain_shell() {
+    fn windows_powershell_builder_injects_prompt_cwd_shell_integration() {
+        for shell in [
+            "powershell.exe",
+            "pwsh.exe",
+            "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+        ] {
+            let cmd = pane_shell_command_builder_for_target(
+                PaneShellConfig::new(shell, crate::config::ShellModeConfig::NonLogin),
+                ShellLaunchTarget::Windows,
+            )
+            .unwrap();
+
+            assert_eq!(
+                cmd.get_argv(),
+                &[
+                    std::ffi::OsString::from(shell),
+                    std::ffi::OsString::from("-NoExit"),
+                    std::ffi::OsString::from("-Command"),
+                    std::ffi::OsString::from(WINDOWS_POWERSHELL_SHELL_INTEGRATION_COMMAND),
+                ]
+            );
+        }
+
+        let script = WINDOWS_POWERSHELL_SHELL_INTEGRATION_COMMAND;
+        assert!(script.contains("]9;9;"), "missing OSC 9;9 emit: {script}");
+        assert!(
+            script.contains("$global:__HerdrOriginalPrompt = $function:prompt"),
+            "must wrap the profile-defined prompt: {script}"
+        );
+        assert!(
+            script.contains("$null -eq $global:__HerdrOriginalPrompt"),
+            "wrap must be idempotent for nested sessions: {script}"
+        );
+        assert!(
+            script.contains("'FileSystem'"),
+            "must not report non-filesystem provider paths: {script}"
+        );
+        assert!(
+            !script.contains('"'),
+            "double quotes corrupt the powershell.exe command-line round-trip: {script}"
+        );
+        let invoke_original = script
+            .find("@(& $global:__HerdrOriginalPrompt)")
+            .expect("wrapper must invoke the original prompt");
+        let cwd_lookup = script
+            .find("$loc =")
+            .expect("wrapper must look up the current location");
+        assert!(
+            invoke_original < cwd_lookup,
+            "original prompt must run first or $? is reset before a status-aware prompt reads it: {script}"
+        );
+    }
+
+    #[test]
+    fn windows_non_powershell_builder_launches_plain_shell() {
         let cmd = pane_shell_command_builder_for_target(
-            PaneShellConfig::new("powershell.exe", crate::config::ShellModeConfig::NonLogin),
-            false,
+            PaneShellConfig::new("cmd.exe", crate::config::ShellModeConfig::NonLogin),
+            ShellLaunchTarget::Windows,
         )
         .unwrap();
 
-        assert_eq!(
-            cmd.get_argv(),
-            &[std::ffi::OsString::from("powershell.exe")]
-        );
+        assert_eq!(cmd.get_argv(), &[std::ffi::OsString::from("cmd.exe")]);
+    }
+
+    #[test]
+    fn unix_powershell_builder_launches_plain_shell() {
+        let cmd = pane_shell_command_builder_for_target(
+            PaneShellConfig::new("pwsh", crate::config::ShellModeConfig::NonLogin),
+            ShellLaunchTarget::OtherUnix,
+        )
+        .unwrap();
+
+        assert_eq!(cmd.get_argv(), &[std::ffi::OsString::from("pwsh")]);
+    }
+
+    #[test]
+    fn windows_powershell_pane_shell_predicate_requires_windows_and_non_login() {
+        let pwsh = PaneShellConfig::new("pwsh.exe", crate::config::ShellModeConfig::NonLogin);
+        assert!(uses_windows_powershell_pane_shell_for_target(
+            pwsh,
+            ShellLaunchTarget::Windows
+        ));
+        assert!(!uses_windows_powershell_pane_shell_for_target(
+            pwsh,
+            ShellLaunchTarget::OtherUnix
+        ));
+        assert!(!uses_windows_powershell_pane_shell_for_target(
+            pwsh,
+            ShellLaunchTarget::Macos
+        ));
+        assert!(!uses_windows_powershell_pane_shell_for_target(
+            PaneShellConfig::new("pwsh.exe", crate::config::ShellModeConfig::Login),
+            ShellLaunchTarget::Windows
+        ));
+        assert!(!uses_windows_powershell_pane_shell_for_target(
+            PaneShellConfig::new("cmd.exe", crate::config::ShellModeConfig::NonLogin),
+            ShellLaunchTarget::Windows
+        ));
     }
 
     #[test]
@@ -2844,7 +2984,7 @@ mod tests {
                 "/__herdr_missing_shell__",
                 crate::config::ShellModeConfig::Login,
             ),
-            false,
+            ShellLaunchTarget::OtherUnix,
         )
         .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
@@ -2876,7 +3016,7 @@ mod tests {
 
         let cmd = pane_shell_command_builder_for_target(
             PaneShellConfig::new("fake-shell", crate::config::ShellModeConfig::Login),
-            false,
+            ShellLaunchTarget::OtherUnix,
         )
         .unwrap();
 

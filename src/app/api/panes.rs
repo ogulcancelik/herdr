@@ -51,14 +51,7 @@ impl App {
         };
         let (rows, cols) = self.state.estimate_pane_size();
         let split_cwd = params.cwd.map(std::path::PathBuf::from).or_else(|| {
-            let follow_cwd = self.state.workspaces.get(ws_idx).and_then(|ws| {
-                let tab_idx = ws.find_tab_index_for_pane(target_pane_id)?;
-                ws.tabs.get(tab_idx)?.cwd_for_pane(
-                    target_pane_id,
-                    &self.state.terminals,
-                    &self.terminal_runtimes,
-                )
-            });
+            let follow_cwd = self.cwd_for_pane_in_workspace(ws_idx, target_pane_id);
             Some(self.resolve_new_terminal_cwd(follow_cwd))
         });
         let default_shell = self.state.default_shell.clone();

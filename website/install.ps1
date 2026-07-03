@@ -401,6 +401,11 @@ switch ($architecture) {
         $target = "windows-x86_64"
         $targetTriple = "x86_64-pc-windows-msvc"
     }
+    "Arm64" {
+        $target = "windows-x86_64"
+        $targetTriple = "x86_64-pc-windows-msvc"
+        Write-Step "Windows ARM64 detected; installing the x86_64 build under Windows emulation."
+    }
     default {
         Write-Error "Unsupported Windows architecture: $architecture"
         exit 1

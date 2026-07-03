@@ -497,6 +497,10 @@ impl WindowsInputMapper {
             return None;
         }
 
+        if record.virtual_key_code != 0 && (record.unicode < 0x20 || record.unicode == 0x7f) {
+            return None;
+        }
+
         self.synthetic_utf16_unit_to_bytes(record.unicode)
     }
 
@@ -1559,6 +1563,27 @@ mod tests {
                 },
                 crate::protocol::ClientInputEvent::Key {
                     code: crate::protocol::ClientKeyCode::Enter,
+                    modifiers: 0,
+                    kind: crate::protocol::ClientKeyKind::Release,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn vti_win32_input_mode_backspace_stays_backspace() {
+        let records = "\x1b[8;14;8;1;0;1_\x1b[8;14;8;0;0;1_".chars().map(key_char);
+
+        assert_eq!(
+            translate(records),
+            vec![
+                crate::protocol::ClientInputEvent::Key {
+                    code: crate::protocol::ClientKeyCode::Backspace,
+                    modifiers: 0,
+                    kind: crate::protocol::ClientKeyKind::Press,
+                },
+                crate::protocol::ClientInputEvent::Key {
+                    code: crate::protocol::ClientKeyCode::Backspace,
                     modifiers: 0,
                     kind: crate::protocol::ClientKeyKind::Release,
                 },

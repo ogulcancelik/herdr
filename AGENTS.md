@@ -2,7 +2,28 @@
 
 Terminal based agent runtime for coding agents.
 
-## Principles
+## Scope and Audience
+
+These instructions are layered.
+
+- Unless a section explicitly says it is maintainer-only, local-machine-only, or
+  external-contributor-only, treat it as universal project guidance.
+- Universal project rules apply to every agent working on Herdr, including forks.
+- Maintainer workflow applies only when the acting GitHub account is
+  `ogulcancelik` or Can explicitly says this is maintainer work. If the account
+  is not `ogulcancelik`, skip maintainer workflow and follow the external
+  contributor guardrail instead.
+- Local Can machine workflow applies only on Can's own workstation or Windows
+  VM setup, for example when `/home/can/Projects/herdr`, `HERDR_ENV=1`, or the
+  `windows-wirt` SSH alias exists. If those facts are not true, skip local
+  machine workflow.
+- External contributor guardrail applies whenever the acting GitHub account is
+  not `ogulcancelik`, the work is happening in a fork, or the account cannot be
+  determined.
+
+## Universal Project Rules
+
+### Principles
 
 - **State is separated from runtime.** `AppState` is pure data, testable without PTYs or async. `PaneState` is separate from `PaneRuntime`. Workspace logic doesn't need real terminals.
 - **Render is pure.** `compute_view()` handles geometry and mutations. `render()` takes `&AppState` and only draws. Never mutate state during render.
@@ -12,7 +33,7 @@ Terminal based agent runtime for coding agents.
 - **Screen detection is evidence-based.** When changing `src/detect/manifests/`, first capture the relevant bottom-buffer state with `herdr agent read <pane> --source detection --format text` and, when styling or alternate screen behavior matters, `--format ansi`. Decide which visible controls are invariant, which are alternatives, and encode them as explicit AND/OR gates. Do not match whole-pane incidental text, and do not use the user-visible viewport for agent status because users can scroll it.
 - **UI patterns should be reused.** Herdr is a mouse-first TUI. New dialogs, onboarding, settings, and post-update flows should follow the existing UI/UX language and interaction patterns instead of inventing one-off screens. Prefer reusing existing modal/screen structure, affordances, and close actions so the app feels consistent.
 
-## Runtime/client boundary guardrail
+### Runtime/client boundary guardrail
 
 Herdr is migrating toward a server-owned runtime protocol with the TUI as one client. New work should not deepen the current server/TUI coupling.
 
@@ -29,7 +50,13 @@ Examples:
 - Sidebar layout, token placement, colors, selection, modals, mouse/viewport state: TUI/client.
 - Workspace/tab/pane remain shared session organization for now, but avoid making them mandatory identity for unrelated runtime features.
 
-## Multi-agent isolation
+## Maintainer Workflow
+
+This section applies only when the acting GitHub account is `ogulcancelik` or
+Can explicitly says this is maintainer work. If the acting account is not
+`ogulcancelik`, skip this section and follow the external contributor guardrail.
+
+### Multi-agent isolation
 
 Read-only investigation can happen in the shared checkout.
 
@@ -76,6 +103,34 @@ server:
 ```bash
 env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH cargo run -- <command>
 ```
+
+## Local Can Machine Workflow
+
+This section applies only on Can's workstation or Windows VM setup. If the
+acting GitHub account is not `ogulcancelik`, skip this section and follow the
+external contributor guardrail.
+
+### Windows VM validation
+
+The Windows VM is for final/manual Windows validation, not normal agent work.
+Connect to it with the `windows-wirt` SSH alias.
+
+Use the single reusable checkout at `C:\work\repo`. Do not create additional
+persistent Herdr clones or worktrees on the VM. The Windows account is already
+named `herdr`, so avoid paths like `C:\Users\herdr\herdr`.
+
+Before validating a fix on Windows, sync or apply the Linux worktree changes
+into `C:\work\repo`, then run the needed Windows build or test commands there.
+Reuse the shared Rust caches under `C:\Users\herdr\.cargo` and
+`C:\Users\herdr\.rustup`. Do not use WSL on the VM. The VM may have a newer
+Zig on `PATH`; Herdr currently requires Zig 0.15.2, so set
+`$env:ZIG = "C:\Users\herdr\zig-0.15.2\zig.exe"` before running Cargo commands
+that build the vendored libghostty-vt.
+
+After validation, leave `C:\work\repo` clean. Remove temporary files and delete
+`C:\work\repo\target` when disk space is tight, but keep the shared Cargo and
+Rustup caches. Unless Can explicitly asks to keep the patched tree for more
+manual testing, reset `C:\work\repo` back to a clean checkout before finishing.
 
 ## Agent Detection Updates
 
@@ -130,6 +185,10 @@ Do not use GitHub closing keywords like `fixes #<issue-number>`, `closes #<issue
 - When changing the server/client wire protocol, compare `src/protocol/wire.rs::PROTOCOL_VERSION` against the latest released tag. Bump it only if the current source protocol is not already greater than the latest released protocol. Update hardcoded protocol expectations and manual protocol fixtures in tests.
 
 ## Release Channels
+
+This section is maintainer-only for release actions. If the acting GitHub
+account is not `ogulcancelik`, do not run release commands, push release assets,
+or modify release channel files; follow the external contributor guardrail.
 
 Herdr has one main branch and two update channels. Stable and preview both build from `master`; there is no long-lived preview branch.
 

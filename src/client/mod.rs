@@ -55,6 +55,7 @@ struct ClientLoopConfig {
     sound_config: crate::config::SoundConfig,
     mouse_scroll_lines: usize,
     redraw_on_focus_gained: bool,
+    host_cursor: crate::config::HostCursorModeConfig,
     kitty_graphics_enabled: bool,
     mouse_capture_active: bool,
     #[cfg(unix)]
@@ -83,6 +84,8 @@ struct ClientState {
     remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
     /// Whether outer focus gain should force a full host-terminal redraw.
     redraw_on_focus_gained: bool,
+    /// Whether this client draws the cursor into frame cells instead of using the host cursor.
+    draw_host_cursor: bool,
 }
 
 #[derive(Debug, Default)]
@@ -309,7 +312,14 @@ impl std::error::Error for ClientError {
 
 impl From<protocol::FramingError> for ClientError {
     fn from(err: protocol::FramingError) -> Self {
-        ClientError::Protocol(err)
+        match err {
+            protocol::FramingError::UnexpectedEof => ClientError::ConnectionLost(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "server closed connection",
+            )),
+            protocol::FramingError::Io(err) => ClientError::ConnectionLost(err),
+            err => ClientError::Protocol(err),
+        }
     }
 }
 
@@ -338,6 +348,7 @@ fn setup_terminal_with_capabilities(
     mouse_capture: bool,
 ) -> io::Result<TerminalGuard> {
     ratatui::init();
+    crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout())?;
     let host_color_scheme_reports =
         should_enable_host_color_scheme_reports(enable_client_protocols);
 
@@ -440,6 +451,14 @@ fn write_terminal_restore_postlude(
     writer.flush()
 }
 
+fn should_draw_host_cursor(mode: crate::config::HostCursorModeConfig) -> bool {
+    match mode {
+        crate::config::HostCursorModeConfig::Auto => cfg!(windows),
+        crate::config::HostCursorModeConfig::Native => false,
+        crate::config::HostCursorModeConfig::Drawn => true,
+    }
+}
+
 #[cfg(windows)]
 #[derive(Default)]
 struct WindowsVirtualTerminalInputSetup {
@@ -525,6 +544,7 @@ fn restore_windows_input_mode_value(mode: u32) {
 }
 
 fn set_mouse_capture(enabled: bool) -> io::Result<()> {
+    crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout())?;
     if enabled {
         execute!(io::stdout(), EnableMouseCapture)
     } else {
@@ -558,6 +578,7 @@ fn restore_terminal_state(
         DisableBracketedPaste,
         DisableMouseCapture
     );
+    let _ = crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout());
     #[cfg(windows)]
     if let Some(mode) = restore_windows_input_mode {
         restore_windows_input_mode_value(mode);
@@ -1089,9 +1110,11 @@ fn run_client_with_mode(
     init_logging();
 
     let loaded_config = crate::config::Config::load();
+    crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout())?;
     let mouse_capture = loaded_config.config.ui.mouse_capture;
     let mouse_scroll_lines = loaded_config.config.ui.mouse_scroll_lines();
     let redraw_on_focus_gained = loaded_config.config.ui.redraw_on_focus_gained;
+    let host_cursor = loaded_config.config.ui.host_cursor;
     let direct_attach_requested = attach_request.is_some();
     #[cfg(unix)]
     let remote_image_paste_key = client_remote_image_paste_key(&loaded_config.config);
@@ -1101,6 +1124,7 @@ fn run_client_with_mode(
         sound_config: loaded_config.config.ui.sound,
         mouse_scroll_lines,
         redraw_on_focus_gained,
+        host_cursor,
         kitty_graphics_enabled,
         mouse_capture_active: mouse_capture,
         #[cfg(unix)]
@@ -1253,6 +1277,9 @@ async fn run_client_loop(
 ) -> Result<(), ClientError> {
     #[cfg(windows)]
     let _ = config.mouse_scroll_lines;
+    let draw_host_cursor = attach_escape.is_none() && should_draw_host_cursor(config.host_cursor);
+    #[cfg(unix)]
+    let is_remote_client = is_remote_client_process();
 
     let mut state = ClientState {
         blit_encoder: render_ansi::BlitEncoder::new(),
@@ -1266,8 +1293,10 @@ async fn run_client_loop(
         #[cfg(unix)]
         remote_image_paste_key: config.remote_image_paste_key,
         redraw_on_focus_gained: config.redraw_on_focus_gained,
+        draw_host_cursor,
     };
     debug!(?negotiated_encoding, "client render encoding active");
+    let host_mouse_capture_active = Arc::new(AtomicBool::new(state.mouse_capture_active));
 
     // Channel for events from the stdin, resize, and server reader threads.
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ClientLoopEvent>(256);
@@ -1277,8 +1306,14 @@ async fn run_client_loop(
         state.attach_escape.is_none() && should_query_host_terminal_theme();
     let stdin_quit = should_quit.clone();
     let stdin_tx = event_tx.clone();
+    let stdin_mouse_capture_active = host_mouse_capture_active.clone();
     std::thread::spawn(move || {
-        input::stdin_reader_loop(stdin_tx, &stdin_quit, will_query_host_terminal_theme);
+        input::stdin_reader_loop(
+            stdin_tx,
+            &stdin_quit,
+            will_query_host_terminal_theme,
+            stdin_mouse_capture_active,
+        );
     });
 
     if will_query_host_terminal_theme {
@@ -1376,7 +1411,11 @@ async fn run_client_loop(
                     }
                     data
                 };
-                if should_bridge_clipboard_image_paste(&data, state.remote_image_paste_key) {
+                if should_bridge_clipboard_image_paste(
+                    &data,
+                    is_remote_client,
+                    state.remote_image_paste_key,
+                ) {
                     if let Some(image) = crate::platform::read_clipboard_image() {
                         if image.bytes.len() > MAX_CLIPBOARD_IMAGE_PAYLOAD {
                             warn!(
@@ -1443,7 +1482,18 @@ async fn run_client_loop(
             }
             ClientLoopEvent::ServerMessage(msg) => match msg {
                 ServerMessage::Frame(frame_data) => {
-                    let encoded = state.blit_encoder.encode(&frame_data, false);
+                    let frame_data = if state.draw_host_cursor {
+                        render_ansi::frame_with_drawn_cursor(frame_data)
+                    } else {
+                        frame_data
+                    };
+                    let encoded = if state.draw_host_cursor {
+                        state
+                            .blit_encoder
+                            .encode_with_suppressed_visible_cursor(&frame_data, false)
+                    } else {
+                        state.blit_encoder.encode(&frame_data, false)
+                    };
                     let mut stdout = io::stdout();
                     let graphics = if state.kitty_graphics_enabled {
                         frame_data.graphics.as_slice()
@@ -1493,6 +1543,7 @@ async fn run_client_loop(
                     reload_local_client_config(
                         &mut state.sound_config,
                         &mut state.redraw_on_focus_gained,
+                        &mut state.draw_host_cursor,
                         #[cfg(unix)]
                         &mut state.remote_image_paste_key,
                     );
@@ -1506,6 +1557,7 @@ async fn run_client_loop(
                             let _ = enable_windows_virtual_terminal_input();
                         }
                         state.mouse_capture_active = desired;
+                        host_mouse_capture_active.store(desired, Ordering::Release);
                     }
                 }
                 ServerMessage::Welcome { .. } => {
@@ -1618,6 +1670,7 @@ fn client_remote_image_paste_key(
 fn reload_local_client_config(
     sound_config: &mut crate::config::SoundConfig,
     redraw_on_focus_gained: &mut bool,
+    draw_host_cursor: &mut bool,
     #[cfg(unix)] remote_image_paste_key: &mut Option<(
         crossterm::event::KeyCode,
         crossterm::event::KeyModifiers,
@@ -1632,6 +1685,7 @@ fn reload_local_client_config(
             let loaded_remote_image_paste_key = client_remote_image_paste_key(&loaded.config);
             *sound_config = loaded.config.ui.sound;
             *redraw_on_focus_gained = loaded.config.ui.redraw_on_focus_gained;
+            *draw_host_cursor = should_draw_host_cursor(loaded.config.ui.host_cursor);
             #[cfg(unix)]
             {
                 *remote_image_paste_key = loaded_remote_image_paste_key;
@@ -1713,10 +1767,11 @@ fn sound_from_notify_message(message: &str) -> Option<crate::sound::Sound> {
 #[cfg(unix)]
 fn should_bridge_clipboard_image_paste(
     data: &[u8],
+    is_remote_client: bool,
     remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
 ) -> bool {
     if data == b"\x1b[200~\x1b[201~" {
-        return true;
+        return is_remote_client;
     }
 
     let Some(remote_image_paste_key) = remote_image_paste_key else {
@@ -2007,25 +2062,62 @@ mod tests {
         }
     }
 
+    #[test]
+    fn host_cursor_policy_auto_uses_drawn_cursor_on_windows() {
+        assert_eq!(
+            should_draw_host_cursor(crate::config::HostCursorModeConfig::Auto),
+            cfg!(windows)
+        );
+    }
+
+    #[test]
+    fn host_cursor_policy_native_and_drawn_override_auto_detection() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvVarGuard::set("TERM_PROGRAM", "WezTerm");
+
+        assert!(!should_draw_host_cursor(
+            crate::config::HostCursorModeConfig::Native
+        ));
+        assert!(should_draw_host_cursor(
+            crate::config::HostCursorModeConfig::Drawn
+        ));
+    }
+
     #[cfg(unix)]
     #[test]
     fn clipboard_image_paste_bridge_triggers_on_configured_key_and_empty_paste() {
         let ctrl_v = crate::config::parse_key_combo("ctrl+v").unwrap();
-        assert!(should_bridge_clipboard_image_paste(&[0x16], Some(ctrl_v)));
+        assert!(should_bridge_clipboard_image_paste(
+            &[0x16],
+            true,
+            Some(ctrl_v)
+        ));
         assert!(should_bridge_clipboard_image_paste(
             b"\x1b[118;5u",
+            true,
             Some(ctrl_v)
         ));
         assert!(should_bridge_clipboard_image_paste(
             b"\x1b[200~\x1b[201~",
+            true,
             None
         ));
         assert!(!should_bridge_clipboard_image_paste(
-            b"\x1b[200~text\x1b[201~",
+            b"\x1b[200~\x1b[201~",
+            false,
             Some(ctrl_v)
         ));
-        assert!(!should_bridge_clipboard_image_paste(&[0x16], None));
-        assert!(!should_bridge_clipboard_image_paste(b"v", Some(ctrl_v)));
+        assert!(!should_bridge_clipboard_image_paste(
+            b"\x1b[200~text\x1b[201~",
+            true,
+            Some(ctrl_v)
+        ));
+        assert!(!should_bridge_clipboard_image_paste(&[0x16], true, None));
+        assert!(!should_bridge_clipboard_image_paste(
+            b"v",
+            true,
+            Some(ctrl_v)
+        ));
     }
 
     #[test]
@@ -2436,7 +2528,7 @@ mod tests {
     }
 
     #[test]
-    fn reload_local_client_config_refreshes_redraw_on_focus_gained() {
+    fn reload_local_client_config_refreshes_local_client_presentation_state() {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let path = std::env::temp_dir().join(format!(
             "herdr-client-config-reload-{}-{}.toml",
@@ -2446,22 +2538,29 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        std::fs::write(&path, "[ui]\nredraw_on_focus_gained = false\n").unwrap();
+        std::fs::write(
+            &path,
+            "[ui]\nredraw_on_focus_gained = false\nhost_cursor = \"drawn\"\n",
+        )
+        .unwrap();
         let path_string = path.to_string_lossy().to_string();
         let _env = EnvVarGuard::set(crate::config::CONFIG_PATH_ENV_VAR, &path_string);
         let mut sound_config = crate::config::SoundConfig::default();
         let mut redraw_on_focus_gained = true;
+        let mut draw_host_cursor = false;
         #[cfg(unix)]
         let mut remote_image_paste_key = None;
 
         reload_local_client_config(
             &mut sound_config,
             &mut redraw_on_focus_gained,
+            &mut draw_host_cursor,
             #[cfg(unix)]
             &mut remote_image_paste_key,
         );
 
         assert!(!redraw_on_focus_gained);
+        assert!(draw_host_cursor);
         let _ = std::fs::remove_file(path);
     }
 

@@ -38,6 +38,23 @@ impl App {
             .resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)
     }
 
+    pub(super) fn cwd_for_pane_in_workspace(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<PathBuf> {
+        let ws = self.state.workspaces.get(ws_idx)?;
+        let tab_idx = ws.find_tab_index_for_pane(pane_id)?;
+        ws.tabs
+            .get(tab_idx)?
+            .cwd_for_pane(pane_id, &self.state.terminals, &self.terminal_runtimes)
+    }
+
+    pub(super) fn focused_pane_cwd_in_workspace(&self, ws_idx: usize) -> Option<PathBuf> {
+        let pane_id = self.state.workspaces.get(ws_idx)?.focused_pane_id()?;
+        self.cwd_for_pane_in_workspace(ws_idx, pane_id)
+    }
+
     pub(super) fn resolve_new_terminal_cwd(&self, follow_cwd: Option<PathBuf>) -> PathBuf {
         resolve_new_terminal_cwd(&self.state.new_terminal_cwd, follow_cwd)
     }

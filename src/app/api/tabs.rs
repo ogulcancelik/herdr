@@ -63,11 +63,7 @@ impl App {
             return encode_error(id, "workspace_not_found", "no active workspace");
         };
         let cwd = cwd.map(PathBuf::from).unwrap_or_else(|| {
-            let follow_cwd = self
-                .state
-                .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
-                .and_then(|rt| rt.cwd());
-            self.resolve_new_terminal_cwd(follow_cwd)
+            self.resolve_new_terminal_cwd(self.focused_pane_cwd_in_workspace(ws_idx))
         });
         let (rows, cols) = self.state.estimate_pane_size();
         let default_shell = self.state.default_shell.clone();
@@ -296,8 +292,13 @@ fn tab_not_found(id: String, tab_id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{exiting_test_command, shutdown_test_runtimes};
     use super::*;
-    use crate::{api::schema::SuccessResponse, config::Config, workspace::Workspace};
+    use crate::{
+        api::schema::SuccessResponse,
+        config::{Config, ShellModeConfig},
+        workspace::Workspace,
+    };
 
     #[test]
     fn api_tab_move_reorders_tabs_in_target_workspace() {
@@ -341,5 +342,48 @@ mod tests {
                     && tabs[2].tab_id == moved_id
             )
         }));
+    }
+
+    #[tokio::test]
+    async fn tab_create_follows_cached_focused_pane_cwd_without_runtime() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        app.state.default_shell = exiting_test_command().into();
+        app.state.shell_mode = ShellModeConfig::NonLogin;
+        let workspace = Workspace::test_new("tabs");
+        let focused_pane = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let cached_cwd = std::env::temp_dir();
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(focused_pane)
+            .cloned()
+            .unwrap();
+        app.state.terminals.get_mut(&terminal_id).unwrap().cwd = cached_cwd.clone();
+
+        let response = app.handle_tab_create(
+            "req".into(),
+            TabCreateParams {
+                workspace_id: None,
+                cwd: None,
+                focus: false,
+                label: None,
+                env: Default::default(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::TabCreated { .. }));
+        let created = &app.state.workspaces[0].tabs[1];
+        let created_terminal_id = created.terminal_id(created.root_pane).unwrap();
+        let created_cwd = &app.state.terminals.get(created_terminal_id).unwrap().cwd;
+        assert_eq!(
+            crate::worktree::canonical_or_original(created_cwd),
+            crate::worktree::canonical_or_original(&cached_cwd)
+        );
+        shutdown_test_runtimes(&mut app);
     }
 }

@@ -46,6 +46,41 @@ struct WindowsProcessEntry {
 
 pub fn raise_server_nofile_limit() {}
 
+pub(crate) fn scrollback_editor_argv(path: &std::path::Path) -> std::io::Result<Vec<String>> {
+    let editor = std::env::var("VISUAL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("EDITOR")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        });
+    scrollback_editor_argv_with_env(path, editor.as_deref())
+}
+
+fn scrollback_editor_argv_with_env(
+    path: &std::path::Path,
+    editor: Option<&str>,
+) -> std::io::Result<Vec<String>> {
+    let mut argv = match editor.filter(|value| !value.trim().is_empty()) {
+        Some(editor) => command_line_to_argv(editor).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("failed to parse editor command {editor:?}"),
+            )
+        })?,
+        None => vec!["notepad.exe".to_string()],
+    };
+    if argv.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "editor command must not be empty",
+        ));
+    }
+    argv.push(path.display().to_string());
+    Ok(argv)
+}
+
 pub fn detach_server_daemon_command(_command: &mut std::process::Command) {}
 
 pub fn current_process_is_detached_server_daemon() -> bool {
@@ -696,6 +731,31 @@ mod tests {
         pids.sort_unstable();
 
         assert_eq!(pids, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn scrollback_editor_argv_uses_editor_env_and_appends_path() {
+        let path = std::path::Path::new(r"C:\Users\User\AppData\Local\Temp\herdr scrollback.txt");
+        let argv = super::scrollback_editor_argv_with_env(
+            path,
+            Some(r#""C:\Program Files\Microsoft VS Code\Code.exe" --wait"#),
+        )
+        .unwrap();
+
+        assert_eq!(argv[0], r"C:\Program Files\Microsoft VS Code\Code.exe");
+        assert_eq!(argv[1], "--wait");
+        assert_eq!(argv[2], path.display().to_string());
+    }
+
+    #[test]
+    fn scrollback_editor_argv_falls_back_to_notepad() {
+        let path = std::path::Path::new(r"C:\Temp\herdr-scrollback.txt");
+        let argv = super::scrollback_editor_argv_with_env(path, None).unwrap();
+
+        assert_eq!(
+            argv,
+            vec!["notepad.exe".to_string(), path.display().to_string()]
+        );
     }
 
     fn test_entry(

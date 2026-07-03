@@ -7,6 +7,14 @@ use super::{ClipboardImage, ForegroundJob, Signal};
 pub fn raise_server_nofile_limit() {}
 
 /// Unsupported platform stub.
+pub(crate) fn scrollback_editor_argv(_path: &std::path::Path) -> std::io::Result<Vec<String>> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "opening scrollback in an editor is not supported on this platform",
+    ))
+}
+
+/// Unsupported platform stub.
 pub fn detach_server_daemon_command(_command: &mut Command) {}
 
 /// Unsupported platform stub.

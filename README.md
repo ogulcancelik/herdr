@@ -9,6 +9,12 @@
   <a href="https://herdr.dev">herdr.dev</a> · <a href="#install">install</a> · <a href="#quick-start">quick start</a> · <a href="#supported-agents">supported agents</a> · <a href="https://herdr.dev/docs/">docs</a> · <a href="https://herdr.dev/docs/socket-api/">socket api</a> · <a href="#sponsors">sponsor</a>
 </p>
 
+<p align="center">
+  <a href="https://trendshift.io/repositories/32084" target="_blank" rel="noopener noreferrer">
+    <img src="https://trendshift.io/api/badge/repositories/32084" alt="herdr was #1 GitHub Trending repository of the day on Jun 30, 2026" width="250" height="55" />
+  </a>
+</p>
+
 ---
 
 https://github.com/user-attachments/assets/043ec09f-4bdd-41d5-aee0-8fda6b83e267

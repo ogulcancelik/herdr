@@ -1,8 +1,13 @@
 use std::fs;
 use std::io;
 #[cfg(unix)]
+use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
+
+#[cfg(unix)]
+use interprocess::local_socket::traits::Stream as _;
 
 pub(crate) type LocalListener = interprocess::local_socket::Listener;
 pub(crate) type LocalStream = interprocess::local_socket::Stream;
@@ -99,6 +104,75 @@ fn stale_socket_connect_error(kind: io::ErrorKind) -> bool {
     ) || (cfg!(windows) && kind == io::ErrorKind::WouldBlock)
 }
 
+pub(crate) fn local_stream_peer_closed(stream: &mut LocalStream) -> io::Result<bool> {
+    probe_stream_closed(stream)
+}
+
+#[cfg(unix)]
+fn probe_stream_closed(stream: &mut LocalStream) -> io::Result<bool> {
+    stream.set_nonblocking(true)?;
+    let mut probe = [0u8; 1];
+    let status = match stream.read(&mut probe) {
+        Ok(0) => Ok(true),
+        Ok(_) => Ok(true),
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(err) if is_connection_closed_error(&err) => Ok(true),
+        Err(err) => Err(err),
+    };
+    stream.set_nonblocking(false)?;
+    status
+}
+
+#[cfg(windows)]
+fn probe_stream_closed(stream: &mut LocalStream) -> io::Result<bool> {
+    use std::os::windows::io::{AsHandle, AsRawHandle};
+
+    let LocalStream::NamedPipe(pipe) = stream;
+    let ok = unsafe {
+        windows_sys::Win32::System::Pipes::PeekNamedPipe(
+            pipe.as_handle().as_raw_handle(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ok != 0 {
+        return Ok(false);
+    }
+
+    let err = io::Error::last_os_error();
+    if is_connection_closed_error(&err) || windows_named_pipe_closed_error(&err) {
+        return Ok(true);
+    }
+    Err(err)
+}
+
+pub(crate) fn is_connection_closed_error(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::WriteZero
+    )
+}
+
+#[cfg(windows)]
+fn windows_named_pipe_closed_error(err: &io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(6 | 109 | 232 | 233))
+}
+
 pub(crate) fn socket_file_identity(path: &Path) -> io::Result<SocketFileIdentity> {
     #[cfg(windows)]
     {
@@ -163,6 +237,8 @@ pub(crate) fn restrict_socket_permissions(_path: &Path, _mode: u32) -> io::Resul
 mod tests {
     use super::*;
     #[cfg(windows)]
+    use interprocess::local_socket::traits::Listener as _;
+    #[cfg(windows)]
     use std::path::PathBuf;
 
     #[test]
@@ -191,6 +267,34 @@ mod tests {
         assert!(path.exists(), "same-length replacement marker must survive");
 
         let _ = fs::remove_file(&path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn idle_named_pipe_peer_is_not_treated_as_closed() {
+        let path = temp_socket_marker_path("idle-pipe");
+        let listener = bind_local_listener(&path).unwrap();
+        let _client = connect_local_stream(&path).unwrap();
+        let mut server = listener.accept().unwrap();
+
+        assert!(!local_stream_peer_closed(&mut server).unwrap());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn disconnected_named_pipe_peer_is_treated_as_closed() {
+        let path = temp_socket_marker_path("disconnected-pipe");
+        let listener = bind_local_listener(&path).unwrap();
+        let client = connect_local_stream(&path).unwrap();
+        let mut server = listener.accept().unwrap();
+
+        drop(client);
+
+        assert!(local_stream_peer_closed(&mut server).unwrap());
+
+        let _ = fs::remove_file(path);
     }
 
     #[cfg(windows)]

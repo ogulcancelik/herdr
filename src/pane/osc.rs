@@ -1057,6 +1057,21 @@ mod tests {
         );
     }
 
+    // The quoted form is what Windows Terminal's documented shell integration
+    // snippet emits. Herdr's own injected prompt integration deliberately
+    // emits the path unquoted; see WINDOWS_POWERSHELL_SHELL_INTEGRATION_COMMAND.
+    #[test]
+    fn cwd_osc_tracker_detects_quoted_powershell_prompt_cwd_sequence() {
+        let mut tracker = CwdOscTracker::default();
+
+        tracker.observe(b"PS C:\\my proj> \x1b]9;9;\"C:\\my proj\"\x1b\\");
+
+        assert_eq!(
+            tracker.drain_latest(),
+            Some(std::path::PathBuf::from("C:\\my proj"))
+        );
+    }
+
     // -----------------------------------------------------------------------
     // AgentOscStateTracker tests
     // -----------------------------------------------------------------------

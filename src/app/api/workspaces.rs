@@ -40,9 +40,10 @@ impl App {
         params: WorkspaceCreateParams,
     ) -> String {
         let cwd = params.cwd.map(PathBuf::from).unwrap_or_else(|| {
-            let follow_cwd = self
-                .workspace_creation_source()
-                .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx));
+            let follow_cwd = self.workspace_creation_source().and_then(|ws_idx| {
+                self.focused_pane_cwd_in_workspace(ws_idx)
+                    .or_else(|| self.seed_cwd_from_workspace(ws_idx))
+            });
             self.resolve_new_terminal_cwd(follow_cwd)
         });
         let extra_env = match super::env::normalize_launch_env(params.env) {
@@ -211,6 +212,88 @@ fn workspace_not_found(id: String, workspace_id: &str) -> String {
 mod tests {
     use super::*;
     use crate::{api::schema::SuccessResponse, config::Config, workspace::Workspace};
+
+    // `new_cwd = follow` must anchor on the focused pane for every creation
+    // surface. Splits and tabs already do; a new workspace must follow the
+    // focused pane too, not the source workspace's first-tab root pane.
+    #[tokio::test]
+    async fn workspace_create_follows_focused_pane_cwd_not_first_tab_root() {
+        use super::super::test_support::{exiting_test_command, shutdown_test_runtimes};
+        use crate::config::ShellModeConfig;
+
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.default_shell = exiting_test_command().into();
+        app.state.shell_mode = ShellModeConfig::NonLogin;
+        app.state.workspaces = vec![Workspace::test_new("spaces")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+
+        // Second tab becomes the focused pane, away from tab 1's root pane.
+        let response = app.handle_tab_create(
+            "tab".into(),
+            crate::api::schema::TabCreateParams {
+                workspace_id: None,
+                cwd: None,
+                focus: true,
+                label: None,
+                env: Default::default(),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        // Drop runtimes so cwd resolution deterministically uses cached state.
+        shutdown_test_runtimes(&mut app);
+
+        let focused_cwd = std::env::temp_dir().join(format!(
+            "herdr-ws-follow-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&focused_cwd).unwrap();
+        let ws = &app.state.workspaces[0];
+        let root_cwd = ws.identity_cwd.clone();
+        let focused_pane = ws.focused_pane_id().unwrap();
+        assert_ne!(focused_pane, ws.tabs[0].root_pane);
+        let terminal_id = ws.terminal_id(focused_pane).cloned().unwrap();
+        app.state.terminals.get_mut(&terminal_id).unwrap().cwd = focused_cwd.clone();
+
+        let response = app.handle_workspace_create(
+            "req".into(),
+            WorkspaceCreateParams {
+                cwd: None,
+                focus: false,
+                label: None,
+                env: Default::default(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(
+            success.result,
+            ResponseResult::WorkspaceCreated { .. }
+        ));
+        let created_cwd = &app.state.workspaces[1].identity_cwd;
+        assert_eq!(
+            crate::worktree::canonical_or_original(created_cwd),
+            crate::worktree::canonical_or_original(&focused_cwd)
+        );
+        assert_ne!(
+            crate::worktree::canonical_or_original(created_cwd),
+            crate::worktree::canonical_or_original(&root_cwd)
+        );
+        shutdown_test_runtimes(&mut app);
+        let _ = std::fs::remove_dir_all(&focused_cwd);
+    }
 
     fn app_with_linked_worktree() -> App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();

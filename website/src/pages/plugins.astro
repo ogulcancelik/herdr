@@ -69,6 +69,7 @@ const apiUrl = import.meta.env.DEV ? null : snapshotUrl;
     <section class="section plugins-results">
       <div id="plugins-grid" class="plugins-grid" role="list"></div>
       <div id="plugins-status" class="plugins-status">Loading plugins…</div>
+      <button id="plugins-more" class="button button-secondary plugins-more" hidden></button>
     </section>
 
     <section class="section plugins-publish">
@@ -94,6 +95,11 @@ const apiUrl = import.meta.env.DEV ? null : snapshotUrl;
     const searchInput = document.getElementById("plugins-search");
     const sortSelect = document.getElementById("plugins-sort");
     const metaEl = document.getElementById("plugins-meta");
+    const moreButton = document.getElementById("plugins-more");
+
+    // 24 fills complete rows in both the 3-column and 2-column grid layouts.
+    const SHOW_LIMIT = 24;
+    let showAll = false;
 
     const LANG_COLORS = {
       TypeScript: "#3178c6",
@@ -214,9 +220,16 @@ const apiUrl = import.meta.env.DEV ? null : snapshotUrl;
     function render() {
       const q = searchInput.value.trim().toLowerCase();
       const visible = sortPlugins(plugins.filter((p) => matches(p, q)), sortSelect.value);
+      const shown = showAll ? visible : visible.slice(0, SHOW_LIMIT);
 
       grid.replaceChildren();
-      for (const p of visible) grid.appendChild(buildCard(p));
+      for (const p of shown) grid.appendChild(buildCard(p));
+
+      const hiddenCount = visible.length - shown.length;
+      moreButton.hidden = hiddenCount === 0;
+      if (hiddenCount > 0) {
+        moreButton.textContent = "show " + hiddenCount + " more";
+      }
 
       if (visible.length === 0) {
         statusEl.textContent = q
@@ -247,6 +260,7 @@ const apiUrl = import.meta.env.DEV ? null : snapshotUrl;
       plugins = [];
       metaEl.textContent = "";
       grid.replaceChildren();
+      moreButton.hidden = true;
       statusEl.textContent =
         "The plugin marketplace is warming up. Check back in a few minutes.";
       statusEl.hidden = false;
@@ -276,6 +290,10 @@ const apiUrl = import.meta.env.DEV ? null : snapshotUrl;
 
     searchInput.addEventListener("input", render);
     sortSelect.addEventListener("change", render);
+    moreButton.addEventListener("click", () => {
+      showAll = true;
+      render();
+    });
     load();
   </script>
 
@@ -554,6 +572,16 @@ const apiUrl = import.meta.env.DEV ? null : snapshotUrl;
       color: var(--muted);
       font-family: var(--mono);
       font-size: 0.85rem;
+    }
+
+    .plugins-more {
+      display: flex;
+      margin: 2rem auto 0;
+      cursor: pointer;
+    }
+
+    .plugins-more[hidden] {
+      display: none;
     }
 
     /* Publish */

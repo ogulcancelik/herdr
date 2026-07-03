@@ -907,6 +907,28 @@ mod tests {
         );
     }
 
+    // A plain shell pane launched with herdr's injected prompt integration
+    // must still classify as a shell, not an agent, even though its argv now
+    // carries a -Command payload.
+    #[test]
+    fn identify_agent_in_job_ignores_herdr_powershell_shell_integration_argv() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 123,
+            processes: vec![foreground_process(
+                1,
+                "powershell.exe",
+                &[
+                    "powershell.exe",
+                    "-NoExit",
+                    "-Command",
+                    crate::pane::WINDOWS_POWERSHELL_SHELL_INTEGRATION_COMMAND,
+                ],
+            )],
+        };
+
+        assert_eq!(identify_agent_in_job(&job), None);
+    }
+
     #[test]
     fn identify_agent_in_job_detects_opencode_exe_from_pnpm_package() {
         let job = crate::platform::ForegroundJob {
