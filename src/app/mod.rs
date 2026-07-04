@@ -100,6 +100,14 @@ pub struct App {
     pub(crate) event_hub: crate::api::EventHub,
     pub(crate) last_focus: Option<(usize, crate::layout::PaneId)>,
     pub(crate) no_session: bool,
+    /// Host links persisted in the restored session, pending re-attach
+    /// (Task 10). `App` sits below the server in the dep graph and has no
+    /// `HostLinkRegistry` of its own, so this is just the raw restored list
+    /// -- `HeadlessServer`'s caller (`run_server`) drains it and re-runs the
+    /// same `host.attach` lifecycle per entry once the server (and its
+    /// `host_event_tx` bridge) exists. Always empty when `no_session` is set
+    /// or no session file was found.
+    pub(crate) restored_hosts: Vec<crate::persist::HostSnapshot>,
     pub(crate) input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
     pub(crate) last_terminal_size: Option<(u16, u16)>,
     pub(crate) config_diagnostic_deadline: Option<Instant>,
@@ -360,6 +368,7 @@ impl App {
         // Try to restore previous session
         let mut restored_terminals = std::collections::HashMap::new();
         let mut restored_terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let mut restored_hosts = Vec::new();
         let (
             workspaces,
             active,
@@ -379,6 +388,7 @@ impl App {
                 std::collections::HashSet::new(),
             )
         } else if let Some(snap) = crate::persist::load() {
+            restored_hosts = snap.hosts.clone();
             let history = config
                 .experimental
                 .pane_history
@@ -725,6 +735,7 @@ impl App {
             event_hub,
             last_focus,
             no_session,
+            restored_hosts,
             input_rx: None,
             last_terminal_size: terminal::size().ok(),
             render_notify,
@@ -793,6 +804,12 @@ impl App {
             app.state.sidebar_section_split = split;
         }
         app.state.collapsed_space_keys = snapshot.collapsed_space_keys.clone();
+        // Carry the persisted host list forward so the handoff-import server
+        // can re-attach remote links after its host-event bridge exists,
+        // mirroring the session.json restore path in `run_server`. Without
+        // this a live update/restart would silently drop every attached host
+        // (recoverable only by a cold restart).
+        app.restored_hosts = snapshot.hosts.clone();
         app.state.mode = if app.state.active.is_some() {
             state::Mode::Terminal
         } else {

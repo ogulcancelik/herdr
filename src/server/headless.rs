@@ -1144,6 +1144,15 @@ impl HeadlessServer {
             self.app.state.sidebar_width,
             self.app.state.sidebar_section_split,
             self.app.state.collapsed_space_keys.clone(),
+            // Captured from the authoritative `HostLinkRegistry` (not the
+            // Task 7 display projection) since it is in scope here. The
+            // handoff-import server re-attaches these on the receiving side
+            // (`run_handoff_import_server`), mirroring how `run_server`
+            // re-attaches from a session.json restore, so a live update no
+            // longer silently drops remote host links.
+            crate::persist::HostSnapshot::from_host_ids(
+                self.host_links.iter().map(|link| link.id.0.clone()),
+            ),
         );
 
         let mut handoff_entries = Vec::new();
@@ -1309,23 +1318,29 @@ impl HeadlessServer {
     // bridge thread spawned in `new()`; nothing else sends it.
     // -----------------------------------------------------------------
 
+    /// Core host-attach lifecycle: validate the target, register it in
+    /// `host_links`, allocate a fresh generation, build the transport
+    /// materials once, and spawn the per-host poll loop. Shared by
+    /// `handle_host_attach_api` (`host.attach`) and `restore_attached_hosts`
+    /// (Task 10 session restore at server startup) so there is exactly one
+    /// place that drives this lifecycle -- restore is just a fresh attach
+    /// per persisted host, with no special-casing for an unreachable host
+    /// (it degrades through the normal Connecting -> Reconnecting -> Offline
+    /// path like any other attach).
     #[cfg(unix)]
-    fn handle_host_attach_api(
+    fn attach_host(
         &mut self,
-        id: String,
-        params: api::schema::HostAttachParams,
-    ) -> String {
-        let host = params.host;
+        host: String,
+    ) -> Result<api::schema::HostInfo, (&'static str, String)> {
         if let Err(err) = crate::remote::validate_remote_target(&host) {
-            return host_error_response(id, "invalid_request", err);
+            return Err(("invalid_request", err));
         }
         let link_id = crate::server::host_link::HostLinkId(host.clone());
         if self.host_links.attach(link_id.clone()).is_err() {
-            return host_error_response(
-                id,
+            return Err((
                 "already_attached",
                 format!("host '{host}' is already attached"),
-            );
+            ));
         }
         let generation = self.alloc_host_generation();
         debug!(host = %host, generation, "attaching host link");
@@ -1336,8 +1351,56 @@ impl HeadlessServer {
         let transport = self.build_host_transport_handle(&host);
         self.sync_host_link_display(&link_id);
         self.spawn_host_link_runtime(link_id.clone(), generation, transport);
-        let info = self.host_info_for(&link_id);
-        host_success_response(id, api::schema::ResponseResult::HostAttached { host: info })
+        Ok(self.host_info_for(&link_id))
+    }
+
+    #[cfg(unix)]
+    fn handle_host_attach_api(
+        &mut self,
+        id: String,
+        params: api::schema::HostAttachParams,
+    ) -> String {
+        match self.attach_host(params.host) {
+            Ok(info) => {
+                host_success_response(id, api::schema::ResponseResult::HostAttached { host: info })
+            }
+            Err((code, message)) => host_error_response(id, code, message),
+        }
+    }
+
+    /// Re-attaches every host persisted in the restored session snapshot
+    /// (Task 10), reusing `attach_host` so restore never duplicates the
+    /// `host.attach` lifecycle. Called once from `run_server` right after
+    /// the `HeadlessServer` (and its `host_event_tx` bridge) is constructed.
+    /// An attach failure here (e.g. a host removed from ssh config since the
+    /// session was saved) is logged and skipped -- it does not stop the
+    /// server from starting, matching how host.attach failures never take
+    /// down the whole process.
+    #[cfg(unix)]
+    fn restore_attached_hosts(&mut self, hosts: Vec<crate::persist::HostSnapshot>) {
+        for host in hosts {
+            if let Err((code, message)) = self.attach_host(host.host.clone()) {
+                warn!(
+                    host = %host.host,
+                    code,
+                    message = %message,
+                    "failed to reattach persisted host at restore"
+                );
+            }
+        }
+    }
+
+    /// Non-unix builds have no host-link machinery at all (see
+    /// `HostLinkRegistry`'s module doc); a persisted host list is simply
+    /// dropped with a warning instead of silently vanishing.
+    #[cfg(not(unix))]
+    fn restore_attached_hosts(&mut self, hosts: Vec<crate::persist::HostSnapshot>) {
+        if !hosts.is_empty() {
+            warn!(
+                count = hosts.len(),
+                "host links are only supported on Unix; not reattaching persisted hosts"
+            );
+        }
     }
 
     /// Allocates the next per-attach generation (see
@@ -4630,6 +4693,13 @@ pub fn run_server() -> io::Result<()> {
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
 
+        // Host links (Task 10) must be re-attached AFTER the HeadlessServer
+        // exists -- attaching spawns the per-host poll loop onto
+        // `host_event_tx`, which only exists once the server's event bridge
+        // is running. Take the restored list out of `app` before it moves
+        // into `HeadlessServer::new`.
+        let restored_hosts = std::mem::take(&mut app.restored_hosts);
+
         // Create the headless server.
         let mut server = match HeadlessServer::new(
             app,
@@ -4645,6 +4715,7 @@ pub fn run_server() -> io::Result<()> {
             }
             Err(err) => return Err(err),
         };
+        server.restore_attached_hosts(restored_hosts);
 
         info!(
             api_socket = %api::socket_path().display(),
@@ -4728,6 +4799,10 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         )?;
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
+        // Persisted host links must be re-attached AFTER the HeadlessServer
+        // (and its host_event bridge) exists, so take them out before `app`
+        // moves into `HeadlessServer::new`. Mirrors `run_server`'s ordering.
+        let restored_hosts = std::mem::take(&mut app.restored_hosts);
         crate::server::handoff::report_restored(&mut received.stream)?;
         if std::env::var("HERDR_TEST_HANDOFF_IMPORT_FAIL").as_deref() == Ok("after_restored") {
             return Err(io::Error::other(
@@ -4743,6 +4818,7 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
             Some(api_tx.clone()),
             Some(api_server),
         )?;
+        server.restore_attached_hosts(restored_hosts);
         crate::server::handoff::report_ready(&mut received.stream)?;
         crate::server::handoff::wait_committed(&mut received.stream)?;
         server.app.assume_handoff_ownership();
@@ -4825,7 +4901,14 @@ mod tests {
         let mut app = crate::app::App::new(&config, true, None, api_rx, event_hub);
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
+        test_headless_server_from_app(app)
+    }
 
+    /// Wraps an already-built `App` in a test `HeadlessServer` (socket +
+    /// host-event bridge wired up like `new()`). Lets tests exercise a
+    /// server whose app came from something other than `App::new` -- e.g.
+    /// the handoff-import path's `App::new_from_handoff`.
+    fn test_headless_server_from_app(app: crate::app::App) -> HeadlessServer {
         let dir = std::env::temp_dir().join(format!(
             "hh-{}-{}",
             std::process::id(),
@@ -9719,6 +9802,240 @@ next_tab = ""
 
             server.handle_host_detach_api(
                 "test:detach:2".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        // -------------------------------------------------------------
+        // Task 10: persistence + restore of host links
+        // -------------------------------------------------------------
+
+        /// Spawns a fake remote herdr endpoint that behaves like a freshly
+        /// attached host: answers exactly one `pane.list` with `pane_count`
+        /// fake panes, then acks `events.subscribe` and blocks until the
+        /// client closes the connection. Factored out of
+        /// `host_attach_reports_connected_and_pane_count_then_detach_clears_it`'s
+        /// inline remote thread so the Task 10 tests below can reuse the
+        /// same fake-remote shape without touching that approved test.
+        fn spawn_fake_host_remote(
+            sock: std::path::PathBuf,
+            pane_count: usize,
+        ) -> std::thread::JoinHandle<()> {
+            std::thread::spawn(move || {
+                let listener = UnixListener::bind(&sock).unwrap();
+
+                let (mut conn, _) = listener.accept().unwrap();
+                let request = read_fake_request(&mut conn);
+                assert!(matches!(request.method, api::schema::Method::PaneList(_)));
+                write_fake_line(
+                    &mut conn,
+                    &api::schema::SuccessResponse {
+                        id: request.id,
+                        result: api::schema::ResponseResult::PaneList {
+                            panes: (0..pane_count)
+                                .map(|i| fake_pane(&format!("w1:p{i}")))
+                                .collect(),
+                        },
+                    },
+                );
+                conn.shutdown(std::net::Shutdown::Both).ok();
+                drop(conn);
+
+                let (mut conn, _) = listener.accept().unwrap();
+                let request = read_fake_request(&mut conn);
+                assert!(matches!(
+                    request.method,
+                    api::schema::Method::EventsSubscribe(_)
+                ));
+                write_fake_line(
+                    &mut conn,
+                    &api::schema::SuccessResponse {
+                        id: request.id,
+                        result: api::schema::ResponseResult::SubscriptionStarted {},
+                    },
+                );
+                let mut buf = [0u8; 1];
+                let _ = conn.read(&mut buf);
+            })
+        }
+
+        /// Builds the `hosts` list `capture()` would save right now, the
+        /// same way `perform_live_handoff` does: read back from the
+        /// authoritative `HostLinkRegistry` (which the server, unlike `App`,
+        /// can see directly).
+        fn captured_hosts(server: &HeadlessServer) -> Vec<String> {
+            crate::persist::capture(
+                &server.app.state.workspaces,
+                &server.app.state.terminals,
+                &server.app.terminal_runtimes,
+                server.app.state.active,
+                server.app.state.selected,
+                server.app.state.sidebar_width,
+                server.app.state.sidebar_section_split,
+                server.app.state.collapsed_space_keys.clone(),
+                crate::persist::HostSnapshot::from_host_ids(
+                    server.host_links.iter().map(|link| link.id.0.clone()),
+                ),
+            )
+            .hosts
+            .into_iter()
+            .map(|h| h.host)
+            .collect()
+        }
+
+        #[test]
+        fn capture_saves_only_currently_attached_hosts() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("host-save");
+            fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("remote-api.sock");
+
+            let remote = spawn_fake_host_remote(sock.clone(), 1);
+            use_fake_remote_socket(&mut server, sock);
+
+            assert!(captured_hosts(&server).is_empty());
+
+            server.handle_host_attach_api(
+                "test:host:attach".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            wait_for_host_state(&mut server, "workbox", "connected");
+
+            assert_eq!(captured_hosts(&server), vec!["workbox".to_string()]);
+
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+
+            // A detached host must NOT persist.
+            assert!(captured_hosts(&server).is_empty());
+
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn restore_reattaches_persisted_hosts_through_the_attach_lifecycle() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("host-restore");
+            fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("remote-api.sock");
+
+            let remote = spawn_fake_host_remote(sock.clone(), 1);
+            use_fake_remote_socket(&mut server, sock);
+
+            // Mirrors what `run_server` does at startup: a session snapshot
+            // loaded from disk carries a persisted host list, re-attached
+            // through the exact same lifecycle `host.attach` uses -- no
+            // separate restore-specific attach path.
+            server.restore_attached_hosts(vec![crate::persist::HostSnapshot {
+                host: "workbox".to_string(),
+            }]);
+
+            let entry = wait_for_host_state(&mut server, "workbox", "connected");
+            assert_eq!(entry["pane_count"], 1);
+            assert_eq!(captured_hosts(&server), vec!["workbox".to_string()]);
+
+            // Detach so the fake remote's held-open connection B closes and
+            // its thread can be joined -- the per-host poll loop owns that
+            // socket until the link is torn down, so without this the remote
+            // thread's blocking `read` (and thus `join`) never returns.
+            // Mirrors the attach-path test's cleanup.
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn restore_of_an_unreachable_host_degrades_like_any_attach() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("host-restore-unreachable");
+            fs::create_dir_all(&dir).unwrap();
+            // No listener bound at this path -- the transport's connection
+            // attempts fail immediately, exactly like attaching to a host
+            // that is down. There is no special restore case: the link just
+            // rides the normal Connecting -> Reconnecting -> Offline path.
+            let sock = dir.join("nobody-listening.sock");
+            use_fake_remote_socket(&mut server, sock);
+
+            server.restore_attached_hosts(vec![crate::persist::HostSnapshot {
+                host: "ghost-box".to_string(),
+            }]);
+
+            wait_for_host_state(&mut server, "ghost-box", "offline");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn handoff_import_reattaches_persisted_hosts() {
+            // `run_handoff_import_server` is a process entry point that can't
+            // run in-process, so this mirrors its exact ordering: build the
+            // receiving `App` from a handoff snapshot carrying a persisted
+            // host list, take the restored hosts out BEFORE the server (and
+            // its host-event bridge) is built, then re-attach AFTER -- the
+            // same take-before-new / restore-after-new shape `run_server`
+            // uses. RED before the receive-side wire (`new_from_handoff`
+            // left `restored_hosts` empty, so nothing re-attached and this
+            // timed out); GREEN after.
+            let config = crate::config::Config::default();
+            let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+            let snapshot = crate::persist::SessionSnapshot {
+                version: 0,
+                workspaces: vec![],
+                active: None,
+                selected: 0,
+                sidebar_width: None,
+                sidebar_section_split: None,
+                collapsed_space_keys: Default::default(),
+                hosts: vec![crate::persist::HostSnapshot {
+                    host: "workbox".to_string(),
+                }],
+            };
+            let mut imports = HashMap::new();
+            let mut app = crate::app::App::new_from_handoff(
+                &config,
+                None,
+                api_rx,
+                api::EventHub::default(),
+                &snapshot,
+                &mut imports,
+            )
+            .expect("new_from_handoff should succeed for an empty-workspace snapshot");
+
+            // The receive-side wiring under test: new_from_handoff must carry
+            // the persisted host list forward into `restored_hosts`.
+            let restored_hosts = std::mem::take(&mut app.restored_hosts);
+
+            let mut server = test_headless_server_from_app(app);
+            let dir = unique_host_test_dir("host-handoff-restore");
+            fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("remote-api.sock");
+            let remote = spawn_fake_host_remote(sock.clone(), 1);
+            use_fake_remote_socket(&mut server, sock);
+
+            server.restore_attached_hosts(restored_hosts);
+
+            let entry = wait_for_host_state(&mut server, "workbox", "connected");
+            assert_eq!(entry["pane_count"], 1);
+            assert_eq!(captured_hosts(&server), vec!["workbox".to_string()]);
+
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
                 api::schema::HostDetachParams {
                     host: "workbox".to_string(),
                 },

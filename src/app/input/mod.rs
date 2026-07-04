@@ -639,6 +639,7 @@ fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
         state.sidebar_width,
         state.sidebar_section_split,
         state.collapsed_space_keys.clone(),
+        crate::persist::HostSnapshot::from_display_links(&state.host_links),
     )
 }
 

@@ -26,6 +26,57 @@ pub struct SessionSnapshot {
     pub sidebar_section_split: Option<f32>,
     #[serde(default)]
     pub collapsed_space_keys: std::collections::HashSet<String>,
+    /// Attached host links (Task 10). Additive + `#[serde(default)]`, so a
+    /// session file saved before multi-host support loads with `hosts: []`
+    /// -- no version bump needed (matches the established policy: this
+    /// snapshot format only bumps `SNAPSHOT_VERSION` for breaking changes
+    /// that require a migration, e.g. the pre-tabs -> tabs restructuring;
+    /// every other additive field here, like `sidebar_width` or
+    /// `collapsed_space_keys`, landed without bumping it).
+    #[serde(default)]
+    pub hosts: Vec<HostSnapshot>,
+}
+
+/// One persisted host-link alias. Only the target the user asked to attach
+/// is persisted -- remote pane layout is NOT part of this (the remote
+/// server owns it; panes re-adopt through the host poll loop's first
+/// `Snapshot` after restore re-attaches).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostSnapshot {
+    pub host: String,
+}
+
+impl HostSnapshot {
+    /// The single place a persisted host list is built from a set of host
+    /// aliases. Every save-point routes through here so `HostSnapshot`'s
+    /// shape has exactly one definition. Each caller feeds the most
+    /// authoritative host-id source it can see:
+    /// - server save-points (`HeadlessServer`) pass the `HostLinkRegistry`
+    ///   ids directly (`HostLinkId -> String` at the boundary);
+    /// - the App-level save sits below the server in the dep graph and can
+    ///   only see the Task 7 display projection, so it passes that map's
+    ///   keys via [`HostSnapshot::from_display_links`].
+    pub fn from_host_ids<I, S>(hosts: I) -> Vec<HostSnapshot>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        hosts
+            .into_iter()
+            .map(|host| HostSnapshot { host: host.into() })
+            .collect()
+    }
+
+    /// Convenience for the App-level save, which reads the Task 7 display
+    /// map keyed by [`crate::terminal::TerminalHostTag`] -- the only host
+    /// view `App` can reach (`TerminalHostTag -> String` at the boundary).
+    /// Generic over the value so `persist` need not depend on the app-layer
+    /// `HostLinkDisplayState` type.
+    pub fn from_display_links<V>(
+        links: &std::collections::BTreeMap<crate::terminal::TerminalHostTag, V>,
+    ) -> Vec<HostSnapshot> {
+        Self::from_host_ids(links.keys().map(|tag| tag.as_str().to_string()))
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -182,6 +233,8 @@ struct RawSessionSnapshot {
     sidebar_section_split: Option<f32>,
     #[serde(default)]
     collapsed_space_keys: std::collections::HashSet<String>,
+    #[serde(default)]
+    hosts: Vec<HostSnapshot>,
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
@@ -197,6 +250,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         sidebar_width: raw.sidebar_width,
         sidebar_section_split: raw.sidebar_section_split,
         collapsed_space_keys: raw.collapsed_space_keys,
+        hosts: raw.hosts,
     })
 }
 
@@ -259,6 +313,7 @@ pub fn capture(
     sidebar_width: u16,
     sidebar_section_split: f32,
     collapsed_space_keys: std::collections::HashSet<String>,
+    hosts: Vec<HostSnapshot>,
 ) -> SessionSnapshot {
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
@@ -271,6 +326,7 @@ pub fn capture(
         sidebar_width: Some(sidebar_width),
         sidebar_section_split: Some(sidebar_section_split),
         collapsed_space_keys,
+        hosts,
     }
 }
 
@@ -539,6 +595,7 @@ mod tests {
             state.sidebar_width,
             state.sidebar_section_split,
             state.collapsed_space_keys.clone(),
+            HostSnapshot::from_display_links(&state.host_links),
         )
     }
 
@@ -566,6 +623,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            hosts: vec![],
         };
         let json = serde_json::to_string(&snap).unwrap();
         let restored = parse_snapshot(&json).unwrap();
@@ -651,6 +709,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            hosts: vec![],
             version: SNAPSHOT_VERSION,
         };
 
@@ -1206,6 +1265,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            hosts: vec![],
         };
 
         let json = serde_json::to_string(&snap).unwrap();
@@ -1214,6 +1274,87 @@ mod tests {
         assert_eq!(
             restored.workspaces[0].tabs[0].panes[&0].cwd,
             PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test")
+        );
+    }
+
+    #[test]
+    fn old_session_without_hosts_field_loads_with_empty_hosts() {
+        // Canned current-version JSON that OMITS `hosts` entirely -- this is
+        // exactly what a session.json saved before multi-host support looks
+        // like. `#[serde(default)]` must let it load with `hosts: vec![]`
+        // rather than failing to parse.
+        let json = format!(
+            r#"{{
+                "version": {SNAPSHOT_VERSION},
+                "workspaces": [],
+                "active": null,
+                "selected": 0,
+                "sidebar_width": 26,
+                "sidebar_section_split": 0.5,
+                "collapsed_space_keys": []
+            }}"#
+        );
+
+        let restored = parse_snapshot(&json).unwrap();
+
+        assert!(restored.hosts.is_empty());
+    }
+
+    #[test]
+    fn hosts_round_trip_through_save_and_load() {
+        let snap = SessionSnapshot {
+            version: SNAPSHOT_VERSION,
+            workspaces: vec![],
+            active: None,
+            selected: 0,
+            sidebar_width: Some(26),
+            sidebar_section_split: Some(0.5),
+            collapsed_space_keys: std::collections::HashSet::new(),
+            hosts: vec![
+                HostSnapshot {
+                    host: "workbox".to_string(),
+                },
+                HostSnapshot {
+                    host: "gpu-box".to_string(),
+                },
+            ],
+        };
+
+        let json = serde_json::to_string(&snap).unwrap();
+        let restored = parse_snapshot(&json).unwrap();
+
+        assert_eq!(
+            restored.hosts,
+            vec![
+                HostSnapshot {
+                    host: "workbox".to_string()
+                },
+                HostSnapshot {
+                    host: "gpu-box".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn capture_captures_only_currently_attached_hosts() {
+        let mut state = state_with_workspaces(&["one"]);
+        state.host_links.insert(
+            crate::terminal::TerminalHostTag::new("workbox"),
+            crate::app::state::HostLinkDisplayState::Connected,
+        );
+        state.host_links.insert(
+            crate::terminal::TerminalHostTag::new("offline-box"),
+            crate::app::state::HostLinkDisplayState::Offline,
+        );
+
+        let snapshot = capture_from_state(&state);
+
+        let mut hosts: Vec<String> = snapshot.hosts.into_iter().map(|h| h.host).collect();
+        hosts.sort();
+        assert_eq!(
+            hosts,
+            vec!["offline-box".to_string(), "workbox".to_string()]
         );
     }
 }
