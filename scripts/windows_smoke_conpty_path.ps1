@@ -85,12 +85,17 @@ try {
     }
 
     Invoke-Checked $exe @("agent", "start", "smoke", "--", $env:ComSpec, "/K", "dir")
-    Start-Sleep -Seconds 2
-    $read = & $exe agent read smoke --source recent --lines 40 --format text
-    if ($LASTEXITCODE -ne 0) {
-        throw "command failed with exit code $LASTEXITCODE`: $exe agent read smoke"
-    }
-    $text = $read -join "`n"
+    $text = ""
+    $deadline = (Get-Date).AddSeconds(15)
+    do {
+        Start-Sleep -Milliseconds 500
+        $read = & $exe agent read smoke --source recent --lines 40 --format text 2>&1
+        $text = $read -join "`n"
+        if ($LASTEXITCODE -eq 0 -and $text -match "File\(s\)" -and $text -match "Dir\(s\)") {
+            break
+        }
+    } while ((Get-Date) -lt $deadline)
+
     if ($text -notmatch "File\(s\)" -or $text -notmatch "Dir\(s\)") {
         throw "pane read did not include cmd.exe directory output: $text"
     }
