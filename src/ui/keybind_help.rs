@@ -150,6 +150,14 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.focus_pane_down), "focus pane down"),
         help_entry(keybind_label(&kb.focus_pane_up), "focus pane up"),
         help_entry(keybind_label(&kb.focus_pane_right), "focus pane right"),
+        help_entry(
+            keybind_label(&kb.focus_pane_or_tab_left),
+            "focus pane left or previous tab",
+        ),
+        help_entry(
+            keybind_label(&kb.focus_pane_or_tab_right),
+            "focus pane right or next tab",
+        ),
         help_entry(keybind_label(&kb.cycle_pane_next), "cycle pane next"),
         help_entry(
             keybind_label(&kb.cycle_pane_previous),

@@ -79,8 +79,7 @@ impl App {
             return;
         }
 
-        if let Some(action) = navigate_reserved_action_for_key(&self.state, raw_key) {
-            self.execute_tui_navigate_action(action, ActionContext::Navigate);
+        if handle_navigate_reserved_key(&mut self.state, raw_key) {
             return;
         }
 
@@ -271,6 +270,26 @@ impl App {
             NavigateAction::FocusPaneUp => self.focus_pane_direction_via_api(NavDirection::Up),
             NavigateAction::FocusPaneRight => {
                 self.focus_pane_direction_via_api(NavDirection::Right)
+            }
+            NavigateAction::FocusPaneOrTabLeft => {
+                if let Some((ws_idx, target)) =
+                    self.directional_pane_target_from_view(NavDirection::Left)
+                {
+                    self.focus_pane_internal_via_api(ws_idx, target);
+                } else if let Some(tab_idx) = self.relative_tab(-1) {
+                    self.focus_tab_idx_via_api(tab_idx);
+                    leave_navigate_mode(&mut self.state);
+                }
+            }
+            NavigateAction::FocusPaneOrTabRight => {
+                if let Some((ws_idx, target)) =
+                    self.directional_pane_target_from_view(NavDirection::Right)
+                {
+                    self.focus_pane_internal_via_api(ws_idx, target);
+                } else if let Some(tab_idx) = self.relative_tab(1) {
+                    self.focus_tab_idx_via_api(tab_idx);
+                    leave_navigate_mode(&mut self.state);
+                }
             }
             NavigateAction::SwapPaneLeft => {
                 self.swap_pane_direction_via_api(NavDirection::Left);
@@ -1111,57 +1130,6 @@ pub(super) fn handle_navigate_reserved_key(state: &mut AppState, key: TerminalKe
     false
 }
 
-fn navigate_reserved_action_for_key(state: &AppState, key: TerminalKey) -> Option<NavigateAction> {
-    let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
-    if modifiers.is_empty() {
-        match code {
-            KeyCode::Enter => {
-                return (!state.workspaces.is_empty()).then_some(NavigateAction::SwitchWorkspace(
-                    state
-                        .visible_workspace_order()
-                        .iter()
-                        .position(|idx| *idx == state.selected)
-                        .unwrap_or(state.selected),
-                ));
-            }
-            KeyCode::Char(c @ '1'..='9') => {
-                return Some(NavigateAction::SwitchWorkspace(
-                    (c as usize) - ('1' as usize),
-                ));
-            }
-            KeyCode::Tab => return Some(NavigateAction::CyclePaneNext),
-            KeyCode::BackTab => return Some(NavigateAction::CyclePanePrevious),
-            KeyCode::Left => return Some(NavigateAction::FocusPaneLeft),
-            KeyCode::Right => return Some(NavigateAction::FocusPaneRight),
-            _ => {}
-        }
-    }
-
-    if state.keybinds.navigate.workspace_up.matches_direct_key(key)
-        || state
-            .keybinds
-            .navigate
-            .workspace_down
-            .matches_direct_key(key)
-    {
-        return None;
-    }
-    if state.keybinds.navigate.pane_left.matches_direct_key(key) {
-        return Some(NavigateAction::FocusPaneLeft);
-    }
-    if state.keybinds.navigate.pane_down.matches_direct_key(key) {
-        return Some(NavigateAction::FocusPaneDown);
-    }
-    if state.keybinds.navigate.pane_up.matches_direct_key(key) {
-        return Some(NavigateAction::FocusPaneUp);
-    }
-    if state.keybinds.navigate.pane_right.matches_direct_key(key) {
-        return Some(NavigateAction::FocusPaneRight);
-    }
-
-    None
-}
-
 pub(super) fn api_pane_direction(direction: NavDirection) -> crate::api::schema::PaneDirection {
     match direction {
         NavDirection::Left => crate::api::schema::PaneDirection::Left,
@@ -1222,6 +1190,8 @@ pub(crate) enum NavigateAction {
     FocusPaneDown,
     FocusPaneUp,
     FocusPaneRight,
+    FocusPaneOrTabLeft,
+    FocusPaneOrTabRight,
     SwapPaneLeft,
     SwapPaneDown,
     SwapPaneUp,
@@ -1328,6 +1298,14 @@ fn action_for_key(
         (&kb.focus_pane_down, NavigateAction::FocusPaneDown),
         (&kb.focus_pane_up, NavigateAction::FocusPaneUp),
         (&kb.focus_pane_right, NavigateAction::FocusPaneRight),
+        (
+            &kb.focus_pane_or_tab_left,
+            NavigateAction::FocusPaneOrTabLeft,
+        ),
+        (
+            &kb.focus_pane_or_tab_right,
+            NavigateAction::FocusPaneOrTabRight,
+        ),
         (&kb.swap_pane_left, NavigateAction::SwapPaneLeft),
         (&kb.swap_pane_down, NavigateAction::SwapPaneDown),
         (&kb.swap_pane_up, NavigateAction::SwapPaneUp),
@@ -1364,6 +1342,8 @@ fn navigate_mode_action_for_key(state: &AppState, key: TerminalKey) -> Option<Na
             | NavigateAction::FocusPaneDown
             | NavigateAction::FocusPaneUp
             | NavigateAction::FocusPaneRight
+            | NavigateAction::FocusPaneOrTabLeft
+            | NavigateAction::FocusPaneOrTabRight
     ) {
         return None;
     }
@@ -1509,6 +1489,12 @@ pub(super) fn execute_navigate_action_in_context(
         NavigateAction::FocusPaneDown => state.navigate_pane(NavDirection::Down),
         NavigateAction::FocusPaneUp => state.navigate_pane(NavDirection::Up),
         NavigateAction::FocusPaneRight => state.navigate_pane(NavDirection::Right),
+        NavigateAction::FocusPaneOrTabLeft => {
+            state.navigate_pane_or_tab_horizontal(NavDirection::Left)
+        }
+        NavigateAction::FocusPaneOrTabRight => {
+            state.navigate_pane_or_tab_horizontal(NavDirection::Right)
+        }
         NavigateAction::SwapPaneLeft => {
             state.swap_pane(NavDirection::Left);
             leave_navigate_mode(state);

@@ -322,6 +322,8 @@ pub struct Keybinds {
     pub focus_pane_down: ActionKeybinds,
     pub focus_pane_up: ActionKeybinds,
     pub focus_pane_right: ActionKeybinds,
+    pub focus_pane_or_tab_left: ActionKeybinds,
+    pub focus_pane_or_tab_right: ActionKeybinds,
     pub swap_pane_left: ActionKeybinds,
     pub swap_pane_down: ActionKeybinds,
     pub swap_pane_up: ActionKeybinds,
@@ -484,6 +486,8 @@ impl Config {
             focus_pane_down: empty_action!(),
             focus_pane_up: empty_action!(),
             focus_pane_right: empty_action!(),
+            focus_pane_or_tab_left: empty_action!(),
+            focus_pane_or_tab_right: empty_action!(),
             swap_pane_left: empty_action!(),
             swap_pane_down: empty_action!(),
             swap_pane_up: empty_action!(),
@@ -625,6 +629,16 @@ impl Config {
             apply_action!(keybinds.focus_pane_down, focus_pane_down, source);
             apply_action!(keybinds.focus_pane_up, focus_pane_up, source);
             apply_action!(keybinds.focus_pane_right, focus_pane_right, source);
+            apply_action!(
+                keybinds.focus_pane_or_tab_left,
+                focus_pane_or_tab_left,
+                source
+            );
+            apply_action!(
+                keybinds.focus_pane_or_tab_right,
+                focus_pane_or_tab_right,
+                source
+            );
             apply_action!(keybinds.swap_pane_left, swap_pane_left, source);
             apply_action!(keybinds.swap_pane_down, swap_pane_down, source);
             apply_action!(keybinds.swap_pane_up, swap_pane_up, source);

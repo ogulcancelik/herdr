@@ -389,6 +389,10 @@ pub struct KeysConfig {
     pub focus_pane_up: BindingConfig,
     /// Focus the pane to the right. Default: "prefix+l".
     pub focus_pane_right: BindingConfig,
+    /// Focus pane left in tab, or previous tab at edge (Zellij-style). Unset by default.
+    pub focus_pane_or_tab_left: BindingConfig,
+    /// Focus pane right in tab, or next tab at edge (Zellij-style). Unset by default.
+    pub focus_pane_or_tab_right: BindingConfig,
     /// Swap the focused pane with the pane to the left. Default: "prefix+shift+h".
     pub swap_pane_left: BindingConfig,
     /// Swap the focused pane with the pane below. Default: "prefix+shift+j".
@@ -509,6 +513,10 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     focus_pane_right: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    focus_pane_or_tab_left: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    focus_pane_or_tab_right: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     swap_pane_left: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     swap_pane_down: Option<BindingConfig>,
@@ -597,6 +605,8 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(focus_pane_down);
         apply_field!(focus_pane_up);
         apply_field!(focus_pane_right);
+        apply_field!(focus_pane_or_tab_left);
+        apply_field!(focus_pane_or_tab_right);
         apply_field!(swap_pane_left);
         apply_field!(swap_pane_down);
         apply_field!(swap_pane_up);
@@ -695,6 +705,8 @@ impl KeysConfig {
         copy_effective_action_field!(focus_pane_down, keybinds.focus_pane_down);
         copy_effective_action_field!(focus_pane_up, keybinds.focus_pane_up);
         copy_effective_action_field!(focus_pane_right, keybinds.focus_pane_right);
+        copy_effective_action_field!(focus_pane_or_tab_left, keybinds.focus_pane_or_tab_left);
+        copy_effective_action_field!(focus_pane_or_tab_right, keybinds.focus_pane_or_tab_right);
         copy_effective_action_field!(swap_pane_left, keybinds.swap_pane_left);
         copy_effective_action_field!(swap_pane_down, keybinds.swap_pane_down);
         copy_effective_action_field!(swap_pane_up, keybinds.swap_pane_up);
@@ -952,6 +964,8 @@ impl Default for KeysConfig {
             focus_pane_down: BindingConfig::one("prefix+j"),
             focus_pane_up: BindingConfig::one("prefix+k"),
             focus_pane_right: BindingConfig::one("prefix+l"),
+            focus_pane_or_tab_left: BindingConfig::empty(),
+            focus_pane_or_tab_right: BindingConfig::empty(),
             swap_pane_left: BindingConfig::one("prefix+shift+h"),
             swap_pane_down: BindingConfig::one("prefix+shift+j"),
             swap_pane_up: BindingConfig::one("prefix+shift+k"),
