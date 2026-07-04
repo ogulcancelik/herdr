@@ -514,6 +514,7 @@ fn main() -> io::Result<()> {
         println!("       herdr tab <subcommand> ...");
         println!("       herdr notification <subcommand> ...");
         println!("       herdr agent <subcommand> ...");
+        println!("       herdr host <subcommand> ...");
         println!("       herdr pane <subcommand> ...");
         println!("       herdr wait <subcommand> ...");
         println!("       herdr session <subcommand> ...");
@@ -568,6 +569,10 @@ fn main() -> io::Result<()> {
             (
                 "herdr agent <subcommand>",
                 "Agent/terminal helpers over the socket API",
+            ),
+            (
+                "herdr host <subcommand>",
+                "Attach, list, and detach remote hosts over SSH",
             ),
             (
                 "herdr pane <subcommand>",

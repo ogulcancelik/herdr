@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::agents::AgentInfo;
 use super::common::{ClientWindowTitleReason, NotificationShowReason};
 use super::events::EventEnvelope;
+use super::hosts::HostInfo;
 use super::integrations::{
     IntegrationInstallResult, IntegrationTarget, IntegrationUninstallResult,
 };
@@ -103,6 +104,16 @@ pub enum ResponseResult {
     },
     AgentList {
         agents: Vec<AgentInfo>,
+    },
+    HostAttached {
+        host: HostInfo,
+    },
+    HostList {
+        hosts: Vec<HostInfo>,
+    },
+    HostDetached {
+        host: String,
+        detached: bool,
     },
     PaneInfo {
         pane: PaneInfo,

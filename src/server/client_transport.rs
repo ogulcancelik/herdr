@@ -344,6 +344,16 @@ pub(crate) enum ServerEvent {
     ClientDisconnected { client_id: u64 },
     /// A client writer drained its render slot and can accept another render.
     ClientWriterDrained { client_id: u64 },
+    /// A host-link background thread (`crate::server::remote_pane::
+    /// spawn_host_event_loop`) produced a `HostEvent`, stamped with the
+    /// generation of the loop that emitted it (see `HostEventEnvelope`).
+    /// Bridged from a plain `std::sync::mpsc` channel by one long-lived
+    /// forwarding thread per server (see `HeadlessServer::new`), since
+    /// `spawn_host_event_loop`'s sender is synchronous/thread-based while
+    /// this channel is the async one the main loop already drains every
+    /// iteration.
+    #[cfg(unix)]
+    HostEvent(crate::server::remote_pane::HostEventEnvelope),
     /// Ctrl+C or external shutdown signal received.
     QuitSignal,
 }

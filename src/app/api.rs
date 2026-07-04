@@ -812,6 +812,23 @@ impl App {
                 };
                 return serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
             }
+            Method::HostAttach(_) | Method::HostList(_) | Method::HostDetach(_) => {
+                // Host-link state (HostLinkRegistry/RemotePaneRegistry) lives
+                // in the server layer, which sits above `app` in the
+                // dependency graph (app cannot import server types), so
+                // these are intercepted by HeadlessServer before it ever
+                // reaches this generic dispatch. In plain app-mode there is
+                // no headless server to own the link, so report that
+                // plainly instead of silently no-oping.
+                let response = ErrorResponse {
+                    id: request.id,
+                    error: ErrorBody {
+                        code: "unsupported_in_app_mode".into(),
+                        message: "host commands are only supported by the headless server".into(),
+                    },
+                };
+                return serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
+            }
             Method::ServerReloadConfig(_) => {
                 let report = self.reload_config();
                 SuccessResponse {

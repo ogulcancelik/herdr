@@ -38,10 +38,9 @@ pub(crate) struct RemotePaneRegistry {
     by_local: HashMap<PaneId, RemotePaneKey>,
 }
 
-// Not driven outside tests yet; the host-event loop (this file, below) and
-// the server main-loop consumer (Task 7-9) will call these through the real
-// adoption/teardown lifecycle.
-#[allow(dead_code)]
+// Driven by the server's host-event consumer (src/server/headless.rs, Task
+// 9): `adopt`/`release`/`release_host`/`local_for`/`panes_for_host` are all
+// called from `HeadlessServer::handle_host_event` and `handle_host_list_api`.
 impl RemotePaneRegistry {
     /// Adopt: returns existing local id if already adopted (idempotent).
     pub(crate) fn adopt(&mut self, key: RemotePaneKey, alloc: impl FnOnce() -> PaneId) -> PaneId {
@@ -66,10 +65,6 @@ impl RemotePaneRegistry {
         self.by_key.retain(|key, _| &key.host != host);
         self.by_local.retain(|local, _| !released.contains(local));
         released.into_iter().collect()
-    }
-
-    pub(crate) fn key_for(&self, local: PaneId) -> Option<&RemotePaneKey> {
-        self.by_local.get(&local)
     }
 
     /// Drop one adopted pane (e.g. on a remote `pane.closed`), returning its
@@ -100,6 +95,13 @@ impl RemotePaneRegistry {
             .map(|(key, local)| (key, *local))
     }
 
+    // Test-only helpers: not reachable from production code paths.
+    #[allow(dead_code)]
+    pub(crate) fn key_for(&self, local: PaneId) -> Option<&RemotePaneKey> {
+        self.by_local.get(&local)
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn assert_bijection_for_test(&self) {
         assert_eq!(
             self.by_key.len(),
@@ -126,7 +128,13 @@ impl RemotePaneRegistry {
 /// what adoption needs: identity, the status to seed with, and the display
 /// metadata the sidebar presents for a pane (label/agent/title and friends,
 /// straight from `PaneInfo`).
-// Consumed by the server host-event loop integration (Task 7-9).
+///
+/// The Task 9 host-event consumer (`src/server/headless.rs`) reads
+/// `remote_pane_id` (to key the `RemotePaneRegistry` bijection) but has
+/// nowhere to route `agent_status`/`label`/`agent`/`title`/`display_agent`/
+/// `custom_status` yet -- that needs a host-tagged `TerminalState` per
+/// adopted pane, which Task 9 deliberately defers (see `HostEvent::PaneClosed`
+/// and `StatusChanged` handling in `HeadlessServer::handle_host_event`).
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemotePaneInfo {
@@ -177,8 +185,12 @@ impl From<crate::api::schema::PaneInfo> for RemotePaneInfo {
 /// per-pane status subscriptions covering the new pane set (the consumer's
 /// snapshot reconciliation retires ids that vanished). That internal
 /// refresh is not a link failure and emits no `LinkDown`.
-// Consumed by the server host-event loop integration (Task 7-9).
-#[allow(dead_code)]
+/// `Snapshot`/`StatusChanged`/`PaneClosed`/`LinkDown` are consumed by
+/// `HeadlessServer::handle_host_event` (Task 9). `TerminalBytes`/
+/// `AttachFailed` are only ever constructed by `RemotePaneAttach`'s reader
+/// thread, which nothing spawns yet (no visibility hook wires focus changes
+/// to `RemotePaneAttach::attach` -- see that type's doc comment); each stays
+/// individually `#[allow(dead_code)]` below until Task 9b wires that seam.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HostEvent {
     Snapshot {
@@ -214,6 +226,7 @@ pub(crate) enum HostEvent {
     /// from the `TerminalFrame` are deliberately dropped:
     /// `process_pty_bytes` is a pure ANSI byte sink that reconstructs a full
     /// grid from the diff stream itself.
+    #[allow(dead_code)] // only constructed by run_attach_reader; see enum doc
     TerminalBytes {
         host: HostLinkId,
         local_pane: PaneId,
@@ -230,11 +243,66 @@ pub(crate) enum HostEvent {
     /// that has since closed. Task 9 reacts (release the adopted pane, or
     /// re-fetch the snapshot); a mid-stream `ServerShutdown` never produces
     /// this.
+    #[allow(dead_code)] // only constructed by run_attach_reader; see enum doc
     AttachFailed {
         host: HostLinkId,
         local_pane: PaneId,
         reason: Option<String>,
     },
+}
+
+impl HostEvent {
+    /// The host link every variant carries. Lets the single consumer look up
+    /// the emitting link's current generation without matching each arm.
+    pub(crate) fn host(&self) -> &HostLinkId {
+        match self {
+            HostEvent::Snapshot { host, .. }
+            | HostEvent::StatusChanged { host, .. }
+            | HostEvent::PaneClosed { host, .. }
+            | HostEvent::LinkDown { host }
+            | HostEvent::TerminalBytes { host, .. }
+            | HostEvent::AttachFailed { host, .. } => host,
+        }
+    }
+}
+
+/// A `HostEvent` stamped with the generation of the loop that emitted it.
+///
+/// The server hands each spawned per-host loop a fresh `u64` generation
+/// (bumped on every `host.attach`) and drops any envelope whose generation
+/// no longer matches the link's current one. This closes the detach+reattach
+/// race: a `Snapshot` the *old* loop sent just before `stop()` was observed
+/// (`events_tx.send` is not itself gated on the stop flag) can still be
+/// sitting in the channel when the *same* alias is re-attached; without the
+/// generation stamp that stale snapshot would reconcile against the new
+/// generation's registry (and, once frame streaming lands, route the old
+/// generation's pane ids to the wrong terminal after a remote restart
+/// re-mints ids from zero). Wrapping the event -- rather than threading a
+/// field through every `HostEvent` variant -- keeps the variants unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostEventEnvelope {
+    pub(crate) generation: u64,
+    pub(crate) event: HostEvent,
+}
+
+/// The emitting side of the generation-stamped channel: a per-loop clone-able
+/// wrapper that stamps every `HostEvent` with the loop's generation before it
+/// reaches the shared server bridge. `send` mirrors `mpsc::Sender::send`'s
+/// `Result` so existing `.is_err()` "consumer gone" checks keep working
+/// unchanged.
+#[derive(Clone)]
+pub(crate) struct HostEventSink {
+    generation: u64,
+    tx: mpsc::Sender<HostEventEnvelope>,
+}
+
+impl HostEventSink {
+    fn send(&self, event: HostEvent) -> Result<(), mpsc::SendError<HostEventEnvelope>> {
+        self.tx.send(HostEventEnvelope {
+            generation: self.generation,
+            event,
+        })
+    }
 }
 
 /// Tracks the closer for whichever transport channel the loop currently has
@@ -308,14 +376,13 @@ impl StopHandle {
 /// `host_transport`'s `closer_unblocks_a_reader_stuck_in_read` test for the
 /// underlying proof that closing a `LinkChannel` does this); `join()` waits
 /// for the thread to actually exit.
-// Consumed by the server host-event loop integration (Task 7-9).
-#[allow(dead_code)]
+/// Owned by `HeadlessServer` (Task 9) per attached host; `stop()`+`join()`
+/// on detach or before a reconnect respawn.
 pub(crate) struct HostEventLoopHandle {
     thread: std::thread::JoinHandle<()>,
     stop: Arc<StopHandle>,
 }
 
-#[allow(dead_code)]
 impl HostEventLoopHandle {
     pub(crate) fn stop(&self) {
         self.stop.stop();
@@ -339,17 +406,27 @@ impl HostEventLoopHandle {
 /// failure just emits `LinkDown` and the thread exits. EOF before the first
 /// successful response is a connect failure; EOF after is a link drop --
 /// either way, `LinkDown` and exit.
-// Consumed by the server host-event loop integration (Task 7-9).
-#[allow(dead_code)]
+///
+/// Called by `HeadlessServer` (Task 9) on `host.attach`, and again on each
+/// reconnect attempt after a `LinkDown` whose backoff state is
+/// `Reconnecting` (owner-driven reconnect; see `HeadlessServer::
+/// handle_host_link_down`). `generation` is stamped onto every emitted event
+/// (see `HostEventEnvelope`) so the consumer can drop events from a
+/// superseded loop after a detach+reattach of the same alias.
 pub(crate) fn spawn_host_event_loop(
     host: HostLinkId,
     transport: Box<dyn LinkTransport>,
-    events_tx: mpsc::Sender<HostEvent>,
+    generation: u64,
+    events_tx: mpsc::Sender<HostEventEnvelope>,
 ) -> HostEventLoopHandle {
     let stop = Arc::new(StopHandle::new());
     let thread_stop = Arc::clone(&stop);
+    let sink = HostEventSink {
+        generation,
+        tx: events_tx,
+    };
     let thread = std::thread::spawn(move || {
-        run_host_event_loop(&host, transport.as_ref(), &events_tx, &thread_stop);
+        run_host_event_loop(&host, transport.as_ref(), &sink, &thread_stop);
     });
     HostEventLoopHandle { thread, stop }
 }
@@ -383,7 +460,7 @@ const MAX_CONSECUTIVE_SETUP_REFRESHES: u32 = 3;
 fn run_host_event_loop(
     host: &HostLinkId,
     transport: &dyn LinkTransport,
-    events_tx: &mpsc::Sender<HostEvent>,
+    events_tx: &HostEventSink,
     stop: &StopHandle,
 ) {
     // Unknown pane ids that already triggered a refresh, carried across
@@ -554,7 +631,7 @@ fn run_subscription(
     transport: &dyn LinkTransport,
     host: &HostLinkId,
     panes: &[RemotePaneInfo],
-    events_tx: &mpsc::Sender<HostEvent>,
+    events_tx: &HostEventSink,
     stop: &StopHandle,
     refreshed_for: &mut HashSet<String>,
 ) -> SubscriptionEnd {
@@ -744,7 +821,7 @@ fn build_subscriptions(panes: &[RemotePaneInfo]) -> Vec<Subscription> {
 /// by the same bounce. `pane_closed` for an unknown id is dropped for the
 /// same replay reason: the consumer never adopted that pane.
 /// Forwards one event; a send failure means the receiver was dropped.
-fn forward(events_tx: &mpsc::Sender<HostEvent>, event: HostEvent) -> LineOutcome {
+fn forward(events_tx: &HostEventSink, event: HostEvent) -> LineOutcome {
     if events_tx.send(event).is_err() {
         LineOutcome::ConsumerGone
     } else {
@@ -755,7 +832,7 @@ fn forward(events_tx: &mpsc::Sender<HostEvent>, event: HostEvent) -> LineOutcome
 fn handle_event_line(
     host: &HostLinkId,
     value: serde_json::Value,
-    events_tx: &mpsc::Sender<HostEvent>,
+    events_tx: &HostEventSink,
     known: &HashSet<&str>,
     refreshed_for: &mut HashSet<String>,
 ) -> LineOutcome {
@@ -875,7 +952,9 @@ fn read_json_line(
 /// after this deadline, unblocking the blocking read.
 const ATTACH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 
-// Consumed by the server visibility-hook integration (Task 9).
+// Consumed by the server visibility-hook integration (Task 9b -- deferred,
+// see the multi-host plan's Task 9 scope note: no PaneRuntime exists yet for
+// adopted remote panes).
 #[allow(dead_code)]
 pub(crate) struct RemotePaneAttach {
     write: Mutex<Box<dyn Write + Send>>,
@@ -1230,7 +1309,8 @@ fn run_attach_reader(
 // ---------------------------------------------------------------------------
 
 /// Result of routing one input payload toward a remote pane's attach.
-// Consumed by the server input-routing integration (Task 9).
+// Consumed by the server input-routing integration (Task 9b -- deferred
+// alongside RemotePaneAttach above).
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InputRouteOutcome {
@@ -1251,7 +1331,8 @@ pub(crate) enum InputRouteOutcome {
 /// standalone so it is testable purely off a `LinkState` value, the way
 /// `host_link.rs` tests `HostLinkRegistry`'s state machine -- no transport,
 /// no queue, nothing a dropped payload could accumulate in.
-// Consumed by the server input-routing integration (Task 9).
+// Consumed by the server input-routing integration (Task 9b -- deferred
+// alongside RemotePaneAttach above).
 #[allow(dead_code)]
 pub(crate) fn route_remote_pane_input(host: &HostLinkId, state: LinkState) -> InputRouteOutcome {
     if matches!(state, LinkState::Connected) {
@@ -1425,6 +1506,24 @@ mod tests {
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
 
+    /// Fixed generation the poll-loop tests spawn their loops with; the
+    /// server-side generation logic (drop-superseded-events) is exercised
+    /// separately in `src/server/headless.rs`'s host_lifecycle tests.
+    const TEST_GENERATION: u64 = 1;
+
+    /// Receives one `HostEventEnvelope` and returns its inner `HostEvent`,
+    /// asserting the loop stamped it with the expected generation.
+    fn recv_event(rx: &mpsc::Receiver<HostEventEnvelope>, label: &str) -> HostEvent {
+        let envelope = rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|_| panic!("{label}"));
+        assert_eq!(
+            envelope.generation, TEST_GENERATION,
+            "event stamped with unexpected generation: {label}"
+        );
+        envelope.event
+    }
+
     /// Expected-value twin of `canned_pane_info` after `RemotePaneInfo::from`.
     fn remote_pane(id: &str, status: AgentStatus) -> RemotePaneInfo {
         RemotePaneInfo {
@@ -1565,11 +1664,10 @@ mod tests {
             client_socket: sock.clone(),
         });
         let (tx, rx) = mpsc::channel();
-        let handle = spawn_host_event_loop(HostLinkId("wb".to_string()), transport, tx);
+        let handle =
+            spawn_host_event_loop(HostLinkId("wb".to_string()), transport, TEST_GENERATION, tx);
 
-        let snapshot = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("snapshot event");
+        let snapshot = recv_event(&rx, "snapshot event");
         assert_eq!(
             snapshot,
             HostEvent::Snapshot {
@@ -1581,9 +1679,7 @@ mod tests {
             }
         );
 
-        let status_changed = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("status changed event");
+        let status_changed = recv_event(&rx, "status changed event");
         assert_eq!(
             status_changed,
             HostEvent::StatusChanged {
@@ -1593,9 +1689,7 @@ mod tests {
             }
         );
 
-        let link_down = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("link down event");
+        let link_down = recv_event(&rx, "link down event");
         assert_eq!(
             link_down,
             HostEvent::LinkDown {
@@ -1761,11 +1855,10 @@ mod tests {
             client_socket: sock.clone(),
         });
         let (tx, rx) = mpsc::channel();
-        let handle = spawn_host_event_loop(HostLinkId("wb".to_string()), transport, tx);
+        let handle =
+            spawn_host_event_loop(HostLinkId("wb".to_string()), transport, TEST_GENERATION, tx);
 
-        let first = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("initial snapshot");
+        let first = recv_event(&rx, "initial snapshot");
         assert_eq!(
             first,
             HostEvent::Snapshot {
@@ -1776,9 +1869,7 @@ mod tests {
 
         // The very next event must be the refreshed snapshot -- a LinkDown
         // here would mean the refresh was misclassified as a link failure.
-        let second = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("refreshed snapshot");
+        let second = recv_event(&rx, "refreshed snapshot");
         assert_eq!(
             second,
             HostEvent::Snapshot {
@@ -1792,9 +1883,7 @@ mod tests {
 
         // The replayed pane.created was ignored; the status line and then
         // the EOF-driven LinkDown follow directly.
-        let status = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("status changed event");
+        let status = recv_event(&rx, "status changed event");
         assert_eq!(
             status,
             HostEvent::StatusChanged {
@@ -1803,9 +1892,7 @@ mod tests {
                 status: AgentStatus::Blocked,
             }
         );
-        let link_down = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("link down event");
+        let link_down = recv_event(&rx, "link down event");
         assert_eq!(
             link_down,
             HostEvent::LinkDown {
@@ -1941,10 +2028,11 @@ mod tests {
             client_socket: sock.clone(),
         });
         let (tx, rx) = mpsc::channel();
-        let handle = spawn_host_event_loop(HostLinkId("wb".to_string()), transport, tx);
+        let handle =
+            spawn_host_event_loop(HostLinkId("wb".to_string()), transport, TEST_GENERATION, tx);
 
         for label in ["initial snapshot", "refreshed snapshot"] {
-            let event = rx.recv_timeout(Duration::from_secs(5)).expect(label);
+            let event = recv_event(&rx, label);
             assert_eq!(
                 event,
                 HostEvent::Snapshot {
@@ -1955,8 +2043,7 @@ mod tests {
             );
         }
         assert_eq!(
-            rx.recv_timeout(Duration::from_secs(5))
-                .expect("status changed event"),
+            recv_event(&rx, "status changed event"),
             HostEvent::StatusChanged {
                 host: HostLinkId("wb".to_string()),
                 remote_pane_id: "w1:p1".to_string(),
@@ -1965,8 +2052,7 @@ mod tests {
             "replayed ghost created must not bounce a second time"
         );
         assert_eq!(
-            rx.recv_timeout(Duration::from_secs(5))
-                .expect("link down event"),
+            recv_event(&rx, "link down event"),
             HostEvent::LinkDown {
                 host: HostLinkId("wb".to_string()),
             }
@@ -2009,18 +2095,18 @@ mod tests {
             client_socket: sock.clone(),
         });
         let (tx, rx) = mpsc::channel();
-        let handle = spawn_host_event_loop(HostLinkId("wb".to_string()), transport, tx);
+        let handle =
+            spawn_host_event_loop(HostLinkId("wb".to_string()), transport, TEST_GENERATION, tx);
 
         for label in ["initial snapshot", "retried snapshot"] {
-            let event = rx.recv_timeout(Duration::from_secs(5)).expect(label);
+            let event = recv_event(&rx, label);
             assert!(
                 matches!(event, HostEvent::Snapshot { .. }),
                 "{label}: expected Snapshot, got {event:?}"
             );
         }
         assert_eq!(
-            rx.recv_timeout(Duration::from_secs(5))
-                .expect("status changed event"),
+            recv_event(&rx, "status changed event"),
             HostEvent::StatusChanged {
                 host: HostLinkId("wb".to_string()),
                 remote_pane_id: "w1:p1".to_string(),
@@ -2028,8 +2114,7 @@ mod tests {
             }
         );
         assert_eq!(
-            rx.recv_timeout(Duration::from_secs(5))
-                .expect("link down event"),
+            recv_event(&rx, "link down event"),
             HostEvent::LinkDown {
                 host: HostLinkId("wb".to_string()),
             }
@@ -2067,20 +2152,18 @@ mod tests {
             client_socket: sock.clone(),
         });
         let (tx, rx) = mpsc::channel();
-        let handle = spawn_host_event_loop(HostLinkId("wb".to_string()), transport, tx);
+        let handle =
+            spawn_host_event_loop(HostLinkId("wb".to_string()), transport, TEST_GENERATION, tx);
 
         for round in 0..MAX_CONSECUTIVE_SETUP_REFRESHES {
-            let event = rx
-                .recv_timeout(Duration::from_secs(5))
-                .unwrap_or_else(|_| panic!("snapshot for round {round}"));
+            let event = recv_event(&rx, &format!("snapshot for round {round}"));
             assert!(
                 matches!(event, HostEvent::Snapshot { .. }),
                 "round {round}: expected Snapshot, got {event:?}"
             );
         }
         assert_eq!(
-            rx.recv_timeout(Duration::from_secs(5))
-                .expect("link down after cap"),
+            recv_event(&rx, "link down after cap"),
             HostEvent::LinkDown {
                 host: HostLinkId("wb".to_string()),
             }
@@ -2147,27 +2230,25 @@ mod tests {
             client_socket: sock.clone(),
         });
         let (tx, rx) = mpsc::channel();
-        let handle = spawn_host_event_loop(HostLinkId("wb".to_string()), transport, tx);
+        let handle =
+            spawn_host_event_loop(HostLinkId("wb".to_string()), transport, TEST_GENERATION, tx);
 
         assert_eq!(
-            rx.recv_timeout(Duration::from_secs(5))
-                .expect("initial snapshot"),
+            recv_event(&rx, "initial snapshot"),
             HostEvent::Snapshot {
                 host: HostLinkId("wb".to_string()),
                 panes: vec![remote_pane("w1:p1", AgentStatus::Idle)],
             }
         );
         assert_eq!(
-            rx.recv_timeout(Duration::from_secs(5))
-                .expect("post-move snapshot"),
+            recv_event(&rx, "post-move snapshot"),
             HostEvent::Snapshot {
                 host: HostLinkId("wb".to_string()),
                 panes: vec![remote_pane("w2:p1", AgentStatus::Idle)],
             }
         );
         assert_eq!(
-            rx.recv_timeout(Duration::from_secs(5))
-                .expect("link down event"),
+            recv_event(&rx, "link down event"),
             HostEvent::LinkDown {
                 host: HostLinkId("wb".to_string()),
             }
@@ -2213,11 +2294,10 @@ mod tests {
             client_socket: sock.clone(),
         });
         let (tx, rx) = mpsc::channel();
-        let handle = spawn_host_event_loop(HostLinkId("wb".to_string()), transport, tx);
+        let handle =
+            spawn_host_event_loop(HostLinkId("wb".to_string()), transport, TEST_GENERATION, tx);
 
-        let snapshot = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("snapshot event");
+        let snapshot = recv_event(&rx, "snapshot event");
         assert!(matches!(snapshot, HostEvent::Snapshot { .. }));
         drop(rx);
         rx_dropped_tx.send(()).unwrap();
@@ -2274,11 +2354,10 @@ mod tests {
             client_socket: sock.clone(),
         });
         let (tx, rx) = mpsc::channel();
-        let handle = spawn_host_event_loop(HostLinkId("wb".to_string()), transport, tx);
+        let handle =
+            spawn_host_event_loop(HostLinkId("wb".to_string()), transport, TEST_GENERATION, tx);
 
-        let snapshot = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("snapshot event");
+        let snapshot = recv_event(&rx, "snapshot event");
         assert!(matches!(snapshot, HostEvent::Snapshot { .. }));
         parked_rx
             .recv_timeout(Duration::from_secs(5))

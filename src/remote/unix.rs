@@ -142,7 +142,10 @@ pub(crate) fn extract_remote_args(
     Ok((cleaned, remote))
 }
 
-fn validate_remote_target(target: &str) -> Result<&str, String> {
+/// Also used by `host.attach` (`src/server/headless.rs`) to validate the
+/// `host` API parameter before spending an ssh round trip on it -- the same
+/// shape of alias/target the single-host `--remote` flag accepts.
+pub(crate) fn validate_remote_target(target: &str) -> Result<&str, String> {
     if target.is_empty() {
         return Err("missing value for --remote".to_string());
     }
@@ -319,6 +322,23 @@ impl RemoteHerdr {
         self.shell_path = shell_path;
         self
     }
+}
+
+/// Builds a `RemoteHerdr` for the default install path convention
+/// (`$HOME/.local/bin/herdr`), without any ssh round trip to detect the
+/// remote's platform.
+///
+/// `for_platform` never varies `shell_path`/`install_suffix` by OS/arch --
+/// only the (unused here) `platform` field would differ -- so multi-host
+/// `host.attach` (`src/server/headless.rs`), which intentionally does not
+/// run the interactive install-management flow (`prepare_remote_herdr`) a
+/// headless API handler can't safely block on, can assume the remote binary
+/// is already installed at the default location and let the existing
+/// `ensure_remote_server_running()` in the bridge commands start it if it
+/// isn't running yet. The `RemotePlatform::local()` placeholder is inert:
+/// nothing downstream of `host.attach` reads `RemoteHerdr::platform`.
+pub(crate) fn default_installed_remote_herdr() -> RemoteHerdr {
+    RemoteHerdr::for_platform(RemotePlatform::local())
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub mod agents;
 pub mod common;
 pub mod events;
+pub mod hosts;
 pub mod integrations;
 pub mod panes;
 pub mod plugins;
@@ -16,6 +17,7 @@ pub mod worktrees;
 pub use agents::*;
 pub use common::*;
 pub use events::*;
+pub use hosts::*;
 pub use integrations::*;
 pub use panes::*;
 pub use plugins::*;
@@ -115,6 +117,12 @@ pub enum Method {
     AgentFocus(AgentTarget),
     #[serde(rename = "agent.start")]
     AgentStart(AgentStartParams),
+    #[serde(rename = "host.attach")]
+    HostAttach(HostAttachParams),
+    #[serde(rename = "host.list")]
+    HostList(EmptyParams),
+    #[serde(rename = "host.detach")]
+    HostDetach(HostDetachParams),
     #[serde(rename = "pane.split")]
     PaneSplit(PaneSplitParams),
     #[serde(rename = "pane.swap")]

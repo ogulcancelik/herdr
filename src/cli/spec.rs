@@ -35,6 +35,7 @@ pub(super) fn command() -> Command {
         .subcommand(tab_command())
         .subcommand(notification_command())
         .subcommand(agent_command())
+        .subcommand(host_command())
         .subcommand(pane_command())
         .subcommand(wait_command())
         .subcommand(terminal_command())
@@ -320,6 +321,18 @@ fn agent_command() -> Command {
                         .action(ArgAction::SetTrue),
                 ),
         )
+}
+
+fn host_command() -> Command {
+    Command::new("host")
+        .about("Attach, list, and detach remote hosts over SSH")
+        .subcommand(id_command(
+            "attach",
+            "host",
+            "Attach a remote host over SSH",
+        ))
+        .subcommand(Command::new("list").about("List attached hosts"))
+        .subcommand(id_command("detach", "host", "Detach a remote host"))
 }
 
 fn pane_command() -> Command {

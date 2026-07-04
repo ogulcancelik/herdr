@@ -5,9 +5,18 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+// This module itself is cross-platform (pure state, no I/O), but its only
+// caller -- the multi-host host-event consumer in src/server/headless.rs --
+// is `#[cfg(unix)]`-gated (the ssh transport it drives lives in
+// src/remote/unix.rs, per the plan's "Windows support out of scope" note).
+// So every item here is genuinely unreachable on a Windows build; silence
+// that specifically instead of unconditionally, so a real regression to
+// unix-only reachability would still be caught there.
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub(crate) struct HostLinkId(pub(crate) String); // ssh config alias, e.g. "workbox"
 
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LinkState {
     Connecting,
@@ -16,25 +25,26 @@ pub(crate) enum LinkState {
     Offline,
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug)]
 pub(crate) struct HostLink {
-    // Not read yet outside Debug output; iter() consumers arrive in Task 5/6.
-    #[allow(dead_code)]
     pub(crate) id: HostLinkId,
     pub(crate) state: LinkState,
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Default)]
 pub(crate) struct HostLinkRegistry {
     links: BTreeMap<HostLinkId, HostLink>,
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) const MAX_RECONNECT_ATTEMPTS: u32 = 6;
 
+#[cfg_attr(not(unix), allow(dead_code))]
 impl HostLinkRegistry {
-    // Not called outside tests yet; the host transport (Task 5) and adoption
-    // (Task 6) work will drive these through the real connection lifecycle.
-    #[allow(dead_code)]
+    // Driven by the server's host-event consumer (src/server/headless.rs,
+    // Task 9): `host.attach` calls this before spawning the transport.
     pub(crate) fn attach(&mut self, id: HostLinkId) -> Result<(), AttachError> {
         if self.links.contains_key(&id) {
             return Err(AttachError::AlreadyAttached);
@@ -49,12 +59,10 @@ impl HostLinkRegistry {
         Ok(())
     }
 
-    #[allow(dead_code)] // see attach() above; consumed starting Task 5/6
     pub(crate) fn detach(&mut self, id: &HostLinkId) -> bool {
         self.links.remove(id).is_some()
     }
 
-    #[allow(dead_code)] // see attach() above; consumed starting Task 5/6
     pub(crate) fn on_connected(&mut self, id: &HostLinkId) {
         if let Some(link) = self.links.get_mut(id) {
             link.state = LinkState::Connected;
@@ -65,7 +73,6 @@ impl HostLinkRegistry {
     ///
     /// Offline is terminal for automatic retries; manual retry is modeled as
     /// detach + attach.
-    #[allow(dead_code)] // see attach() above; consumed starting Task 5/6
     pub(crate) fn on_disconnect(&mut self, id: &HostLinkId) -> Option<LinkState> {
         let link = self.links.get_mut(id)?;
         link.state = match link.state {
@@ -80,17 +87,16 @@ impl HostLinkRegistry {
         Some(link.state)
     }
 
-    #[allow(dead_code)] // see attach() above; consumed starting Task 5/6
     pub(crate) fn state(&self, id: &HostLinkId) -> Option<LinkState> {
         self.links.get(id).map(|l| l.state)
     }
 
-    #[allow(dead_code)] // see attach() above; consumed starting Task 5/6
     pub(crate) fn iter(&self) -> impl Iterator<Item = &HostLink> {
         self.links.values()
     }
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum AttachError {
     AlreadyAttached,

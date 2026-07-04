@@ -29,9 +29,6 @@ use tracing::{info, warn};
 /// tears the channel down from any thread. The stream itself is consumed by
 /// `split` or moved into a reader thread, so detach/teardown needs this
 /// separate handle to unblock a reader stuck in `read()`.
-// Constructed via LinkTransport::open_*; consumed by the host event loop /
-// remote pane adoption (Task 6).
-#[allow(dead_code)]
 pub(crate) struct LinkChannel {
     pub(crate) stream: Box<dyn ReadWriteStream>,
     /// Closes the underlying connection out-of-band; a reader blocked in
@@ -40,10 +37,6 @@ pub(crate) struct LinkChannel {
     pub(crate) close: Box<dyn Fn() + Send + Sync>,
 }
 
-// Only the unix-socket implementation is exercised by tests today; both
-// methods are consumed by the host event loop / remote pane adoption
-// (Task 6).
-#[allow(dead_code)]
 pub(crate) trait LinkTransport: Send {
     /// Open a bidirectional byte stream to the remote JSON API socket.
     fn open_api(&self) -> std::io::Result<LinkChannel>;
@@ -58,8 +51,6 @@ pub(crate) trait LinkTransport: Send {
 /// driven that way (see the reader/writer threads in
 /// `src/server/client_transport.rs` and `bridge_connection` in
 /// `src/remote/unix.rs`).
-// consumed by the host event loop / remote pane adoption (Task 6)
-#[allow(dead_code)]
 pub(crate) trait ReadWriteStream: Read + Write + Send {
     /// Splits into (read half, write half). Dropping the write half signals
     /// EOF to the remote side while the read half stays usable for draining.
@@ -179,10 +170,9 @@ impl Drop for UnixWriteHalf {
 /// sets `ServerAliveInterval 15` / `ServerAliveCountMax 4`, so a dead peer
 /// is detected in about a minute; with `None`, dead-peer detection falls
 /// back to kernel TCP defaults, which can take hours.
-// Constructed only by the host event loop / remote pane adoption (Task 6);
-// no unit test here (needs a real ssh binary/target), covered by the
-// homelab checklist instead.
-#[allow(dead_code)]
+// Constructed by `HeadlessServer::build_host_transport` (Task 9) for
+// production `host.attach`; no unit test here (needs a real ssh
+// binary/target), covered by the homelab checklist instead.
 pub(crate) struct SshTransport {
     pub(crate) target: String,
     pub(crate) remote_herdr: crate::remote::RemoteHerdr,
@@ -191,8 +181,6 @@ pub(crate) struct SshTransport {
 }
 
 impl SshTransport {
-    // consumed by the host event loop / remote pane adoption (Task 6)
-    #[allow(dead_code)]
     fn open_channel(&self, remote_command: String) -> std::io::Result<LinkChannel> {
         let mut command = std::process::Command::new("ssh");
         crate::remote::apply_managed_ssh_options(&mut command, self.ssh_options.as_ref());

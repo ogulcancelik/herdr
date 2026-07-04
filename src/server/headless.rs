@@ -230,6 +230,166 @@ pub struct HeadlessServer {
     server_event_rx: mpsc::Receiver<ServerEvent>,
     /// Sender for server events (cloned for each client thread).
     server_event_tx: mpsc::Sender<ServerEvent>,
+    /// Pure host-link state machine (Task 3): attach/detach and the
+    /// Connecting/Connected/Reconnecting/Offline lifecycle. The single
+    /// mutation point for it is `handle_host_event`/the `host.*` API
+    /// handlers below, mirroring how `self.app.state` is only mutated from
+    /// one place.
+    #[cfg(unix)]
+    host_links: crate::server::host_link::HostLinkRegistry,
+    /// Bijection between adopted remote panes and locally-allocated
+    /// `PaneId`s (Task 6), reconciled from every `HostEvent::Snapshot`.
+    #[cfg(unix)]
+    remote_panes: crate::server::remote_pane::RemotePaneRegistry,
+    /// Per-host background-thread handle plus the reusable transport
+    /// materials, keyed by the same `HostLinkId` `host_links` uses.
+    #[cfg(unix)]
+    host_link_runtimes: HashMap<crate::server::host_link::HostLinkId, HostLinkRuntime>,
+    /// Monotonic per-attach generation. Bumped on every `host.attach` and
+    /// stamped onto that link's event loop (and reused across its reconnect
+    /// respawns) so the consumer can drop events from a superseded loop
+    /// after a detach+reattach of the same alias.
+    #[cfg(unix)]
+    next_host_generation: u64,
+    /// Cloned into each spawned per-host event loop; forwarded into
+    /// `server_event_tx` by one long-lived bridge thread (see `new()`) so
+    /// `HostEvent`s reach the main loop through the same async channel
+    /// everything else already drains.
+    #[cfg(unix)]
+    host_event_tx: std::sync::mpsc::Sender<crate::server::remote_pane::HostEventEnvelope>,
+    /// Test-only escape hatch: when set, `host.attach` builds its transport
+    /// from this closure instead of `SshTransport`, so the host-link
+    /// lifecycle can be exercised against an in-process fake/real API
+    /// server (`UnixSocketTransport`) without a real `ssh` binary or
+    /// network target, and with no config-file I/O. Always `None` in
+    /// production.
+    #[cfg(unix)]
+    host_transport_override_for_test: Option<std::sync::Arc<HostTransportFactory>>,
+}
+
+/// Per-host runtime state kept alive by `HeadlessServer` for as long as a
+/// host link is attached (or being reconnected).
+#[cfg(unix)]
+struct HostLinkRuntime {
+    /// This loop generation; carried through reconnect respawns and matched
+    /// against inbound `HostEventEnvelope`s to drop superseded events.
+    generation: u64,
+    event_loop: crate::server::remote_pane::HostEventLoopHandle,
+    /// Reusable transport materials (holding the `ManagedSshConfig` guard in
+    /// production). Built once at attach time and moved forward across every
+    /// reconnect respawn, so reconnecting never re-reads config or
+    /// re-writes the ssh config.
+    transport: HostTransportHandle,
+}
+
+/// Everything needed to build a fresh `LinkTransport` for one host link with
+/// NO disk I/O -- the config read + managed-ssh-config write happen exactly
+/// once, when the handle is first built (`build_host_transport_handle`).
+/// `open()` is cheap and infallible and can run once per reconnect attempt.
+#[cfg(unix)]
+enum HostTransportHandle {
+    /// Production: hold the managed ssh config guard alive and rebuild a
+    /// cheap `SshTransport` per connection from the cached paths.
+    Ssh {
+        target: String,
+        session_name: String,
+        ssh_options: Option<crate::remote::ManagedSshOptions>,
+        // Kept alive for the link's whole lifetime; see
+        // `host_transport::SshTransport`'s doc comment for why the guard
+        // must outlive the transport. `None` when the config opted out of
+        // (or failed to write) a managed ssh config.
+        _ssh_guard: Option<crate::remote::ManagedSshConfig>,
+    },
+    /// Test: a factory that builds a fresh in-process transport with no I/O.
+    Test {
+        host: String,
+        factory: std::sync::Arc<HostTransportFactory>,
+    },
+}
+
+#[cfg(unix)]
+impl HostTransportHandle {
+    fn open(&self) -> Box<dyn crate::server::host_transport::LinkTransport> {
+        match self {
+            HostTransportHandle::Ssh {
+                target,
+                session_name,
+                ssh_options,
+                ..
+            } => Box::new(crate::server::host_transport::SshTransport {
+                target: target.clone(),
+                remote_herdr: crate::remote::default_installed_remote_herdr(),
+                session_name: session_name.clone(),
+                ssh_options: ssh_options.clone(),
+            }),
+            HostTransportHandle::Test { host, factory } => {
+                let build: &HostTransportFactory = factory.as_ref();
+                build(host)
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+type HostTransportFactory =
+    dyn Fn(&str) -> Box<dyn crate::server::host_transport::LinkTransport> + Send + Sync;
+
+/// `host.list`/`host.attach`'s `HostInfo.state` snake_case label -- the ONE
+/// place `server::host_link::LinkState` is converted to a wire string.
+/// `Reconnecting`'s `attempt` is deliberately not mirrored here either
+/// (matches the sidebar's `HostLinkDisplayState` choice, see its doc
+/// comment).
+#[cfg(unix)]
+fn link_state_label(state: crate::server::host_link::LinkState) -> &'static str {
+    use crate::server::host_link::LinkState;
+    match state {
+        LinkState::Connecting => "connecting",
+        LinkState::Connected => "connected",
+        LinkState::Reconnecting { .. } => "reconnecting",
+        LinkState::Offline => "offline",
+    }
+}
+
+/// The ONE place `server::host_link::LinkState` is converted to
+/// `app::state::HostLinkDisplayState` for the sidebar (Task 7).
+#[cfg(unix)]
+fn host_link_display_state(
+    state: crate::server::host_link::LinkState,
+) -> crate::app::state::HostLinkDisplayState {
+    use crate::app::state::HostLinkDisplayState;
+    use crate::server::host_link::LinkState;
+    match state {
+        LinkState::Connecting => HostLinkDisplayState::Connecting,
+        LinkState::Connected => HostLinkDisplayState::Connected,
+        LinkState::Reconnecting { .. } => HostLinkDisplayState::Reconnecting,
+        LinkState::Offline => HostLinkDisplayState::Offline,
+    }
+}
+
+#[cfg(unix)]
+fn host_success_response(id: String, result: api::schema::ResponseResult) -> String {
+    serde_json::to_string(&api::schema::SuccessResponse { id, result })
+        .unwrap_or_else(|_| "{}".to_string())
+}
+
+fn host_error_response(id: String, code: &str, message: String) -> String {
+    serde_json::to_string(&api::schema::ErrorResponse {
+        id,
+        error: api::schema::ErrorBody {
+            code: code.into(),
+            message,
+        },
+    })
+    .unwrap_or_else(|_| "{}".to_string())
+}
+
+#[cfg(not(unix))]
+fn unsupported_host_command_response(id: String) -> String {
+    host_error_response(
+        id,
+        "unsupported_platform",
+        "host commands are only supported on Unix".to_string(),
+    )
 }
 
 fn apply_terminal_attach_scroll(
@@ -303,6 +463,33 @@ fn apply_terminal_attach_input(
     runtime
         .try_send_bytes(Bytes::from(data))
         .map_err(|err| format!("terminal attach input failed: {err}"))
+}
+
+/// Spawns the one long-lived bridge thread that turns `HostEvent`s from any
+/// number of per-host event-loop threads (each holding a clone of the
+/// returned sender) into `ServerEvent::HostEvent`s on the main loop's async
+/// channel. `spawn_host_event_loop`'s sender is a plain thread-blocking
+/// `std::sync::mpsc::Sender` (Task 6, unchanged), so this thread is the
+/// seam that lets `tokio::select!`/`drain_server_events` pick host events up
+/// without polling. Exits once every std sender (this bridge's clone plus
+/// every per-host loop's clone) has dropped.
+#[cfg(unix)]
+fn spawn_host_event_bridge(
+    server_event_tx: mpsc::Sender<ServerEvent>,
+) -> std::sync::mpsc::Sender<crate::server::remote_pane::HostEventEnvelope> {
+    let (std_tx, std_rx) =
+        std::sync::mpsc::channel::<crate::server::remote_pane::HostEventEnvelope>();
+    std::thread::spawn(move || {
+        while let Ok(envelope) = std_rx.recv() {
+            if server_event_tx
+                .blocking_send(ServerEvent::HostEvent(envelope))
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    std_tx
 }
 
 #[cfg(windows)]
@@ -387,6 +574,8 @@ impl HeadlessServer {
             server_config_diagnostic_summaries(config_diagnostics);
         #[cfg(not(unix))]
         let _ = (&api_tx, &api_server);
+        #[cfg(unix)]
+        let host_event_tx = spawn_host_event_bridge(server_event_tx.clone());
 
         Ok(Self {
             app,
@@ -415,6 +604,18 @@ impl HeadlessServer {
             should_quit,
             server_event_rx,
             server_event_tx,
+            #[cfg(unix)]
+            host_links: crate::server::host_link::HostLinkRegistry::default(),
+            #[cfg(unix)]
+            remote_panes: crate::server::remote_pane::RemotePaneRegistry::default(),
+            #[cfg(unix)]
+            host_link_runtimes: HashMap::new(),
+            #[cfg(unix)]
+            next_host_generation: 1,
+            #[cfg(unix)]
+            host_event_tx,
+            #[cfg(unix)]
+            host_transport_override_for_test: None,
         })
     }
 
@@ -1094,6 +1295,453 @@ impl HeadlessServer {
         _params: crate::api::schema::ServerLiveHandoffParams,
     ) -> io::Result<()> {
         Err(io::Error::other("live handoff is only supported on Unix"))
+    }
+
+    // -----------------------------------------------------------------
+    // host.* API handlers + HostEvent consumer (Task 9)
+    //
+    // `host_links` (Task 3), `remote_panes` (Task 6), and
+    // `AppState.host_links` (Task 7) are ALL mutated only from the methods
+    // below -- this is the single mutation point the multi-host plan calls
+    // for, mirroring how `self.app.state` elsewhere is only ever touched
+    // from the main loop. `handle_host_event` is reached exclusively via
+    // `ServerEvent::HostEvent`, which itself is only produced by the one
+    // bridge thread spawned in `new()`; nothing else sends it.
+    // -----------------------------------------------------------------
+
+    #[cfg(unix)]
+    fn handle_host_attach_api(
+        &mut self,
+        id: String,
+        params: api::schema::HostAttachParams,
+    ) -> String {
+        let host = params.host;
+        if let Err(err) = crate::remote::validate_remote_target(&host) {
+            return host_error_response(id, "invalid_request", err);
+        }
+        let link_id = crate::server::host_link::HostLinkId(host.clone());
+        if self.host_links.attach(link_id.clone()).is_err() {
+            return host_error_response(
+                id,
+                "already_attached",
+                format!("host '{host}' is already attached"),
+            );
+        }
+        let generation = self.alloc_host_generation();
+        debug!(host = %host, generation, "attaching host link");
+        // Build the transport materials ONCE here (config read + managed
+        // ssh-config write), then reuse them across every reconnect respawn
+        // of this link -- reconnecting must not stall the main loop on
+        // per-attempt disk I/O.
+        let transport = self.build_host_transport_handle(&host);
+        self.sync_host_link_display(&link_id);
+        self.spawn_host_link_runtime(link_id.clone(), generation, transport);
+        let info = self.host_info_for(&link_id);
+        host_success_response(id, api::schema::ResponseResult::HostAttached { host: info })
+    }
+
+    /// Allocates the next per-attach generation (see
+    /// [`HeadlessServer::next_host_generation`]).
+    #[cfg(unix)]
+    fn alloc_host_generation(&mut self) -> u64 {
+        let generation = self.next_host_generation;
+        self.next_host_generation = self.next_host_generation.saturating_add(1);
+        generation
+    }
+
+    /// The current loop generation of an attached host, for the
+    /// generation-drop test to craft a stale-generation envelope.
+    #[cfg(all(test, unix))]
+    fn host_generation_for_test(&self, host: &str) -> Option<u64> {
+        self.host_link_runtimes
+            .get(&crate::server::host_link::HostLinkId(host.to_string()))
+            .map(|runtime| runtime.generation)
+    }
+
+    #[cfg(not(unix))]
+    fn handle_host_attach_api(
+        &mut self,
+        id: String,
+        _params: api::schema::HostAttachParams,
+    ) -> String {
+        unsupported_host_command_response(id)
+    }
+
+    #[cfg(unix)]
+    fn handle_host_list_api(&self, id: String) -> String {
+        let remote_panes = &self.remote_panes;
+        let hosts: Vec<api::schema::HostInfo> = self
+            .host_links
+            .iter()
+            .map(|link| api::schema::HostInfo {
+                host: link.id.0.clone(),
+                state: link_state_label(link.state).to_string(),
+                pane_count: remote_panes.panes_for_host(&link.id).count() as u32,
+            })
+            .collect();
+        host_success_response(id, api::schema::ResponseResult::HostList { hosts })
+    }
+
+    #[cfg(not(unix))]
+    fn handle_host_list_api(&self, id: String) -> String {
+        unsupported_host_command_response(id)
+    }
+
+    #[cfg(unix)]
+    fn handle_host_detach_api(
+        &mut self,
+        id: String,
+        params: api::schema::HostDetachParams,
+    ) -> String {
+        let host = params.host;
+        let link_id = crate::server::host_link::HostLinkId(host.clone());
+        if !self.host_links.detach(&link_id) {
+            return host_error_response(id, "not_found", format!("host '{host}' is not attached"));
+        }
+        debug!(host = %host, "detaching host link");
+        self.stop_host_link_runtime(&link_id);
+        self.remote_panes.release_host(&link_id);
+        self.app
+            .state
+            .host_links
+            .remove(&crate::terminal::TerminalHostTag::new(host.clone()));
+        host_success_response(
+            id,
+            api::schema::ResponseResult::HostDetached {
+                host,
+                detached: true,
+            },
+        )
+    }
+
+    #[cfg(not(unix))]
+    fn handle_host_detach_api(
+        &mut self,
+        id: String,
+        _params: api::schema::HostDetachParams,
+    ) -> String {
+        unsupported_host_command_response(id)
+    }
+
+    /// `host.list`'s `HostInfo` for one just-attached (or already-attached)
+    /// link: reads back through the same registries `handle_host_list_api`
+    /// does, so `host.attach`'s response and a subsequent `host.list` never
+    /// disagree.
+    #[cfg(unix)]
+    fn host_info_for(&self, id: &crate::server::host_link::HostLinkId) -> api::schema::HostInfo {
+        api::schema::HostInfo {
+            host: id.0.clone(),
+            state: self
+                .host_links
+                .state(id)
+                .map(link_state_label)
+                .unwrap_or("offline")
+                .to_string(),
+            pane_count: self.remote_panes.panes_for_host(id).count() as u32,
+        }
+    }
+
+    /// Builds the reusable transport materials for one host link, doing the
+    /// config read + managed-ssh-config write exactly once. Production yields
+    /// an `Ssh` handle that owns the `ManagedSshConfig` guard; a test
+    /// override yields a `Test` handle wrapping the in-process factory. The
+    /// returned handle's `open()` is cheap + infallible and is called once
+    /// per reconnect attempt WITHOUT repeating this I/O.
+    #[cfg(unix)]
+    fn build_host_transport_handle(&self, host: &str) -> HostTransportHandle {
+        if let Some(factory) = &self.host_transport_override_for_test {
+            return HostTransportHandle::Test {
+                host: host.to_string(),
+                factory: std::sync::Arc::clone(factory),
+            };
+        }
+        let manage_ssh_config = crate::config::Config::load()
+            .config
+            .remote
+            .manage_ssh_config;
+        let ssh_guard = manage_ssh_config
+            .then(|| crate::remote::write_managed_ssh_config().ok())
+            .flatten();
+        let ssh_options = ssh_guard.as_ref().map(|guard| guard.options().clone());
+        let session_name = crate::session::active_name()
+            .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
+        HostTransportHandle::Ssh {
+            target: host.to_string(),
+            session_name,
+            ssh_options,
+            _ssh_guard: ssh_guard,
+        }
+    }
+
+    /// Opens a fresh transport from the (already-built, no-I/O) handle and
+    /// spawns a new per-host event loop stamped with `generation`, recording
+    /// its handle in `host_link_runtimes`. Called both from `host.attach`
+    /// and, for a reconnect attempt, from `handle_host_link_down` (which
+    /// moves the same handle + generation forward).
+    #[cfg(unix)]
+    fn spawn_host_link_runtime(
+        &mut self,
+        host: crate::server::host_link::HostLinkId,
+        generation: u64,
+        transport: HostTransportHandle,
+    ) {
+        let event_loop = crate::server::remote_pane::spawn_host_event_loop(
+            host.clone(),
+            transport.open(),
+            generation,
+            self.host_event_tx.clone(),
+        );
+        self.host_link_runtimes.insert(
+            host,
+            HostLinkRuntime {
+                generation,
+                event_loop,
+                transport,
+            },
+        );
+    }
+
+    /// Stops and joins the per-host loop thread (if any) and drops its
+    /// transport materials (and ssh guard). Used by `host.detach`;
+    /// `handle_host_link_down` does its own remove+join since a `LinkDown`
+    /// loop has already exited.
+    #[cfg(unix)]
+    fn stop_host_link_runtime(&mut self, host: &crate::server::host_link::HostLinkId) {
+        if let Some(runtime) = self.host_link_runtimes.remove(host) {
+            runtime.event_loop.stop();
+            runtime.event_loop.join();
+        }
+    }
+
+    /// Stops and joins every per-host loop thread on shutdown, for symmetry
+    /// with the careful stop+join `host.detach` does per link (so the
+    /// per-host threads and their ssh children don't outlive the server as
+    /// detached threads relying on process exit).
+    #[cfg(unix)]
+    fn stop_all_host_link_runtimes(&mut self) {
+        for (_, runtime) in self.host_link_runtimes.drain() {
+            runtime.event_loop.stop();
+            runtime.event_loop.join();
+        }
+    }
+
+    /// The single `HostEvent` consumer. Reached only via
+    /// `ServerEvent::HostEvent`, itself only produced by the bridge thread
+    /// in `new()` -- see the module doc above `handle_host_attach_api`.
+    #[cfg(unix)]
+    fn handle_host_event(&mut self, envelope: crate::server::remote_pane::HostEventEnvelope) {
+        use crate::server::remote_pane::HostEvent;
+
+        // Generation guard: drop any event whose stamped generation no
+        // longer matches the emitting host's current loop generation. This
+        // closes the detach+reattach race -- a `Snapshot` the *old* loop
+        // sent before `stop()` was observed can still be queued when the
+        // same alias is re-attached; without this it would reconcile
+        // against the new generation's registry (and, once frame streaming
+        // lands, route stale pane ids to the wrong terminal after a remote
+        // restart re-mints ids from zero). Defense in depth with the
+        // `state()`-none check in the `Snapshot` arm below.
+        let host = envelope.event.host().clone();
+        match self.host_link_runtimes.get(&host) {
+            Some(runtime) if runtime.generation == envelope.generation => {}
+            _ => {
+                debug!(
+                    host = %host.0,
+                    generation = envelope.generation,
+                    "dropping host event from a superseded link generation"
+                );
+                return;
+            }
+        }
+
+        match envelope.event {
+            HostEvent::Snapshot { host, panes } => {
+                // `fetch_snapshot` (remote_pane.rs) can return a snapshot
+                // just before `stop()` is observed -- `events_tx.send` isn't
+                // itself gated on the stop flag -- so a `host.detach` (with
+                // no re-attach) can race a just-completed round trip. The
+                // generation guard above catches the detach+reattach case;
+                // this catches the plain detach case (no runtime, so no
+                // generation to match -- already returned above -- but keep
+                // this as a belt-and-braces check in case the runtime is
+                // present while the link state was cleared).
+                if self.host_links.state(&host).is_none() {
+                    return;
+                }
+                // Authoritative reconciliation (mandatory consumer contract
+                // from the Task 6/7 reviews): adopt panes new to the
+                // registry, release registered panes missing from this
+                // snapshot, and re-seed link state from EVERY snapshot, not
+                // just the first.
+                self.host_links.on_connected(&host);
+                self.sync_host_link_display(&host);
+                self.reconcile_remote_pane_snapshot(&host, panes);
+            }
+            HostEvent::StatusChanged {
+                host,
+                remote_pane_id,
+                status: _status,
+            } => {
+                // Seam for Task 9b: once adopted remote panes have a
+                // host-tagged TerminalState, look this pane up via
+                // `local_for` (never adopt on a status event) and re-seed
+                // its agent status there.
+                let key = crate::server::remote_pane::RemotePaneKey {
+                    host,
+                    remote_pane_id,
+                };
+                let _ = self.remote_panes.local_for(&key);
+            }
+            HostEvent::PaneClosed {
+                host,
+                remote_pane_id,
+            } => {
+                // Idempotent + unknown-tolerant (mandatory consumer
+                // contract): `release` is a no-op for an already-released or
+                // never-adopted key.
+                let key = crate::server::remote_pane::RemotePaneKey {
+                    host,
+                    remote_pane_id,
+                };
+                self.remote_panes.release(&key);
+                // Seam for Task 9b: tear down the pane's TerminalState/
+                // runtime once adoption creates one.
+            }
+            HostEvent::LinkDown { host } => {
+                self.handle_host_link_down(host);
+            }
+            HostEvent::TerminalBytes { .. } => {
+                // Seam for Task 9b: route through
+                // `PaneTerminal::process_pty_bytes` once a visibility hook
+                // actually spawns `RemotePaneAttach` for a focused remote
+                // pane; nothing does yet, so this event cannot occur today
+                // (see `RemotePaneAttach`'s doc comment).
+            }
+            HostEvent::AttachFailed { .. } => {
+                // Seam for Task 9b: release the adopted pane / refresh the
+                // snapshot once RemotePaneAttach is actually wired up.
+            }
+        }
+    }
+
+    /// Reconciles `RemotePaneRegistry` against one authoritative snapshot:
+    /// adopts panes new to it, releases registered panes for `host` that are
+    /// absent from it. This is the sole close-path after a remote
+    /// SetupRefresh and the sole old-id retirement path after a
+    /// cross-workspace `pane.move` on the remote (mandatory consumer
+    /// contract from the Task 6/7 reviews).
+    #[cfg(unix)]
+    fn reconcile_remote_pane_snapshot(
+        &mut self,
+        host: &crate::server::host_link::HostLinkId,
+        panes: Vec<crate::server::remote_pane::RemotePaneInfo>,
+    ) {
+        let incoming: std::collections::HashSet<&str> = panes
+            .iter()
+            .map(|pane| pane.remote_pane_id.as_str())
+            .collect();
+        let stale: Vec<crate::server::remote_pane::RemotePaneKey> = self
+            .remote_panes
+            .panes_for_host(host)
+            .filter(|(key, _)| !incoming.contains(key.remote_pane_id.as_str()))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in stale {
+            self.remote_panes.release(&key);
+        }
+        for pane in panes {
+            let key = crate::server::remote_pane::RemotePaneKey {
+                host: host.clone(),
+                remote_pane_id: pane.remote_pane_id.clone(),
+            };
+            self.remote_panes.adopt(key, crate::layout::PaneId::alloc);
+            // Seam for Task 9b: re-seed status/label/title/etc. into a
+            // host-tagged TerminalState once adoption creates one.
+        }
+    }
+
+    /// `LinkDown` handling: advances the backoff state machine, syncs the
+    /// display map, retires the (already-exited) loop thread, and -- unless
+    /// the link just went terminally `Offline` -- respawns a fresh transport
+    /// and event loop for the next attempt. Reconnect policy intentionally
+    /// lives here (the link's owner), not in the poll loop itself, per the
+    /// Task 6/8 reviews' "LinkDown at most once per loop lifetime" contract:
+    /// each respawned loop is a fresh lifetime with its own single-LinkDown
+    /// budget.
+    ///
+    /// Reconnect decision: no explicit backoff delay is injected here.
+    /// `on_disconnect`'s attempt counter still bounds the worst case to
+    /// `MAX_RECONNECT_ATTEMPTS` respawns before the link goes `Offline`
+    /// (terminal for auto-retry; manual retry is detach+attach), and in
+    /// production a real `ssh` connection attempt paces each retry with its
+    /// own connect latency. A fast-failing transport (e.g. a closed unix
+    /// socket in tests) can burn through the whole attempt budget almost
+    /// immediately -- acceptable for now, but a real timed backoff before
+    /// each respawn is a documented follow-up (would need a scheduled-task
+    /// deadline like `next_auto_update_check`, not a blocking sleep on the
+    /// main loop thread).
+    #[cfg(unix)]
+    fn handle_host_link_down(&mut self, host: crate::server::host_link::HostLinkId) {
+        use crate::server::host_link::LinkState;
+        let next_state = self.host_links.on_disconnect(&host);
+        self.sync_host_link_display(&host);
+        let Some(runtime) = self.host_link_runtimes.remove(&host) else {
+            // No runtime: the link was detached concurrently. Nothing to
+            // join or respawn.
+            return;
+        };
+        // The loop thread already exited (it sends LinkDown right before
+        // returning), so this join is immediate.
+        let HostLinkRuntime {
+            generation,
+            event_loop,
+            transport,
+        } = runtime;
+        event_loop.join();
+        match next_state {
+            Some(LinkState::Reconnecting { attempt }) => {
+                debug!(host = %host.0, attempt, "host link down; reconnecting");
+                // Reuse the same generation + transport materials -- a
+                // reconnect is the same logical attach lifetime, and reusing
+                // the handle means no per-attempt config read / ssh-config
+                // write.
+                self.spawn_host_link_runtime(host, generation, transport);
+            }
+            Some(LinkState::Offline) => {
+                warn!(
+                    host = %host.0,
+                    "host link exhausted reconnect attempts; now offline (manual retry = detach + attach)"
+                );
+                // `transport` (and its ssh guard) drop here.
+            }
+            _ => {
+                // Connecting/Connected are never produced by `on_disconnect`,
+                // and `None` means the link was detached concurrently. Drop
+                // the transport materials either way.
+            }
+        }
+    }
+
+    /// The ONLY place `server::host_link::LinkState` is converted to
+    /// `app::state::HostLinkDisplayState` (mirrored `TerminalHostTag`
+    /// conversion happens right here too), per the Task 7 sync contract on
+    /// `AppState::host_links`. Removes the entry if the link was detached
+    /// out from under a caller (defensive; `host.detach` also removes it
+    /// directly).
+    #[cfg(unix)]
+    fn sync_host_link_display(&mut self, host: &crate::server::host_link::HostLinkId) {
+        let tag = crate::terminal::TerminalHostTag::new(host.0.clone());
+        match self.host_links.state(host) {
+            Some(state) => {
+                self.app
+                    .state
+                    .host_links
+                    .insert(tag, host_link_display_state(state));
+            }
+            None => {
+                self.app.state.host_links.remove(&tag);
+            }
+        }
     }
 
     fn sync_visible_server_config_diagnostic(&mut self, uses_local_keybindings: bool) {
@@ -2712,6 +3360,11 @@ impl HeadlessServer {
                     false
                 }
             }
+            #[cfg(unix)]
+            ServerEvent::HostEvent(envelope) => {
+                self.handle_host_event(envelope);
+                true
+            }
             ServerEvent::QuitSignal => {
                 // The quit check at the top of the loop handles this.
                 // No render needed — the next iteration will initiate shutdown.
@@ -2795,6 +3448,27 @@ impl HeadlessServer {
         if let api::schema::Method::NotificationShow(params) = &msg.request.method {
             let response =
                 self.handle_notification_show_api(msg.request.id.clone(), params.clone());
+            let _ = msg.respond_to.send(response);
+            return true;
+        }
+
+        // Host-link state (`HostLinkRegistry`/`RemotePaneRegistry`) lives on
+        // `HeadlessServer`, not `App` -- `app` sits below `server` in the
+        // dependency graph and can't hold server-layer newtypes -- so these
+        // three methods are intercepted here, the same way `ServerLiveHandoff`
+        // is above, instead of reaching `App::handle_api_request_*`.
+        if let api::schema::Method::HostAttach(params) = &msg.request.method {
+            let response = self.handle_host_attach_api(msg.request.id.clone(), params.clone());
+            let _ = msg.respond_to.send(response);
+            return true;
+        }
+        if matches!(&msg.request.method, api::schema::Method::HostList(_)) {
+            let response = self.handle_host_list_api(msg.request.id.clone());
+            let _ = msg.respond_to.send(response);
+            return true;
+        }
+        if let api::schema::Method::HostDetach(params) = &msg.request.method {
+            let response = self.handle_host_detach_api(msg.request.id.clone(), params.clone());
             let _ = msg.respond_to.send(response);
             return true;
         }
@@ -3764,6 +4438,10 @@ impl HeadlessServer {
         // Drain remaining API requests with server_unavailable.
         self.drain_api_requests_with_shutdown_check();
 
+        // Stop and join every per-host event loop thread.
+        #[cfg(unix)]
+        self.stop_all_host_link_runtimes();
+
         // Close all client connections.
         let staged_files = self
             .clients
@@ -3797,6 +4475,10 @@ impl HeadlessServer {
 
 impl Drop for HeadlessServer {
     fn drop(&mut self) {
+        // Symmetry with `complete_shutdown`: stop+join per-host loop threads
+        // even on an abrupt drop (a no-op if shutdown already drained them).
+        #[cfg(unix)]
+        self.stop_all_host_link_runtimes();
         let staged_files = self
             .clients
             .drain()
@@ -4168,6 +4850,8 @@ mod tests {
         #[cfg(windows)]
         spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone());
         let server_keybindings = app_keybindings(&app);
+        #[cfg(unix)]
+        let host_event_tx = spawn_host_event_bridge(server_event_tx.clone());
 
         HeadlessServer {
             app,
@@ -4199,6 +4883,18 @@ mod tests {
             should_quit,
             server_event_rx,
             server_event_tx,
+            #[cfg(unix)]
+            host_links: crate::server::host_link::HostLinkRegistry::default(),
+            #[cfg(unix)]
+            remote_panes: crate::server::remote_pane::RemotePaneRegistry::default(),
+            #[cfg(unix)]
+            host_link_runtimes: HashMap::new(),
+            #[cfg(unix)]
+            next_host_generation: 1,
+            #[cfg(unix)]
+            host_event_tx,
+            #[cfg(unix)]
+            host_transport_override_for_test: None,
         }
     }
 
@@ -8531,5 +9227,504 @@ next_tab = ""
              handle_internal_event_with_forwarding (bypass risk):\n  {}",
             bypass_lines.join("\n  ")
         );
+    }
+
+    // -----------------------------------------------------------------
+    // host.* lifecycle (Task 9)
+    //
+    // Mirrors the fake-remote pattern from src/server/remote_pane.rs's own
+    // tests: a real `UnixListener` scripted to play canned wire-format
+    // responses (built from the real API structs, so the test can't drift
+    // from the wire shape), fed to the real `host.attach`/`host.list`/
+    // `host.detach` handlers through `host_transport_override_for_test`
+    // instead of a real `ssh` binary/target.
+    // -----------------------------------------------------------------
+
+    #[cfg(unix)]
+    mod host_lifecycle {
+        use super::*;
+        use crate::server::host_transport::{LinkTransport, UnixSocketTransport};
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::os::unix::net::{UnixListener, UnixStream};
+
+        fn unique_host_test_dir(name: &str) -> std::path::PathBuf {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}", std::process::id()))
+        }
+
+        fn read_fake_request(conn: &mut UnixStream) -> api::schema::Request {
+            let mut line = String::new();
+            BufReader::new(&mut *conn).read_line(&mut line).unwrap();
+            serde_json::from_str(&line).unwrap()
+        }
+
+        fn write_fake_line<T: serde::Serialize>(conn: &mut UnixStream, value: &T) {
+            let encoded = serde_json::to_string(value).unwrap();
+            conn.write_all(encoded.as_bytes()).unwrap();
+            conn.write_all(b"\n").unwrap();
+            conn.flush().unwrap();
+        }
+
+        fn fake_pane(pane_id: &str) -> api::schema::PaneInfo {
+            api::schema::PaneInfo {
+                pane_id: pane_id.to_string(),
+                terminal_id: format!("term_{pane_id}"),
+                workspace_id: "ws1".to_string(),
+                tab_id: "tab1".to_string(),
+                focused: false,
+                cwd: None,
+                foreground_cwd: None,
+                label: None,
+                agent: None,
+                title: None,
+                display_agent: None,
+                agent_status: api::schema::AgentStatus::Idle,
+                custom_status: None,
+                state_labels: HashMap::new(),
+                agent_session: None,
+                revision: 0,
+            }
+        }
+
+        /// Installs a transport override pointing every `host.attach` at
+        /// `sock`, so the real production ssh-building path (and its config
+        /// I/O) is never exercised in tests.
+        fn use_fake_remote_socket(server: &mut HeadlessServer, sock: std::path::PathBuf) {
+            let factory: std::sync::Arc<HostTransportFactory> =
+                std::sync::Arc::new(move |_host: &str| {
+                    Box::new(UnixSocketTransport {
+                        api_socket: sock.clone(),
+                        client_socket: sock.clone(),
+                    }) as Box<dyn LinkTransport>
+                });
+            server.host_transport_override_for_test = Some(factory);
+        }
+
+        fn host_list_hosts(server: &mut HeadlessServer) -> Vec<serde_json::Value> {
+            let response = server.handle_host_list_api("test:host:list".to_string());
+            let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+            parsed["result"]["hosts"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        }
+
+        /// Drains whatever `HostEvent`s the bridge thread has forwarded so
+        /// far and returns the current `host.list` entry for `host`, or
+        /// `None` if it isn't attached (yet).
+        fn poll_host_entry(server: &mut HeadlessServer, host: &str) -> Option<serde_json::Value> {
+            server.drain_server_events();
+            host_list_hosts(server)
+                .into_iter()
+                .find(|entry| entry["host"] == host)
+        }
+
+        fn wait_for_host_state(
+            server: &mut HeadlessServer,
+            host: &str,
+            state: &str,
+        ) -> serde_json::Value {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(entry) = poll_host_entry(server, host) {
+                    if entry["state"] == state {
+                        return entry;
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for host '{host}' to reach state '{state}'"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        #[test]
+        fn host_attach_reports_connected_and_pane_count_then_detach_clears_it() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("host-attach");
+            fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("remote-api.sock");
+
+            let remote_sock = sock.clone();
+            let remote = std::thread::spawn(move || {
+                let listener = UnixListener::bind(&remote_sock).unwrap();
+
+                // Connection A: pane.list snapshot with two panes.
+                let (mut conn, _) = listener.accept().unwrap();
+                let request = read_fake_request(&mut conn);
+                assert!(matches!(request.method, api::schema::Method::PaneList(_)));
+                write_fake_line(
+                    &mut conn,
+                    &api::schema::SuccessResponse {
+                        id: request.id,
+                        result: api::schema::ResponseResult::PaneList {
+                            panes: vec![fake_pane("w1:p1"), fake_pane("w1:p2")],
+                        },
+                    },
+                );
+                conn.shutdown(std::net::Shutdown::Both).ok();
+                drop(conn);
+
+                // Connection B: events.subscribe, ack then held open until
+                // host.detach closes the client side.
+                let (mut conn, _) = listener.accept().unwrap();
+                let request = read_fake_request(&mut conn);
+                assert!(matches!(
+                    request.method,
+                    api::schema::Method::EventsSubscribe(_)
+                ));
+                write_fake_line(
+                    &mut conn,
+                    &api::schema::SuccessResponse {
+                        id: request.id,
+                        result: api::schema::ResponseResult::SubscriptionStarted {},
+                    },
+                );
+                let mut buf = [0u8; 1];
+                let _ = conn.read(&mut buf);
+            });
+
+            use_fake_remote_socket(&mut server, sock);
+
+            let attach_response = server.handle_host_attach_api(
+                "test:host:attach".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            assert!(
+                !attach_response.contains("\"error\""),
+                "attach failed: {attach_response}"
+            );
+
+            let entry = wait_for_host_state(&mut server, "workbox", "connected");
+            assert_eq!(entry["pane_count"], 2);
+
+            // The sidebar's display map (Task 7 seam) must agree with the
+            // API's view -- both are driven by the same single mutation
+            // point (`sync_host_link_display`).
+            assert_eq!(
+                server
+                    .app
+                    .state
+                    .host_links
+                    .get(&crate::terminal::TerminalHostTag::new("workbox")),
+                Some(&crate::app::state::HostLinkDisplayState::Connected)
+            );
+
+            let detach_response = server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            assert!(
+                !detach_response.contains("\"error\""),
+                "detach failed: {detach_response}"
+            );
+            assert!(host_list_hosts(&mut server).is_empty());
+            assert!(!server
+                .app
+                .state
+                .host_links
+                .contains_key(&crate::terminal::TerminalHostTag::new("workbox")));
+
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn detaching_an_unattached_host_is_a_not_found_error() {
+            let mut server = test_headless_server();
+            let response = server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "ghost".to_string(),
+                },
+            );
+            assert!(response.contains("\"error\""));
+            assert!(response.contains("not_found"));
+        }
+
+        #[test]
+        fn attaching_an_already_attached_host_is_rejected() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("host-attach-twice");
+            fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("remote-api.sock");
+
+            // Never accepted: the second attach must be rejected before
+            // opening any transport at all.
+            let _listener = UnixListener::bind(&sock).unwrap();
+            use_fake_remote_socket(&mut server, sock);
+
+            let first = server.handle_host_attach_api(
+                "test:host:attach:1".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            assert!(!first.contains("\"error\""), "{first}");
+
+            let second = server.handle_host_attach_api(
+                "test:host:attach:2".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            assert!(second.contains("\"error\""));
+            assert!(second.contains("already_attached"));
+
+            server.stop_host_link_runtime(&crate::server::host_link::HostLinkId(
+                "workbox".to_string(),
+            ));
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// Pins the reconnect wiring this task adds on top of Task 3/6's
+        /// pure state machine: a link that drops degrades to
+        /// `reconnecting`, and -- because `handle_host_link_down` respawns
+        /// a fresh transport + event loop per attempt -- keeps failing
+        /// reconnect attempts until `on_disconnect`'s attempt cap lands it
+        /// on the terminal `offline` state. The fake remote closes its
+        /// listener after the very first round, so every respawned attempt
+        /// fails to even connect (immediate `ECONNREFUSED`, no fresh
+        /// `Snapshot`), which is what makes the attempt counter actually
+        /// climb instead of resetting on each retry's own success.
+        #[test]
+        fn host_link_down_escalates_to_offline_after_repeated_reconnect_failures() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("host-reconnect");
+            fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("remote-api.sock");
+
+            let remote_sock = sock.clone();
+            let remote = std::thread::spawn(move || {
+                let listener = UnixListener::bind(&remote_sock).unwrap();
+
+                let (mut conn, _) = listener.accept().unwrap();
+                let request = read_fake_request(&mut conn);
+                assert!(matches!(request.method, api::schema::Method::PaneList(_)));
+                write_fake_line(
+                    &mut conn,
+                    &api::schema::SuccessResponse {
+                        id: request.id,
+                        result: api::schema::ResponseResult::PaneList {
+                            panes: vec![fake_pane("w1:p1")],
+                        },
+                    },
+                );
+                conn.shutdown(std::net::Shutdown::Both).ok();
+                drop(conn);
+
+                let (mut conn, _) = listener.accept().unwrap();
+                let request = read_fake_request(&mut conn);
+                assert!(matches!(
+                    request.method,
+                    api::schema::Method::EventsSubscribe(_)
+                ));
+                write_fake_line(
+                    &mut conn,
+                    &api::schema::SuccessResponse {
+                        id: request.id,
+                        result: api::schema::ResponseResult::SubscriptionStarted {},
+                    },
+                );
+                conn.shutdown(std::net::Shutdown::Both).ok();
+                // `listener` drops here: every later connect attempt from a
+                // respawned loop fails instantly instead of hanging.
+            });
+
+            use_fake_remote_socket(&mut server, sock);
+
+            let attach_response = server.handle_host_attach_api(
+                "test:host:attach".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            assert!(!attach_response.contains("\"error\""), "{attach_response}");
+
+            // First observe the (transient) reconnecting state the initial
+            // drop produces...
+            wait_for_host_state(&mut server, "workbox", "reconnecting");
+            // ...then confirm the repeated-failure escalation actually
+            // reaches the terminal offline state instead of retrying
+            // forever.
+            wait_for_host_state(&mut server, "workbox", "offline");
+
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        fn remote_pane_info(id: &str) -> crate::server::remote_pane::RemotePaneInfo {
+            crate::server::remote_pane::RemotePaneInfo {
+                remote_pane_id: id.to_string(),
+                agent_status: api::schema::AgentStatus::Idle,
+                label: None,
+                agent: None,
+                title: None,
+                display_agent: None,
+                custom_status: None,
+            }
+        }
+
+        fn host_pane_count(server: &mut HeadlessServer) -> u64 {
+            host_list_hosts(server)
+                .iter()
+                .find(|entry| entry["host"] == "workbox")
+                .and_then(|entry| entry["pane_count"].as_u64())
+                .unwrap_or_default()
+        }
+
+        /// Serves one attach round on `listener`: a `pane.list` returning
+        /// `panes`, then an `events.subscribe` ack. Returns the held-open
+        /// subscribe connection so the caller can keep it alive (dropping it
+        /// would look like a link drop to the loop).
+        fn serve_attach_round(
+            listener: &UnixListener,
+            panes: Vec<api::schema::PaneInfo>,
+        ) -> UnixStream {
+            let (mut conn, _) = listener.accept().unwrap();
+            let request = read_fake_request(&mut conn);
+            assert!(matches!(request.method, api::schema::Method::PaneList(_)));
+            write_fake_line(
+                &mut conn,
+                &api::schema::SuccessResponse {
+                    id: request.id,
+                    result: api::schema::ResponseResult::PaneList { panes },
+                },
+            );
+            conn.shutdown(std::net::Shutdown::Both).ok();
+            drop(conn);
+
+            let (mut conn, _) = listener.accept().unwrap();
+            let request = read_fake_request(&mut conn);
+            assert!(matches!(
+                request.method,
+                api::schema::Method::EventsSubscribe(_)
+            ));
+            write_fake_line(
+                &mut conn,
+                &api::schema::SuccessResponse {
+                    id: request.id,
+                    result: api::schema::ResponseResult::SubscriptionStarted {},
+                },
+            );
+            conn
+        }
+
+        /// The detach+reattach correlation race, closed by the generation
+        /// stamp on every `HostEventEnvelope`: after `detach x && attach x`,
+        /// a `Snapshot` the *old* generation's loop sent (or, here, one
+        /// synthesized with the old generation) must NOT reconcile against
+        /// the new generation's registry. Drives `handle_host_event`
+        /// directly with a synthetic stale envelope (wiring one through the
+        /// real async bridge would be racy), which is the unit-level check
+        /// the review called for.
+        #[test]
+        fn stale_generation_snapshot_is_dropped_after_reattach() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("host-generation");
+            fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("remote-api.sock");
+
+            let remote_sock = sock.clone();
+            let remote = std::thread::spawn(move || {
+                let listener = UnixListener::bind(&remote_sock).unwrap();
+                // Round 1: one pane. Keep the subscribe conn alive until the
+                // detach stops the round-1 loop.
+                let _round1 = serve_attach_round(&listener, vec![fake_pane("w1:p1")]);
+                // Round 2 (after reattach): two panes, held open.
+                let round2 =
+                    serve_attach_round(&listener, vec![fake_pane("w1:p1"), fake_pane("w1:p2")]);
+                // Park keeping round 2 open; nextest reaps this on exit.
+                let mut buf = [0u8; 1];
+                let mut held = round2;
+                let _ = held.read(&mut buf);
+            });
+
+            use_fake_remote_socket(&mut server, sock);
+
+            // Round 1: attach, capture generation G1.
+            server.handle_host_attach_api(
+                "test:attach:1".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            wait_for_host_state(&mut server, "workbox", "connected");
+            let gen1 = server
+                .host_generation_for_test("workbox")
+                .expect("attached host has a generation");
+            assert_eq!(host_pane_count(&mut server), 1);
+
+            // Detach, then reattach: G2 must differ from G1.
+            server.handle_host_detach_api(
+                "test:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            server.handle_host_attach_api(
+                "test:attach:2".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            wait_for_host_state(&mut server, "workbox", "connected");
+            let gen2 = server
+                .host_generation_for_test("workbox")
+                .expect("reattached host has a generation");
+            assert_ne!(gen1, gen2, "reattach must bump the generation");
+            assert_eq!(host_pane_count(&mut server), 2);
+
+            // A Snapshot stamped with the OLD generation carrying only
+            // w1:p1 would, if applied, release w1:p2 (missing from it) and
+            // drop the count to 1. The generation guard must drop it.
+            server.handle_host_event(crate::server::remote_pane::HostEventEnvelope {
+                generation: gen1,
+                event: crate::server::remote_pane::HostEvent::Snapshot {
+                    host: crate::server::host_link::HostLinkId("workbox".to_string()),
+                    panes: vec![remote_pane_info("w1:p1")],
+                },
+            });
+            assert_eq!(
+                host_pane_count(&mut server),
+                2,
+                "stale-generation snapshot must be dropped, not reconciled"
+            );
+
+            // Positive control: a CURRENT-generation snapshot IS applied.
+            server.handle_host_event(crate::server::remote_pane::HostEventEnvelope {
+                generation: gen2,
+                event: crate::server::remote_pane::HostEvent::Snapshot {
+                    host: crate::server::host_link::HostLinkId("workbox".to_string()),
+                    panes: vec![
+                        remote_pane_info("w1:p1"),
+                        remote_pane_info("w1:p2"),
+                        remote_pane_info("w1:p3"),
+                    ],
+                },
+            });
+            assert_eq!(
+                host_pane_count(&mut server),
+                3,
+                "current-generation snapshot must reconcile normally"
+            );
+
+            server.handle_host_detach_api(
+                "test:detach:2".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 }

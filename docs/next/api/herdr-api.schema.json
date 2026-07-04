@@ -1487,6 +1487,29 @@
           ],
           "type": "object"
         },
+        "HostAttachParams": {
+          "description": "`host` is an ssh alias/target identifying the remote herdr server to\nattach. No `--handoff`-style options here (YAGNI per the multi-host plan).",
+          "properties": {
+            "host": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "host"
+          ],
+          "type": "object"
+        },
+        "HostDetachParams": {
+          "properties": {
+            "host": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "host"
+          ],
+          "type": "object"
+        },
         "IntegrationInstallParams": {
           "properties": {
             "target": {
@@ -4103,6 +4126,54 @@
         {
           "properties": {
             "method": {
+              "const": "host.attach",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/HostAttachParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "host.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "host.detach",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/HostDetachParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.split",
               "type": "string"
             },
@@ -5805,6 +5876,28 @@
             "pane_agent_status_changed"
           ],
           "type": "string"
+        },
+        "HostInfo": {
+          "description": "One attached host's link state and adopted pane count, as reported by\n`host.list`.\n\n`state` is a snake_case label (`\"connecting\"`, `\"connected\"`,\n`\"reconnecting\"`, `\"offline\"`) converted from the server's internal\n`server::host_link::LinkState` at the API boundary -- that internal\nnewtype (and `HostLinkId`) never crosses into this pub schema, matching\nthe boundary rule the Task 6 schema review established for other server\nnewtypes.",
+          "properties": {
+            "host": {
+              "type": "string"
+            },
+            "pane_count": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "host",
+            "state",
+            "pane_count"
+          ],
+          "type": "object"
         },
         "InstalledPluginInfo": {
           "properties": {
@@ -7588,6 +7681,61 @@
               "required": [
                 "type",
                 "agents"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "host": {
+                  "$ref": "#/schemas/success_response/$defs/HostInfo"
+                },
+                "type": {
+                  "const": "host_attached",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "host"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "hosts": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/HostInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "host_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "hosts"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "detached": {
+                  "type": "boolean"
+                },
+                "host": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "host_detached",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "host",
+                "detached"
               ],
               "type": "object"
             },

@@ -843,21 +843,25 @@ pub enum AgentPanelSort {
 /// `host_link::LinkState`. `app/` sits below `server/` in the dependency
 /// graph, so this is a distinct type; the server layer converts between the
 /// two at the single point where it applies host events to `AppState`
-/// (Task 8/9 wiring, same seam that sets `TerminalState::host`).
+/// (`HeadlessServer::sync_host_link_display`, Task 9; the same seam is meant
+/// to set `TerminalState::host` once adopted remote panes get a runtime --
+/// still Task 9b/deferred today, so `host_links` entries currently exist
+/// without any tagged terminals alongside them).
 ///
 /// Sync contract for that wiring:
 /// - Snapshot events are authoritative reconciliation: adopt new panes,
 ///   release missing ones, and re-seed every host's entry in
 ///   [`AppState::host_links`] each time.
 /// - Link state transitions update the entry in place; detaching a host
-///   removes it (and its terminals' host tags).
+///   removes it (and, once Task 9b lands, its terminals' host tags).
 ///
 /// `attempt` from `LinkState::Reconnecting` is deliberately not mirrored;
 /// the host section header shows only a spinner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// The sidebar matches on every variant, but nothing outside tests constructs
-// them until the Task 8/9 server wiring lands.
-#[allow(dead_code)]
+// Constructed only by the `#[cfg(unix)]`-gated multi-host server wiring
+// (`HeadlessServer::sync_host_link_display`, Task 9); genuinely unreachable
+// on a Windows build (multi-host is unix-only, matching `src/remote/`).
+#[cfg_attr(not(unix), allow(dead_code))]
 pub enum HostLinkDisplayState {
     Connecting,
     Connected,

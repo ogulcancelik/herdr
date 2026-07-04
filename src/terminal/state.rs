@@ -80,10 +80,11 @@ pub struct TerminalHostTag(String);
 
 impl TerminalHostTag {
     /// Wraps a host link alias. Constructed at the server/app boundary when
-    /// remote panes are adopted (Task 8/9) and by UI tests; `terminal/` never
-    /// derives one itself.
-    // Only tests construct tags until the Task 8/9 adoption wiring lands.
-    #[allow(dead_code)]
+    /// remote panes are adopted (`HeadlessServer::sync_host_link_display`,
+    /// Task 9) and by UI tests; `terminal/` never derives one itself. That
+    /// server-side caller is `#[cfg(unix)]`-gated (multi-host is unix-only),
+    /// so this stays genuinely unreachable on a Windows build.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn new(host: impl Into<String>) -> Self {
         Self(host.into())
     }

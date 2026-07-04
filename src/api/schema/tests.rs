@@ -1098,3 +1098,109 @@ fn plugin_pane_open_request_round_trips() {
     let restored: Request = serde_json::from_value(json).unwrap();
     assert_eq!(restored, request);
 }
+
+#[test]
+fn request_round_trips_for_host_attach() {
+    let request = Request {
+        id: "req_host_attach".into(),
+        method: Method::HostAttach(HostAttachParams {
+            host: "workbox".into(),
+        }),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "host.attach");
+    assert_eq!(json["params"]["host"], "workbox");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
+fn request_round_trips_for_host_list() {
+    let request = Request {
+        id: "req_host_list".into(),
+        method: Method::HostList(EmptyParams::default()),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "host.list");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
+fn request_round_trips_for_host_detach() {
+    let request = Request {
+        id: "req_host_detach".into(),
+        method: Method::HostDetach(HostDetachParams {
+            host: "workbox".into(),
+        }),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "host.detach");
+    assert_eq!(json["params"]["host"], "workbox");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
+fn host_attached_response_round_trips() {
+    let response = SuccessResponse {
+        id: "req_host_attach".into(),
+        result: ResponseResult::HostAttached {
+            host: HostInfo {
+                host: "workbox".into(),
+                state: "connecting".into(),
+                pane_count: 0,
+            },
+        },
+    };
+
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["result"]["type"], "host_attached");
+    let restored: SuccessResponse = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, response);
+}
+
+#[test]
+fn host_list_response_round_trips() {
+    let response = SuccessResponse {
+        id: "req_host_list".into(),
+        result: ResponseResult::HostList {
+            hosts: vec![
+                HostInfo {
+                    host: "workbox".into(),
+                    state: "connected".into(),
+                    pane_count: 3,
+                },
+                HostInfo {
+                    host: "buildfarm".into(),
+                    state: "reconnecting".into(),
+                    pane_count: 0,
+                },
+            ],
+        },
+    };
+
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["result"]["type"], "host_list");
+    let restored: SuccessResponse = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, response);
+}
+
+#[test]
+fn host_detached_response_round_trips() {
+    let response = SuccessResponse {
+        id: "req_host_detach".into(),
+        result: ResponseResult::HostDetached {
+            host: "workbox".into(),
+            detached: true,
+        },
+    };
+
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["result"]["type"], "host_detached");
+    let restored: SuccessResponse = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, response);
+}
