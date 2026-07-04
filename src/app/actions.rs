@@ -313,6 +313,9 @@ impl AppState {
             return false;
         }
 
+        if self.copy_mode.is_some() {
+            self.clear_copy_mode_selection();
+        }
         self.switch_workspace_tab(ws_idx, tab_idx);
         if let Some(tab) = self
             .workspaces
