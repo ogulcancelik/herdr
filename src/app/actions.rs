@@ -1321,18 +1321,37 @@ impl AppState {
             self.view.sidebar_rect,
             self.sidebar_section_split,
         );
-        let metrics = crate::ui::agent_panel_scroll_metrics(self, detail_area);
-        let visible = metrics.viewport_rows;
-        if visible == 0 {
+        let entries = crate::ui::agent_panel_entries(self);
+        let body = crate::ui::agent_panel_body_rect(detail_area, false);
+        if body.height < 2 {
             return;
         }
 
+        // Single source of truth: scroll by what the row-placement walker
+        // actually paints, not a header-blind capacity estimate. This agrees
+        // with the (now walker-defined) `max_offset_from_bottom` clamp that
+        // compute_view re-applies every frame, so the target it reveals is
+        // not scrolled back off-screen at render time.
         if idx < self.agent_panel_scroll {
+            // Reveal above the fold: the first visible entry always places
+            // (headerless if only its header would not fit), so `idx` at the
+            // top of its own window is guaranteed visible.
             self.agent_panel_scroll = idx;
-        } else if idx >= self.agent_panel_scroll.saturating_add(visible) {
-            self.agent_panel_scroll = idx.saturating_add(1).saturating_sub(visible);
+        } else {
+            // Reveal below the fold: advance to the smallest offset that
+            // places `idx` (which lands it at the bottom of the viewport).
+            while self.agent_panel_scroll < idx
+                && !crate::ui::agent_panel_row_placements(&entries, self.agent_panel_scroll, body)
+                    .iter()
+                    .any(|placement| placement.entry_idx == idx)
+            {
+                self.agent_panel_scroll += 1;
+            }
         }
 
+        // Bound scroll. `max_offset_from_bottom` is the offset that places the
+        // last entry; since it is >= the offset that places any earlier `idx`,
+        // this clamp never pushes `idx` back off-screen.
         let max_scroll =
             crate::ui::agent_panel_scroll_metrics(self, detail_area).max_offset_from_bottom;
         self.agent_panel_scroll = self.agent_panel_scroll.min(max_scroll);
@@ -3725,6 +3744,82 @@ mod tests {
         let last_idx = state.workspaces[0].tabs.len() - 1;
         assert_eq!(state.workspaces[0].active_tab, last_idx);
         assert!(state.agent_panel_scroll > 0);
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn wrapped_agent_target_stays_visible_with_host_section_headers_at_any_height() {
+        let mut workspace = Workspace::test_new("one");
+        let root = workspace.tabs[0].root_pane;
+        for idx in 1..8 {
+            workspace.test_add_tab(Some(&format!("tab-{idx}")));
+        }
+
+        let mut state = AppState::test_new();
+        state.workspaces = vec![workspace];
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = Mode::Terminal;
+        for tab_idx in 0..state.workspaces[0].tabs.len() {
+            let pane_id = state.workspaces[0].tabs[tab_idx].root_pane;
+            mark_agent(&mut state, 0, tab_idx, pane_id);
+        }
+        // 4 local entries, then two host sections of two entries each. The
+        // headers consume body rows, which the header-blind capacity metric
+        // does not see; the wrap target must still end up placed.
+        for (tab_idx, host) in [(4, "alpha"), (5, "alpha"), (6, "beta"), (7, "beta")] {
+            let pane_id = state.workspaces[0].tabs[tab_idx].root_pane;
+            let terminal_id = state.workspaces[0].tabs[tab_idx].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            state.terminals.get_mut(&terminal_id).unwrap().host =
+                Some(crate::terminal::TerminalHostTag::new(host));
+        }
+
+        let mut hidden_heights = Vec::new();
+        for height in 10u16..=30 {
+            let area = ratatui::layout::Rect::new(0, 0, 80, height);
+            state.workspaces[0].active_tab = 0;
+            state.workspaces[0].tabs[0].layout.focus_pane(root);
+            state.agent_panel_scroll = 0;
+            crate::ui::compute_view(&mut state, area);
+
+            state.previous_agent();
+
+            // The render path runs compute_view every frame, and its
+            // header-blind max_offset_from_bottom clamp used to re-hide the
+            // target that the input handler had just scrolled into view. Run
+            // it here so the assertion sees the FINAL, post-clamp scroll.
+            crate::ui::compute_view(&mut state, area);
+
+            let entries = crate::ui::agent_panel_entries(&state);
+            let target_idx = entries.len() - 1;
+            assert_eq!(
+                state.workspaces[0].focused_pane_id(),
+                Some(entries[target_idx].pane_id),
+                "height {height}: previous_agent should wrap to the last entry"
+            );
+            let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+                state.view.sidebar_rect,
+                state.sidebar_section_split,
+            );
+            let body = crate::ui::agent_panel_body_rect(detail_area, false);
+            if body.height < 2 {
+                continue; // panel too small to place anything at all
+            }
+            let placed =
+                crate::ui::agent_panel_row_placements(&entries, state.agent_panel_scroll, body)
+                    .iter()
+                    .any(|placement| placement.entry_idx == target_idx);
+            if !placed {
+                hidden_heights.push((height, state.agent_panel_scroll));
+            }
+        }
+        assert!(
+            hidden_heights.is_empty(),
+            "focused wrap target hidden after render clamp at (height, scroll): {hidden_heights:?}"
+        );
         state.assert_invariants_for_test();
     }
 

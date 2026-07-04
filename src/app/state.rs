@@ -839,6 +839,32 @@ pub enum AgentPanelSort {
     Priority,
 }
 
+/// Display state of one remote host link, mirrored from the server's
+/// `host_link::LinkState`. `app/` sits below `server/` in the dependency
+/// graph, so this is a distinct type; the server layer converts between the
+/// two at the single point where it applies host events to `AppState`
+/// (Task 8/9 wiring, same seam that sets `TerminalState::host`).
+///
+/// Sync contract for that wiring:
+/// - Snapshot events are authoritative reconciliation: adopt new panes,
+///   release missing ones, and re-seed every host's entry in
+///   [`AppState::host_links`] each time.
+/// - Link state transitions update the entry in place; detaching a host
+///   removes it (and its terminals' host tags).
+///
+/// `attempt` from `LinkState::Reconnecting` is deliberately not mirrored;
+/// the host section header shows only a spinner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// The sidebar matches on every variant, but nothing outside tests constructs
+// them until the Task 8/9 server wiring lands.
+#[allow(dead_code)]
+pub enum HostLinkDisplayState {
+    Connecting,
+    Connected,
+    Reconnecting,
+    Offline,
+}
+
 // ---------------------------------------------------------------------------
 // Settings UI state
 // ---------------------------------------------------------------------------
@@ -1268,6 +1294,12 @@ pub struct AppState {
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     /// Terminal ids whose size is currently owned by a direct attach client.
     pub direct_attach_resize_locks: std::collections::HashSet<crate::terminal::TerminalId>,
+    /// Link state per attached remote host, keyed by the host tag carried on
+    /// adopted terminals. See [`HostLinkDisplayState`] for the sync contract.
+    /// `BTreeMap` iteration is sorted by host id, matching the server's
+    /// `HostLinkRegistry` order, so UI host sections stay consistent with it.
+    pub host_links:
+        std::collections::BTreeMap<crate::terminal::TerminalHostTag, HostLinkDisplayState>,
     pub(crate) pane_id_aliases: std::collections::HashMap<u32, PaneId>,
     pub(crate) public_pane_id_aliases: std::collections::HashMap<String, PaneId>,
     pub workspaces: Vec<Workspace>,
@@ -1626,6 +1658,7 @@ impl AppState {
         Self {
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
+            host_links: std::collections::BTreeMap::new(),
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces: Vec::new(),

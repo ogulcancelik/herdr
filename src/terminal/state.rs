@@ -75,14 +75,19 @@ pub struct TerminalStateMutation {
 /// imports from `crate::terminal`, never the reverse), so this module must
 /// not import server-layer types. The server layer converts between the two
 /// at the single point where it applies `HostEvent` to `AppState` (Task 8/9).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TerminalHostTag(String);
 
 impl TerminalHostTag {
-    // Only read by AppState::assert_invariants_for_test() today, which is
-    // itself only reachable from test code; a real reader arrives with
-    // adoption in Task 7-9.
+    /// Wraps a host link alias. Constructed at the server/app boundary when
+    /// remote panes are adopted (Task 8/9) and by UI tests; `terminal/` never
+    /// derives one itself.
+    // Only tests construct tags until the Task 8/9 adoption wiring lands.
     #[allow(dead_code)]
+    pub(crate) fn new(host: impl Into<String>) -> Self {
+        Self(host.into())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -116,12 +121,10 @@ pub struct TerminalState {
     pub respawn_shell_on_exit: bool,
     recent_agent_process_exit_at: Option<Instant>,
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
-    /// `None` for locally spawned terminals. Always `None` today: nothing
-    /// constructs `Some` yet -- adoption lands in Task 7-9, which will also
-    /// wire the corresponding `RemotePaneRegistry` cross-check into
+    /// `None` for locally spawned terminals. The sidebar groups agent panel
+    /// entries by this tag; server-side adoption sets it in Task 8/9, which
+    /// will also wire the corresponding `RemotePaneRegistry` cross-check into
     /// `AppState::assert_invariants_for_test()`.
-    // Only read by that (test-only-reachable) invariant check today.
-    #[allow(dead_code)]
     pub host: Option<TerminalHostTag>,
 }
 

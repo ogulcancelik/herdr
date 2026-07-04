@@ -9,10 +9,10 @@ use ratatui::{
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::status::{agent_icon, state_dot, state_label, state_label_color};
 use super::text::{display_width, display_width_u16, truncate_end};
-use crate::app::state::{AgentPanelSort, Palette};
+use crate::app::state::{AgentPanelSort, HostLinkDisplayState, Palette};
 use crate::app::{AppState, Mode};
 use crate::detect::AgentState;
-use crate::terminal::TerminalRuntimeRegistry;
+use crate::terminal::{TerminalHostTag, TerminalRuntimeRegistry};
 
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
 const AGENT_PANEL_HEADER_ROWS: u16 = 3;
@@ -29,6 +29,10 @@ pub(crate) struct AgentPanelEntry {
     pub last_agent_state_change_seq: Option<u64>,
     pub custom_status: Option<String>,
     pub state_labels: std::collections::HashMap<String, String>,
+    /// Remote host link that owns this entry's terminal; `None` for local
+    /// terminals. Entries are grouped by this tag: local first, then one
+    /// section per host sorted by host id.
+    pub host: Option<TerminalHostTag>,
 }
 
 fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
@@ -137,6 +141,10 @@ fn agent_panel_entries_with_runtimes(
                     last_agent_state_change_seq: detail.last_agent_state_change_seq,
                     custom_status: detail.custom_status,
                     state_labels: detail.state_labels,
+                    host: ws
+                        .terminal_id(detail.pane_id)
+                        .and_then(|terminal_id| app.terminals.get(terminal_id))
+                        .and_then(|terminal| terminal.host.clone()),
                 })
         })
         .collect();
@@ -149,6 +157,13 @@ fn agent_panel_entries_with_runtimes(
             )
         });
     }
+
+    // Host grouping composes with both sort modes: local entries first, then
+    // one section per host sorted by host id (matching the server's
+    // `HostLinkRegistry` iteration order). The sort is stable, so within each
+    // section the mode's order above is preserved. With zero host-tagged
+    // terminals every key is `None` and this is a no-op.
+    entries.sort_by(|a, b| a.host.cmp(&b.host));
 
     entries
 }
@@ -507,28 +522,134 @@ pub(crate) fn agent_panel_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
     Rect::new(area.x, body_y, body_width, body_height)
 }
 
-fn agent_panel_visible_count(area: Rect) -> usize {
-    let body = agent_panel_body_rect(area, false);
+/// Placement of one visible agent panel entry, shared by rendering
+/// ([`render_agent_detail`]) and click hit-testing
+/// (`AppState::agent_detail_target_at`) so the two can never disagree about
+/// which rows an entry occupies once host section headers shift rows.
+pub(crate) struct AgentPanelRowPlacement {
+    /// Index into the `agent_panel_entries` slice this was computed from.
+    pub entry_idx: usize,
+    /// Row of the host section header drawn above this entry, present when
+    /// the entry starts a new host section in the visible slice.
+    pub header_y: Option<u16>,
+    /// Top row of the entry's two-line body.
+    pub y: u16,
+}
+
+/// Walks the agent panel body layout: two rows per entry, a blank gap row
+/// between entries, and a host section header row before the first visible
+/// entry of each host section. This is the single source of truth for which
+/// rows each entry occupies, shared by rendering, hit-testing, the scroll
+/// bound, and ensure-visible.
+pub(crate) fn agent_panel_row_placements(
+    entries: &[AgentPanelEntry],
+    scroll: usize,
+    body: Rect,
+) -> Vec<AgentPanelRowPlacement> {
+    let mut placements = Vec::new();
+    if body.width == 0 || body.height < 2 {
+        return placements;
+    }
+
+    let body_bottom = body.y + body.height;
+    let mut row_y = body.y;
+    let mut prev_host: Option<&TerminalHostTag> = None;
+    for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
+        let mut header = entry
+            .host
+            .as_ref()
+            .is_some_and(|host| prev_host != Some(host));
+        // Degenerate-geometry parity with the pre-host uniform layout: if
+        // the first visible entry's section header is the only row that
+        // does not fit, drop the header rather than the entry.
+        if header && placements.is_empty() && row_y.saturating_add(3) > body_bottom {
+            header = false;
+        }
+        let rows_needed: u16 = if header { 3 } else { 2 };
+        if row_y.saturating_add(rows_needed) > body_bottom {
+            break;
+        }
+        let mut header_y = None;
+        if header {
+            header_y = Some(row_y);
+            row_y += 1;
+        }
+        placements.push(AgentPanelRowPlacement {
+            entry_idx,
+            header_y,
+            y: row_y,
+        });
+        prev_host = entry.host.as_ref();
+        row_y += 2;
+        if row_y < body_bottom {
+            row_y += 1;
+        }
+    }
+    placements
+}
+
+/// Largest useful `agent_panel_scroll`: the smallest offset at which
+/// [`agent_panel_layout`] still places the final entry. Scrolling past it only
+/// reveals blank rows below the last entry, so every clamp site bounds scroll
+/// here. Defined via the same walker that rendering and hit-testing use, so a
+/// scroll value that survives this clamp is guaranteed to paint the entry it
+/// was chosen to reveal — no header-blind phantom-slot capacity is involved.
+///
+/// Zero-host equivalence (the regression guard): with no section headers every
+/// entry is a uniform 2-rows-plus-gap block, so entries `S..total` fit iff
+/// their count is within the viewport capacity `C`; the smallest qualifying
+/// `S` is therefore `total.saturating_sub(C)`, identical to the pre-host
+/// `total - viewport_rows` bound.
+/// `agent_panel_max_scroll_matches_uniform_capacity_bound_without_hosts`
+/// asserts this equality is preserved.
+fn agent_panel_max_scroll(entries: &[AgentPanelEntry], body: Rect) -> usize {
+    let total = entries.len();
+    if total == 0 {
+        return 0;
+    }
+    let last = total - 1;
+    // Placing the last entry is monotonic in scroll (a smaller tail can only
+    // become easier to fit), so the first offset that places it is the bound.
+    for scroll in 0..total {
+        if agent_panel_row_placements(entries, scroll, body)
+            .iter()
+            .any(|placement| placement.entry_idx == last)
+        {
+            return scroll;
+        }
+    }
+    // Body too small to place even the last entry alone: scroll is unbounded
+    // up to `total`, matching the pre-host `total - 0` capacity math.
+    total
+}
+
+/// Viewport capacity in whole entry slots: how many uniform 2-rows-plus-gap
+/// entries fit, ignoring headers. Drives only the scrollbar thumb size (via
+/// `viewport_rows`); the scroll bound is [`agent_panel_max_scroll`].
+fn agent_panel_viewport_capacity(body: Rect) -> usize {
     if body.width == 0 || body.height < 2 {
         return 0;
     }
-
-    let mut used_rows = 0u16;
-    let mut visible = 0usize;
-    while used_rows.saturating_add(2) <= body.height {
-        used_rows = used_rows.saturating_add(2);
-        visible += 1;
-        if used_rows < body.height {
-            used_rows = used_rows.saturating_add(1);
+    let body_bottom = body.y + body.height;
+    let mut row_y = body.y;
+    let mut capacity = 0usize;
+    while row_y.saturating_add(2) <= body_bottom {
+        capacity += 1;
+        row_y += 2;
+        if row_y < body_bottom {
+            row_y += 1;
         }
     }
-    visible
+    capacity
 }
 
 pub(crate) fn agent_panel_scroll_metrics(app: &AppState, area: Rect) -> crate::pane::ScrollMetrics {
-    let viewport_rows = agent_panel_visible_count(area);
-    let total_rows = agent_panel_entries(app).len();
-    let max_offset_from_bottom = total_rows.saturating_sub(viewport_rows);
+    let entries = agent_panel_entries(app);
+    let body = agent_panel_body_rect(area, false);
+
+    let viewport_rows = agent_panel_viewport_capacity(body);
+    let max_offset_from_bottom = agent_panel_max_scroll(&entries, body);
+    let total_rows = entries.len();
     let offset_from_bottom = total_rows
         .saturating_sub(app.agent_panel_scroll)
         .saturating_sub(viewport_rows);
@@ -837,7 +958,7 @@ fn render_workspace_list(
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
                 " spaces",
-                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+                section_header_style(p),
             )])),
             Rect::new(area.x, area.y, area.width, 1),
         );
@@ -1015,6 +1136,48 @@ fn render_workspace_list(
     }
 }
 
+/// Shared style for the sidebar's section header rows (" spaces", " agents",
+/// the sort toggle, and per-host sections in the agent panel).
+fn section_header_style(p: &Palette) -> Style {
+    Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD)
+}
+
+/// Maps a host link's display state onto the agent-state icon language the
+/// sidebar already speaks: `Connecting`/`Reconnecting` animate like
+/// `Working`, `Offline` shows the `Blocked` glyph, and `Connected` (or a
+/// host not yet reported into `AppState::host_links`) shows no indicator.
+fn host_link_indicator_state(link: Option<HostLinkDisplayState>) -> Option<AgentState> {
+    match link {
+        Some(HostLinkDisplayState::Connecting | HostLinkDisplayState::Reconnecting) => {
+            Some(AgentState::Working)
+        }
+        Some(HostLinkDisplayState::Offline) => Some(AgentState::Blocked),
+        Some(HostLinkDisplayState::Connected) | None => None,
+    }
+}
+
+fn render_host_section_header(
+    app: &AppState,
+    frame: &mut Frame,
+    host: &TerminalHostTag,
+    rect: Rect,
+) {
+    let p = &app.palette;
+    let mut spans = vec![Span::styled(
+        format!(" {}", host.as_str()),
+        section_header_style(p),
+    )];
+    if let Some(state) = host_link_indicator_state(app.host_links.get(host).copied()) {
+        let (icon, _) = agent_icon(state, true, app.spinner_tick, p);
+        spans.push(Span::styled(" ", Style::default()));
+        spans.push(Span::styled(
+            icon,
+            Style::default().fg(state_label_color(state, true, p)),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), rect);
+}
+
 fn render_agent_detail(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -1036,7 +1199,7 @@ fn render_agent_detail(
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             " agents",
-            Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+            section_header_style(p),
         )])),
         Rect::new(area.x, area.y + 1, area.width, 1),
     );
@@ -1045,7 +1208,7 @@ fn render_agent_detail(
         frame.render_widget(
             Paragraph::new(Span::styled(
                 agent_panel_sort_label(app.agent_panel_sort),
-                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+                section_header_style(p),
             ))
             .alignment(Alignment::Right),
             toggle_rect,
@@ -1060,12 +1223,17 @@ fn render_agent_detail(
         return;
     }
 
-    let mut row_y = body.y;
-    let body_bottom = body.y + body.height;
-    for detail in details.iter().skip(app.agent_panel_scroll) {
-        if row_y.saturating_add(1) >= body_bottom {
-            break;
+    for placement in agent_panel_row_placements(&details, app.agent_panel_scroll, body) {
+        let detail = &details[placement.entry_idx];
+        if let (Some(header_y), Some(host)) = (placement.header_y, detail.host.as_ref()) {
+            render_host_section_header(
+                app,
+                frame,
+                host,
+                Rect::new(body.x, header_y, body.width, 1),
+            );
         }
+        let row_y = placement.y;
 
         // Check if this agent entry corresponds to the active session
         let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
@@ -1108,7 +1276,6 @@ fn render_agent_detail(
             Paragraph::new(name_line).style(row_style),
             Rect::new(body.x, row_y, body.width, 1),
         );
-        row_y += 1;
 
         let mut status_spans = vec![
             Span::styled("   ", Style::default()),
@@ -1124,13 +1291,8 @@ fn render_agent_detail(
         }
         frame.render_widget(
             Paragraph::new(Line::from(status_spans)).style(row_style),
-            Rect::new(body.x, row_y, body.width, 1),
+            Rect::new(body.x, row_y + 1, body.width, 1),
         );
-        row_y += 1;
-
-        if row_y < body_bottom {
-            row_y += 1;
-        }
     }
 
     if let Some(track) = scrollbar_rect {
@@ -1217,6 +1379,65 @@ mod tests {
         assert_eq!(toggle.y, area.y + area.height - 1);
     }
 
+    /// Characterization: with zero host-tagged terminals the agent panel must
+    /// render exactly the same output as before host grouping existed.
+    #[test]
+    fn render_agent_detail_without_hosts_is_unchanged() {
+        let mut app = crate::app::state::AppState::test_new();
+        let first = Workspace::test_new("one");
+        let first_pane = first.tabs[0].root_pane;
+        let second = Workspace::test_new("two");
+        let second_pane = second.tabs[0].root_pane;
+
+        app.workspaces = vec![first, second];
+        app.ensure_test_terminals();
+        let first_terminal_id = app.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&first_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        let second_terminal_id = app.workspaces[1].tabs[0].panes[&second_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&second_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        let mut terminal = Terminal::new(TestBackend::new(26, 12)).expect("test terminal");
+        let runtimes = TerminalRuntimeRegistry::new();
+        terminal
+            .draw(|frame| render_agent_detail(&app, &runtimes, frame, Rect::new(0, 0, 26, 12)))
+            .expect("agent detail should render");
+
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..12)
+            .map(|y| (0..26).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "──────────────────────────",
+                " agents            grouped",
+                "                          ",
+                " ○ one                    ",
+                "   idle · pi              ",
+                "                          ",
+                " ○ two                    ",
+                "   idle · claude          ",
+                "                          ",
+                "                          ",
+                "                          ",
+                "                          ",
+            ]
+        );
+    }
+
     #[test]
     fn all_workspaces_agent_panel_entries_use_workspace_and_optional_tab_labels() {
         let mut app = crate::app::state::AppState::test_new();
@@ -1252,6 +1473,237 @@ mod tests {
         assert_eq!(entries[1].primary_label, "two");
         assert_eq!(entries[1].primary_tab_label.as_deref(), Some("logs"));
         assert_eq!(entries[1].agent_label.as_deref(), Some("claude"));
+    }
+
+    fn set_terminal_host(app: &mut crate::app::state::AppState, ws_idx: usize, host: Option<&str>) {
+        let pane = app.workspaces[ws_idx].tabs[0].root_pane;
+        let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Claude);
+        terminal.host = host.map(crate::terminal::TerminalHostTag::new);
+    }
+
+    #[test]
+    fn agent_panel_entries_group_host_entries_after_local_sorted_by_host_id() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![
+            Workspace::test_new("local"),
+            Workspace::test_new("remote-b"),
+            Workspace::test_new("remote-a"),
+        ];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        set_terminal_host(&mut app, 0, None);
+        set_terminal_host(&mut app, 1, Some("workbox"));
+        set_terminal_host(&mut app, 2, Some("ana"));
+
+        let order: Vec<(String, Option<String>)> = agent_panel_entries(&app)
+            .iter()
+            .map(|entry| {
+                (
+                    entry.primary_label.clone(),
+                    entry.host.as_ref().map(|host| host.as_str().to_string()),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            order,
+            [
+                ("local".to_string(), None),
+                ("remote-a".to_string(), Some("ana".to_string())),
+                ("remote-b".to_string(), Some("workbox".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn priority_sort_orders_entries_within_host_groups_keeping_hosts_after_local() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![
+            Workspace::test_new("local-idle"),
+            Workspace::test_new("local-blocked"),
+            Workspace::test_new("wb-idle"),
+            Workspace::test_new("wb-blocked"),
+        ];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Priority;
+        set_terminal_host(&mut app, 0, None);
+        set_terminal_host(&mut app, 1, None);
+        set_terminal_host(&mut app, 2, Some("workbox"));
+        set_terminal_host(&mut app, 3, Some("workbox"));
+
+        let set_state = |app: &mut crate::app::state::AppState, ws_idx: usize, state| {
+            let pane = app.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().state = state;
+        };
+        set_state(&mut app, 0, AgentState::Idle);
+        set_state(&mut app, 1, AgentState::Blocked);
+        set_state(&mut app, 2, AgentState::Idle);
+        set_state(&mut app, 3, AgentState::Blocked);
+
+        let labels: Vec<String> = agent_panel_entries(&app)
+            .into_iter()
+            .map(|entry| entry.primary_label)
+            .collect();
+
+        assert_eq!(
+            labels,
+            ["local-blocked", "local-idle", "wb-blocked", "wb-idle"]
+        );
+    }
+
+    #[test]
+    fn layout_places_first_hosted_entry_headerless_when_only_header_does_not_fit() {
+        // Degenerate-geometry parity: a 2-row body showed one entry before
+        // host grouping existed, so a hosted entry must not vanish just
+        // because its section header row does not fit.
+        let entry = AgentPanelEntry {
+            ws_idx: 0,
+            tab_idx: 0,
+            pane_id: crate::layout::PaneId::from_raw(1),
+            primary_label: "remote".into(),
+            primary_tab_label: None,
+            agent_label: Some("claude".into()),
+            state: AgentState::Idle,
+            seen: true,
+            last_agent_state_change_seq: None,
+            custom_status: None,
+            state_labels: std::collections::HashMap::new(),
+            host: Some(crate::terminal::TerminalHostTag::new("workbox")),
+        };
+
+        let placements =
+            agent_panel_row_placements(std::slice::from_ref(&entry), 0, Rect::new(0, 0, 20, 2));
+
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].header_y, None);
+        assert_eq!(placements[0].y, 0);
+    }
+
+    fn local_agent_entry(idx: usize) -> AgentPanelEntry {
+        AgentPanelEntry {
+            ws_idx: idx,
+            tab_idx: 0,
+            pane_id: crate::layout::PaneId::from_raw(idx as u32 + 1),
+            primary_label: format!("ws-{idx}"),
+            primary_tab_label: None,
+            agent_label: Some("claude".into()),
+            state: AgentState::Idle,
+            seen: true,
+            last_agent_state_change_seq: None,
+            custom_status: None,
+            state_labels: std::collections::HashMap::new(),
+            host: None,
+        }
+    }
+
+    /// Zero-host regression guard: the walker-defined scroll bound must equal
+    /// the pre-host `total - viewport_capacity` bound byte-for-byte whenever no
+    /// section headers exist, across entry counts and body heights.
+    #[test]
+    fn agent_panel_max_scroll_matches_uniform_capacity_bound_without_hosts() {
+        for total in 0..=12usize {
+            let entries: Vec<AgentPanelEntry> = (0..total).map(local_agent_entry).collect();
+            for height in 0..=24u16 {
+                let body = Rect::new(0, 0, 20, height);
+                let capacity = agent_panel_viewport_capacity(body);
+                let expected = total.saturating_sub(capacity);
+                assert_eq!(
+                    agent_panel_max_scroll(&entries, body),
+                    expected,
+                    "total={total} height={height} capacity={capacity}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn host_link_indicator_maps_onto_existing_agent_icon_language() {
+        use crate::app::state::HostLinkDisplayState as Link;
+
+        assert_eq!(
+            host_link_indicator_state(Some(Link::Connecting)),
+            Some(AgentState::Working)
+        );
+        assert_eq!(
+            host_link_indicator_state(Some(Link::Reconnecting)),
+            Some(AgentState::Working)
+        );
+        assert_eq!(
+            host_link_indicator_state(Some(Link::Offline)),
+            Some(AgentState::Blocked)
+        );
+        assert_eq!(host_link_indicator_state(Some(Link::Connected)), None);
+        assert_eq!(host_link_indicator_state(None), None);
+    }
+
+    #[test]
+    fn render_agent_detail_draws_host_section_headers_with_link_state_indicators() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![
+            Workspace::test_new("one"),
+            Workspace::test_new("two"),
+            Workspace::test_new("three"),
+            Workspace::test_new("four"),
+        ];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        set_terminal_host(&mut app, 0, None);
+        set_terminal_host(&mut app, 1, Some("alpha"));
+        set_terminal_host(&mut app, 2, Some("beta"));
+        set_terminal_host(&mut app, 3, Some("gamma"));
+        app.host_links.insert(
+            crate::terminal::TerminalHostTag::new("alpha"),
+            crate::app::state::HostLinkDisplayState::Connecting,
+        );
+        app.host_links.insert(
+            crate::terminal::TerminalHostTag::new("beta"),
+            crate::app::state::HostLinkDisplayState::Connected,
+        );
+        app.host_links.insert(
+            crate::terminal::TerminalHostTag::new("gamma"),
+            crate::app::state::HostLinkDisplayState::Offline,
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(26, 18)).expect("test terminal");
+        let runtimes = TerminalRuntimeRegistry::new();
+        terminal
+            .draw(|frame| render_agent_detail(&app, &runtimes, frame, Rect::new(0, 0, 26, 18)))
+            .expect("agent detail should render");
+
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..18)
+            .map(|y| {
+                (0..26)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+
+        // Local entry first, then one header per host sorted by host id.
+        assert_eq!(rows[3], " ○ one");
+        // Connecting shows the Working spinner glyph (tick 0).
+        assert_eq!(rows[6], " alpha ⠋");
+        assert_eq!(rows[7], " ○ two");
+        // Connected shows no indicator suffix.
+        assert_eq!(rows[10], " beta");
+        assert_eq!(rows[11], " ○ three");
+        // Offline shows the Blocked glyph.
+        assert_eq!(rows[14], " gamma ◉");
+        assert_eq!(rows[15], " ○ four");
     }
 
     #[test]
@@ -1406,6 +1858,7 @@ mod tests {
             last_agent_state_change_seq: None,
             custom_status: None,
             state_labels: std::collections::HashMap::new(),
+            host: None,
         };
 
         let label = format_agent_panel_primary_label(&entry, 18);

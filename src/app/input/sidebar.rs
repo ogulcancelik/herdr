@@ -467,20 +467,15 @@ impl AppState {
             return None;
         }
 
-        let mut row_y = body.y;
-        for detail in crate::ui::agent_panel_entries(self)
-            .into_iter()
-            .skip(self.agent_panel_scroll)
+        // Row layout is shared with rendering via agent_panel_row_placements
+        // so host section headers can never desync clicks from drawing.
+        let entries = crate::ui::agent_panel_entries(self);
+        for placement in
+            crate::ui::agent_panel_row_placements(&entries, self.agent_panel_scroll, body)
         {
-            if row_y.saturating_add(1) >= body.y + body.height {
-                break;
-            }
-            if row == row_y || row == row_y + 1 {
+            if row == placement.y || row == placement.y + 1 {
+                let detail = &entries[placement.entry_idx];
                 return Some((detail.ws_idx, detail.tab_idx, detail.pane_id));
-            }
-            row_y = row_y.saturating_add(2);
-            if row_y < body.y + body.height {
-                row_y = row_y.saturating_add(1);
             }
         }
         None
@@ -779,6 +774,60 @@ mod tests {
         assert_eq!(app.state.active, Some(1));
         assert_eq!(app.state.selected, 1);
         assert_eq!(app.state.workspaces[1].active_tab, 0);
+        assert_eq!(
+            app.state.workspaces[1].tabs[0].layout.focused(),
+            second_pane
+        );
+    }
+
+    #[test]
+    fn clicking_agent_row_below_host_header_targets_correct_workspace() {
+        let mut app = app_for_mouse_test();
+        let first = Workspace::test_new("one");
+        let first_pane = first.tabs[0].root_pane;
+        let second = Workspace::test_new("two");
+        let second_pane = second.tabs[0].root_pane;
+
+        app.state.workspaces = vec![first, second];
+        app.state.ensure_test_terminals();
+        let first_terminal_id = app.state.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&first_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        let second_terminal_id = app.state.workspaces[1].tabs[0].panes[&second_pane]
+            .attached_terminal_id
+            .clone();
+        let second_terminal = app.state.terminals.get_mut(&second_terminal_id).unwrap();
+        second_terminal.detected_agent = Some(Agent::Claude);
+        second_terminal.host = Some(crate::terminal::TerminalHostTag::new("workbox"));
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+            app.state.view.sidebar_rect,
+            app.state.sidebar_section_split,
+        );
+        // The host header row occupies the row where the second entry used to
+        // start; clicking it must not switch workspaces.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            detail_area.x + 2,
+            detail_area.y + 6,
+        ));
+        assert_eq!(app.state.active, Some(0));
+
+        // The remote entry itself sits one row lower than without a header.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            detail_area.x + 2,
+            detail_area.y + 7,
+        ));
+        assert_eq!(app.state.active, Some(1));
         assert_eq!(
             app.state.workspaces[1].tabs[0].layout.focused(),
             second_pane

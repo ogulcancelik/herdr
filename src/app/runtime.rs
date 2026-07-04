@@ -358,6 +358,15 @@ impl App {
             .workspaces
             .iter()
             .any(|ws| ws.has_working_pane(&self.state.terminals))
+            || self.state.host_links.values().any(|state| {
+                // Connecting/reconnecting host section headers show the same
+                // spinner as working agents, so they animate too.
+                matches!(
+                    state,
+                    crate::app::state::HostLinkDisplayState::Connecting
+                        | crate::app::state::HostLinkDisplayState::Reconnecting
+                )
+            })
     }
 
     pub(crate) fn tick_selection_autoscroll(&mut self, now: Instant) {
