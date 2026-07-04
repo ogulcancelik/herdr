@@ -10043,5 +10043,231 @@ next_tab = ""
             remote.join().unwrap();
             let _ = fs::remove_dir_all(&dir);
         }
+
+        // -------------------------------------------------------------
+        // Task 11: genuine two-server integration (a real remote, not a
+        // scripted fake)
+        //
+        // Every test above scripts a bare `UnixListener` to play canned
+        // wire-format lines -- enough to pin the state machine's wiring, but
+        // it never proves the real remote API (a real `pane.list` handler, a
+        // real `events.subscribe` stream backed by a real `EventHub`) is
+        // what a live host link actually round-trips against. `RealRemoteServer`
+        // below spins up a second, REAL `HeadlessServer` -- the exact
+        // `HeadlessServer::new` + `run()` path `run_server()` drives in
+        // production, just constructed directly instead of through main's
+        // env-var/CLI plumbing -- with one real workspace/pane, and the test
+        // attaches the server-under-test to it via `UnixSocketTransport`.
+        //
+        // Why this lives here instead of in `tests/multi_host.rs`: the only
+        // hook that lets a host link skip real ssh is
+        // `host_transport_override_for_test`, a private field on
+        // `HeadlessServer` set directly (not through any public setter) --
+        // see `use_fake_remote_socket` above. `herdr` has no `[lib]` target
+        // (only a `[[bin]]`), so `tests/*.rs` integration tests link against
+        // NONE of the crate's Rust internals; every existing integration
+        // test drives the compiled binary as a child process and talks to it
+        // purely over the JSON/wire socket protocol (see
+        // `tests/server_headless.rs`'s `spawn_server`). `CARGO_BIN_EXE_herdr`
+        // -- the mechanism those tests use to find that binary -- is itself
+        // only defined for genuine integration-test targets, not for a bin
+        // crate's own `#[cfg(test)]` unit tests (confirmed empirically: a
+        // probe placed in this file failed to compile with "environment
+        // variable `CARGO_BIN_EXE_herdr` not defined at compile time"). There
+        // is no existing feature-gated seam either. So a genuinely
+        // transport-swapped two-server test can only be written here, next
+        // to the fake-remote tests it strengthens; `tests/multi_host.rs`
+        // documents this and carries the homelab manual checklist instead.
+
+        /// A second, real `HeadlessServer` running its own `run()` loop on a
+        /// background thread with real API + client sockets. Kept
+        /// deliberately separate from `use_fake_remote_socket`'s scripted
+        /// `UnixListener`: this one answers `pane.list` and
+        /// `events.subscribe` through the actual app/API stack, off one real
+        /// workspace/pane seeded at construction.
+        struct RealRemoteServer {
+            api_socket: std::path::PathBuf,
+            client_socket: std::path::PathBuf,
+            quit: std::sync::Arc<std::sync::atomic::AtomicBool>,
+            wake: mpsc::Sender<ServerEvent>,
+            thread: std::thread::JoinHandle<()>,
+        }
+
+        impl RealRemoteServer {
+            /// Binds real sockets at `api_socket_path` (deriving the client
+            /// path the same way `client_socket_path()` does), seeds one
+            /// real pane, and runs the real `run()` loop on a background
+            /// thread -- mirrors `run_server()`'s own construction order
+            /// exactly (create App, seed workspace, bind API socket, build
+            /// `HeadlessServer`, run).
+            fn spawn(api_socket_path: std::path::PathBuf) -> RealRemoteServer {
+                // `App` holds a `Box<dyn PrefixInputSource>` (and similar
+                // trait objects), so neither it nor `HeadlessServer` is
+                // `Send` -- unlike `run_server()`, which builds them on
+                // whatever thread ends up calling `rt.block_on`, this helper
+                // must build them ON the background thread itself and only
+                // ship the (Send) handles the caller needs back over a
+                // channel, instead of constructing here and moving them in.
+                let thread_path = api_socket_path.clone();
+                let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+                let thread = std::thread::spawn(move || {
+                    // Build + enter the runtime BEFORE constructing `App`:
+                    // pane/PTY creation spawns tokio tasks internally (see
+                    // `pane.rs`), which panics ("no reactor running") outside
+                    // an active Tokio context -- mirrors `run_server()`
+                    // building `app`/`server` inside its own `rt.block_on`.
+                    let rt = tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                        .expect("build tokio runtime for the second real server");
+                    rt.block_on(async move {
+                        std::env::set_var(api::SOCKET_PATH_ENV_VAR, &thread_path);
+
+                        let config = crate::config::Config::default();
+                        let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+                        let event_hub = api::EventHub::default();
+                        let mut app =
+                            crate::app::App::new(&config, true, None, api_rx, event_hub.clone());
+                        app.state.local_sound_playback = false;
+                        app.local_terminal_notifications = false;
+                        app.create_workspace_with_options(std::env::temp_dir(), true)
+                            .expect("seed one real pane on the second server");
+
+                        let api_server = api::start_server(api_tx.clone(), event_hub)
+                            .expect("bind real api socket for the second server");
+                        let mut server =
+                            HeadlessServer::new(app, &[], Some(api_tx), Some(api_server))
+                                .expect("construct the second real headless server");
+
+                        let client_socket = server.client_socket_path.clone();
+                        let quit = std::sync::Arc::clone(&server.should_quit);
+                        let wake = server.server_event_tx.clone();
+                        let _ = ready_tx.send((client_socket, quit, wake));
+
+                        let _ = server.run().await;
+                    });
+                    rt.shutdown_timeout(Duration::from_millis(100));
+                });
+
+                let (client_socket, quit, wake) = ready_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("second real server failed to start");
+
+                RealRemoteServer {
+                    api_socket: api_socket_path,
+                    client_socket,
+                    quit,
+                    wake,
+                    thread,
+                }
+            }
+
+            /// Signals the real `run()` loop to shut down (the same
+            /// `should_quit` + wake path Ctrl+C uses) and blocks until its
+            /// thread exits. By the time this returns, both real sockets are
+            /// closed and their files removed
+            /// (`complete_shutdown`/`ServerHandle::drop`) -- a genuine "the
+            /// remote server is gone", not merely a severed connection, so a
+            /// fresh `spawn` can immediately rebind the same paths.
+            fn kill(self) {
+                self.quit.store(true, std::sync::atomic::Ordering::Release);
+                let _ = self.wake.try_send(ServerEvent::QuitSignal);
+                let _ = self.thread.join();
+            }
+
+            fn transport_factory(&self) -> std::sync::Arc<HostTransportFactory> {
+                let api_socket = self.api_socket.clone();
+                let client_socket = self.client_socket.clone();
+                std::sync::Arc::new(move |_host: &str| {
+                    Box::new(UnixSocketTransport {
+                        api_socket: api_socket.clone(),
+                        client_socket: client_socket.clone(),
+                    }) as Box<dyn LinkTransport>
+                })
+            }
+        }
+
+        /// The full lifecycle end to end against a real second server:
+        /// attach observes `connected` plus the real pane count; killing it
+        /// degrades the link through `reconnecting` to the terminal
+        /// `offline` state (matching
+        /// `host_link_down_escalates_to_offline_after_repeated_reconnect_failures`'s
+        /// already-proven "fast-failing transport burns the attempt budget
+        /// almost immediately" behavior, just against a real dead socket
+        /// instead of a closed fake listener); and because
+        /// `HostLinkRegistry::on_disconnect` documents `Offline` as terminal
+        /// for automatic retries ("manual retry is modeled as detach +
+        /// attach" -- see `host_link.rs`), reviving the link after the real
+        /// server restarts goes through a fresh `host.detach` + `host.attach`,
+        /// exactly like a homelab user manually reattaching after noticing a
+        /// host went offline.
+        #[test]
+        fn attach_reconnect_offline_and_restart_against_a_real_second_server() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("two-real-servers");
+            fs::create_dir_all(&dir).unwrap();
+            let api_socket_path = dir.join("remote-b-api.sock");
+
+            let remote_b = RealRemoteServer::spawn(api_socket_path.clone());
+            server.host_transport_override_for_test = Some(remote_b.transport_factory());
+
+            let attach_response = server.handle_host_attach_api(
+                "test:host:attach".to_string(),
+                api::schema::HostAttachParams {
+                    host: "homelab-b".to_string(),
+                },
+            );
+            assert!(!attach_response.contains("\"error\""), "{attach_response}");
+
+            let entry = wait_for_host_state(&mut server, "homelab-b", "connected");
+            assert_eq!(
+                entry["pane_count"], 1,
+                "the real second server seeded exactly one pane"
+            );
+
+            // Kill the real second server: a genuine process-equivalent
+            // death (full graceful teardown of its own run loop and both
+            // real sockets), not a scripted disconnect.
+            remote_b.kill();
+
+            wait_for_host_state(&mut server, "homelab-b", "reconnecting");
+            wait_for_host_state(&mut server, "homelab-b", "offline");
+
+            // Restart on the SAME socket paths -- the homelab equivalent of
+            // the server process coming back up.
+            let remote_b = RealRemoteServer::spawn(api_socket_path.clone());
+            // `Offline` never auto-retries (see `on_disconnect`'s doc
+            // comment on `host_link.rs`); manual retry is detach + attach.
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "homelab-b".to_string(),
+                },
+            );
+            server.host_transport_override_for_test = Some(remote_b.transport_factory());
+            let attach_response = server.handle_host_attach_api(
+                "test:host:attach:2".to_string(),
+                api::schema::HostAttachParams {
+                    host: "homelab-b".to_string(),
+                },
+            );
+            assert!(!attach_response.contains("\"error\""), "{attach_response}");
+
+            let entry = wait_for_host_state(&mut server, "homelab-b", "connected");
+            assert_eq!(
+                entry["pane_count"], 1,
+                "the restarted second server also seeded exactly one pane"
+            );
+
+            server.handle_host_detach_api(
+                "test:host:detach:2".to_string(),
+                api::schema::HostDetachParams {
+                    host: "homelab-b".to_string(),
+                },
+            );
+            remote_b.kill();
+            std::env::remove_var(api::SOCKET_PATH_ENV_VAR);
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 }
