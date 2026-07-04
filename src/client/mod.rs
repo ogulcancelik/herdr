@@ -1565,7 +1565,6 @@ async fn run_client_loop(
                     }
                 }
                 ServerMessage::PrefixInputSource { active } => {
-                    // Host-local side effect: switch / restore the keyboard input source (see impl).
                     if active {
                         prefix_input_source.switch_to_ascii();
                     } else {

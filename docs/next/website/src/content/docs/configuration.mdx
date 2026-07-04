@@ -500,14 +500,14 @@ The trade-off when enabled: an extra hardware cursor is visible in the outer ter
 
 On macOS, prefix-mode commands can be hard to use while a non-ASCII input source is active because prefix commands are still interpreted through the host input source.
 
-Set `switch_ascii_input_source_in_prefix = true` to switch the host input source to the system ASCII-capable input source while prefix mode is active:
+Set `switch_ascii_input_source_in_prefix = true` to switch the host input source to the system ASCII-capable input source while prefix commands and prefix-launched navigation are active:
 
 ```toml
 [experimental]
 switch_ascii_input_source_in_prefix = false
 ```
 
-When enabled, Herdr switches input sources only after prefix mode is entered, then restores the previous input source when prefix mode exits. The setting is macOS-only and is a no-op on other platforms or when the system input-source switch fails.
+When enabled, Herdr switches input sources after prefix mode is entered, keeps the ASCII source across prefix-launched modes such as navigation, menus, resize, and copy mode, and restores the previous input source when returning to the terminal or entering a text field such as a rename dialog. The setting is macOS-only and is a no-op on other platforms or when the system input-source switch fails.
 
 You can also toggle it from Settings > Experiments > switch to ascii input source in prefix (macOS).
 

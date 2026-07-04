@@ -131,8 +131,9 @@ pub enum AppEvent {
     /// re-emits it through herdr's own clipboard writer.
     ClipboardWrite { content: Vec<u8> },
     /// Prefix-mode ASCII input-source request, emitted on entering/leaving the ASCII input
-    /// realm. The server forwards it to the foreground client, which applies the host-local
-    /// TIS switch (`active = true`) / restore (`active = false`) in its own process.
+    /// realm. The foreground process applies the host-local TIS switch (`active = true`) /
+    /// restore (`active = false`): the client in server mode (via server forwarding), the
+    /// app itself in monolithic mode.
     PrefixInputSource { active: bool },
     /// A pane child reported its shell current directory through terminal
     /// metadata such as OSC 7.
