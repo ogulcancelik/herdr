@@ -241,6 +241,22 @@ pub struct HeadlessServer {
     /// `PaneId`s (Task 6), reconciled from every `HostEvent::Snapshot`.
     #[cfg(unix)]
     remote_panes: crate::server::remote_pane::RemotePaneRegistry,
+    /// `TerminalId` of the host-tagged `TerminalState` (in
+    /// `self.app.state.terminals`) for each adopted remote pane, keyed by
+    /// the same `RemotePaneKey` `remote_panes` bijects to a local `PaneId`
+    /// (Task 9b). A parallel map -- rather than folding the `TerminalId`
+    /// into `RemotePaneRegistry` itself -- keeps that registry a pure
+    /// `RemotePaneKey`<->`PaneId` bijection, reusable/testable on its own;
+    /// this mirrors how `host_links` (pure link state machine) and
+    /// `AppState.host_links` (display projection) already stay two synced
+    /// structures rather than one merged type. Maintained ONLY from
+    /// `handle_host_event`/its helpers (the single mutation point), in
+    /// lockstep with `remote_panes` and `self.app.state.terminals`: a key
+    /// has an entry here if and only if it is adopted in `remote_panes`,
+    /// and the named `TerminalId` names a host-tagged terminal there.
+    #[cfg(unix)]
+    remote_pane_terminals:
+        HashMap<crate::server::remote_pane::RemotePaneKey, crate::terminal::TerminalId>,
     /// Per-host background-thread handle plus the reusable transport
     /// materials, keyed by the same `HostLinkId` `host_links` uses.
     #[cfg(unix)]
@@ -363,6 +379,31 @@ fn host_link_display_state(
         LinkState::Connected => HostLinkDisplayState::Connected,
         LinkState::Reconnecting { .. } => HostLinkDisplayState::Reconnecting,
         LinkState::Offline => HostLinkDisplayState::Offline,
+    }
+}
+
+/// The ONE place `api::schema::AgentStatus` is inverted back to a
+/// `crate::detect::AgentState` for a host-tagged `TerminalState` (Task 9b).
+/// The exact inverse of `pane_agent_status` (`src/app/api_helpers.rs`):
+/// `Done` and `Idle` both forward-map from `AgentState::Idle`, differing
+/// only in the local `PaneState.seen` bit (`Done` == idle-and-unseen).
+/// Host-tagged terminals adopted from a remote host never have a
+/// `PaneState` -- Option B deliberately keeps them out of workspaces -- so
+/// there is nowhere to carry that `seen` bit locally; both invert to
+/// `AgentState::Idle` and the `Done`/`Idle` distinction is lost across this
+/// hop. Working/Blocked/Unknown fold both `seen` values to the same status
+/// forward, so inverting them is unambiguous.
+#[cfg(unix)]
+fn remote_agent_status_to_terminal_state(
+    status: api::schema::AgentStatus,
+) -> crate::detect::AgentState {
+    use crate::detect::AgentState;
+    use api::schema::AgentStatus;
+    match status {
+        AgentStatus::Done | AgentStatus::Idle => AgentState::Idle,
+        AgentStatus::Working => AgentState::Working,
+        AgentStatus::Blocked => AgentState::Blocked,
+        AgentStatus::Unknown => AgentState::Unknown,
     }
 }
 
@@ -608,6 +649,8 @@ impl HeadlessServer {
             host_links: crate::server::host_link::HostLinkRegistry::default(),
             #[cfg(unix)]
             remote_panes: crate::server::remote_pane::RemotePaneRegistry::default(),
+            #[cfg(unix)]
+            remote_pane_terminals: HashMap::new(),
             #[cfg(unix)]
             host_link_runtimes: HashMap::new(),
             #[cfg(unix)]
@@ -1463,7 +1506,19 @@ impl HeadlessServer {
         }
         debug!(host = %host, "detaching host link");
         self.stop_host_link_runtime(&link_id);
+        // Capture the keys before releasing: `release_host` drops the
+        // registry's own record of them, and `remote_pane_terminals` is
+        // keyed by `RemotePaneKey`, not by the released `PaneId`s it
+        // returns.
+        let released_keys: Vec<crate::server::remote_pane::RemotePaneKey> = self
+            .remote_panes
+            .panes_for_host(&link_id)
+            .map(|(key, _)| key.clone())
+            .collect();
         self.remote_panes.release_host(&link_id);
+        for key in released_keys {
+            self.remove_remote_pane_terminal(&key);
+        }
         self.app
             .state
             .host_links
@@ -1643,17 +1698,21 @@ impl HeadlessServer {
             HostEvent::StatusChanged {
                 host,
                 remote_pane_id,
-                status: _status,
+                status,
             } => {
-                // Seam for Task 9b: once adopted remote panes have a
-                // host-tagged TerminalState, look this pane up via
-                // `local_for` (never adopt on a status event) and re-seed
-                // its agent status there.
+                // Look the pane up via `remote_pane_terminals` -- never
+                // adopt on a status event, only Snapshot reconciliation
+                // adopts. Unknown/unmapped key (e.g. a status update racing
+                // a release): no-op, idempotent and tolerant.
                 let key = crate::server::remote_pane::RemotePaneKey {
                     host,
                     remote_pane_id,
                 };
-                let _ = self.remote_panes.local_for(&key);
+                if let Some(terminal_id) = self.remote_pane_terminals.get(&key).cloned() {
+                    if let Some(terminal) = self.app.state.terminals.get_mut(&terminal_id) {
+                        terminal.state = remote_agent_status_to_terminal_state(status);
+                    }
+                }
             }
             HostEvent::PaneClosed {
                 host,
@@ -1667,8 +1726,7 @@ impl HeadlessServer {
                     remote_pane_id,
                 };
                 self.remote_panes.release(&key);
-                // Seam for Task 9b: tear down the pane's TerminalState/
-                // runtime once adoption creates one.
+                self.remove_remote_pane_terminal(&key);
             }
             HostEvent::LinkDown { host } => {
                 self.handle_host_link_down(host);
@@ -1711,15 +1769,139 @@ impl HeadlessServer {
             .collect();
         for key in stale {
             self.remote_panes.release(&key);
+            self.remove_remote_pane_terminal(&key);
         }
         for pane in panes {
             let key = crate::server::remote_pane::RemotePaneKey {
                 host: host.clone(),
                 remote_pane_id: pane.remote_pane_id.clone(),
             };
-            self.remote_panes.adopt(key, crate::layout::PaneId::alloc);
-            // Seam for Task 9b: re-seed status/label/title/etc. into a
-            // host-tagged TerminalState once adoption creates one.
+            self.remote_panes
+                .adopt(key.clone(), crate::layout::PaneId::alloc);
+            // Re-seed status/label from EVERY snapshot, not just on first
+            // adoption -- the authoritative reconciliation contract applies
+            // to a pane's presentation the same way it does to the adopted
+            // set itself.
+            self.seed_remote_pane_terminal(key, pane);
+        }
+    }
+
+    /// Creates (on first adoption) or re-seeds (on every later snapshot)
+    /// the host-tagged `TerminalState` for one adopted remote pane. `key`
+    /// must already be adopted in `remote_panes`; this only maintains the
+    /// `TerminalId` half of the bijection (`remote_pane_terminals` +
+    /// `self.app.state.terminals`).
+    #[cfg(unix)]
+    fn seed_remote_pane_terminal(
+        &mut self,
+        key: crate::server::remote_pane::RemotePaneKey,
+        pane: crate::server::remote_pane::RemotePaneInfo,
+    ) {
+        let host_tag = crate::terminal::TerminalHostTag::new(key.host.0.clone());
+        let terminal_id = self
+            .remote_pane_terminals
+            .entry(key)
+            .or_insert_with(crate::terminal::TerminalId::alloc)
+            .clone();
+        let terminal = self
+            .app
+            .state
+            .terminals
+            .entry(terminal_id.clone())
+            .or_insert_with(|| {
+                crate::terminal::TerminalState::new(terminal_id.clone(), PathBuf::new())
+            });
+        terminal.host = Some(host_tag);
+        terminal.state = remote_agent_status_to_terminal_state(pane.agent_status);
+        // Seeded from whichever field a local agent pane would populate
+        // first: `pane_details` (src/workspace/aggregate.rs) checks
+        // `terminal.agent_name` before falling back to
+        // `effective_agent_label()` (hook/detection authority, which an
+        // adopted remote pane never has locally), so `agent_name` is what
+        // must be `Some` for a host-tagged entry to pass that filter once
+        // the sidebar reads them directly (next commit). Prefer the raw
+        // agent identity (`agent`, the remote's own `effective_agent_label`)
+        // over the presentation override (`display_agent`) over the manual
+        // pane label (`label`), so a real agent identity wins when more than
+        // one is present.
+        match pane.agent.or(pane.display_agent).or(pane.label) {
+            Some(label) => terminal.set_agent_name(label),
+            None => terminal.clear_agent_name(),
+        }
+    }
+
+    /// Removes the host-tagged `TerminalState` (if any) tracked for a
+    /// released/absent remote pane, keeping `remote_pane_terminals` and
+    /// `self.app.state.terminals` in lockstep with `remote_panes`.
+    /// Idempotent: a key with no tracked terminal is a no-op.
+    #[cfg(unix)]
+    fn remove_remote_pane_terminal(&mut self, key: &crate::server::remote_pane::RemotePaneKey) {
+        if let Some(terminal_id) = self.remote_pane_terminals.remove(key) {
+            self.app.state.terminals.remove(&terminal_id);
+        }
+    }
+
+    /// Test-only bijection check for the Task 9b invariant: every
+    /// host-tagged `TerminalState` corresponds to a live `remote_panes`
+    /// entry, and vice versa. `AppState::assert_invariants_for_test` already
+    /// checks the shape of `terminal.host` (non-empty tag), but it cannot
+    /// see `RemotePaneRegistry` -- `app/` sits below `server/` in the
+    /// dependency graph, so `AppState` must not import
+    /// `crate::server::remote_pane` -- so the full cross-check lives here,
+    /// where `remote_panes`, `remote_pane_terminals`, and
+    /// `self.app.state.terminals` are all visible together.
+    #[cfg(all(test, unix))]
+    fn assert_remote_pane_terminal_bijection_for_test(&self) {
+        use std::collections::HashSet;
+
+        self.app.state.assert_invariants_for_test();
+
+        // remote_pane_terminals -> remote_panes + app.state.terminals: every
+        // tracked key is still adopted, and its TerminalId names a
+        // host-tagged terminal carrying that key's host.
+        for (key, terminal_id) in &self.remote_pane_terminals {
+            assert!(
+                self.remote_panes.local_for(key).is_some(),
+                "remote_pane_terminals tracks {key:?} -> {terminal_id}, but it is not adopted in remote_panes"
+            );
+            let terminal = self
+                .app
+                .state
+                .terminals
+                .get(terminal_id)
+                .unwrap_or_else(|| {
+                    panic!("remote_pane_terminals names missing terminal {terminal_id} for {key:?}")
+                });
+            assert_eq!(
+                terminal.host.as_ref().map(|tag| tag.as_str()),
+                Some(key.host.0.as_str()),
+                "terminal {terminal_id} host tag does not match its RemotePaneKey's host"
+            );
+        }
+
+        // remote_panes -> remote_pane_terminals: every adopted pane, across
+        // every currently-registered host link, has a tracked terminal.
+        for link in self.host_links.iter() {
+            for (key, _local) in self.remote_panes.panes_for_host(&link.id) {
+                assert!(
+                    self.remote_pane_terminals.contains_key(key),
+                    "adopted remote pane {key:?} has no tracked TerminalId"
+                );
+            }
+        }
+
+        // app.state.terminals -> remote_pane_terminals: no ghost host-tagged
+        // terminal outlives its registry entry.
+        let tracked: HashSet<&crate::terminal::TerminalId> =
+            self.remote_pane_terminals.values().collect();
+        for terminal in self.app.state.terminals.values() {
+            if terminal.host.is_some() {
+                assert!(
+                    tracked.contains(&terminal.id),
+                    "terminal {} is host-tagged but not tracked in remote_pane_terminals",
+                    terminal.id
+                );
+            }
         }
     }
 
@@ -4970,6 +5152,8 @@ mod tests {
             host_links: crate::server::host_link::HostLinkRegistry::default(),
             #[cfg(unix)]
             remote_panes: crate::server::remote_pane::RemotePaneRegistry::default(),
+            #[cfg(unix)]
+            remote_pane_terminals: HashMap::new(),
             #[cfg(unix)]
             host_link_runtimes: HashMap::new(),
             #[cfg(unix)]
@@ -9647,6 +9831,7 @@ next_tab = ""
         fn remote_pane_info(id: &str) -> crate::server::remote_pane::RemotePaneInfo {
             crate::server::remote_pane::RemotePaneInfo {
                 remote_pane_id: id.to_string(),
+                remote_terminal_id: format!("term_{id}"),
                 agent_status: api::schema::AgentStatus::Idle,
                 label: None,
                 agent: None,
@@ -9806,6 +9991,336 @@ next_tab = ""
                     host: "workbox".to_string(),
                 },
             );
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        // -------------------------------------------------------------
+        // Task 9b: adopt remote panes as host-tagged TerminalState entries
+        // -------------------------------------------------------------
+
+        /// Every host-tagged terminal currently in `app.state.terminals` for
+        /// `host`, sorted by `TerminalId` for stable assertions.
+        fn host_tagged_terminals<'a>(
+            server: &'a HeadlessServer,
+            host: &str,
+        ) -> Vec<&'a crate::terminal::TerminalState> {
+            let tag = crate::terminal::TerminalHostTag::new(host);
+            let mut terminals: Vec<&crate::terminal::TerminalState> = server
+                .app
+                .state
+                .terminals
+                .values()
+                .filter(|terminal| terminal.host.as_ref() == Some(&tag))
+                .collect();
+            terminals.sort_by_key(|terminal| terminal.id.to_string());
+            terminals
+        }
+
+        #[test]
+        fn snapshot_adopts_host_tagged_terminals_with_status_and_agent_label() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("host-snapshot-adopt");
+            fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("remote-api.sock");
+
+            let remote_sock = sock.clone();
+            let remote = std::thread::spawn(move || {
+                let listener = UnixListener::bind(&remote_sock).unwrap();
+
+                let (mut conn, _) = listener.accept().unwrap();
+                let request = read_fake_request(&mut conn);
+                assert!(matches!(request.method, api::schema::Method::PaneList(_)));
+                let mut working_pane = fake_pane("w1:p1");
+                working_pane.agent_status = api::schema::AgentStatus::Working;
+                working_pane.agent = Some("claude".to_string());
+                let mut done_pane = fake_pane("w1:p2");
+                done_pane.agent_status = api::schema::AgentStatus::Done;
+                done_pane.display_agent = Some("Codex".to_string());
+                write_fake_line(
+                    &mut conn,
+                    &api::schema::SuccessResponse {
+                        id: request.id,
+                        result: api::schema::ResponseResult::PaneList {
+                            panes: vec![working_pane, done_pane],
+                        },
+                    },
+                );
+                conn.shutdown(std::net::Shutdown::Both).ok();
+                drop(conn);
+
+                let (mut conn, _) = listener.accept().unwrap();
+                let request = read_fake_request(&mut conn);
+                assert!(matches!(
+                    request.method,
+                    api::schema::Method::EventsSubscribe(_)
+                ));
+                write_fake_line(
+                    &mut conn,
+                    &api::schema::SuccessResponse {
+                        id: request.id,
+                        result: api::schema::ResponseResult::SubscriptionStarted {},
+                    },
+                );
+                let mut buf = [0u8; 1];
+                let _ = conn.read(&mut buf);
+            });
+
+            use_fake_remote_socket(&mut server, sock);
+            server.handle_host_attach_api(
+                "test:host:attach".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            wait_for_host_state(&mut server, "workbox", "connected");
+
+            let terminals = host_tagged_terminals(&server, "workbox");
+            assert_eq!(terminals.len(), 2, "both snapshot panes must be adopted");
+
+            let claude = terminals
+                .iter()
+                .find(|terminal| terminal.agent_name.as_deref() == Some("claude"))
+                .expect(
+                    "pane reporting agent \"claude\" seeds agent_name from RemotePaneInfo.agent",
+                );
+            assert_eq!(
+                claude.state,
+                crate::detect::AgentState::Working,
+                "AgentStatus::Working must invert to AgentState::Working"
+            );
+
+            let codex = terminals
+                .iter()
+                .find(|terminal| terminal.agent_name.as_deref() == Some("Codex"))
+                .expect(
+                    "pane with no agent but a display_agent falls back to seeding agent_name from it",
+                );
+            assert_eq!(
+                codex.state,
+                crate::detect::AgentState::Idle,
+                "AgentStatus::Done must invert to AgentState::Idle"
+            );
+
+            server.assert_remote_pane_terminal_bijection_for_test();
+
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn status_changed_updates_adopted_terminal_state_without_adopting() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("host-status-changed");
+            fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("remote-api.sock");
+
+            let remote = spawn_fake_host_remote(sock.clone(), 1); // "w1:p0"
+            use_fake_remote_socket(&mut server, sock);
+
+            server.handle_host_attach_api(
+                "test:host:attach".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            wait_for_host_state(&mut server, "workbox", "connected");
+
+            let terminal_id = host_tagged_terminals(&server, "workbox")
+                .first()
+                .expect("adopted terminal")
+                .id
+                .clone();
+            assert_eq!(
+                server.app.state.terminals[&terminal_id].state,
+                crate::detect::AgentState::Idle
+            );
+
+            let generation = server.host_generation_for_test("workbox").unwrap();
+            server.handle_host_event(crate::server::remote_pane::HostEventEnvelope {
+                generation,
+                event: crate::server::remote_pane::HostEvent::StatusChanged {
+                    host: crate::server::host_link::HostLinkId("workbox".to_string()),
+                    remote_pane_id: "w1:p0".to_string(),
+                    status: api::schema::AgentStatus::Blocked,
+                },
+            });
+            assert_eq!(
+                server.app.state.terminals[&terminal_id].state,
+                crate::detect::AgentState::Blocked,
+                "StatusChanged must update the already-adopted terminal's state"
+            );
+
+            // Unknown pane id: no-op -- must not adopt, must not panic.
+            let before = server.app.state.terminals.len();
+            server.handle_host_event(crate::server::remote_pane::HostEventEnvelope {
+                generation,
+                event: crate::server::remote_pane::HostEvent::StatusChanged {
+                    host: crate::server::host_link::HostLinkId("workbox".to_string()),
+                    remote_pane_id: "w1:p9-ghost".to_string(),
+                    status: api::schema::AgentStatus::Working,
+                },
+            });
+            assert_eq!(
+                server.app.state.terminals.len(),
+                before,
+                "an unmapped pane id must not create a terminal"
+            );
+
+            server.assert_remote_pane_terminal_bijection_for_test();
+
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn pane_closed_removes_the_host_tagged_terminal() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("host-pane-closed");
+            fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("remote-api.sock");
+
+            let remote = spawn_fake_host_remote(sock.clone(), 1); // "w1:p0"
+            use_fake_remote_socket(&mut server, sock);
+
+            server.handle_host_attach_api(
+                "test:host:attach".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            wait_for_host_state(&mut server, "workbox", "connected");
+            assert_eq!(host_tagged_terminals(&server, "workbox").len(), 1);
+
+            let generation = server.host_generation_for_test("workbox").unwrap();
+            server.handle_host_event(crate::server::remote_pane::HostEventEnvelope {
+                generation,
+                event: crate::server::remote_pane::HostEvent::PaneClosed {
+                    host: crate::server::host_link::HostLinkId("workbox".to_string()),
+                    remote_pane_id: "w1:p0".to_string(),
+                },
+            });
+
+            assert!(
+                host_tagged_terminals(&server, "workbox").is_empty(),
+                "PaneClosed must remove the pane's host-tagged terminal"
+            );
+            server.assert_remote_pane_terminal_bijection_for_test();
+
+            // Idempotent: closing an already-closed pane is a no-op, not a
+            // panic.
+            server.handle_host_event(crate::server::remote_pane::HostEventEnvelope {
+                generation,
+                event: crate::server::remote_pane::HostEvent::PaneClosed {
+                    host: crate::server::host_link::HostLinkId("workbox".to_string()),
+                    remote_pane_id: "w1:p0".to_string(),
+                },
+            });
+
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn snapshot_reconciliation_removes_terminal_for_pane_missing_from_a_later_snapshot() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("host-snapshot-removal");
+            fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("remote-api.sock");
+
+            let remote = spawn_fake_host_remote(sock.clone(), 2); // "w1:p0", "w1:p1"
+            use_fake_remote_socket(&mut server, sock);
+
+            server.handle_host_attach_api(
+                "test:host:attach".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            wait_for_host_state(&mut server, "workbox", "connected");
+            assert_eq!(host_tagged_terminals(&server, "workbox").len(), 2);
+
+            let generation = server.host_generation_for_test("workbox").unwrap();
+            server.handle_host_event(crate::server::remote_pane::HostEventEnvelope {
+                generation,
+                event: crate::server::remote_pane::HostEvent::Snapshot {
+                    host: crate::server::host_link::HostLinkId("workbox".to_string()),
+                    panes: vec![remote_pane_info("w1:p0")],
+                },
+            });
+
+            assert_eq!(
+                host_tagged_terminals(&server, "workbox").len(),
+                1,
+                "reconciliation must remove the host-tagged terminal for a pane absent from the new snapshot"
+            );
+            server.assert_remote_pane_terminal_bijection_for_test();
+
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn host_detach_removes_its_host_tagged_terminals() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("host-detach-terminals");
+            fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("remote-api.sock");
+
+            let remote = spawn_fake_host_remote(sock.clone(), 2);
+            use_fake_remote_socket(&mut server, sock);
+
+            server.handle_host_attach_api(
+                "test:host:attach".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            wait_for_host_state(&mut server, "workbox", "connected");
+            assert_eq!(
+                host_tagged_terminals(&server, "workbox").len(),
+                2,
+                "a connected host should have adopted two host-tagged terminals"
+            );
+            server.assert_remote_pane_terminal_bijection_for_test();
+
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+
+            assert!(
+                host_tagged_terminals(&server, "workbox").is_empty(),
+                "detach must remove every host-tagged terminal for the detached host"
+            );
+            server.assert_remote_pane_terminal_bijection_for_test();
+
             remote.join().unwrap();
             let _ = fs::remove_dir_all(&dir);
         }

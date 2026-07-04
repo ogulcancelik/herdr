@@ -78,6 +78,15 @@ impl RemotePaneRegistry {
 
     /// Look up the local id for a remote pane WITHOUT adopting it; `adopt`
     /// is the only path that allocates.
+    ///
+    /// No production caller today: `HeadlessServer` (Task 9b) looks up a
+    /// `StatusChanged`/`PaneClosed` pane's terminal through its own
+    /// `remote_pane_terminals` map (keyed by the same `RemotePaneKey`)
+    /// instead of through this method, since that map (unlike this
+    /// registry) also carries the `TerminalId`. Kept for the registry's own
+    /// bijection tests and for `HeadlessServer::
+    /// assert_remote_pane_terminal_bijection_for_test`'s cross-check.
+    #[allow(dead_code)]
     pub(crate) fn local_for(&self, key: &RemotePaneKey) -> Option<PaneId> {
         self.by_key.get(key).copied()
     }
@@ -139,6 +148,14 @@ impl RemotePaneRegistry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemotePaneInfo {
     pub(crate) remote_pane_id: String,
+    /// The remote server's `PaneInfo.terminal_id` -- the remote's OWN
+    /// terminal identity for this pane, distinct from any local `TerminalId`
+    /// the Task 9b consumer allocates for the adopted host-tagged
+    /// `TerminalState`. Not consumed by anything yet; threaded through now
+    /// because HALF 2 (frame streaming) needs it to open
+    /// `RemotePaneAttach::attach`'s terminal channel against the right
+    /// remote terminal, and it is cheap to carry from here on.
+    pub(crate) remote_terminal_id: String,
     pub(crate) agent_status: AgentStatus,
     pub(crate) label: Option<String>,
     pub(crate) agent: Option<String>,
@@ -151,6 +168,7 @@ impl From<crate::api::schema::PaneInfo> for RemotePaneInfo {
     fn from(pane: crate::api::schema::PaneInfo) -> Self {
         Self {
             remote_pane_id: pane.pane_id,
+            remote_terminal_id: pane.terminal_id,
             agent_status: pane.agent_status,
             label: pane.label,
             agent: pane.agent,
@@ -1528,6 +1546,7 @@ mod tests {
     fn remote_pane(id: &str, status: AgentStatus) -> RemotePaneInfo {
         RemotePaneInfo {
             remote_pane_id: id.to_string(),
+            remote_terminal_id: format!("term_{id}"),
             agent_status: status,
             label: None,
             agent: None,
