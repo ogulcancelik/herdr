@@ -13,6 +13,7 @@
 - Added `ui.hide_tab_bar_when_single_tab` to hide the tab row when a workspace has one tab. (#448)
 
 ### Changed
+- Bumped the client/server protocol version to 16 for foreground-client prefix input-source switching.
 - Bumped the client/server protocol version to 15 for socket API placement mutation event and response compatibility.
 
 ### Fixed
