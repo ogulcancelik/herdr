@@ -322,6 +322,7 @@ fn launch_iroh_bridge_and_client(
 ) -> io::Result<()> {
     let transport = IrohTransport {
         remote_endpoint_id: remote_id,
+        relay_urls: Vec::new(), // relay URLs are not yet threaded from --remote CLI
     };
     let bridge = BridgeHandle::start(transport, local_socket.clone())?;
     let result = run_client_process(&local_socket, &reattach_command, keybindings);
@@ -336,11 +337,13 @@ fn launch_iroh_bridge_and_client(
 
 /// An iroh QUIC transport that implements [`RemoteTransport`].
 ///
-/// On [`bridge`], loads the local identity key, connects to the remote
-/// endpoint via iroh, opens a bidirectional QUIC stream, and tunnels the
-/// Unix socket stream through it.
+/// Binds an iroh endpoint once on first use, then reuses it across
+/// subsequent [`bridge`] calls.  The [`BridgeHandle`] accept loop handles
+/// client reconnection — when the QUIC tunnel drops, the bridge returns
+/// an error, the accept loop retries, and the next call gets a fresh stream.
 struct IrohTransport {
     remote_endpoint_id: String,
+    relay_urls: Vec<String>,
 }
 
 impl RemoteTransport for IrohTransport {
@@ -348,11 +351,6 @@ impl RemoteTransport for IrohTransport {
         // Convert blocking std UnixStream to async tokio UnixStream.
         local_stream.set_nonblocking(true)?;
         let local_stream = tokio::net::UnixStream::from_std(local_stream)?;
-
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| io::Error::other(format!("failed to create tokio runtime: {e}")))?;
 
         let remote_id: iroh::EndpointId = self
             .remote_endpoint_id
@@ -365,10 +363,18 @@ impl RemoteTransport for IrohTransport {
             remote_endpoint_id: remote_id,
             local_socket: PathBuf::new(), // not used by the bridge itself
             secret_key,
-            relay_urls: Vec::new(),
+            relay_urls: self.relay_urls.clone(),
         };
 
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| io::Error::other(format!("failed to create tokio runtime: {e}")))?;
+
         rt.block_on(async move {
+            // Bind endpoint fresh each call — the BridgeHandle accept loop
+            // handles client reconnection, and a new endpoint per call
+            // ensures clean state after a QUIC tunnel drop.
             let (endpoint, _) =
                 crate::iroh_bridge::bind_endpoint(config.secret_key, config.relay_urls.clone())
                     .await?;
