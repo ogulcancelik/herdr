@@ -1151,6 +1151,9 @@ pub enum ContextMenuKind {
         source_pane_id: Option<PaneId>,
         has_manual_label: bool,
     },
+    Host {
+        host: crate::terminal::TerminalHostTag,
+    },
 }
 
 /// Right-click context menu state.
@@ -1247,6 +1250,7 @@ impl ContextMenuState {
                 "Zoom",
                 "Close pane",
             ],
+            ContextMenuKind::Host { .. } => &["Detach"],
         }
     }
 }
@@ -1390,6 +1394,17 @@ pub struct AppState {
     /// the time -- only set for the duration between the modal submit and
     /// the server taking it.
     pub(crate) requested_host_attach: Option<String>,
+    /// Pending "detach this host" request raised by the sidebar's host
+    /// section header context menu (`ContextMenuKind::Host`'s "Detach"
+    /// item, see `apply_context_menu_action_via_api`). `host.detach` lives
+    /// on `HeadlessServer` (behind the runtime/client boundary,
+    /// `#[cfg(unix)]`) so `AppState`/`App` cannot call it directly -- this
+    /// mirrors `requested_host_attach` exactly: the app layer sets it, and
+    /// the server drains it once per main-loop iteration in
+    /// `HeadlessServer::handle_deferred_requests_headless`. `None` most of
+    /// the time -- only set for the duration between the context menu
+    /// action and the server taking it.
+    pub(crate) requested_host_detach: Option<crate::terminal::TerminalHostTag>,
     pub(crate) pane_id_aliases: std::collections::HashMap<u32, PaneId>,
     pub(crate) public_pane_id_aliases: std::collections::HashMap<String, PaneId>,
     pub workspaces: Vec<Workspace>,
@@ -1752,6 +1767,7 @@ impl AppState {
             remote_pane_display: std::collections::HashMap::new(),
             requested_remote_pane_focus: None,
             requested_host_attach: None,
+            requested_host_detach: None,
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces: Vec::new(),
@@ -2252,6 +2268,11 @@ impl AppState {
                         assert_live_pane(source_pane_id, "context menu source pane");
                     }
                 }
+                // No ws_idx/tab_idx/pane_id to bounds-check -- a host
+                // section header's context menu carries only the host tag,
+                // which is app-layer data with no workspace/tab/pane
+                // identity to validate here.
+                ContextMenuKind::Host { .. } => {}
             }
         }
     }

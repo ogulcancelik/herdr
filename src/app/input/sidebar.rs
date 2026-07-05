@@ -468,6 +468,46 @@ impl AppState {
             && row < rect.y + rect.height
     }
 
+    /// Resolves a right-click row in the expanded agent panel to the host
+    /// section header it lands on, for the sidebar's host-header context
+    /// menu (`ContextMenuKind::Host`). Mirrors `agent_detail_target_at`'s
+    /// walk over the SAME shared `agent_panel_row_placements` layout, so a
+    /// header's clickable row can never desync from where it's drawn
+    /// (`render_host_section_header`) -- this only ADDS a hit-test for
+    /// `placement.header_y`; it does not touch the existing entry-row
+    /// (`placement.y`/`y + 1`) hit-testing `agent_detail_target_at` does, so
+    /// that hit-test and the walker itself are unchanged. With no attached
+    /// hosts no entry ever produces a `header_y`, so this always returns
+    /// `None` (zero-host render/hit-test equivalence, Task 7/c2).
+    pub(super) fn agent_panel_host_header_at(
+        &self,
+        row: u16,
+    ) -> Option<crate::terminal::TerminalHostTag> {
+        if self.sidebar_collapsed {
+            return None;
+        }
+
+        let detail_area = self.agent_panel_rect();
+        let metrics = crate::ui::agent_panel_scroll_metrics(self, detail_area);
+        let body = crate::ui::agent_panel_body_rect(
+            detail_area,
+            crate::ui::should_show_scrollbar(metrics),
+        );
+        if body.height < 2 || row < body.y || row >= body.y + body.height {
+            return None;
+        }
+
+        let entries = crate::ui::agent_panel_entries(self);
+        for placement in
+            crate::ui::agent_panel_row_placements(&entries, self.agent_panel_scroll, body)
+        {
+            if placement.header_y == Some(row) {
+                return entries[placement.entry_idx].host.clone();
+            }
+        }
+        None
+    }
+
     /// Resolves a click row in the expanded agent panel to its typed focus
     /// target (Task 9b, HALF 2). Both `Local` and `Remote` entries now
     /// resolve to a real target -- there is no more inert synthetic-entry
@@ -879,6 +919,85 @@ mod tests {
             app.state.workspaces[1].tabs[0].layout.focused(),
             second_pane
         );
+    }
+
+    #[test]
+    fn agent_panel_host_header_at_targets_only_the_header_row() {
+        // Mirrors clicking_agent_row_below_host_header_targets_correct_workspace's
+        // fixture and geometry exactly: with a host-tagged second workspace,
+        // the header sits at +6 and the entry's own row at +7. The header
+        // hit-test must match ONLY the header row, and entry-row hit-testing
+        // (agent_detail_target_at) must be completely unaffected by adding
+        // this new method.
+        let mut app = app_for_mouse_test();
+        let first = Workspace::test_new("one");
+        let first_pane = first.tabs[0].root_pane;
+        let second = Workspace::test_new("two");
+        let second_pane = second.tabs[0].root_pane;
+
+        app.state.workspaces = vec![first, second];
+        app.state.ensure_test_terminals();
+        let first_terminal_id = app.state.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&first_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        let second_terminal_id = app.state.workspaces[1].tabs[0].panes[&second_pane]
+            .attached_terminal_id
+            .clone();
+        let second_terminal = app.state.terminals.get_mut(&second_terminal_id).unwrap();
+        second_terminal.detected_agent = Some(Agent::Claude);
+        second_terminal.host = Some(crate::terminal::TerminalHostTag::new("workbox"));
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+            app.state.view.sidebar_rect,
+            app.state.sidebar_section_split,
+        );
+
+        assert_eq!(
+            app.state.agent_panel_host_header_at(detail_area.y + 6),
+            Some(crate::terminal::TerminalHostTag::new("workbox"))
+        );
+        assert_eq!(
+            app.state.agent_panel_host_header_at(detail_area.y + 7),
+            None
+        );
+        assert_eq!(app.state.agent_panel_host_header_at(detail_area.y), None);
+
+        // Entry-row hit-testing is unchanged: the remote entry itself still
+        // resolves one row below the header.
+        assert_eq!(
+            app.state.agent_detail_target_at(detail_area.y + 7),
+            Some(crate::ui::AgentFocusTarget::Local {
+                ws_idx: 1,
+                tab_idx: 0,
+                pane_id: second_pane,
+            })
+        );
+    }
+
+    #[test]
+    fn agent_panel_host_header_at_is_always_none_without_any_hosts() {
+        // Zero-host equivalence (Task 7/c2): with no host-tagged terminals no
+        // entry ever produces a header row, so this hit-test must return
+        // `None` for every row -- adding it must not change the zero-host
+        // sidebar/hit-test behavior at all.
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        let detail_area = app.state.agent_panel_rect();
+        for row in detail_area.y..detail_area.y + detail_area.height {
+            assert_eq!(app.state.agent_panel_host_header_at(row), None);
+        }
     }
 
     #[test]

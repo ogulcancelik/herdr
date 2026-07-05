@@ -511,6 +511,7 @@ impl App {
             remote_pane_display: std::collections::HashMap::new(),
             requested_remote_pane_focus: None,
             requested_host_attach: None,
+            requested_host_detach: None,
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces,
@@ -4577,6 +4578,35 @@ last_pane = "prefix+tab"
                 .map(|create| create.branch.as_str()),
             Some("feature/linear-302")
         );
+    }
+
+    /// Fast-follow from the attach commit's review: `handle_non_terminal_
+    /// key_headless` (the real production key-routing dispatcher for the
+    /// headless server) was compiler-checked for `Mode::AttachHost` but not
+    /// behavior-tested -- no test drove a keystroke through it. This closes
+    /// that gap by routing a plain character key through
+    /// `route_client_events` (which calls `handle_non_terminal_key_headless`
+    /// for any non-`Terminal` mode) while in `Mode::AttachHost`, and asserts
+    /// it lands in `name_input` exactly like the direct-mode dispatcher
+    /// (`app::input::handle_attach_host_key`) already does.
+    #[test]
+    fn route_client_events_types_a_character_into_attach_host_modal() {
+        let mut app = test_app();
+        app.state.mode = Mode::AttachHost;
+        app.state.name_input.clear();
+
+        app.route_client_events(
+            vec![raw_key(
+                KeyCode::Char('w'),
+                KeyModifiers::empty(),
+                KeyEventKind::Press,
+            )],
+            true,
+            None,
+        );
+
+        assert_eq!(app.state.name_input, "w");
+        assert_eq!(app.state.mode, Mode::AttachHost);
     }
 
     #[test]

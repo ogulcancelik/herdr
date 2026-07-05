@@ -1032,6 +1032,35 @@ impl AppState {
                 }
             }
 
+            // Host section headers live inside the sidebar's agent panel, so
+            // without this arm a right-click on one would fall through to
+            // the broader workspace arm just below (whose guard is only
+            // `in_sidebar && !sidebar_collapsed`) and silently do nothing,
+            // since `workspace_at_row` never matches an agent panel row.
+            // This must come BEFORE that arm so it wins the match.
+            MouseEventKind::Down(MouseButton::Right)
+                if in_sidebar
+                    && !self.sidebar_collapsed
+                    && self.agent_panel_host_header_at(mouse.row).is_some() =>
+            {
+                // Match the sibling workspace right-click arm below, which
+                // clears any in-flight left-press latch: without this, a
+                // chorded left-press-then-right-click could leave
+                // `workspace_press` set so the eventual (non-mode-gated)
+                // left-release focuses a workspace behind the open menu.
+                self.workspace_press = None;
+                self.tab_press = None;
+                if let Some(host) = self.agent_panel_host_header_at(mouse.row) {
+                    self.context_menu = Some(ContextMenuState {
+                        kind: ContextMenuKind::Host { host },
+                        x: mouse.column,
+                        y: mouse.row,
+                        list: MenuListState::new(0),
+                    });
+                    self.mode = Mode::ContextMenu;
+                }
+            }
+
             MouseEventKind::Down(MouseButton::Right) if in_sidebar && !self.sidebar_collapsed => {
                 self.workspace_press = None;
                 self.tab_press = None;
@@ -2262,6 +2291,134 @@ mod tests {
                 .rect,
             source_rect_before
         );
+    }
+
+    #[test]
+    fn right_clicking_host_section_header_opens_host_context_menu() {
+        let mut app = app_for_mouse_test();
+        let first = Workspace::test_new("one");
+        let first_pane = first.tabs[0].root_pane;
+        let second = Workspace::test_new("two");
+        let second_pane = second.tabs[0].root_pane;
+
+        app.state.workspaces = vec![first, second];
+        app.state.ensure_test_terminals();
+        let first_terminal_id = app.state.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&first_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        let second_terminal_id = app.state.workspaces[1].tabs[0].panes[&second_pane]
+            .attached_terminal_id
+            .clone();
+        let second_terminal = app.state.terminals.get_mut(&second_terminal_id).unwrap();
+        second_terminal.detected_agent = Some(Agent::Claude);
+        second_terminal.host = Some(crate::terminal::TerminalHostTag::new("workbox"));
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+            app.state.view.sidebar_rect,
+            app.state.sidebar_section_split,
+        );
+
+        // Same geometry as
+        // clicking_agent_row_below_host_header_targets_correct_workspace:
+        // the host section header sits at +6.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            detail_area.x + 2,
+            detail_area.y + 6,
+        ));
+
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        let menu = app.state.context_menu.as_ref().expect("host context menu");
+        assert_eq!(
+            menu.kind,
+            ContextMenuKind::Host {
+                host: crate::terminal::TerminalHostTag::new("workbox")
+            }
+        );
+        assert!(menu.items().contains(&"Detach"));
+        assert_eq!(menu.items().len(), 1);
+    }
+
+    #[test]
+    fn right_clicking_remote_agent_row_below_host_header_opens_no_menu() {
+        // The header row opens the host menu (see the test above); the
+        // entry row directly beneath it is unaffected -- there is no
+        // per-row context menu for an agent panel entry today, and adding
+        // the header hit-test must not change that.
+        let mut app = app_for_mouse_test();
+        let first = Workspace::test_new("one");
+        let first_pane = first.tabs[0].root_pane;
+        let second = Workspace::test_new("two");
+        let second_pane = second.tabs[0].root_pane;
+
+        app.state.workspaces = vec![first, second];
+        app.state.ensure_test_terminals();
+        let first_terminal_id = app.state.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&first_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        let second_terminal_id = app.state.workspaces[1].tabs[0].panes[&second_pane]
+            .attached_terminal_id
+            .clone();
+        let second_terminal = app.state.terminals.get_mut(&second_terminal_id).unwrap();
+        second_terminal.detected_agent = Some(Agent::Claude);
+        second_terminal.host = Some(crate::terminal::TerminalHostTag::new("workbox"));
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+            app.state.view.sidebar_rect,
+            app.state.sidebar_section_split,
+        );
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            detail_area.x + 2,
+            detail_area.y + 7,
+        ));
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app.state.context_menu.is_none());
+    }
+
+    #[test]
+    fn selecting_detach_from_host_context_menu_requests_host_detach_and_closes_menu() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Host {
+                host: crate::terminal::TerminalHostTag::new("workbox"),
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+
+        app.apply_context_menu_action_via_api(menu, 0);
+
+        assert_eq!(
+            app.state.requested_host_detach,
+            Some(crate::terminal::TerminalHostTag::new("workbox"))
+        );
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app.state.context_menu.is_none());
     }
 
     #[tokio::test]

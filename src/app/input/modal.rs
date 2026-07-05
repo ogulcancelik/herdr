@@ -950,6 +950,14 @@ pub(super) fn apply_context_menu_action(
                 };
             }
         }
+        // Kept in lockstep with the production twin
+        // (`apply_context_menu_action_via_api`) so a test driving a Host
+        // menu through this dispatcher sets the same deferred flag rather
+        // than silently falling through to `leave_modal`.
+        (ContextMenuKind::Host { host }, Some("Detach")) => {
+            state.requested_host_detach = Some(host);
+            leave_modal(state);
+        }
         _ => leave_modal(state),
     }
 }
@@ -1340,6 +1348,10 @@ impl App {
                 } else {
                     Mode::Navigate
                 };
+            }
+            (ContextMenuKind::Host { host }, Some("Detach")) => {
+                self.state.requested_host_detach = Some(host);
+                leave_modal(&mut self.state);
             }
             _ => leave_modal(&mut self.state),
         }

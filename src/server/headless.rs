@@ -1186,6 +1186,12 @@ impl HeadlessServer {
             crate::render_prof::event("full_render_cause.deferred_host_attach");
         }
 
+        // The other half of the host-op pair: see `apply_requested_host_detach`.
+        if self.apply_requested_host_detach() {
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_host_detach");
+        }
+
         needs_render
     }
 
@@ -1707,16 +1713,20 @@ impl HeadlessServer {
         unsupported_host_command_response(id)
     }
 
+    /// Core host-detach lifecycle: stop the link's runtime, release its
+    /// remote-pane registrations, and drop `AppState::host_links`'s entry --
+    /// shared by `handle_host_detach_api` (`host.detach`) and the sidebar's
+    /// host-header context menu "Detach" action
+    /// (`apply_requested_host_detach`), the same way `attach_host` is
+    /// shared by `handle_host_attach_api` and `restore_attached_hosts`. This
+    /// is, together with `attach_host`, the ONLY place `host_links`/
+    /// `remote_panes`/`AppState.host_links` are mutated (see the section
+    /// doc comment above).
     #[cfg(unix)]
-    fn handle_host_detach_api(
-        &mut self,
-        id: String,
-        params: api::schema::HostDetachParams,
-    ) -> String {
-        let host = params.host;
-        let link_id = crate::server::host_link::HostLinkId(host.clone());
+    fn detach_host(&mut self, host: &str) -> Result<(), (&'static str, String)> {
+        let link_id = crate::server::host_link::HostLinkId(host.to_string());
         if !self.host_links.detach(&link_id) {
-            return host_error_response(id, "not_found", format!("host '{host}' is not attached"));
+            return Err(("not_found", format!("host '{host}' is not attached")));
         }
         debug!(host = %host, "detaching host link");
         self.stop_host_link_runtime(&link_id);
@@ -1736,14 +1746,27 @@ impl HeadlessServer {
         self.app
             .state
             .host_links
-            .remove(&crate::terminal::TerminalHostTag::new(host.clone()));
-        host_success_response(
-            id,
-            api::schema::ResponseResult::HostDetached {
-                host,
-                detached: true,
-            },
-        )
+            .remove(&crate::terminal::TerminalHostTag::new(host.to_string()));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn handle_host_detach_api(
+        &mut self,
+        id: String,
+        params: api::schema::HostDetachParams,
+    ) -> String {
+        let host = params.host;
+        match self.detach_host(&host) {
+            Ok(()) => host_success_response(
+                id,
+                api::schema::ResponseResult::HostDetached {
+                    host,
+                    detached: true,
+                },
+            ),
+            Err((code, message)) => host_error_response(id, code, message),
+        }
     }
 
     #[cfg(not(unix))]
@@ -4395,37 +4418,73 @@ impl HeadlessServer {
         false
     }
 
-    /// Consumes `AppState::requested_host_attach` -- the cross-layer signal
-    /// set by the TUI's `+host` sidebar affordance (the `AttachHost` modal's
-    /// submit action, see `app::input::modal::apply_attach_host_action`).
-    /// `host.attach` lives on `HeadlessServer` (behind the runtime/client
-    /// boundary, `#[cfg(unix)]`) so the app layer cannot call it directly;
-    /// this mirrors `apply_requested_remote_pane_focus` exactly, draining
-    /// once per main-loop iteration from `handle_deferred_requests_headless`.
-    /// A failed attach (bad target, already attached, ...) is surfaced as a
-    /// toast to the foreground client rather than silently dropped -- there
-    /// is no other feedback path back to the modal, which has already
-    /// closed by the time this runs. A successful attach needs no toast: the
-    /// sidebar's Connecting spinner (via `host_links`) already conveys it.
+    /// Shared "take a deferred host-op flag, run it, toast on failure"
+    /// plumbing for `apply_requested_host_attach` and
+    /// `apply_requested_host_detach`: the two signals only differ in which
+    /// `AppState` flag is drained and which core method
+    /// (`attach_host`/`detach_host`) applies it, so this owns the
+    /// take/dispatch/toast/return-did-act shape once instead of twice.
+    /// Generic over the flag's payload type (`String` for attach,
+    /// `TerminalHostTag` for detach) since that's the only thing that
+    /// varies. Only reachable from the two `#[cfg(unix)]` callers
+    /// (multi-host is unix-only, see `attach_host`'s doc comment).
     #[cfg(unix)]
-    fn apply_requested_host_attach(&mut self) -> bool {
-        let Some(target) = self.app.state.requested_host_attach.take() else {
+    fn drain_host_op_request<T>(
+        &mut self,
+        requested: Option<T>,
+        op: impl FnOnce(&mut Self, T) -> Result<(), (&'static str, String)>,
+    ) -> bool {
+        let Some(value) = requested else {
             return false;
         };
-        if let Err((code, message)) = self.attach_host(target) {
-            debug!(code, message = %message, "host attach requested from the TUI failed");
+        if let Err((code, message)) = op(self, value) {
+            debug!(code, message = %message, "host operation requested from the TUI failed");
             self.send_notify_to_foreground_client(protocol::NotifyKind::Toast, message, None);
         }
         true
     }
 
-    /// Multi-host is unix-only (see `attach_host`'s doc comment); on other
-    /// targets there is nothing to attach, but the signal must still be
-    /// drained (with a toast, since the user did click something) so it
-    /// never lingers into a later tick.
-    #[cfg(not(unix))]
+    /// Consumes `AppState::requested_host_attach` -- the cross-layer signal
+    /// set by the TUI's `+host` sidebar affordance (the `AttachHost` modal's
+    /// submit action, see `app::input::modal::apply_attach_host_action`).
+    /// `host.attach` lives on `HeadlessServer` (behind the runtime/client
+    /// boundary, `#[cfg(unix)]`) so the app layer cannot call it directly;
+    /// this drains once per main-loop iteration from
+    /// `handle_deferred_requests_headless`, same as every other deferred
+    /// `AppState` request flag. A failed attach (bad target, already
+    /// attached, ...) is surfaced as a toast to the foreground client rather
+    /// than silently dropped -- there is no other feedback path back to the
+    /// modal, which has already closed by the time this runs. A successful
+    /// attach needs no toast: the sidebar's Connecting spinner (via
+    /// `host_links`) already conveys it.
+    #[cfg(unix)]
     fn apply_requested_host_attach(&mut self) -> bool {
-        if self.app.state.requested_host_attach.take().is_none() {
+        let target = self.app.state.requested_host_attach.take();
+        self.drain_host_op_request(target, |this, target| this.attach_host(target).map(|_| ()))
+    }
+
+    /// Consumes `AppState::requested_host_detach` -- the cross-layer signal
+    /// set by the sidebar's host-header context menu "Detach" action (see
+    /// `app::input::modal::apply_context_menu_action_via_api`). Mirrors
+    /// `apply_requested_host_attach` exactly, including the toast-on-failure
+    /// rationale (the context menu has already closed by the time this
+    /// runs). A successful detach needs no toast either: the host and its
+    /// panes simply vanish from the sidebar once `AppState::host_links` and
+    /// the terminal registry drop it.
+    #[cfg(unix)]
+    fn apply_requested_host_detach(&mut self) -> bool {
+        let target = self.app.state.requested_host_detach.take();
+        self.drain_host_op_request(target, |this, host| this.detach_host(host.as_str()))
+    }
+
+    /// Multi-host is unix-only (see `attach_host`'s doc comment); on other
+    /// targets there is nothing to attach/detach, but the signal must still
+    /// be drained (with a toast, since the user did click something) so it
+    /// never lingers into a later tick. Shared by both non-unix stubs below,
+    /// mirroring `drain_host_op_request` on the unix side.
+    #[cfg(not(unix))]
+    fn drain_unsupported_host_op<T>(&mut self, requested: Option<T>) -> bool {
+        if requested.is_none() {
             return false;
         }
         self.send_notify_to_foreground_client(
@@ -4434,6 +4493,18 @@ impl HeadlessServer {
             None,
         );
         true
+    }
+
+    #[cfg(not(unix))]
+    fn apply_requested_host_attach(&mut self) -> bool {
+        let target = self.app.state.requested_host_attach.take();
+        self.drain_unsupported_host_op(target)
+    }
+
+    #[cfg(not(unix))]
+    fn apply_requested_host_detach(&mut self) -> bool {
+        let target = self.app.state.requested_host_detach.take();
+        self.drain_unsupported_host_op(target)
     }
 
     /// Handles a server event. Returns true if the event requires a re-render.
@@ -11403,6 +11474,110 @@ next_tab = ""
             server.app.state.requested_host_attach = Some("-not-a-valid-target".to_string());
             assert!(server.handle_deferred_requests_headless());
             assert!(server.app.state.requested_host_attach.is_none());
+
+            let (kind, message, _) = recv_notify(&control_rx);
+            assert_eq!(kind, protocol::NotifyKind::Toast);
+            assert!(!message.is_empty());
+            assert!(host_list_hosts(&mut server).is_empty());
+        }
+
+        /// Feature: detach a remote host directly from the TUI. The
+        /// sidebar's host-header context menu never calls `host.detach`
+        /// itself -- it only sets `AppState::requested_host_detach`, which
+        /// `handle_deferred_requests_headless` drains once per main-loop
+        /// iteration (mirrors `requested_host_attach`). This pins the
+        /// drain's happy path end to end: the flag alone, with no direct
+        /// `host.detach` API call, is enough to clear the host from both
+        /// `host_links` and the remote-pane registry.
+        #[test]
+        fn requested_host_detach_is_drained_into_a_real_detach() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("host-detach-deferred");
+            fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("remote-api.sock");
+
+            let remote_sock = sock.clone();
+            let remote = std::thread::spawn(move || {
+                let listener = UnixListener::bind(&remote_sock).unwrap();
+
+                let (mut conn, _) = listener.accept().unwrap();
+                let request = read_fake_request(&mut conn);
+                assert!(matches!(request.method, api::schema::Method::PaneList(_)));
+                write_fake_line(
+                    &mut conn,
+                    &api::schema::SuccessResponse {
+                        id: request.id,
+                        result: api::schema::ResponseResult::PaneList {
+                            panes: vec![fake_pane("w1:p1")],
+                        },
+                    },
+                );
+                conn.shutdown(std::net::Shutdown::Both).ok();
+                drop(conn);
+
+                let (mut conn, _) = listener.accept().unwrap();
+                let request = read_fake_request(&mut conn);
+                assert!(matches!(
+                    request.method,
+                    api::schema::Method::EventsSubscribe(_)
+                ));
+                write_fake_line(
+                    &mut conn,
+                    &api::schema::SuccessResponse {
+                        id: request.id,
+                        result: api::schema::ResponseResult::SubscriptionStarted {},
+                    },
+                );
+                let mut buf = [0u8; 1];
+                let _ = conn.read(&mut buf);
+            });
+
+            use_fake_remote_socket(&mut server, sock);
+
+            let attach_response = server.handle_host_attach_api(
+                "test:host:attach".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            assert!(
+                !attach_response.contains("\"error\""),
+                "attach failed: {attach_response}"
+            );
+            wait_for_host_state(&mut server, "workbox", "connected");
+
+            let link_id = crate::server::host_link::HostLinkId("workbox".to_string());
+            server.app.state.requested_host_detach =
+                Some(crate::terminal::TerminalHostTag::new("workbox"));
+            assert!(server.handle_deferred_requests_headless());
+            assert!(server.app.state.requested_host_detach.is_none());
+
+            assert!(host_list_hosts(&mut server).is_empty());
+            assert!(!server
+                .app
+                .state
+                .host_links
+                .contains_key(&crate::terminal::TerminalHostTag::new("workbox")));
+            assert_eq!(server.remote_panes.panes_for_host(&link_id).count(), 0);
+
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// The other half of the deferred-flag contract: an already-gone
+        /// host has no modal/menu left to report back into (the TUI already
+        /// closed it on click), so the only feedback path is a toast to the
+        /// foreground client -- and the flag must still be cleared so it
+        /// doesn't leak into a later main-loop iteration.
+        #[test]
+        fn requested_host_detach_for_unattached_host_toasts_instead_of_detaching() {
+            let mut server = test_headless_server();
+            let control_rx = attach_fake_foreground_client(&mut server);
+
+            server.app.state.requested_host_detach =
+                Some(crate::terminal::TerminalHostTag::new("ghost"));
+            assert!(server.handle_deferred_requests_headless());
+            assert!(server.app.state.requested_host_detach.is_none());
 
             let (kind, message, _) = recv_notify(&control_rx);
             assert_eq!(kind, protocol::NotifyKind::Toast);
