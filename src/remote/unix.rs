@@ -260,6 +260,18 @@ fn run_remote_iroh(
     _session_name: String,
     reattach_command: String,
 ) -> io::Result<()> {
+    // If the target looks like a 64-char hex endpoint ID, skip SSH
+    // bootstrap and connect directly via iroh.
+    if looks_like_endpoint_id(&remote.target) {
+        return launch_iroh_bridge_and_client(
+            remote.target.clone(),
+            local_socket,
+            reattach_command,
+            remote.keybindings,
+        );
+    }
+
+    // SSH-bootstrapped path: target is an SSH hostname.
     let manage_ssh_config = crate::config::Config::load()
         .config
         .remote
@@ -308,6 +320,11 @@ fn run_remote_iroh_stored(
         reattach_command,
         remote.keybindings,
     )
+}
+
+/// Returns true if the target is a 64-character hex string (iroh endpoint ID).
+fn looks_like_endpoint_id(target: &str) -> bool {
+    target.len() == 64 && target.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Launch the iroh bridge and client as a single unit.
@@ -3643,5 +3660,30 @@ mod tests {
         assert_eq!(map.get("dev").unwrap(), "abc123");
         assert_eq!(map.get("prod").unwrap(), "def456");
         assert_eq!(map.len(), 2);
+    }
+
+    // --- endpoint ID detection tests ---
+
+    #[test]
+    fn looks_like_endpoint_id_valid() {
+        assert!(looks_like_endpoint_id(
+            "33ec8c0c3f2660243ad1766ae3754857e88c09239adf20432f53be44c21e0a1d"
+        ));
+    }
+
+    #[test]
+    fn looks_like_endpoint_id_too_short() {
+        assert!(!looks_like_endpoint_id("abc123"));
+    }
+
+    #[test]
+    fn looks_like_endpoint_id_non_hex() {
+        assert!(!looks_like_endpoint_id(&"g".repeat(64)));
+    }
+
+    #[test]
+    fn looks_like_endpoint_id_ssh_hostname() {
+        assert!(!looks_like_endpoint_id("nix-vm"));
+        assert!(!looks_like_endpoint_id("user@host:22"));
     }
 }
