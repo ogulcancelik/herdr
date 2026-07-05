@@ -1,5 +1,22 @@
 /target
 /vendor/libghostty-vt/zig-pkg/
+
+# secrets / local credentials — never commit
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+*.secret
+.env
+.env.*
+!.env.example
+/secrets/
+/.secrets/
+.netrc
+credentials.json
+
 __pycache__/
 *.pyc
 *.swp
