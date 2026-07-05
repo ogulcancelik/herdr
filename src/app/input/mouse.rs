@@ -613,11 +613,27 @@ impl AppState {
                         return None;
                     }
 
-                    if let Some((ws_idx, _tab_idx, pane_id)) =
-                        self.agent_detail_target_at(mouse.row)
-                    {
+                    if let Some(target) = self.agent_detail_target_at(mouse.row) {
                         self.mode = Mode::Terminal;
-                        return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                        match target {
+                            crate::ui::AgentFocusTarget::Local {
+                                ws_idx, pane_id, ..
+                            } => {
+                                return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                            }
+                            crate::ui::AgentFocusTarget::Remote { terminal_id } => {
+                                // No local ws/pane to touch (view-only, no
+                                // workspace-homing): request the cross-layer
+                                // bridge `HeadlessServer::
+                                // handle_client_input_events` consumes after
+                                // routing this input, which calls
+                                // `focus_remote_pane`.
+                                self.requested_remote_pane_focus = Some(
+                                    crate::app::state::RemotePaneFocusRequest::Focus(terminal_id),
+                                );
+                                return None;
+                            }
+                        }
                     }
                 } else if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
                     if self.mode != Mode::Terminal {
@@ -1158,13 +1174,23 @@ impl AppState {
                 self.mode = Mode::Terminal;
                 return MobileMouseResult::Action(MouseAction::FocusTab { tab_idx });
             }
-            Some(crate::ui::MobileSwitcherTarget::Agent {
-                ws_idx,
-                tab_idx: _,
-                pane_id,
-            }) => {
+            Some(crate::ui::MobileSwitcherTarget::Agent(target)) => {
                 self.mode = Mode::Terminal;
-                return MobileMouseResult::Action(MouseAction::FocusPane { ws_idx, pane_id });
+                match target {
+                    crate::ui::AgentFocusTarget::Local {
+                        ws_idx, pane_id, ..
+                    } => {
+                        return MobileMouseResult::Action(MouseAction::FocusPane {
+                            ws_idx,
+                            pane_id,
+                        });
+                    }
+                    crate::ui::AgentFocusTarget::Remote { terminal_id } => {
+                        self.requested_remote_pane_focus = Some(
+                            crate::app::state::RemotePaneFocusRequest::Focus(terminal_id),
+                        );
+                    }
+                }
             }
             Some(crate::ui::MobileSwitcherTarget::Menu(action_idx)) => {
                 let actions = global_menu_actions(self);

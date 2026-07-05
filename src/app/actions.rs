@@ -13,8 +13,8 @@ use unicode_width::UnicodeWidthChar;
 
 use super::state::{
     text_matches_query, AgentNotificationDelivery, AppState, Mode, NavigatorRow,
-    NavigatorStateFilter, NavigatorTarget, PaneFocusTarget, PendingAgentNotification, ToastKind,
-    ToastNotification, ToastTarget, ViewLayout,
+    NavigatorStateFilter, NavigatorTarget, PaneFocusTarget, PendingAgentNotification,
+    RemotePaneFocusRequest, ToastKind, ToastNotification, ToastTarget, ViewLayout,
 };
 
 fn is_background_completion_transition(prev_state: AgentState, new_state: AgentState) -> bool {
@@ -302,6 +302,16 @@ impl AppState {
         let Some(tab_idx) = ws.find_tab_index_for_pane(pane_id) else {
             return false;
         };
+        // This is the single mutation point for "a local pane is focused":
+        // every focus-inducing path (sidebar click, direct pane click,
+        // keyboard nav, toast target, plugin actions, ...) funnels through
+        // here. Any real attempt to focus a local pane means the user wants
+        // to look at workspace panes again, so request a remote-pane blur
+        // unconditionally (not gated on whether focus actually changes
+        // below) -- `HeadlessServer::blur_focused_remote_pane` is
+        // idempotent, and a click on the ALREADY-active local pane while a
+        // remote pane happens to be focused/overlaid must still blur it.
+        self.requested_remote_pane_focus = Some(RemotePaneFocusRequest::Blur);
         let previous = self.current_pane_focus_target();
         let target = PaneFocusTarget {
             workspace_id: ws.id.clone(),
@@ -1268,13 +1278,25 @@ impl AppState {
         self.cycle_agent_entry(false);
     }
 
+    /// Focuses the entry at `idx` in the full `agent_panel_entries` list.
+    /// Local-only: a `Remote` target needs the cross-layer bridge
+    /// (`requested_remote_pane_focus`, consumed by `HeadlessServer`) that
+    /// only `App`-level callers (`execute_tui_navigate_action`) can reach,
+    /// so this `AppState`-only method (exercised by `AppState`-level unit
+    /// tests; production keyboard nav is `App::execute_tui_navigate_action`)
+    /// treats a `Remote` entry as unfocusable, same as the old
+    /// `in_workspace` sentinel did.
     pub fn focus_agent_entry(&mut self, idx: usize) -> bool {
         let entries = crate::ui::agent_panel_entries(self);
         let Some(target) = entries.get(idx) else {
             return false;
         };
-        let ws_idx = target.ws_idx;
-        let pane_id = target.pane_id;
+        let crate::ui::AgentFocusTarget::Local {
+            ws_idx, pane_id, ..
+        } = target.focus_target
+        else {
+            return false;
+        };
 
         if self.active == Some(ws_idx) && self.workspaces[ws_idx].focused_pane_id() == Some(pane_id)
         {
@@ -1291,15 +1313,20 @@ impl AppState {
 
     fn cycle_agent_entry(&mut self, forward: bool) {
         let entries = crate::ui::agent_panel_entries(self);
-        // Synthetic (workspace-less) remote entries (Task 9b) have no focus
-        // target -- `focus_agent_entry` would just no-op on one -- so
-        // Tab-style cycling only visits `in_workspace` entries. With zero
-        // such entries this is index-for-index the same sequence as before:
-        // `focusable[i] == i`.
+        // Synthetic (workspace-less) remote entries (Task 9b) have no local
+        // focus target this AppState-only path can resolve -- so Tab-style
+        // cycling only visits `Local` entries. With zero such entries this
+        // is index-for-index the same sequence as before: `focusable[i] ==
+        // i`.
         let focusable: Vec<usize> = entries
             .iter()
             .enumerate()
-            .filter(|(_, entry)| entry.in_workspace)
+            .filter(|(_, entry)| {
+                matches!(
+                    entry.focus_target,
+                    crate::ui::AgentFocusTarget::Local { .. }
+                )
+            })
             .map(|(idx, _)| idx)
             .collect();
         if focusable.is_empty() {
@@ -1311,7 +1338,14 @@ impl AppState {
             .and_then(|idx| self.workspaces.get(idx))
             .and_then(crate::workspace::Workspace::focused_pane_id);
         let current_pos = focused
-            .and_then(|pane_id| entries.iter().position(|entry| entry.pane_id == pane_id))
+            .and_then(|pane_id| {
+                entries.iter().position(|entry| {
+                    matches!(
+                        entry.focus_target,
+                        crate::ui::AgentFocusTarget::Local { pane_id: p, .. } if p == pane_id
+                    )
+                })
+            })
             .and_then(|entry_idx| focusable.iter().position(|idx| *idx == entry_idx));
         let target_pos = match (current_pos, forward) {
             (Some(pos), true) => (pos + 1) % focusable.len(),
@@ -3623,9 +3657,10 @@ mod tests {
 
         // A host-tagged terminal with no workspace home (Task 9b synthetic
         // entry) sorts after the local entry. Tab-cycling must skip it --
-        // it has no focus target -- rather than silently landing on it and
-        // leaving the user "stuck" until enough presses skip past every
-        // such entry.
+        // this AppState-only path has no way to act on a `Remote` focus
+        // target (see `focus_agent_entry`'s doc comment) -- rather than
+        // silently landing on it and leaving the user "stuck" until enough
+        // presses skip past every such entry.
         let remote_id = crate::terminal::TerminalId::alloc();
         let mut remote_terminal =
             crate::terminal::TerminalState::new(remote_id.clone(), "/tmp".into());
@@ -3636,8 +3671,8 @@ mod tests {
 
         state.next_agent();
 
-        // Only one focusable (in_workspace) entry exists, so cycling wraps
-        // back to it instead of landing on the unfocusable remote entry.
+        // Only one focusable (Local) entry exists, so cycling wraps back to
+        // it instead of landing on the unfocusable remote entry.
         assert_eq!(state.active, Some(0));
         assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
         state.assert_invariants_for_test();
@@ -3755,13 +3790,22 @@ mod tests {
         state.mode = Mode::Terminal;
         state.agent_panel_sort = crate::app::state::AgentPanelSort::Priority;
 
+        fn first_entry_pane_id(state: &AppState) -> PaneId {
+            match crate::ui::agent_panel_entries(state)[0].focus_target {
+                crate::ui::AgentFocusTarget::Local { pane_id, .. } => pane_id,
+                crate::ui::AgentFocusTarget::Remote { .. } => {
+                    panic!("expected a local entry")
+                }
+            }
+        }
+
         transition_agent_state(&mut state, first, AgentState::Idle);
         transition_agent_state(&mut state, second, AgentState::Working);
-        assert_eq!(crate::ui::agent_panel_entries(&state)[0].pane_id, second);
+        assert_eq!(first_entry_pane_id(&state), second);
 
         transition_agent_state(&mut state, second, AgentState::Idle);
 
-        assert_eq!(crate::ui::agent_panel_entries(&state)[0].pane_id, second);
+        assert_eq!(first_entry_pane_id(&state), second);
         state.assert_invariants_for_test();
     }
 
@@ -3842,9 +3886,13 @@ mod tests {
 
             let entries = crate::ui::agent_panel_entries(&state);
             let target_idx = entries.len() - 1;
+            let target_pane_id = match entries[target_idx].focus_target {
+                crate::ui::AgentFocusTarget::Local { pane_id, .. } => pane_id,
+                crate::ui::AgentFocusTarget::Remote { .. } => panic!("expected a local entry"),
+            };
             assert_eq!(
                 state.workspaces[0].focused_pane_id(),
-                Some(entries[target_idx].pane_id),
+                Some(target_pane_id),
                 "height {height}: previous_agent should wrap to the last entry"
             );
             let (_, detail_area) = crate::ui::expanded_sidebar_sections(

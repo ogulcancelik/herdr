@@ -509,6 +509,7 @@ impl App {
             direct_attach_resize_locks: std::collections::HashSet::new(),
             host_links: std::collections::BTreeMap::new(),
             remote_pane_display: std::collections::HashMap::new(),
+            requested_remote_pane_focus: None,
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces,

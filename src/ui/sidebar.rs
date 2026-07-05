@@ -17,10 +17,31 @@ use crate::terminal::{TerminalHostTag, TerminalRuntimeRegistry};
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
 const AGENT_PANEL_HEADER_ROWS: u16 = 3;
 
+/// Where focusing an `AgentPanelEntry` actually goes (Task 9b, HALF 2). This
+/// replaces the earlier `in_workspace: bool` + inert placeholder
+/// `ws_idx`/`tab_idx`/`pane_id` sentinel: every consumer that resolves a
+/// focus target now has to handle the `Remote` arm at compile time instead
+/// of remembering to check a bool first.
+///
+/// `Local` mirrors `Workspace::pane_details`'s addressing scheme exactly.
+/// `Remote` carries the host-tagged `TerminalId` for a synthetic
+/// (workspace-less) entry; there is no `ws_idx`/`pane_id` for these because
+/// they are not homed in any workspace. `TerminalId` is an app-layer type
+/// (`crate::terminal`), so this stays app-layer with no server import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentFocusTarget {
+    Local {
+        ws_idx: usize,
+        tab_idx: usize,
+        pane_id: crate::layout::PaneId,
+    },
+    Remote {
+        terminal_id: crate::terminal::TerminalId,
+    },
+}
+
 pub(crate) struct AgentPanelEntry {
-    pub ws_idx: usize,
-    pub tab_idx: usize,
-    pub pane_id: crate::layout::PaneId,
+    pub focus_target: AgentFocusTarget,
     pub primary_label: String,
     pub primary_tab_label: Option<String>,
     pub agent_label: Option<String>,
@@ -33,25 +54,6 @@ pub(crate) struct AgentPanelEntry {
     /// terminals. Entries are grouped by this tag: local first, then one
     /// section per host sorted by host id.
     pub host: Option<TerminalHostTag>,
-    /// Whether this entry has a real `(ws_idx, tab_idx, pane_id)` focus
-    /// target. `true` for every entry derived from `Workspace::pane_details`;
-    /// `false` for the synthetic entries `agent_panel_entries_with_runtimes`
-    /// appends for host-tagged terminals with no workspace home (Task 9b) --
-    /// those carry inert placeholder `ws_idx`/`tab_idx`/`pane_id` values that
-    /// must not be treated as a real focus target. Click/tap hit-testing
-    /// (`agent_detail_target_at`, `mobile_switcher_target_at`) and keyboard
-    /// nav (`focusable_agent_entries`, `cycle_agent_entry`) check this before
-    /// returning a focus target; render and the row-placement walker don't
-    /// need to (they never dereference a workspace through an entry).
-    ///
-    /// HALF 2 breadcrumb: once remote entries become focusable (frame
-    /// streaming), replace this bool + the placeholder coordinates with a
-    /// typed focus target on `AgentPanelEntry`, e.g. `enum AgentFocusTarget {
-    /// Local { ws_idx, tab_idx, pane_id }, Remote { terminal_id } }`, so every
-    /// consumer is compiler-forced to handle the remote arm instead of relying
-    /// on a sentinel `usize::MAX`/`PaneId(0)` staying inert. Do NOT do that
-    /// conversion in this display-only commit.
-    pub in_workspace: bool,
 }
 
 fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
@@ -149,9 +151,11 @@ fn agent_panel_entries_with_runtimes(
             ws.pane_details(&app.terminals)
                 .into_iter()
                 .map(move |detail| AgentPanelEntry {
-                    ws_idx,
-                    tab_idx: detail.tab_idx,
-                    pane_id: detail.pane_id,
+                    focus_target: AgentFocusTarget::Local {
+                        ws_idx,
+                        tab_idx: detail.tab_idx,
+                        pane_id: detail.pane_id,
+                    },
                     primary_label: workspace_label.clone(),
                     primary_tab_label: multi_tab.then_some(detail.tab_label),
                     agent_label: Some(detail.agent_label),
@@ -164,7 +168,6 @@ fn agent_panel_entries_with_runtimes(
                         .terminal_id(detail.pane_id)
                         .and_then(|terminal_id| app.terminals.get(terminal_id))
                         .and_then(|terminal| terminal.host.clone()),
-                    in_workspace: true,
                 })
         })
         .collect();
@@ -189,17 +192,6 @@ fn agent_panel_entries_with_runtimes(
 
     entries
 }
-
-/// Placeholder focus target for a synthetic (workspace-less) entry:
-/// deliberately out of range so every real lookup through it (`is_active_pane`,
-/// `AppState::workspaces.get`, `public_pane_id`, ...) safely resolves to
-/// "not found"/`false` instead of aliasing a real pane. Click/tap
-/// hit-testing and keyboard nav additionally check
-/// `AgentPanelEntry::in_workspace` before ever reading this, so this is
-/// defense in depth, not the only guard. This placeholder-coordinate approach
-/// is display-only for Task 9b; see `AgentPanelEntry::in_workspace`'s doc
-/// comment for the HALF 2 plan to replace it with a typed focus-target enum.
-const UNHOMED_ENTRY_WS_IDX: usize = usize::MAX;
 
 /// One `AgentPanelEntry` per host-tagged terminal that no workspace pane
 /// currently references (Task 9b: Option B surfaces adopted remote panes
@@ -259,9 +251,9 @@ fn unhomed_remote_pane_entries(app: &AppState) -> Vec<AgentPanelEntry> {
             let display = app.remote_pane_display.get(terminal_id);
             let agent_label = terminal.agent_name.clone();
             AgentPanelEntry {
-                ws_idx: UNHOMED_ENTRY_WS_IDX,
-                tab_idx: 0,
-                pane_id: crate::layout::PaneId::from_raw(0),
+                focus_target: AgentFocusTarget::Remote {
+                    terminal_id: terminal_id.clone(),
+                },
                 primary_label: agent_label
                     .clone()
                     .unwrap_or_else(|| "(unnamed)".to_string()),
@@ -273,7 +265,6 @@ fn unhomed_remote_pane_entries(app: &AppState) -> Vec<AgentPanelEntry> {
                 custom_status: display.and_then(|info| info.custom_status.clone()),
                 state_labels: std::collections::HashMap::new(),
                 host: terminal.host.clone(),
-                in_workspace: false,
             }
         })
         .collect()
@@ -1346,8 +1337,20 @@ fn render_agent_detail(
         }
         let row_y = placement.y;
 
-        // Check if this agent entry corresponds to the active session
-        let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
+        // Check if this agent entry corresponds to the active session. A
+        // synthetic remote entry has no workspace pane to compare against,
+        // so it never renders as "active" here (highlighting the currently
+        // server-focused remote pane would need that fact threaded from
+        // `HeadlessServer::focused_remote_pane`, which stays server-only --
+        // out of scope for this render-only lookup).
+        let is_active = match &detail.focus_target {
+            AgentFocusTarget::Local {
+                ws_idx,
+                tab_idx,
+                pane_id,
+            } => app.is_active_pane(*ws_idx, *tab_idx, *pane_id),
+            AgentFocusTarget::Remote { .. } => false,
+        };
 
         let (icon, icon_style) = agent_icon(detail.state, detail.seen, app.spinner_tick, p);
         let label_color = state_label_color(detail.state, detail.seen, p);
@@ -1678,9 +1681,11 @@ mod tests {
         // host grouping existed, so a hosted entry must not vanish just
         // because its section header row does not fit.
         let entry = AgentPanelEntry {
-            ws_idx: 0,
-            tab_idx: 0,
-            pane_id: crate::layout::PaneId::from_raw(1),
+            focus_target: AgentFocusTarget::Local {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: crate::layout::PaneId::from_raw(1),
+            },
             primary_label: "remote".into(),
             primary_tab_label: None,
             agent_label: Some("claude".into()),
@@ -1690,7 +1695,6 @@ mod tests {
             custom_status: None,
             state_labels: std::collections::HashMap::new(),
             host: Some(crate::terminal::TerminalHostTag::new("workbox")),
-            in_workspace: true,
         };
 
         let placements =
@@ -1703,9 +1707,11 @@ mod tests {
 
     fn local_agent_entry(idx: usize) -> AgentPanelEntry {
         AgentPanelEntry {
-            ws_idx: idx,
-            tab_idx: 0,
-            pane_id: crate::layout::PaneId::from_raw(idx as u32 + 1),
+            focus_target: AgentFocusTarget::Local {
+                ws_idx: idx,
+                tab_idx: 0,
+                pane_id: crate::layout::PaneId::from_raw(idx as u32 + 1),
+            },
             primary_label: format!("ws-{idx}"),
             primary_tab_label: None,
             agent_label: Some("claude".into()),
@@ -1715,7 +1721,6 @@ mod tests {
             custom_status: None,
             state_labels: std::collections::HashMap::new(),
             host: None,
-            in_workspace: true,
         }
     }
 
@@ -1882,7 +1887,12 @@ mod tests {
             .iter()
             .find(|entry| entry.host.as_ref() == Some(&host) && entry.agent_label.is_some())
             .expect("the identified remote entry is present");
-        assert!(!done_entry.in_workspace);
+        assert_eq!(
+            done_entry.focus_target,
+            AgentFocusTarget::Remote {
+                terminal_id: done_id.clone()
+            }
+        );
         assert_eq!(done_entry.state, AgentState::Idle);
         assert!(
             !done_entry.seen,
@@ -1895,7 +1905,12 @@ mod tests {
             .iter()
             .find(|entry| entry.host.as_ref() == Some(&host) && entry.agent_label.is_none())
             .expect("the nameless remote entry must still be visible");
-        assert!(!nameless_entry.in_workspace);
+        assert_eq!(
+            nameless_entry.focus_target,
+            AgentFocusTarget::Remote {
+                terminal_id: working_id.clone()
+            }
+        );
         assert_eq!(nameless_entry.state, AgentState::Working);
         assert_eq!(nameless_entry.primary_label, "(unnamed)");
     }
@@ -2117,9 +2132,11 @@ mod tests {
     #[test]
     fn all_workspaces_primary_label_truncates_workspace_and_tab() {
         let entry = AgentPanelEntry {
-            ws_idx: 0,
-            tab_idx: 0,
-            pane_id: crate::layout::PaneId::from_raw(1),
+            focus_target: AgentFocusTarget::Local {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: crate::layout::PaneId::from_raw(1),
+            },
             primary_label: "agent-browser".into(),
             primary_tab_label: Some("test-escalation".into()),
             agent_label: Some("claude".into()),
@@ -2129,7 +2146,6 @@ mod tests {
             custom_status: None,
             state_labels: std::collections::HashMap::new(),
             host: None,
-            in_workspace: true,
         };
 
         let label = format_agent_panel_primary_label(&entry, 18);

@@ -180,8 +180,8 @@ impl App {
                 }
             }
             NavigateAction::FocusAgent(idx) => {
-                if let Some((entry_idx, ws_idx, pane_id)) = self.agent_entry_target(idx) {
-                    self.focus_pane_internal_via_api(ws_idx, pane_id);
+                if let Some((entry_idx, target)) = self.agent_entry_target(idx) {
+                    self.apply_agent_focus_target(target);
                     self.state.ensure_agent_panel_entry_visible(entry_idx);
                     leave_navigate_mode(&mut self.state);
                 }
@@ -203,14 +203,14 @@ impl App {
                 }
             }
             NavigateAction::PreviousAgent => {
-                if let Some((idx, ws_idx, pane_id)) = self.relative_agent_entry(false) {
+                if let Some((idx, ws_idx, pane_id)) = self.relative_local_agent_entry(false) {
                     self.focus_pane_internal_via_api(ws_idx, pane_id);
                     self.state.ensure_agent_panel_entry_visible(idx);
                     leave_navigate_mode(&mut self.state);
                 }
             }
             NavigateAction::NextAgent => {
-                if let Some((idx, ws_idx, pane_id)) = self.relative_agent_entry(true) {
+                if let Some((idx, ws_idx, pane_id)) = self.relative_local_agent_entry(true) {
                     self.focus_pane_internal_via_api(ws_idx, pane_id);
                     self.state.ensure_agent_panel_entry_visible(idx);
                     leave_navigate_mode(&mut self.state);
@@ -635,36 +635,63 @@ impl App {
         Some((ws.active_tab as isize + delta).rem_euclid(ws.tabs.len() as isize) as usize)
     }
 
-    /// The agent-panel entries that have a real focus target, each paired
-    /// with its index in the full `agent_panel_entries` list (that full
-    /// index is what `ensure_agent_panel_entry_visible` scrolls to).
+    /// Every agent-panel entry's typed focus target, each paired with its
+    /// index in the full `agent_panel_entries` list (that full index is
+    /// what `ensure_agent_panel_entry_visible` scrolls to).
     ///
-    /// Synthetic (workspace-less) remote entries (Task 9b) are filtered out:
-    /// they carry placeholder `ws_idx`/`pane_id`, so
-    /// `focus_pane_internal_via_api` would silently no-op on one while the
-    /// caller still ran `ensure_agent_panel_entry_visible`/`leave_navigate_mode`
-    /// -- i.e. keyboard Next/Prev/FocusAgent would get "stuck" on it. HALF 2
-    /// makes remote entries focusable. With zero synthetic entries this is
-    /// `entries.iter().enumerate()` unchanged, so the live keyboard-nav
-    /// sequence stays byte-for-byte the pre-9b one.
-    fn focusable_agent_entries(&self) -> Vec<(usize, usize, crate::layout::PaneId)> {
+    /// Task 9b HALF 2: synthetic (workspace-less) remote entries now carry a
+    /// real target (`AgentFocusTarget::Remote`) instead of an inert
+    /// placeholder, so an absolute-index lookup (`agent_entry_target`, used
+    /// by the numbered `FocusAgent` keybinds) can jump straight to one. With
+    /// zero remote entries this is `entries.iter().enumerate()` unchanged,
+    /// so the live keyboard-nav sequence stays byte-for-byte the pre-9b one.
+    fn focusable_agent_entries(&self) -> Vec<(usize, crate::ui::AgentFocusTarget)> {
         crate::ui::agent_panel_entries(&self.state)
-            .iter()
+            .into_iter()
             .enumerate()
-            .filter(|(_, entry)| entry.in_workspace)
-            .map(|(entry_idx, entry)| (entry_idx, entry.ws_idx, entry.pane_id))
+            .map(|(entry_idx, entry)| (entry_idx, entry.focus_target))
             .collect()
     }
 
-    fn agent_entry_target(&self, idx: usize) -> Option<(usize, usize, crate::layout::PaneId)> {
-        // `idx` is a keybind position (focus-agent-1, -2, ...): it selects the
-        // nth FOCUSABLE entry, so a synthetic remote entry never consumes a
-        // slot. Returns the entry's full-list index too, for ensure-visible.
+    fn agent_entry_target(&self, idx: usize) -> Option<(usize, crate::ui::AgentFocusTarget)> {
+        // `idx` is a keybind position (focus-agent-1, -2, ...): an absolute
+        // index into the full entry list, so it can land on a `Remote`
+        // entry directly -- there is no "current position" ambiguity for an
+        // absolute jump the way there is for relative Next/Previous (see
+        // `relative_local_agent_entry`'s doc comment).
         self.focusable_agent_entries().into_iter().nth(idx)
     }
 
-    fn relative_agent_entry(&self, forward: bool) -> Option<(usize, usize, crate::layout::PaneId)> {
-        let focusable = self.focusable_agent_entries();
+    /// Steps to the next/previous LOCAL agent entry (Tab-style relative
+    /// cycling), skipping remote entries entirely.
+    ///
+    /// Unlike an absolute `FocusAgent(idx)` jump, a relative step needs to
+    /// know which entry is "current" in order to advance from it, and that
+    /// can only be derived here from the locally-focused pane id -- there is
+    /// no `AppState`-visible fact for "a remote entry is the one currently
+    /// focused server-side" (that lives in `HeadlessServer::
+    /// focused_remote_pane`, deliberately not threaded into AppState/App;
+    /// see the runtime/client boundary guardrail in CLAUDE.md). Including
+    /// remote entries in this relative cycle would make that position
+    /// tracking ambiguous -- repeatedly resolving back to the same remote
+    /// entry instead of advancing past it -- so Next/Previous stay
+    /// local-only; jump straight to a remote entry with its numbered
+    /// `FocusAgent` keybind or a sidebar click/tap instead.
+    fn relative_local_agent_entry(
+        &self,
+        forward: bool,
+    ) -> Option<(usize, usize, crate::layout::PaneId)> {
+        let focusable: Vec<(usize, usize, crate::layout::PaneId)> =
+            crate::ui::agent_panel_entries(&self.state)
+                .into_iter()
+                .enumerate()
+                .filter_map(|(entry_idx, entry)| match entry.focus_target {
+                    crate::ui::AgentFocusTarget::Local {
+                        ws_idx, pane_id, ..
+                    } => Some((entry_idx, ws_idx, pane_id)),
+                    crate::ui::AgentFocusTarget::Remote { .. } => None,
+                })
+                .collect();
         if focusable.is_empty() {
             return None;
         }
@@ -689,6 +716,26 @@ impl App {
         };
         // `(entry_idx, ws_idx, pane_id)`; entry_idx indexes the full list.
         focusable.get(next_pos).copied()
+    }
+
+    /// Applies a resolved `AgentFocusTarget`: a `Local` target focuses the
+    /// pane through the normal API-dispatch path; a `Remote` target has no
+    /// local ws/pane to touch, so it requests the cross-layer bridge
+    /// (`AppState::requested_remote_pane_focus`) `HeadlessServer` consumes
+    /// after routing this input and turns into `focus_remote_pane`.
+    fn apply_agent_focus_target(&mut self, target: crate::ui::AgentFocusTarget) {
+        match target {
+            crate::ui::AgentFocusTarget::Local {
+                ws_idx, pane_id, ..
+            } => {
+                self.focus_pane_internal_via_api(ws_idx, pane_id);
+            }
+            crate::ui::AgentFocusTarget::Remote { terminal_id } => {
+                self.state.requested_remote_pane_focus = Some(
+                    crate::app::state::RemotePaneFocusRequest::Focus(terminal_id),
+                );
+            }
+        }
     }
 
     fn pass_through_key_to_focused_pane(&mut self, key: TerminalKey) -> bool {
@@ -2424,20 +2471,24 @@ last_pane = "prefix+tab"
         assert_eq!(app.state.mode, Mode::RenamePane);
     }
 
-    /// Task 9b live-path guard: keyboard Next/Prev/FocusAgent must only ever
-    /// target `in_workspace` entries and never get "stuck" on a synthetic
-    /// (workspace-less) remote entry -- whose placeholder `ws_idx`/`pane_id`
-    /// would make `focus_pane_internal_via_api` a silent no-op while
-    /// `leave_navigate_mode` still ran. Next/Prev are driven end-to-end
-    /// through the production dispatcher `App::handle_navigate_key`; FocusAgent
-    /// is driven through `execute_tui_navigate_action` (the exact live arm
-    /// that dispatcher calls), because a FocusAgent keybind is inherently a
-    /// reserved digit key that would collide with workspace-switch bindings in
-    /// this synthetic setup. Both exercise the guarded `agent_entry_target`/
-    /// `relative_agent_entry`, NOT the dead `cycle_agent_entry` path that the
-    /// sibling `next_agent_skips_synthetic_remote_entries` covers.
+    /// Task 9b HALF 2 live-path guard: keyboard Next/Previous only ever
+    /// cycle `Local` entries (see `relative_local_agent_entry`'s doc comment
+    /// for why a relative step can't safely include remote entries), and
+    /// never get "stuck" -- alternating one <-> two forever regardless of a
+    /// synthetic remote entry sorted after them. FocusAgent by absolute
+    /// keybind position, however, CAN land on the remote entry directly and
+    /// must request the cross-layer remote-focus bridge
+    /// (`requested_remote_pane_focus`) rather than no-op. Next/Prev are
+    /// driven end-to-end through the production dispatcher
+    /// `App::handle_navigate_key`; FocusAgent is driven through
+    /// `execute_tui_navigate_action` (the exact live arm that dispatcher
+    /// calls), because a FocusAgent keybind is inherently a reserved digit
+    /// key that would collide with workspace-switch bindings in this
+    /// synthetic setup. Both exercise the guarded `agent_entry_target`/
+    /// `relative_local_agent_entry`, NOT the dead `cycle_agent_entry` path
+    /// that the sibling `next_agent_skips_synthetic_remote_entries` covers.
     #[tokio::test]
-    async fn live_agent_nav_skips_synthetic_remote_entries() {
+    async fn live_agent_nav_next_prev_skip_remote_but_focus_agent_can_target_it() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &Config::default(),
@@ -2479,13 +2530,19 @@ last_pane = "prefix+tab"
         remote.host = Some(crate::terminal::TerminalHostTag::new("workbox"));
         remote.set_agent_name("claude".into());
         remote.state = crate::detect::AgentState::Working;
-        app.state.terminals.insert(remote_id, remote);
+        app.state.terminals.insert(remote_id.clone(), remote);
 
-        // Entries: [one (local), two (local), workbox (synthetic)]; only the
-        // two locals are focusable.
+        // Entries: [one (local), two (local), workbox (remote)]; Next/Prev
+        // only cycle the two locals, but FocusAgent(2) can target the
+        // remote entry directly.
         let entries = crate::ui::agent_panel_entries(&app.state);
         assert_eq!(entries.len(), 3);
-        assert!(!entries[2].in_workspace);
+        assert_eq!(
+            entries[2].focus_target,
+            crate::ui::AgentFocusTarget::Remote {
+                terminal_id: remote_id.clone()
+            }
+        );
 
         fn next(app: &mut App) {
             app.state.mode = Mode::Navigate;
@@ -2516,10 +2573,11 @@ last_pane = "prefix+tab"
         assert_eq!(app.state.active, Some(1));
         assert_eq!(app.state.mode, Mode::Terminal);
 
-        // Position 2 is the synthetic entry's row, but there is no 3rd
-        // FOCUSABLE agent, so it is a no-op that stays in navigate mode.
-        // Pre-fix, it resolved to the synthetic entry, ran leave_navigate_mode,
-        // and dropped to Terminal without focusing anything.
+        // Position 2 is the remote entry's row. Unlike the old sentinel
+        // (which made this a no-op stuck in navigate mode), this now
+        // requests the remote-focus bridge, leaves local ws/pane focus
+        // untouched (view-only, no workspace-homing), and leaves navigate
+        // mode like any other resolved FocusAgent target.
         app.state.active = Some(0);
         app.state.workspaces[0].tabs[0]
             .layout
@@ -2527,7 +2585,11 @@ last_pane = "prefix+tab"
         app.state.mode = Mode::Navigate;
         app.execute_tui_navigate_action(NavigateAction::FocusAgent(2), ActionContext::Navigate);
         assert_eq!(app.state.active, Some(0));
-        assert_eq!(app.state.mode, Mode::Navigate);
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(
+            app.state.requested_remote_pane_focus,
+            Some(crate::app::state::RemotePaneFocusRequest::Focus(remote_id))
+        );
     }
 
     #[tokio::test]

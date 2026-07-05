@@ -449,10 +449,11 @@ impl AppState {
             && row < rect.y + rect.height
     }
 
-    pub(super) fn agent_detail_target_at(
-        &self,
-        row: u16,
-    ) -> Option<(usize, usize, crate::layout::PaneId)> {
+    /// Resolves a click row in the expanded agent panel to its typed focus
+    /// target (Task 9b, HALF 2). Both `Local` and `Remote` entries now
+    /// resolve to a real target -- there is no more inert synthetic-entry
+    /// no-op, since `AgentFocusTarget` replaced the `in_workspace` sentinel.
+    pub(super) fn agent_detail_target_at(&self, row: u16) -> Option<crate::ui::AgentFocusTarget> {
         if self.sidebar_collapsed {
             return None;
         }
@@ -475,14 +476,7 @@ impl AppState {
         {
             if row == placement.y || row == placement.y + 1 {
                 let detail = &entries[placement.entry_idx];
-                // Synthetic (workspace-less) remote entries have no real
-                // focus target yet (Task 9b defers click focus to a later
-                // frame-streaming commit); clicking one is a no-op rather
-                // than resolving to its inert placeholder ws_idx/pane_id.
-                if !detail.in_workspace {
-                    return None;
-                }
-                return Some((detail.ws_idx, detail.tab_idx, detail.pane_id));
+                return Some(detail.focus_target.clone());
             }
         }
         None
@@ -842,11 +836,13 @@ mod tests {
     }
 
     #[test]
-    fn clicking_synthetic_remote_agent_row_is_a_no_op() {
-        // Task 9b: a host-tagged terminal with no workspace home renders as
-        // a synthetic AgentPanelEntry, but clicking it must not panic, must
-        // not mis-target another pane, and must not even switch mode --
-        // click-focus for these entries is deferred to a later commit.
+    fn clicking_synthetic_remote_agent_row_requests_remote_focus() {
+        // Task 9b HALF 2: a host-tagged terminal with no workspace home
+        // renders as a synthetic AgentPanelEntry whose focus target is now
+        // `AgentFocusTarget::Remote` (not an inert sentinel). Clicking it
+        // must not touch local workspace/pane focus (view-only, no
+        // workspace-homing), but must request the cross-layer remote-focus
+        // bridge that `HeadlessServer` consumes after routing this input.
         let mut app = app_for_mouse_test();
         let first = Workspace::test_new("one");
         let first_pane = first.tabs[0].root_pane;
@@ -872,7 +868,7 @@ mod tests {
         remote_terminal.set_agent_name("claude".into());
         app.state
             .terminals
-            .insert(remote_terminal_id, remote_terminal);
+            .insert(remote_terminal_id.clone(), remote_terminal);
 
         let (_, detail_area) = crate::ui::expanded_sidebar_sections(
             app.state.view.sidebar_rect,
@@ -891,6 +887,12 @@ mod tests {
         assert_eq!(app.state.active, Some(0));
         assert_eq!(app.state.mode, Mode::Terminal);
         assert_eq!(app.state.workspaces[0].tabs[0].layout.focused(), first_pane);
+        assert_eq!(
+            app.state.requested_remote_pane_focus,
+            Some(crate::app::state::RemotePaneFocusRequest::Focus(
+                remote_terminal_id
+            ))
+        );
     }
 
     #[test]

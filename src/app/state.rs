@@ -1333,6 +1333,27 @@ pub(crate) struct PaneFocusTarget {
     pub pane_id: PaneId,
 }
 
+/// A remote-pane focus/blur request raised by the app layer: a sidebar
+/// click or keyboard nav resolving an `AgentFocusTarget::Remote` (a
+/// `Focus`), or any local pane focus change that must blur a currently-
+/// focused remote pane (a `Blur`, set unconditionally by
+/// `focus_pane_in_workspace`). `AppState`/`App` cannot call
+/// `HeadlessServer::focus_remote_pane`/`blur_focused_remote_pane` directly
+/// (server-only, behind the runtime/client boundary and `#[cfg(unix)]`) --
+/// this mirrors the other deferred `AppState` request flags
+/// (`request_new_workspace`, ...): the app layer sets it, and the server
+/// drains it once per main-loop iteration in
+/// `HeadlessServer::handle_deferred_requests_headless`. Draining there,
+/// rather than only on the client-input path, matters because
+/// `focus_pane_in_workspace` (the `Blur` source) is reachable from the JSON
+/// API pane-focus method, plugin actions, and agent-notification focus too
+/// -- none of which run the client-input handler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RemotePaneFocusRequest {
+    Focus(crate::terminal::TerminalId),
+    Blur,
+}
+
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 pub struct AppState {
@@ -1352,6 +1373,11 @@ pub struct AppState {
     /// per-host).
     pub remote_pane_display:
         std::collections::HashMap<crate::terminal::TerminalId, RemotePaneDisplay>,
+    /// Pending cross-layer remote-pane focus/blur request; see
+    /// [`RemotePaneFocusRequest`]. `None` most of the time -- only set for
+    /// the duration between an input handler resolving one and
+    /// `HeadlessServer` taking it.
+    pub(crate) requested_remote_pane_focus: Option<RemotePaneFocusRequest>,
     pub(crate) pane_id_aliases: std::collections::HashMap<u32, PaneId>,
     pub(crate) public_pane_id_aliases: std::collections::HashMap<String, PaneId>,
     pub workspaces: Vec<Workspace>,
@@ -1712,6 +1738,7 @@ impl AppState {
             direct_attach_resize_locks: std::collections::HashSet::new(),
             host_links: std::collections::BTreeMap::new(),
             remote_pane_display: std::collections::HashMap::new(),
+            requested_remote_pane_focus: None,
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces: Vec::new(),

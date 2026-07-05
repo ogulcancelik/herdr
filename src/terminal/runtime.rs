@@ -237,8 +237,11 @@ impl TerminalRuntime {
     /// ghostty vt core. See `PaneRuntime::feed_remote_bytes`'s doc comment
     /// for why `terminal_responses` are dropped and `shell_pid` is `0`.
     ///
-    /// Only reachable on a runtime built by `spawn_remote_fed`; nothing
-    /// outside tests calls this yet.
+    /// Only reachable on a runtime built by `spawn_remote_fed`. Production
+    /// calls this from `HeadlessServer::feed_remote_pane_terminal_bytes`
+    /// (`#[cfg(unix)]` only, since multi-host is unix-only), so on a
+    /// non-unix build nothing outside tests calls this -- the `allow` stays
+    /// for that target.
     #[allow(dead_code)]
     pub(crate) fn feed_remote_bytes(&self, bytes: &[u8]) {
         self.0.feed_remote_bytes(bytes);

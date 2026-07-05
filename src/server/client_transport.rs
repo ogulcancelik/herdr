@@ -362,13 +362,19 @@ pub(crate) enum ServerEvent {
     /// registers the remote-fed runtime and stores `attach`. `generation`
     /// is the host link's generation at the moment `attach()` was called,
     /// so the handler can detect a detach/reconnect race and discard a
-    /// stale attach instead of registering it.
+    /// stale attach instead of registering it. `focus_epoch` is
+    /// `HeadlessServer::remote_pane_focus_epoch` at the moment
+    /// `focus_remote_pane` started THIS attach attempt, so the handler can
+    /// also discard a stale handback from an attempt superseded by a newer
+    /// refocus of the SAME `terminal_id` (rapid refocus A -> B -> A), which
+    /// `generation`/`terminal_id` equality alone cannot detect.
     #[cfg(unix)]
     RemotePaneAttachEstablished {
         host: crate::server::host_link::HostLinkId,
         terminal_id: crate::terminal::TerminalId,
         local_pane: crate::layout::PaneId,
         generation: u64,
+        focus_epoch: u64,
         attach: crate::server::remote_pane::RemotePaneAttach,
     },
     /// The same off-loop attach thread's failure handback: `attach()`

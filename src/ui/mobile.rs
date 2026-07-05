@@ -8,15 +8,14 @@ use ratatui::{
 
 use super::sidebar::{
     agent_panel_entries, agent_panel_entries_from, grouped_child_display_label,
-    next_entry_is_indented_workspace, workspace_list_entries_expanded, AgentPanelEntry,
-    WorkspaceListEntry,
+    next_entry_is_indented_workspace, workspace_list_entries_expanded, AgentFocusTarget,
+    AgentPanelEntry, WorkspaceListEntry,
 };
 use super::status::{agent_icon, state_dot};
 use super::text::{display_width_u16, truncate_end};
 use crate::app::state::{Palette, ToastKind, ToastNotification};
 use crate::app::AppState;
 use crate::detect::AgentState;
-use crate::layout::PaneId;
 use crate::terminal::TerminalRuntimeRegistry;
 
 const SWITCH_BUTTON_WIDTH: u16 = 10;
@@ -32,17 +31,17 @@ pub(crate) struct MobileSwitcherAreas {
     pub viewport: Rect,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `TerminalId` (inside `AgentFocusTarget::Remote`) is not `Copy`, so this
+/// enum no longer derives `Copy` -- every consumer already matches on an
+/// owned `Option<MobileSwitcherTarget>` returned by value from
+/// `mobile_switcher_target_at`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MobileSwitcherTarget {
     NewWorkspace,
     Workspace(usize),
     NewTab,
     Tab(usize),
-    Agent {
-        ws_idx: usize,
-        tab_idx: usize,
-        pane_id: PaneId,
-    },
+    Agent(AgentFocusTarget),
     Menu(usize),
 }
 
@@ -150,18 +149,12 @@ pub(crate) fn mobile_switcher_target_at(
         let agents_end = cursor + agents.len() * 2;
         if doc_row >= cursor && doc_row < agents_end {
             let idx = (doc_row - cursor) / 2;
-            // Synthetic (workspace-less) remote entries have no real focus
-            // target yet (Task 9b defers click/tap focus to a later frame-
-            // streaming commit); tapping one is a no-op rather than
-            // resolving to its inert placeholder ws_idx/pane_id.
+            // Task 9b HALF 2: a synthetic (workspace-less) remote entry now
+            // has a real focus target too (`AgentFocusTarget::Remote`), so
+            // tapping one is no longer filtered out here.
             return agents
                 .get(idx)
-                .filter(|entry| entry.in_workspace)
-                .map(|entry| MobileSwitcherTarget::Agent {
-                    ws_idx: entry.ws_idx,
-                    tab_idx: entry.tab_idx,
-                    pane_id: entry.pane_id,
-                });
+                .map(|entry| MobileSwitcherTarget::Agent(entry.focus_target.clone()));
         }
         cursor = agents_end;
     }
@@ -517,7 +510,14 @@ fn render_mobile_switcher_content(
         doc_y += 1;
         for entry in &entries {
             let active = focused_agent.is_some_and(|(ws_idx, tab_idx, pane_id)| {
-                entry.ws_idx == ws_idx && entry.tab_idx == tab_idx && entry.pane_id == pane_id
+                matches!(
+                    &entry.focus_target,
+                    AgentFocusTarget::Local {
+                        ws_idx: e_ws_idx,
+                        tab_idx: e_tab_idx,
+                        pane_id: e_pane_id,
+                    } if *e_ws_idx == ws_idx && *e_tab_idx == tab_idx && *e_pane_id == pane_id
+                )
             });
             let bg = mobile_item_bg(false, active, p);
             let (icon, icon_style) = agent_icon(entry.state, entry.seen, app.spinner_tick, p);
@@ -1142,9 +1142,11 @@ mod tests {
 
     fn agent_entry(primary_tab_label: Option<&str>, agent_label: Option<&str>) -> AgentPanelEntry {
         AgentPanelEntry {
-            ws_idx: 0,
-            tab_idx: 0,
-            pane_id: PaneId::from_raw(1),
+            focus_target: AgentFocusTarget::Local {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: crate::layout::PaneId::from_raw(1),
+            },
             primary_label: "herdr".into(),
             primary_tab_label: primary_tab_label.map(str::to_string),
             agent_label: agent_label.map(str::to_string),
@@ -1154,7 +1156,6 @@ mod tests {
             custom_status: None,
             state_labels: std::collections::HashMap::new(),
             host: None,
-            in_workspace: true,
         }
     }
 
@@ -1262,10 +1263,7 @@ mod tests {
 
         let viewport = mobile_switcher_areas(&app).viewport;
         let agent_hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 1);
-        assert!(matches!(
-            agent_hit,
-            Some(MobileSwitcherTarget::Agent { .. })
-        ));
+        assert!(matches!(agent_hit, Some(MobileSwitcherTarget::Agent(_))));
         let workspace_hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 7);
         assert_eq!(workspace_hit, Some(MobileSwitcherTarget::Workspace(0)));
     }

@@ -299,6 +299,17 @@ pub struct HeadlessServer {
     /// now.
     #[cfg(unix)]
     focused_remote_pane_attach: Option<crate::server::remote_pane::RemotePaneAttach>,
+    /// Monotonic counter bumped every time `focus_remote_pane` actually
+    /// starts a NEW off-loop attach (not the same-terminal early return).
+    /// Stamped onto that attempt's success handback
+    /// (`ServerEvent::RemotePaneAttachEstablished::focus_epoch`) so
+    /// `handle_remote_pane_attach_established` can reject a stale handback
+    /// from an attach attempt superseded by a NEWER attempt on the SAME
+    /// `terminal_id` (rapid refocus A -> B -> A) -- `terminal_id` equality
+    /// alone (`still_focused`) cannot tell those apart once focus can
+    /// return to the terminal a stale attach was already in flight for.
+    #[cfg(unix)]
+    remote_pane_focus_epoch: u64,
     /// Per-host background-thread handle plus the reusable transport
     /// materials, keyed by the same `HostLinkId` `host_links` uses.
     #[cfg(unix)]
@@ -710,6 +721,8 @@ impl HeadlessServer {
             #[cfg(unix)]
             focused_remote_pane_attach: None,
             #[cfg(unix)]
+            remote_pane_focus_epoch: 0,
+            #[cfg(unix)]
             host_link_runtimes: HashMap::new(),
             #[cfg(unix)]
             next_host_generation: 1,
@@ -1035,6 +1048,18 @@ impl HeadlessServer {
             self.reload_server_config(true);
             needs_render = true;
             crate::render_prof::event("full_render_cause.config_reload");
+        }
+
+        // Central per-iteration drain of a remote-pane focus/blur request set
+        // by ANY focus path (client input, JSON API pane.focus, plugin
+        // action, agent-notification focus). Draining here rather than in a
+        // per-path handler is what guarantees a `Blur` set via the API path
+        // (which never runs `handle_client_input_events`) still tears down a
+        // focused remote pane's attach + runtime. See
+        // `apply_requested_remote_pane_focus`.
+        if self.apply_requested_remote_pane_focus() {
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_remote_pane_focus");
         }
 
         needs_render
@@ -2036,13 +2061,16 @@ impl HeadlessServer {
     /// VIEW-ONLY: typing does not reach the remote pane yet -- that is a
     /// follow-up commit). Tears down any previously-focused remote pane
     /// first (`blur_focused_remote_pane`), so a rapid refocus never leaves
-    /// two live attaches/runtimes around. Not reachable from the sidebar
-    /// yet -- clicking a remote entry to focus it needs the typed
-    /// `AgentFocusTarget` refactor `AgentPanelEntry::in_workspace`'s doc
-    /// comment describes, deferred to a follow-up commit; this commit
-    /// proves focus -> attach -> render end to end via tests that call this
-    /// directly (and is exactly the seam that refactor's click handler will
-    /// call into).
+    /// two live attaches/runtimes around.
+    ///
+    /// Reached from production via `AppState::requested_remote_pane_focus`:
+    /// a sidebar click or keyboard nav resolving an `AgentFocusTarget::
+    /// Remote` sets that field, and `apply_requested_remote_pane_focus`
+    /// (drained once per main-loop iteration from
+    /// `handle_deferred_requests_headless`) calls this. Also exercised
+    /// directly by this module's own `host_lifecycle` tests (a genuine
+    /// focus -> attach -> render -> blur round trip, including against a
+    /// real second server for the underlying attach machinery).
     ///
     /// Looks up the adopted pane's host/local-`PaneId`/remote-terminal-id,
     /// then spawns a detached thread that performs the (up to 60s) blocking
@@ -2056,15 +2084,11 @@ impl HeadlessServer {
     /// handed to `attach()` is stamped with the host link's CURRENT
     /// generation, so the reader thread's `TerminalBytes`/`AttachFailed`
     /// events reach `handle_host_event`'s generation guard correctly
-    /// stamped instead of being silently dropped.
-    ///
-    /// Exercised directly by this module's own `host_lifecycle` tests (a
-    /// genuine focus -> attach -> render -> blur round trip, including
-    /// against a real second server for the underlying attach machinery),
-    /// but has no non-test caller in this commit -- the sidebar
-    /// click-to-focus wiring is the deferred follow-up mentioned above.
-    /// Remove this allow when that wiring lands.
-    #[allow(dead_code)]
+    /// stamped instead of being silently dropped. `remote_pane_focus_epoch`
+    /// is bumped here (NOT on the same-terminal early return above) and
+    /// captured into the handback so a stale same-terminal handback from a
+    /// superseded attach attempt (rapid refocus A -> B -> A) can be told
+    /// apart from the current one -- see the field's doc comment.
     #[cfg(unix)]
     fn focus_remote_pane(&mut self, terminal_id: crate::terminal::TerminalId) {
         if self.focused_remote_pane.as_ref() == Some(&terminal_id) {
@@ -2097,10 +2121,14 @@ impl HeadlessServer {
         let host = key.host.clone();
         let (cols, rows) = self.effective_size;
 
+        self.remote_pane_focus_epoch = self.remote_pane_focus_epoch.wrapping_add(1);
+        let focus_epoch = self.remote_pane_focus_epoch;
+
         debug!(
             host = %host.0,
             terminal = %terminal_id,
             pane = local_pane.raw(),
+            focus_epoch,
             "focusing remote pane; attaching off the main loop"
         );
         self.focused_remote_pane = Some(terminal_id.clone());
@@ -2122,6 +2150,7 @@ impl HeadlessServer {
                             terminal_id,
                             local_pane,
                             generation,
+                            focus_epoch,
                             attach,
                         });
                 }
@@ -2137,7 +2166,7 @@ impl HeadlessServer {
     }
 
     /// Handles the off-loop attach thread's success handback (see
-    /// `focus_remote_pane`). Guards against three races before registering
+    /// `focus_remote_pane`). Guards against four races before registering
     /// anything, gracefully detaching (and dropping) the just-established
     /// `attach` instead in every case: (1) focus moved on to something else
     /// (or was cleared) while the blocking ssh handshake was in flight; (2)
@@ -2145,7 +2174,11 @@ impl HeadlessServer {
     /// reconnected meanwhile) -- registering would keep a live ssh channel
     /// whose `TerminalBytes` are stamped with a now-superseded generation
     /// and so would be silently dropped by `handle_host_event` forever; (3)
-    /// the pane itself was released while attaching. Otherwise registers
+    /// the pane itself was released while attaching; (4) this attempt's
+    /// `focus_epoch` is no longer the current one -- a newer focus attempt
+    /// on the SAME `terminal_id` already superseded it (rapid refocus A ->
+    /// B -> A), which (1)'s `terminal_id` equality alone cannot detect since
+    /// focus legitimately returned to this terminal. Otherwise registers
     /// `TerminalRuntime::spawn_remote_fed` for `terminal_id` -- the ONLY
     /// place a remote-fed runtime is inserted (memory budget: only a
     /// focused pane keeps a live grid + ssh channel) -- and stores `attach`
@@ -2158,6 +2191,7 @@ impl HeadlessServer {
         terminal_id: crate::terminal::TerminalId,
         local_pane: crate::layout::PaneId,
         generation: u64,
+        focus_epoch: u64,
         attach: crate::server::remote_pane::RemotePaneAttach,
     ) {
         let still_focused = self.focused_remote_pane.as_ref() == Some(&terminal_id);
@@ -2166,14 +2200,16 @@ impl HeadlessServer {
             .get(&host)
             .is_some_and(|runtime| runtime.generation == generation);
         let pane_still_adopted = self.app.state.terminals.contains_key(&terminal_id);
+        let epoch_current = self.remote_pane_focus_epoch == focus_epoch;
 
-        if !still_focused || !generation_current || !pane_still_adopted {
+        if !still_focused || !generation_current || !pane_still_adopted || !epoch_current {
             debug!(
                 host = %host.0,
                 terminal = %terminal_id,
                 still_focused,
                 generation_current,
                 pane_still_adopted,
+                epoch_current,
                 "dropping a superseded remote pane attach"
             );
             attach.detach();
@@ -3782,6 +3818,53 @@ impl HeadlessServer {
         })
     }
 
+    /// Consumes `AppState::requested_remote_pane_focus` -- the cross-layer
+    /// signal set by ANY focus path (a sidebar click / keyboard nav
+    /// resolving `AgentFocusTarget::Remote`, OR `AppState::
+    /// focus_pane_in_workspace` requesting a blur on any local pane focus
+    /// change) -- and applies it server-side. click/keyboard/API input
+    /// handling lives in `app/`/`ui/` and must not import server types, so
+    /// it leaves this signal on `AppState` for the server to drain.
+    ///
+    /// Drained once per main-loop iteration from
+    /// `handle_deferred_requests_headless`, NOT from a per-path handler:
+    /// `focus_pane_in_workspace` (which sets the `Blur`) is reachable from
+    /// the JSON API pane-focus path, plugin actions, and agent-notification
+    /// focus as well as from client input, and only the client-input path
+    /// runs `handle_client_input_events`. Draining in the same central
+    /// per-iteration handler that already drains every other deferred
+    /// `AppState` request flag (`request_new_workspace`, ...) guarantees
+    /// exactly-once coverage of every focus path -- it runs after both API
+    /// (`run()` step 3) and client-input (step 5) processing and before
+    /// render, so no path can leave a pending `Focus`/`Blur` undrained and
+    /// leak a remote attach + runtime. Returns true if a request was
+    /// applied, so the caller can request a render. A `Focus` set by client
+    /// input is still applied in the same iteration it was produced (before
+    /// that iteration's render), preserving the prior same-tick behavior.
+    #[cfg(unix)]
+    fn apply_requested_remote_pane_focus(&mut self) -> bool {
+        match self.app.state.requested_remote_pane_focus.take() {
+            Some(crate::app::state::RemotePaneFocusRequest::Focus(terminal_id)) => {
+                self.focus_remote_pane(terminal_id);
+                true
+            }
+            Some(crate::app::state::RemotePaneFocusRequest::Blur) => {
+                self.blur_focused_remote_pane();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Multi-host / remote-pane focus is unix-only (see `focused_remote_pane`'s
+    /// doc comment); on other targets there is nothing to apply, but the
+    /// signal must still be drained so it never lingers into a later tick.
+    #[cfg(not(unix))]
+    fn apply_requested_remote_pane_focus(&mut self) -> bool {
+        self.app.state.requested_remote_pane_focus = None;
+        false
+    }
+
     /// Handles a server event. Returns true if the event requires a re-render.
     fn handle_client_input_events(
         &mut self,
@@ -3817,6 +3900,11 @@ impl HeadlessServer {
         let theme_changed = self.update_client_host_theme_from_events(client_id, &events);
         self.app
             .route_client_events(events, self.foreground_client_id == Some(client_id));
+        // A remote-pane focus/blur request this input produced is drained
+        // centrally in `handle_deferred_requests_headless` (same iteration,
+        // before render), NOT here -- the JSON API / plugin / agent focus
+        // paths that can also set it never run this handler. See
+        // `apply_requested_remote_pane_focus`.
         if self.app.take_config_reloaded_from_disk() {
             self.reload_server_config(false);
         } else {
@@ -4125,6 +4213,7 @@ impl HeadlessServer {
                 terminal_id,
                 local_pane,
                 generation,
+                focus_epoch,
                 attach,
             } => {
                 self.handle_remote_pane_attach_established(
@@ -4132,6 +4221,7 @@ impl HeadlessServer {
                     terminal_id,
                     local_pane,
                     generation,
+                    focus_epoch,
                     attach,
                 );
                 true
@@ -5723,6 +5813,8 @@ mod tests {
             focused_remote_pane: None,
             #[cfg(unix)]
             focused_remote_pane_attach: None,
+            #[cfg(unix)]
+            remote_pane_focus_epoch: 0,
             #[cfg(unix)]
             host_link_runtimes: HashMap::new(),
             #[cfg(unix)]
@@ -11951,6 +12043,334 @@ next_tab = ""
                     host: "workbox".to_string(),
                 },
             );
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// Shared setup for the `handle_remote_pane_attach_established` guard
+        /// tests below: attaches a fake "workbox" host with one adopted
+        /// remote pane and returns its `terminal_id`. The caller drives
+        /// `focus_remote_pane` and manipulates server state to break exactly
+        /// one guard before draining the established handback.
+        fn attached_workbox_terminal_id(
+            server: &mut HeadlessServer,
+            dir: &std::path::Path,
+        ) -> (crate::terminal::TerminalId, std::thread::JoinHandle<()>) {
+            let sock = dir.join("remote-api.sock");
+            let remote_sock = sock.clone();
+            let remote = std::thread::spawn(move || {
+                let listener = UnixListener::bind(&remote_sock).unwrap();
+                let _round = serve_attach_round(&listener, vec![fake_pane("w1:p1")]);
+
+                // The terminal channel `focus_remote_pane`'s off-loop attach
+                // opens: complete the handshake (attach() then returns Ok
+                // and hands back RemotePaneAttachEstablished), then block
+                // reading so this thread -- and `remote.join()` -- only
+                // finishes once the guard branch under test rejects the
+                // handback and `attach.detach()` closes the connection.
+                // Correctness proof: if a bug registered the stale attach
+                // instead, this connection stays open and `remote.join()`
+                // below would hang instead of returning promptly.
+                let (mut conn, _) = listener.accept().unwrap();
+                complete_attach_handshake(&mut conn, "term_w1:p1");
+                let mut buf = [0u8; 64];
+                let _ = conn.read(&mut buf);
+            });
+
+            use_fake_remote_socket(server, sock);
+            server.handle_host_attach_api(
+                "test:host:attach".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            wait_for_host_state(server, "workbox", "connected");
+
+            let terminal_id = host_tagged_terminals(server, "workbox")
+                .first()
+                .expect("remote pane should be adopted as a host-tagged terminal")
+                .id
+                .clone();
+            (terminal_id, remote)
+        }
+
+        /// Drains for a bounded window, giving the off-loop attach thread's
+        /// handback time to arrive and be rejected.
+        fn drain_for(server: &mut HeadlessServer, duration: Duration) {
+            let deadline = Instant::now() + duration;
+            while Instant::now() < deadline {
+                server.drain_server_events();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        /// Direct coverage for the `!still_focused` guard branch: if focus
+        /// moved on to something else (or was cleared, as simulated here)
+        /// while the off-loop ssh handshake was in flight, the established
+        /// handback must detach the just-established attach and register
+        /// nothing, rather than reviving a focus the user already left.
+        #[tokio::test]
+        async fn attach_established_handback_is_dropped_when_focus_moved_on() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("attach-established-focus-moved");
+            fs::create_dir_all(&dir).unwrap();
+
+            let (terminal_id, remote) = attached_workbox_terminal_id(&mut server, &dir);
+
+            server.focus_remote_pane(terminal_id.clone());
+            assert_eq!(server.focused_remote_pane, Some(terminal_id.clone()));
+
+            // Simulate focus moving elsewhere (e.g. the user focused a local
+            // pane, which requests a blur) while the handshake above is
+            // still in flight.
+            server.focused_remote_pane = None;
+
+            drain_for(&mut server, Duration::from_secs(2));
+
+            assert!(
+                server.app.terminal_runtimes.get(&terminal_id).is_none(),
+                "a stale established handback must not register a runtime once focus moved on"
+            );
+            assert!(server.focused_remote_pane_attach.is_none());
+
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// Direct coverage for the `!pane_still_adopted` guard branch: if the
+        /// adopted terminal was released (e.g. a `Snapshot` reconciliation
+        /// dropped it) while the off-loop ssh handshake was in flight, the
+        /// established handback must detach and register nothing.
+        #[tokio::test]
+        async fn attach_established_handback_is_dropped_when_pane_no_longer_adopted() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("attach-established-pane-released");
+            fs::create_dir_all(&dir).unwrap();
+
+            let (terminal_id, remote) = attached_workbox_terminal_id(&mut server, &dir);
+
+            server.focus_remote_pane(terminal_id.clone());
+            assert_eq!(server.focused_remote_pane, Some(terminal_id.clone()));
+
+            // Simulate the pane being released while attaching.
+            server.app.state.terminals.remove(&terminal_id);
+
+            drain_for(&mut server, Duration::from_secs(2));
+
+            assert!(
+                server.app.terminal_runtimes.get(&terminal_id).is_none(),
+                "a stale established handback must not register a runtime for a released pane"
+            );
+            assert!(server.focused_remote_pane_attach.is_none());
+
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// Direct coverage for the `!generation_current` guard branch: if the
+        /// host link's generation no longer matches what this attach attempt
+        /// captured (e.g. a detach/reconnect happened while the off-loop ssh
+        /// handshake was in flight), the established handback must detach
+        /// and register nothing rather than keep a channel stamped with a
+        /// now-superseded generation.
+        #[tokio::test]
+        async fn attach_established_handback_is_dropped_when_host_generation_changed() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("attach-established-generation-changed");
+            fs::create_dir_all(&dir).unwrap();
+
+            let (terminal_id, remote) = attached_workbox_terminal_id(&mut server, &dir);
+
+            server.focus_remote_pane(terminal_id.clone());
+            assert_eq!(server.focused_remote_pane, Some(terminal_id.clone()));
+
+            // Bump the live host link's generation past what this attach
+            // attempt captured, simulating a detach/reconnect race.
+            let host = crate::server::host_link::HostLinkId("workbox".to_string());
+            {
+                let runtime = server
+                    .host_link_runtimes
+                    .get_mut(&host)
+                    .expect("host link runtime should exist");
+                runtime.generation = runtime.generation.wrapping_add(1);
+            }
+
+            drain_for(&mut server, Duration::from_secs(2));
+
+            assert!(
+                server.app.terminal_runtimes.get(&terminal_id).is_none(),
+                "a stale established handback must not register a runtime after the host link's generation changed"
+            );
+            assert!(server.focused_remote_pane_attach.is_none());
+
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// Direct coverage for the attach-epoch guard: a same-terminal
+        /// handback from an attach attempt superseded by a NEWER focus
+        /// attempt on the SAME `terminal_id` (rapid refocus A -> B -> A)
+        /// must be rejected even though `still_focused`/`generation_current`/
+        /// `pane_still_adopted` all still pass -- `terminal_id` equality
+        /// alone cannot tell a stale attach apart from the current one once
+        /// focus can return to the same terminal. Simulated directly by
+        /// bumping `remote_pane_focus_epoch` past what this attempt
+        /// captured, rather than choreographing a real A -> B -> A race
+        /// (which would need multiple adopted panes and cannot deterministically
+        /// order two independent off-loop threads' socket connects).
+        #[tokio::test]
+        async fn attach_established_handback_is_dropped_when_focus_epoch_is_stale() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("attach-established-epoch-stale");
+            fs::create_dir_all(&dir).unwrap();
+
+            let (terminal_id, remote) = attached_workbox_terminal_id(&mut server, &dir);
+
+            server.focus_remote_pane(terminal_id.clone());
+            assert_eq!(server.focused_remote_pane, Some(terminal_id.clone()));
+
+            // Simulate a newer focus attempt on the SAME terminal having
+            // already superseded this in-flight one.
+            server.remote_pane_focus_epoch += 1;
+
+            drain_for(&mut server, Duration::from_secs(2));
+
+            assert!(
+                server.app.terminal_runtimes.get(&terminal_id).is_none(),
+                "a stale-epoch established handback must not register a runtime"
+            );
+            assert!(server.focused_remote_pane_attach.is_none());
+
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// The API-path blur leak, pinned. A client focuses a remote pane
+        /// (attach established, remote-fed runtime registered), then a JSON
+        /// API `pane.focus` of a LOCAL pane -- the API path, which never runs
+        /// `handle_client_input_events` -- must still tear the remote pane
+        /// down. `focus_pane_in_workspace` (the API handler's sink) sets a
+        /// `Blur` request; the central per-iteration drain in
+        /// `handle_deferred_requests_headless` must apply it. If the drain
+        /// only ran on the client-input path (the bug), `focused_remote_pane`
+        /// would stay `Some`, the ssh channel + runtime would leak, and the
+        /// fake remote's blocking read would never return -- so
+        /// `remote.join()` here would hang rather than fail loudly.
+        ///
+        /// `#[tokio::test]`: the established handback registers a real
+        /// `TerminalRuntime` via `spawn_remote_fed`, which needs an active
+        /// Tokio runtime.
+        #[tokio::test]
+        async fn api_local_pane_focus_blurs_focused_remote_pane_via_deferred_drain() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("api-focus-blur");
+            fs::create_dir_all(&dir).unwrap();
+
+            let (terminal_id, remote) = attached_workbox_terminal_id(&mut server, &dir);
+
+            server.focus_remote_pane(terminal_id.clone());
+            assert_eq!(server.focused_remote_pane, Some(terminal_id.clone()));
+
+            // Wait for the off-loop attach's success handback to register the
+            // remote-fed runtime, so the blur below has something to remove.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                server.drain_server_events();
+                if server.app.terminal_runtimes.get(&terminal_id).is_some() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for the remote-fed runtime to register"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(server.focused_remote_pane_attach.is_some());
+
+            // Seed a LOCAL workspace with a pane the API can focus.
+            server
+                .app
+                .state
+                .workspaces
+                .push(crate::workspace::Workspace::test_new("local"));
+            server.app.state.ensure_test_terminals();
+            server.app.state.active = Some(0);
+            let local_pane = server.app.state.workspaces[0].tabs[0].root_pane;
+
+            // Drive a real JSON API `pane.focus` of the local pane (NOT client
+            // input). `p_1_<raw>` addresses ws index 0 / this pane's raw id.
+            let (respond_to, response_rx) = std::sync::mpsc::channel();
+            server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                request: api::schema::Request {
+                    id: "test:pane:focus:local".into(),
+                    method: api::schema::Method::PaneFocus(api::schema::PaneTarget {
+                        pane_id: format!("p_1_{}", local_pane.raw()),
+                    }),
+                },
+                respond_to,
+            });
+            let response: serde_json::Value =
+                serde_json::from_str(&response_rx.recv_timeout(Duration::from_secs(1)).unwrap())
+                    .unwrap();
+            assert_eq!(
+                response["result"]["type"], "pane_info",
+                "pane.focus should succeed: {response}"
+            );
+
+            // The API path set a Blur request but -- unlike client input --
+            // did NOT drain it: the remote pane is still focused at this point.
+            assert_eq!(
+                server.app.state.requested_remote_pane_focus,
+                Some(crate::app::state::RemotePaneFocusRequest::Blur)
+            );
+            assert_eq!(server.focused_remote_pane, Some(terminal_id.clone()));
+
+            // The central per-iteration deferred drain applies the Blur.
+            assert!(server.handle_deferred_requests_headless());
+
+            assert_eq!(server.app.state.requested_remote_pane_focus, None);
+            assert_eq!(
+                server.focused_remote_pane, None,
+                "an API-path local focus must blur the focused remote pane"
+            );
+            assert!(
+                server.app.terminal_runtimes.get(&terminal_id).is_none(),
+                "the remote-fed runtime must be torn down, not leaked"
+            );
+            assert!(server.focused_remote_pane_attach.is_none());
+
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            // If the blur leaked, the attach would still be open and this
+            // join would hang instead of returning.
             remote.join().unwrap();
             let _ = fs::remove_dir_all(&dir);
         }
