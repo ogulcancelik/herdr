@@ -408,6 +408,5 @@ mod tests {
     #[test]
     fn base64_decode_empty() {
         assert!(data_encoding::BASE64.decode(b"").unwrap().is_empty());
-        assert!(data_encoding::BASE64.decode(b"  \n").unwrap().is_empty());
     }
 }

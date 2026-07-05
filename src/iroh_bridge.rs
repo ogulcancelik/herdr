@@ -601,6 +601,12 @@ mod tests {
 
         if key_path.exists() {
             let key_bytes = std::fs::read(&key_path)?;
+            if key_bytes.len() != 32 {
+                return Err(io::Error::other(format!(
+                    "invalid identity key file: expected 32 bytes, got {}",
+                    key_bytes.len()
+                )));
+            }
             let mut secret = [0u8; 32];
             secret.copy_from_slice(&key_bytes);
             return Ok(secret);
