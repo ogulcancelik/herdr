@@ -116,6 +116,32 @@ herdr iroh-bridge key passwd
 
 when you run `herdr --remote --iroh workbox` for the first time, herdr SSHs into `workbox` to ensure the binary is installed, starts the iroh bridge server on the remote, and saves the remote endpoint ID to `~/.config/herdr/remote_endpoints.toml`. from then on, plain `herdr --remote workbox` detects the stored mapping and uses iroh automatically — SSH fallback is only used when the iroh endpoint cannot be reached.
 
+### server-side setup
+
+the remote host needs both the `herdr` binary and `herdr iroh-bridge serve` running. the `--remote` flow auto-deploys the binary via SSH, but if your servers are Nix-managed you can pre-install it declaratively:
+
+```bash
+# one-shot
+nix run github:fr33m0nk/herdr
+
+# home-manager
+{
+  inputs.herdr.url = "github:fr33m0nk/herdr";
+  home.packages = [ inputs.herdr.packages.$${pkgs.system}.default ];
+}
+
+# NixOS systemd service for the iroh bridge
+systemd.user.services.herdr-iroh-bridge = {
+  description = "herdr iroh bridge";
+  wantedBy = [ "default.target" ];
+  serviceConfig = {
+    ExecStart = "$${pkgs.herdr}/bin/herdr iroh-bridge serve";
+    Restart = "always";
+    RestartSec = 5;
+  };
+};
+```
+
 the local identity key lives at `~/.config/herdr/iroh/iroh_id.key`, encrypted at rest with Argon2id + AES-256-GCM (8+ character passphrase required). set `HERDR_IROH_KEY_PASSPHRASE` for unattended use.
 
 see the [persistence and remote docs](https://herdr.dev/docs/persistence-remote/) for named sessions, keepalives, direct attach, and handoff.
