@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Added
+- Added multi-host support: one local Herdr server can link to remote Herdr servers over SSH, adopt their panes into the sidebar grouped by host with live agent status, and focus a remote pane to stream and type into it over the reused `--remote` bridge. Attached hosts restore with the session and re-attach across live handoffs; a focused remote pane keeps its size in sync and survives a transient link reconnect.
+- Added `host.attach` / `host.list` / `host.detach` socket API methods and the matching `herdr host attach|list|detach` commands to manage links to remote Herdr servers.
+- Added `remote-api-bridge`, an additive stdio passthrough subcommand that exposes a remote server's JSON API socket to a linking local server over the SSH bridge.
 - Added `ui.sidebar_collapsed_mode = "hidden"` to make a collapsed sidebar use zero width while keeping the existing compact rail as the default. (#842)
 - Added `herdr completion <shell>` / `herdr completions <shell>` to generate shell completion scripts for bash, elvish, fish, PowerShell, and zsh. (#435)
 - Added `session.snapshot` to bootstrap client runtime state in one socket API response before subscribing to events.
