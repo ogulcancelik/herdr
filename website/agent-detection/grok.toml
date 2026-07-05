@@ -1,9 +1,50 @@
 id = "grok"
-version = "2026.06.10.1"
-min_engine_version = 1
-updated_at = "2026-06-10T00:00:00Z"
+version = "2026.07.03.1"
+min_engine_version = 2
+updated_at = "2026-07-03T00:00:00Z"
 aliases = ["grok-build"]
 
+# Evidence: Grok Build 0.2.82 live pane reads.
+#
+# Working turns render one live status line directly above the prompt box:
+#   "⠧ Waiting on subagent… 2.8s   13s ⇣29.7k [stop]"
+#   "⠴ Explore /tmp/… + 1 more… 5.6s   19s ⇣29.7k [stop]"
+# with a braille spinner and a trailing [stop] chip, plus an Esc:cancel
+# footer hint. Permission prompts and ask-user-question dialogs replace the
+# spinner with "◆" and draw a "┃"-guttered option list:
+#   "┃  2 (○) Yes, proceed"
+#   "┃  z (○) Type your answer here"
+# with footer hints "1/3:select │ Ctrl+o:yolo │ Ctrl+c:cancel" (permission)
+# or "Esc:unselect │ Tab:scrollback │ Shift+x:dismiss" (question dialog).
+# Idle footers end with "Ctrl+.:shortcuts" and never contain "Esc:cancel".
+# The startup splash draws its logo with braille characters, so working
+# rules must anchor on the [stop] chip, not on a bare spinner glyph.
+
+[[rules]]
+id = "option_dialog_blocked"
+state = "blocked"
+priority = 320
+region = "whole_recent"
+visible_blocker = true
+line_regex = ['^\s*┃\s+[0-9a-z]+\s+\([●○]\)\s']
+
+[[rules]]
+id = "permission_hints_blocked"
+state = "blocked"
+priority = 310
+region = "bottom_non_empty_lines(2)"
+visible_blocker = true
+contains = [":select", "ctrl+o:yolo", "ctrl+c:cancel"]
+
+[[rules]]
+id = "question_dialog_hints_blocked"
+state = "blocked"
+priority = 305
+region = "bottom_non_empty_lines(2)"
+visible_blocker = true
+contains = ["tab:scrollback", "shift+x:dismiss"]
+
+# Pre-0.2.x permission UI kept for older Grok Build releases.
 [[rules]]
 id = "permission_scope_selector"
 state = "blocked"
@@ -17,6 +58,23 @@ any = [
 ]
 
 [[rules]]
+id = "spinner_status_working"
+state = "working"
+priority = 200
+region = "whole_recent"
+visible_working = true
+line_regex = ['^\s*[\x{2801}-\x{28FF}]\s.*\[stop\]\s*$']
+
+[[rules]]
+id = "esc_cancel_hints_working"
+state = "working"
+priority = 190
+region = "bottom_non_empty_lines(2)"
+visible_working = true
+contains = ["esc:cancel", "ctrl+.:shortcuts"]
+
+# Pre-0.2.x working chrome kept for older Grok Build releases.
+[[rules]]
 id = "waiting_tool_working"
 state = "working"
 priority = 120
@@ -24,5 +82,17 @@ region = "whole_recent"
 visible_working = true
 any = [
   { all = [{ contains = ["ctrl+c:cancel", "ctrl+enter:interject"] }, { contains = ["waiting"] }] },
-  { line_regex = ['^\s*[\u2800-\u28FF]\s+(Run|Read|Search|List)\b'] },
+  { line_regex = ['^\s*[\x{2801}-\x{28FF}]\s+(Run|Read|Search|List)\b'] },
+]
+
+[[rules]]
+id = "prompt_hints_idle"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(2)"
+visible_idle = true
+contains = ["ctrl+.:shortcuts"]
+not = [
+  { contains = ["esc:cancel"] },
+  { contains = ["ctrl+c:cancel"] },
 ]
