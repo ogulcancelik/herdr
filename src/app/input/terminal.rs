@@ -1,10 +1,11 @@
 use bytes::Bytes;
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyEvent};
 use tracing::{debug, warn};
 
 use crate::{
     app::{App, Mode},
     input::TerminalKey,
+    terminal::{TerminalId, TerminalRuntime},
 };
 
 struct PreparedPaneInput {
@@ -13,21 +14,108 @@ struct PreparedPaneInput {
     bytes: Bytes,
 }
 
+/// What a Terminal-mode key resolved to. `Local` is the existing behavior:
+/// forward to the workspace's locally-focused pane. `Redirect` is Task 9b's
+/// input commit: when the caller passes a `redirect` target (the
+/// server-side focused remote pane's `TerminalId`), the key is encoded
+/// against THAT runtime instead -- reusing this same herdr-keybind-vs-
+/// pane-content split rather than duplicating it -- and handed back as
+/// plain bytes, since a workspace-less remote-fed runtime's own
+/// `try_send_bytes` is a no-op (it has no PTY; only
+/// `RemotePaneAttach::send_input`, which only `HeadlessServer` can reach,
+/// actually delivers it).
+enum PreparedKeyForward {
+    Local(PreparedPaneInput),
+    Redirect(Bytes),
+}
+
 fn is_modifier_only_key(code: &KeyCode) -> bool {
     matches!(code, KeyCode::Modifier(_))
 }
 
+/// Shared tail of `prepare_terminal_key_forward`'s local and redirect
+/// paths: resets scrollback, encodes `key` against `runtime`'s own
+/// keyboard protocol, and logs/validates the encoding the same way
+/// regardless of which runtime it targets (the workspace's focused local
+/// pane, or a redirect target's remote-fed runtime).
+fn encode_key_for_runtime(
+    runtime: &TerminalRuntime,
+    key: TerminalKey,
+    key_event: &KeyEvent,
+) -> Option<Vec<u8>> {
+    runtime.scroll_reset();
+    let protocol = runtime.keyboard_protocol();
+    let bytes = runtime.encode_terminal_key(key);
+
+    if matches!(key_event.code, KeyCode::Esc)
+        || key_event
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::ALT)
+    {
+        debug!(
+            code = ?key_event.code,
+            modifiers = ?key_event.modifiers,
+            kind = ?key_event.kind,
+            protocol = ?protocol,
+            encoded = ?bytes,
+            "forwarding potentially-ambiguous terminal key to pane"
+        );
+    }
+
+    if bytes.is_empty() {
+        if key.kind != crossterm::event::KeyEventKind::Release
+            && !matches!(
+                key.code,
+                KeyCode::CapsLock
+                    | KeyCode::ScrollLock
+                    | KeyCode::NumLock
+                    | KeyCode::PrintScreen
+                    | KeyCode::Pause
+                    | KeyCode::Menu
+                    | KeyCode::KeypadBegin
+                    | KeyCode::Media(_)
+                    | KeyCode::Modifier(_)
+            )
+        {
+            warn!(code = ?key_event.code, mods = ?key_event.modifiers, state = ?key_event.state, "key produced empty encoding");
+        }
+        return None;
+    }
+
+    Some(bytes)
+}
+
 impl App {
-    pub(crate) fn handle_terminal_key_headless(&mut self, key: TerminalKey) {
-        let Some(input) = self.prepare_terminal_key_forward(key) else {
-            return;
-        };
-        if let Some(runtime) = self.lookup_runtime_sender(input.ws_idx, input.pane_id) {
-            let _ = runtime.try_send_bytes(input.bytes);
+    /// `redirect`: the focused remote pane's `TerminalId`, if any (Task 9b's
+    /// input commit) -- `None` in monolithic mode and whenever no remote
+    /// pane is focused. When `Some`, bytes that would have gone to the
+    /// workspace's local pane are appended to `redirected_bytes` instead,
+    /// for the caller (`HeadlessServer`) to hand to
+    /// `RemotePaneAttach::send_input`.
+    pub(crate) fn handle_terminal_key_headless(
+        &mut self,
+        key: TerminalKey,
+        redirect: Option<&TerminalId>,
+        redirected_bytes: &mut Vec<u8>,
+    ) {
+        match self.prepare_terminal_key_forward(key, redirect) {
+            Some(PreparedKeyForward::Local(input)) => {
+                if let Some(runtime) = self.lookup_runtime_sender(input.ws_idx, input.pane_id) {
+                    let _ = runtime.try_send_bytes(input.bytes);
+                }
+            }
+            Some(PreparedKeyForward::Redirect(bytes)) => {
+                redirected_bytes.extend_from_slice(&bytes);
+            }
+            None => {}
         }
     }
 
-    fn prepare_terminal_key_forward(&mut self, key: TerminalKey) -> Option<PreparedPaneInput> {
+    fn prepare_terminal_key_forward(
+        &mut self,
+        key: TerminalKey,
+        redirect: Option<&TerminalId>,
+    ) -> Option<PreparedKeyForward> {
         self.state.clear_selection();
         self.selection_autoscroll_deadline = None;
         self.state.update_dismissed = true;
@@ -81,6 +169,23 @@ impl App {
             return None;
         }
 
+        // Task 9b's input commit: a remote pane is focused server-side
+        // (`redirect` is `Some`). The herdr-keybind checks above already
+        // ran identically either way; only WHERE the remaining content-bound
+        // bytes go differs. Encode against the redirect target's OWN
+        // runtime (already registered in `self.terminal_runtimes` --
+        // `HeadlessServer::handle_remote_pane_attach_established` puts it
+        // there) instead of resolving the workspace's locally-focused pane,
+        // so typing doesn't leak to whatever local pane happens to still be
+        // "focused" underneath the remote overlay. No PageUp/PageDown
+        // local-scrollback special case here -- that reads local `PaneInfo`
+        // geometry that doesn't exist for a workspace-less remote pane.
+        if let Some(terminal_id) = redirect {
+            let runtime = self.terminal_runtimes.get(terminal_id)?;
+            let bytes = encode_key_for_runtime(runtime, key, &key_event)?;
+            return Some(PreparedKeyForward::Redirect(Bytes::from(bytes)));
+        }
+
         let ws_idx = self.state.active?;
         let ws = self.state.workspaces.get(ws_idx)?;
         let pane_id = ws.focused_pane_id()?;
@@ -131,58 +236,31 @@ impl App {
             }
         }
 
-        rt.scroll_reset();
-        let protocol = rt.keyboard_protocol();
-        let bytes = rt.encode_terminal_key(key);
+        let bytes = encode_key_for_runtime(rt, key, &key_event)?;
 
-        if matches!(key_event.code, KeyCode::Esc)
-            || key_event
-                .modifiers
-                .contains(crossterm::event::KeyModifiers::ALT)
-        {
-            debug!(
-                code = ?key_event.code,
-                modifiers = ?key_event.modifiers,
-                kind = ?key_event.kind,
-                protocol = ?protocol,
-                encoded = ?bytes,
-                "forwarding potentially-ambiguous terminal key to pane"
-            );
-        }
-
-        if bytes.is_empty() {
-            if key.kind != crossterm::event::KeyEventKind::Release
-                && !matches!(
-                    key.code,
-                    KeyCode::CapsLock
-                        | KeyCode::ScrollLock
-                        | KeyCode::NumLock
-                        | KeyCode::PrintScreen
-                        | KeyCode::Pause
-                        | KeyCode::Menu
-                        | KeyCode::KeypadBegin
-                        | KeyCode::Media(_)
-                        | KeyCode::Modifier(_)
-                )
-            {
-                warn!(code = ?key_event.code, mods = ?key_event.modifiers, state = ?key_event.state, "key produced empty encoding");
-            }
-            return None;
-        }
-
-        Some(PreparedPaneInput {
+        Some(PreparedKeyForward::Local(PreparedPaneInput {
             ws_idx,
             pane_id,
             bytes: Bytes::from(bytes),
-        })
+        }))
     }
 
     pub(super) async fn handle_terminal_key(&mut self, key: TerminalKey) {
-        let Some(input) = self.prepare_terminal_key_forward(key) else {
-            return;
-        };
-        if let Some(runtime) = self.lookup_runtime_sender(input.ws_idx, input.pane_id) {
-            let _ = runtime.send_bytes(input.bytes).await;
+        match self.prepare_terminal_key_forward(key, None) {
+            Some(PreparedKeyForward::Local(input)) => {
+                if let Some(runtime) = self.lookup_runtime_sender(input.ws_idx, input.pane_id) {
+                    let _ = runtime.send_bytes(input.bytes).await;
+                }
+            }
+            Some(PreparedKeyForward::Redirect(_)) => {
+                // Monolithic mode never focuses a remote pane server-side,
+                // so `redirect` is always `None` here and this arm is
+                // unreachable in practice. Guard defensively rather than
+                // `unreachable!()`: silently dropping beats panicking a
+                // real terminal session over a future refactor mistake.
+                debug!("ignoring unexpected remote-pane redirect in monolithic mode");
+            }
+            None => {}
         }
     }
 }
@@ -973,7 +1051,7 @@ mod tests {
         app.state.view.pane_infos = pane_infos;
 
         let key = crate::input::parse_terminal_key_sequence("\x1b\x7f").unwrap();
-        app.handle_terminal_key_headless(key);
+        app.handle_terminal_key_headless(key, None, &mut Vec::new());
 
         let bytes = rx.try_recv().unwrap();
         assert_eq!(bytes.as_ref(), b"\x1b\x7f");
@@ -1010,7 +1088,11 @@ mod tests {
             .expect("initial scroll metrics");
         assert_eq!(start_metrics.offset_from_bottom, 0);
 
-        app.handle_terminal_key_headless(TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()));
+        app.handle_terminal_key_headless(
+            TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()),
+            None,
+            &mut Vec::new(),
+        );
 
         let end_metrics = app
             .state
@@ -1046,7 +1128,11 @@ mod tests {
         app.state.mode = Mode::Terminal;
         app.state.view.pane_infos = pane_infos;
 
-        app.handle_terminal_key_headless(TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()));
+        app.handle_terminal_key_headless(
+            TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()),
+            None,
+            &mut Vec::new(),
+        );
         let after_up = app
             .state
             .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
@@ -1054,10 +1140,11 @@ mod tests {
             .expect("scroll metrics after PageUp");
         assert!(after_up.offset_from_bottom > 0);
 
-        app.handle_terminal_key_headless(TerminalKey::new(
-            KeyCode::PageDown,
-            KeyModifiers::empty(),
-        ));
+        app.handle_terminal_key_headless(
+            TerminalKey::new(KeyCode::PageDown, KeyModifiers::empty()),
+            None,
+            &mut Vec::new(),
+        );
         let after_down = app
             .state
             .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
@@ -1089,7 +1176,11 @@ mod tests {
         app.state.mode = Mode::Terminal;
         app.state.view.pane_infos = pane_infos;
 
-        app.handle_terminal_key_headless(TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()));
+        app.handle_terminal_key_headless(
+            TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()),
+            None,
+            &mut Vec::new(),
+        );
         let after_press = app
             .state
             .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
@@ -1103,6 +1194,8 @@ mod tests {
         app.handle_terminal_key_headless(
             TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty())
                 .with_kind(KeyEventKind::Release),
+            None,
+            &mut Vec::new(),
         );
 
         let after_release = app
@@ -1139,7 +1232,11 @@ mod tests {
         app.state.mode = Mode::Terminal;
         app.state.view.pane_infos = pane_infos;
 
-        app.handle_terminal_key_headless(TerminalKey::new(KeyCode::PageUp, KeyModifiers::CONTROL));
+        app.handle_terminal_key_headless(
+            TerminalKey::new(KeyCode::PageUp, KeyModifiers::CONTROL),
+            None,
+            &mut Vec::new(),
+        );
 
         let metrics = app
             .state
@@ -1181,7 +1278,11 @@ mod tests {
             .expect("initial scroll metrics");
         assert_eq!(start_metrics.offset_from_bottom, 0);
 
-        app.handle_terminal_key_headless(TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()));
+        app.handle_terminal_key_headless(
+            TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()),
+            None,
+            &mut Vec::new(),
+        );
 
         let end_metrics = app
             .state

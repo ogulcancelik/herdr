@@ -977,10 +977,13 @@ fn read_json_line(
 ///
 /// Driven by `HeadlessServer::focus_remote_pane` (Task 9b, off the main
 /// loop thread -- see its doc comment) and consumed by `handle_host_event`'s
-/// `TerminalBytes`/`AttachFailed` arms. Input (`send_input`) and resize-sync
-/// (`resize`) are not wired to anything real yet -- that is Task 9b's input
-/// commit -- so this is a VIEW-ONLY consumer today: a focused remote pane
-/// renders live but typing does not reach it.
+/// `TerminalBytes`/`AttachFailed` arms. `HeadlessServer::
+/// deliver_remote_pane_input` (Task 9b's input commit) drives `send_input`
+/// once local input is encoded against the focused pane's own runtime.
+/// Resize-sync (`resize`) is still not wired to anything real -- that is a
+/// follow-up commit -- so the local emulator is sized FROM the remote's
+/// reported frame dims (`HostEvent::TerminalBytes`) rather than the other
+/// way around.
 /// Upper bound on the blocking attach handshake (Hello -> Welcome ->
 /// AttachTerminal). Mirrors `src/client/mod.rs`'s remote handshake timeout
 /// (`REMOTE_HANDSHAKE_READ_TIMEOUT`, 60s): the terminal channel runs over a
@@ -1167,10 +1170,10 @@ impl RemotePaneAttach {
     /// first so a non-`Connected` link drops the input instead of reaching
     /// here.
     ///
-    /// Not called from production yet -- routing local input to a focused
-    /// remote pane is Task 9b's *next* commit (this commit is VIEW-ONLY).
-    /// Exercised directly by this module's own tests.
-    #[allow(dead_code)]
+    /// Driven by `HeadlessServer::deliver_remote_pane_input` (Task 9b's
+    /// input commit) once local input has been encoded against the
+    /// focused remote pane's own runtime; also exercised directly by this
+    /// module's own tests.
     pub(crate) fn send_input(&self, data: Vec<u8>) -> io::Result<()> {
         let mut write = self
             .write
@@ -1368,9 +1371,6 @@ fn run_attach_reader(
 // ---------------------------------------------------------------------------
 
 /// Result of routing one input payload toward a remote pane's attach.
-// Consumed by the server input-routing integration (Task 9b -- deferred
-// alongside RemotePaneAttach above).
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InputRouteOutcome {
     /// The link was `Connected`; the caller should forward the input (e.g.
@@ -1389,10 +1389,8 @@ pub(crate) enum InputRouteOutcome {
 /// directed at a pane adopted from `host` reach the remote right now? Kept
 /// standalone so it is testable purely off a `LinkState` value, the way
 /// `host_link.rs` tests `HostLinkRegistry`'s state machine -- no transport,
-/// no queue, nothing a dropped payload could accumulate in.
-// Consumed by the server input-routing integration (Task 9b -- deferred
-// alongside RemotePaneAttach above).
-#[allow(dead_code)]
+/// no queue, nothing a dropped payload could accumulate in. Driven by
+/// `HeadlessServer::deliver_remote_pane_input` (Task 9b's input commit).
 pub(crate) fn route_remote_pane_input(host: &HostLinkId, state: LinkState) -> InputRouteOutcome {
     if matches!(state, LinkState::Connected) {
         InputRouteOutcome::Forward

@@ -277,12 +277,15 @@ pub struct HeadlessServer {
     #[cfg(unix)]
     remote_pane_remote_terminal_ids: HashMap<crate::server::remote_pane::RemotePaneKey, String>,
     /// The `TerminalId` of the remote pane currently focused for live
-    /// viewing (Task 9b, HALF 2, VIEW-ONLY: routing local input to it is a
-    /// follow-up commit). `None` when no remote pane is focused. Setting
-    /// this to `Some` is what `render_and_stream`'s App branch reads to
-    /// substitute the focused runtime for the workspace panes, and is also
-    /// `focus_remote_pane`'s trigger for the off-loop attach. Mutated only
-    /// by `focus_remote_pane`/`blur_focused_remote_pane` and the
+    /// viewing AND interaction (Task 9b): also the redirect target
+    /// `route_client_events_and_forward_to_remote_pane` passes through to
+    /// `App::route_client_events` so typed/pasted/mouse input bound for the
+    /// focused pane reaches the remote instead of a local pane. `None` when
+    /// no remote pane is focused. Setting this to `Some` is what
+    /// `render_and_stream`'s App branch reads to substitute the focused
+    /// runtime for the workspace panes, and is also `focus_remote_pane`'s
+    /// trigger for the off-loop attach. Mutated only by
+    /// `focus_remote_pane`/`blur_focused_remote_pane` and the
     /// `RemotePaneAttachFailed`/`HostEvent::AttachFailed` handlers (all on
     /// the main loop thread).
     #[cfg(unix)]
@@ -292,11 +295,10 @@ pub struct HeadlessServer {
     /// unfocused, or torn down). Owns the ssh terminal channel + reader
     /// thread; `blur_focused_remote_pane`/the attach-failed handlers detach
     /// it (graceful `Detach` write, then `Drop`'s force-close + reader-join)
-    /// so nothing leaks across a focus change. Not read for input/resize
-    /// yet -- routing local input to a focused remote pane is a follow-up
-    /// commit; this commit is VIEW-ONLY (typing does not reach the remote
-    /// pane), so `send_input`/`resize` stay unreachable from production for
-    /// now.
+    /// so nothing leaks across a focus change. `deliver_remote_pane_input`
+    /// (Task 9b's input commit) reads it to call `send_input`; `resize`
+    /// stays unreachable from production until the resize-sync follow-up
+    /// commit.
     #[cfg(unix)]
     focused_remote_pane_attach: Option<crate::server::remote_pane::RemotePaneAttach>,
     /// Monotonic counter bumped every time `focus_remote_pane` actually
@@ -567,6 +569,63 @@ fn apply_terminal_attach_input(
     runtime
         .try_send_bytes(Bytes::from(data))
         .map_err(|err| format!("terminal attach input failed: {err}"))
+}
+
+/// Mouse encoding for a mouse event landing inside the focused remote
+/// pane's content rect (Task 9b's input commit,
+/// `route_client_events_and_forward_to_remote_pane`). Mirrors
+/// `apply_terminal_attach_scroll`'s wheel-routing branches, but the
+/// remote-fed runtime is PTY-less (its own `try_send_bytes` is a no-op --
+/// see `TerminalRuntime::spawn_remote_fed`), so this returns the encoded
+/// bytes for the caller to hand to `RemotePaneAttach::send_input` instead
+/// of writing through the runtime's own I/O channel. `column`/`row` must
+/// already be translated into the remote grid's own coordinate space
+/// (content-rect-relative) by the caller. A `HostScroll`-routed wheel event
+/// scrolls the remote-fed runtime's own local scrollback view directly (a
+/// purely local effect on this side's mirror grid, exactly like the
+/// equivalent branch in `apply_terminal_attach_scroll`) and returns `None`
+/// -- there is nothing to send over the wire for it.
+#[cfg(unix)]
+fn encode_remote_pane_mouse(
+    runtime: &crate::terminal::TerminalRuntime,
+    mouse: crossterm::event::MouseEvent,
+    column: u16,
+    row: u16,
+    scroll_lines: usize,
+) -> Option<Vec<u8>> {
+    match mouse.kind {
+        MouseEventKind::Down(_) | MouseEventKind::Up(_) | MouseEventKind::Drag(_) => {
+            let bytes = runtime.encode_mouse_button(mouse.kind, column, row, mouse.modifiers);
+            if bytes.is_some() {
+                runtime.scroll_reset();
+            }
+            bytes
+        }
+        MouseEventKind::Moved => {
+            runtime.encode_mouse_motion(mouse.kind, column, row, mouse.modifiers)
+        }
+        MouseEventKind::ScrollUp
+        | MouseEventKind::ScrollDown
+        | MouseEventKind::ScrollLeft
+        | MouseEventKind::ScrollRight => match runtime.wheel_routing() {
+            Some(crate::pane::WheelRouting::MouseReport) => {
+                runtime.scroll_reset();
+                runtime.encode_mouse_wheel(mouse.kind, column, row, mouse.modifiers)
+            }
+            Some(crate::pane::WheelRouting::AlternateScroll) => {
+                runtime.scroll_reset();
+                runtime.encode_alternate_scroll(mouse.kind)
+            }
+            Some(crate::pane::WheelRouting::HostScroll) | None => {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => runtime.scroll_up(scroll_lines.max(1)),
+                    MouseEventKind::ScrollDown => runtime.scroll_down(scroll_lines.max(1)),
+                    _ => {}
+                }
+                None
+            }
+        },
+    }
 }
 
 /// Spawns the one long-lived bridge thread that turns `HostEvent`s from any
@@ -1978,8 +2037,11 @@ impl HeadlessServer {
     /// remote pane (e.g. it closed on the remote, or a `Snapshot`
     /// reconciliation retired it, while focused), blurs it first so the
     /// live attach + remote-fed runtime don't outlive the pane they were
-    /// for -- this is a normal pane-closed path, not the link-down/input
-    /// coordination deferred to a follow-up commit.
+    /// for -- this is a normal pane-closed path, not the link-down input
+    /// gate (`deliver_remote_pane_input`/`route_remote_pane_input`, which
+    /// drops input rather than tearing the focused pane down) or the
+    /// broader auto-teardown-on-link-down coordination still deferred to a
+    /// follow-up commit.
     #[cfg(unix)]
     fn remove_remote_pane_terminal(&mut self, key: &crate::server::remote_pane::RemotePaneKey) {
         self.remote_pane_remote_terminal_ids.remove(key);
@@ -2057,11 +2119,12 @@ impl HeadlessServer {
         None
     }
 
-    /// Focuses one remote pane for live viewing (Task 9b, HALF 2,
-    /// VIEW-ONLY: typing does not reach the remote pane yet -- that is a
-    /// follow-up commit). Tears down any previously-focused remote pane
-    /// first (`blur_focused_remote_pane`), so a rapid refocus never leaves
-    /// two live attaches/runtimes around.
+    /// Focuses one remote pane for live viewing AND interaction (Task 9b):
+    /// once established, local input bound for this pane is routed to it
+    /// via `route_client_events_and_forward_to_remote_pane`/
+    /// `deliver_remote_pane_input`. Tears down any previously-focused
+    /// remote pane first (`blur_focused_remote_pane`), so a rapid refocus
+    /// never leaves two live attaches/runtimes around.
     ///
     /// Reached from production via `AppState::requested_remote_pane_focus`:
     /// a sidebar click or keyboard nav resolving an `AgentFocusTarget::
@@ -2182,8 +2245,9 @@ impl HeadlessServer {
     /// `TerminalRuntime::spawn_remote_fed` for `terminal_id` -- the ONLY
     /// place a remote-fed runtime is inserted (memory budget: only a
     /// focused pane keeps a live grid + ssh channel) -- and stores `attach`
-    /// so a future input commit has somewhere to reach it (view-only today:
-    /// nothing calls `attach.send_input`/`attach.resize` yet).
+    /// so `deliver_remote_pane_input` (Task 9b's input commit) has
+    /// somewhere to reach it via `attach.send_input`. `attach.resize` is
+    /// still unreachable until the resize-sync follow-up commit.
     #[cfg(unix)]
     fn handle_remote_pane_attach_established(
         &mut self,
@@ -2351,6 +2415,165 @@ impl HeadlessServer {
             runtime.shutdown();
         }
         debug!(terminal = %terminal_id, "blurred focused remote pane");
+    }
+
+    /// Task 9b's input commit: the single interception point between the
+    /// client-input path and `App::route_client_events`. When no remote
+    /// pane is focused this is a plain passthrough; when one is, it splits
+    /// each event between "pane-bound content for the remote" and
+    /// "everything else" (which still runs through `App::route_client_events`
+    /// completely normally, so herdr keybinds, mode transitions, and
+    /// focus-away blur are unaffected).
+    ///
+    /// Mouse events are split purely geometrically: inside vs. outside the
+    /// overlay's content rect (`self.app.state.view.terminal_area`, the SAME
+    /// rect `render_stream::overlay_focused_remote_pane` draws the remote's
+    /// grid into). That split needs none of `App`'s mode-awareness, and
+    /// deciding it here -- instead of inside `App::route_client_events` --
+    /// avoids running herdr's full mouse hit-testing (sidebar, agent panel,
+    /// ...) against coordinates that are actually landing on the remote's
+    /// own content; a click OUTSIDE the content rect (e.g. a different
+    /// sidebar entry) still runs that hit-testing normally, which is what
+    /// naturally re-focuses or blurs.
+    ///
+    /// Key/Paste events keep the herdr-keybind-vs-pane-content split that
+    /// already lives inside `App::route_client_events`
+    /// (`Mode::Terminal` plus the prefix/direct-keybind checks in
+    /// `prepare_terminal_key_forward`) -- duplicating that logic here would
+    /// be both more code and a second place for it to drift out of sync, so
+    /// this passes `terminal_id` into it as a redirect target instead and
+    /// collects the bytes it hands back.
+    ///
+    /// The collected bytes (from both sources) are handed to
+    /// `deliver_remote_pane_input` for the link-health gate and the actual
+    /// `RemotePaneAttach::send_input` write.
+    #[cfg(unix)]
+    fn route_client_events_and_forward_to_remote_pane(
+        &mut self,
+        events: Vec<crate::raw_input::RawInputEvent>,
+        foreground: bool,
+    ) {
+        let Some(terminal_id) = self.focused_remote_pane.clone() else {
+            self.app.route_client_events(events, foreground, None);
+            return;
+        };
+
+        let content_rect = self.app.state.view.terminal_area;
+        let mut remaining = Vec::with_capacity(events.len());
+        let mut collected = Vec::new();
+        for event in events {
+            match event {
+                crate::raw_input::RawInputEvent::Mouse(mouse) => {
+                    let in_content_rect = content_rect.width > 0
+                        && content_rect.height > 0
+                        && mouse.column >= content_rect.x
+                        && mouse.row >= content_rect.y
+                        && mouse.column < content_rect.x + content_rect.width
+                        && mouse.row < content_rect.y + content_rect.height;
+                    if in_content_rect {
+                        if let Some(runtime) = self.app.terminal_runtimes.get(&terminal_id) {
+                            let column = mouse.column - content_rect.x;
+                            let row = mouse.row - content_rect.y;
+                            if let Some(bytes) = encode_remote_pane_mouse(
+                                runtime,
+                                mouse,
+                                column,
+                                row,
+                                self.app.state.mouse_scroll_lines,
+                            ) {
+                                collected.extend(bytes);
+                            }
+                            continue;
+                        }
+                    }
+                    remaining.push(crate::raw_input::RawInputEvent::Mouse(mouse));
+                }
+                other => remaining.push(other),
+            }
+        }
+
+        let key_paste_bytes =
+            self.app
+                .route_client_events(remaining, foreground, Some(&terminal_id));
+        collected.extend(key_paste_bytes);
+
+        if collected.is_empty() {
+            return;
+        }
+        self.deliver_remote_pane_input(&terminal_id, collected);
+    }
+
+    #[cfg(not(unix))]
+    fn route_client_events_and_forward_to_remote_pane(
+        &mut self,
+        events: Vec<crate::raw_input::RawInputEvent>,
+        foreground: bool,
+    ) {
+        self.app.route_client_events(events, foreground, None);
+    }
+
+    /// Gates collected redirect bytes against the focused remote pane's
+    /// host link before actually forwarding them: `Connected` writes them
+    /// through the live `RemotePaneAttach::send_input`; anything else drops
+    /// them outright (no queueing -- retry belongs to the host link's own
+    /// reconnect lifecycle) and surfaces the one-line notice
+    /// `route_remote_pane_input` builds. A missing `host_links` entry
+    /// (fully detached) is treated the same as not-Connected.
+    #[cfg(unix)]
+    fn deliver_remote_pane_input(
+        &mut self,
+        terminal_id: &crate::terminal::TerminalId,
+        bytes: Vec<u8>,
+    ) {
+        let Some(key) = self.remote_pane_key_for_terminal(terminal_id) else {
+            debug!(terminal = %terminal_id, "dropping remote pane input: pane no longer adopted");
+            return;
+        };
+        let outcome = match self.host_links.state(&key.host) {
+            Some(state) => crate::server::remote_pane::route_remote_pane_input(&key.host, state),
+            None => crate::server::remote_pane::InputRouteOutcome::Drop {
+                notice: format!("input dropped: {} is not connected", key.host.0),
+            },
+        };
+        match outcome {
+            crate::server::remote_pane::InputRouteOutcome::Forward => {
+                let Some(attach) = self.focused_remote_pane_attach.as_ref() else {
+                    debug!(
+                        host = %key.host.0,
+                        terminal = %terminal_id,
+                        "dropping remote pane input: no live attach"
+                    );
+                    return;
+                };
+                // NOTE: this is a write through the attach's write half
+                // (a plain blocking `Write`, see `RemotePaneAttach::
+                // send_input`), on the main loop thread. A keystroke's
+                // encoded bytes are a handful of bytes, so this should
+                // never actually block in practice, but unlike a local
+                // pane's `try_send_bytes` (a bounded channel send) this
+                // has no backpressure escape hatch -- a genuinely wedged
+                // remote could stall the main loop here. Tracked as a
+                // known gap for the resize-sync follow-up commit (the
+                // same class of concern already flagged on `detach()`'s
+                // blocking write), not fixed here.
+                if let Err(err) = attach.send_input(bytes) {
+                    warn!(
+                        host = %key.host.0,
+                        terminal = %terminal_id,
+                        err = %err,
+                        "failed to forward input to the remote pane"
+                    );
+                }
+            }
+            crate::server::remote_pane::InputRouteOutcome::Drop { notice } => {
+                debug!(
+                    host = %key.host.0,
+                    terminal = %terminal_id,
+                    "dropping remote pane input: link not connected"
+                );
+                self.send_notify_to_foreground_client(protocol::NotifyKind::Toast, notice, None);
+            }
+        }
     }
 
     /// Test-only bijection check for the Task 9b invariant: every
@@ -2874,7 +3097,7 @@ impl HeadlessServer {
         if let Some(client) = self.clients.get_mut(&client_id) {
             client.request_semantic_redraw_after_input();
         }
-        self.app.route_client_events(
+        self.route_client_events_and_forward_to_remote_pane(
             vec![crate::raw_input::RawInputEvent::Paste(path)],
             self.foreground_client_id == Some(client_id),
         );
@@ -3898,8 +4121,10 @@ impl HeadlessServer {
             self.resize_shared_runtime_to_effective_size_before_input();
         }
         let theme_changed = self.update_client_host_theme_from_events(client_id, &events);
-        self.app
-            .route_client_events(events, self.foreground_client_id == Some(client_id));
+        self.route_client_events_and_forward_to_remote_pane(
+            events,
+            self.foreground_client_id == Some(client_id),
+        );
         // A remote-pane focus/blur request this input produced is drained
         // centrally in `handle_deferred_requests_headless` (same iteration,
         // before render), NOT here -- the JSON API / plugin / agent focus
@@ -12371,6 +12596,296 @@ next_tab = ""
             );
             // If the blur leaked, the attach would still be open and this
             // join would hang instead of returning.
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        // -------------------------------------------------------------
+        // Task 9b commit 6: route local input to the focused remote pane
+        // -------------------------------------------------------------
+
+        /// Focuses `terminal_id` and blocks (bounded) until the off-loop
+        /// attach's success handback registers the remote-fed runtime,
+        /// mirroring the wait loop `focus_remote_pane_attaches_...` uses.
+        /// Shared by the input-routing tests below, which don't care about
+        /// the rendered content -- only that the runtime + attach exist.
+        fn focus_and_wait_for_remote_runtime(
+            server: &mut HeadlessServer,
+            terminal_id: &crate::terminal::TerminalId,
+        ) {
+            server.focus_remote_pane(terminal_id.clone());
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                server.drain_server_events();
+                if server.app.terminal_runtimes.get(terminal_id).is_some() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for the remote-fed runtime to register"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(server.focused_remote_pane_attach.is_some());
+        }
+
+        /// The headline behavior this commit adds: with a focused,
+        /// `Connected` remote pane, a plain typed key reaches the remote as
+        /// the real, encoded `ClientMessage::Input` -- proving the pane
+        /// went from view-only to interactive. Mirrors the click handler's
+        /// own precondition (`app/input/mouse.rs`'s `AgentFocusTarget::
+        /// Remote` arm sets `Mode::Terminal` before requesting focus) by
+        /// setting `Mode::Terminal` directly, since this test drives
+        /// `focus_remote_pane` rather than a real click.
+        #[tokio::test]
+        async fn typed_key_reaches_the_focused_remote_pane_as_client_input() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("input-key-reaches-remote");
+            fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("remote-api.sock");
+
+            let remote_sock = sock.clone();
+            let remote = std::thread::spawn(move || {
+                let listener = UnixListener::bind(&remote_sock).unwrap();
+                let _round = serve_attach_round(&listener, vec![fake_pane("w1:p1")]);
+
+                let (mut conn, _) = listener.accept().unwrap();
+                complete_attach_handshake(&mut conn, "term_w1:p1");
+
+                let input: crate::protocol::ClientMessage =
+                    protocol::read_message(&mut conn, MAX_FRAME_SIZE).unwrap();
+                assert_eq!(
+                    input,
+                    crate::protocol::ClientMessage::Input {
+                        data: b"a".to_vec()
+                    },
+                    "the typed key must reach the remote as the encoded ClientMessage::Input"
+                );
+            });
+
+            use_fake_remote_socket(&mut server, sock);
+            server.handle_host_attach_api(
+                "test:host:attach".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            wait_for_host_state(&mut server, "workbox", "connected");
+
+            let terminal_id = host_tagged_terminals(&server, "workbox")
+                .first()
+                .expect("remote pane should be adopted as a host-tagged terminal")
+                .id
+                .clone();
+            focus_and_wait_for_remote_runtime(&mut server, &terminal_id);
+
+            // Mirrors what the sidebar click handler sets before requesting
+            // focus: `App::route_client_events` keys the herdr-keybind-vs-
+            // pane-content split off `Mode::Terminal`.
+            server.app.state.mode = crate::app::state::Mode::Terminal;
+            attach_fake_foreground_client(&mut server);
+
+            let events = vec![crate::raw_input::RawInputEvent::Key(
+                crate::input::TerminalKey::new(
+                    crossterm::event::KeyCode::Char('a'),
+                    crossterm::event::KeyModifiers::empty(),
+                ),
+            )];
+            server.handle_client_input_events(1, events);
+
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// A herdr keybind (the configured prefix key) must still perform
+        /// its herdr action -- entering `Mode::Prefix` -- while a remote
+        /// pane is focused, and must NOT be forwarded to the remote as
+        /// input. Proves the keybind/pane-content split
+        /// (`App::route_client_events`'s `Mode::Terminal` + the prefix
+        /// check inside `prepare_terminal_key_forward`) is unaffected by
+        /// the redirect target.
+        #[tokio::test]
+        async fn herdr_keybind_while_remote_pane_focused_is_not_forwarded_to_remote() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("input-keybind-not-forwarded");
+            fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("remote-api.sock");
+
+            let remote_sock = sock.clone();
+            let remote = std::thread::spawn(move || {
+                let listener = UnixListener::bind(&remote_sock).unwrap();
+                let _round = serve_attach_round(&listener, vec![fake_pane("w1:p1")]);
+
+                let (mut conn, _) = listener.accept().unwrap();
+                complete_attach_handshake(&mut conn, "term_w1:p1");
+
+                // No `ClientMessage::Input` should ever arrive. A bounded
+                // read timeout turns "nothing was sent" into a prompt,
+                // deterministic assertion instead of a hang; the test's own
+                // teardown (`handle_host_detach_api`, right after sending
+                // the keybind) can also race a real `ClientMessage::Detach`
+                // into this same read, which is just as good a proof that
+                // no `Input` arrived first -- only an actual `Input` fails
+                // this.
+                conn.set_read_timeout(Some(Duration::from_millis(300)))
+                    .unwrap();
+                let result: Result<crate::protocol::ClientMessage, _> =
+                    protocol::read_message(&mut conn, MAX_FRAME_SIZE);
+                let no_input_reached_remote =
+                    matches!(
+                        &result,
+                        Err(protocol::FramingError::Io(err))
+                            if matches!(
+                                err.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            )
+                    ) || matches!(result, Ok(crate::protocol::ClientMessage::Detach));
+                assert!(
+                    no_input_reached_remote,
+                    "a herdr keybind must not reach the remote as input, got {result:?}"
+                );
+            });
+
+            use_fake_remote_socket(&mut server, sock);
+            server.handle_host_attach_api(
+                "test:host:attach".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            wait_for_host_state(&mut server, "workbox", "connected");
+
+            let terminal_id = host_tagged_terminals(&server, "workbox")
+                .first()
+                .expect("remote pane should be adopted as a host-tagged terminal")
+                .id
+                .clone();
+            focus_and_wait_for_remote_runtime(&mut server, &terminal_id);
+
+            server.app.state.mode = crate::app::state::Mode::Terminal;
+            attach_fake_foreground_client(&mut server);
+
+            let prefix_key = crate::input::TerminalKey::new(
+                server.app.state.prefix_code,
+                server.app.state.prefix_mods,
+            );
+            let events = vec![crate::raw_input::RawInputEvent::Key(prefix_key)];
+            server.handle_client_input_events(1, events);
+
+            assert_eq!(
+                server.app.state.mode,
+                crate::app::state::Mode::Prefix,
+                "the prefix keybind must still perform its herdr action locally"
+            );
+
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// The link-not-`Connected` gate: if the host link drops out from
+        /// under a still-focused remote pane (a real transient
+        /// reconnect -- the attach/runtime stay live; only `host_links`'s
+        /// state changes), typed input must be DROPPED, not forwarded, and
+        /// the foreground client must see the one-line notice
+        /// `route_remote_pane_input` builds.
+        #[tokio::test]
+        async fn input_dropped_and_noticed_when_the_remote_pane_link_is_not_connected() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("input-link-down");
+            fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("remote-api.sock");
+
+            let remote_sock = sock.clone();
+            let remote = std::thread::spawn(move || {
+                let listener = UnixListener::bind(&remote_sock).unwrap();
+                let _round = serve_attach_round(&listener, vec![fake_pane("w1:p1")]);
+
+                let (mut conn, _) = listener.accept().unwrap();
+                complete_attach_handshake(&mut conn, "term_w1:p1");
+
+                // No `ClientMessage::Input` should ever arrive. A bounded
+                // read timeout turns "nothing was sent" into a prompt,
+                // deterministic assertion instead of a hang; the test's own
+                // teardown (`handle_host_detach_api`, right after sending
+                // the key) can also race a real `ClientMessage::Detach`
+                // into this same read, which is just as good a proof that
+                // no `Input` arrived first -- only an actual `Input` fails
+                // this.
+                conn.set_read_timeout(Some(Duration::from_millis(300)))
+                    .unwrap();
+                let result: Result<crate::protocol::ClientMessage, _> =
+                    protocol::read_message(&mut conn, MAX_FRAME_SIZE);
+                let no_input_reached_remote =
+                    matches!(
+                        &result,
+                        Err(protocol::FramingError::Io(err))
+                            if matches!(
+                                err.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            )
+                    ) || matches!(result, Ok(crate::protocol::ClientMessage::Detach));
+                assert!(
+                    no_input_reached_remote,
+                    "input must be dropped (not forwarded) while the link isn't connected, got {result:?}"
+                );
+            });
+
+            use_fake_remote_socket(&mut server, sock);
+            server.handle_host_attach_api(
+                "test:host:attach".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            wait_for_host_state(&mut server, "workbox", "connected");
+
+            let terminal_id = host_tagged_terminals(&server, "workbox")
+                .first()
+                .expect("remote pane should be adopted as a host-tagged terminal")
+                .id
+                .clone();
+            focus_and_wait_for_remote_runtime(&mut server, &terminal_id);
+
+            // Simulate the link dropping while the pane is still focused:
+            // the attach + runtime stay live, but `host_links` no longer
+            // reports `Connected`.
+            let host = crate::server::host_link::HostLinkId("workbox".to_string());
+            server.host_links.on_disconnect(&host);
+
+            server.app.state.mode = crate::app::state::Mode::Terminal;
+            let control_rx = attach_fake_foreground_client(&mut server);
+
+            let events = vec![crate::raw_input::RawInputEvent::Key(
+                crate::input::TerminalKey::new(
+                    crossterm::event::KeyCode::Char('a'),
+                    crossterm::event::KeyModifiers::empty(),
+                ),
+            )];
+            server.handle_client_input_events(1, events);
+
+            let (kind, message, _body) = recv_notify(&control_rx);
+            assert_eq!(kind, protocol::NotifyKind::Toast);
+            assert!(message.contains("workbox"), "message was: {message}");
+            assert!(message.contains("not connected"), "message was: {message}");
+
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
             remote.join().unwrap();
             let _ = fs::remove_dir_all(&dir);
         }

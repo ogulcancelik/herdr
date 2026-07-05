@@ -1533,14 +1533,41 @@ impl App {
     #[cfg(test)]
     pub(crate) fn route_client_input(&mut self, data: Vec<u8>) {
         let events = crate::raw_input::parse_raw_input_bytes_sync(&data);
-        self.route_client_events(events, true);
+        self.route_client_events(events, true, None);
     }
 
+    /// `pane_input_redirect`: the server's focused remote pane's
+    /// `TerminalId`, if any (Task 9b's input commit) -- `None` whenever no
+    /// remote pane is focused (the overwhelmingly common case) or on
+    /// non-Unix targets. `AppState`/`App` don't know what a "remote pane"
+    /// is (layering: that concept is server-only, behind
+    /// `HeadlessServer::focused_remote_pane`) -- they only see a
+    /// `TerminalId` to redirect Terminal-mode content to instead of the
+    /// workspace's locally-focused pane, which is exactly the same shape
+    /// `self.terminal_runtimes` already keys everything by. This reuses the
+    /// EXISTING herdr-keybind-vs-pane-content split (`Mode::Terminal`, plus
+    /// the prefix/direct-keybind checks inside
+    /// `handle_terminal_key_headless`/`prepare_terminal_key_forward`)
+    /// rather than duplicating it: keybinds are completely unaffected,
+    /// and only the bytes that would otherwise reach a local pane's PTY are
+    /// diverted. Returns those diverted bytes for the caller
+    /// (`HeadlessServer`) to gate against the host link's `LinkState` and
+    /// hand to `RemotePaneAttach::send_input` -- a workspace-less
+    /// remote-fed runtime's own `try_send_bytes` is a no-op (no PTY), so
+    /// this can't just deliver them itself.
+    ///
+    /// Mouse redirection (content-rect membership) is decided by the
+    /// caller BEFORE events reach here -- that split is purely geometric
+    /// (`AppState::view::terminal_area`) and needs none of this method's
+    /// mode-awareness, so routing it through `HeadlessServer` directly
+    /// avoids reaching into app-layer mouse hit-testing for no reason.
     pub(crate) fn route_client_events(
         &mut self,
         events: Vec<crate::raw_input::RawInputEvent>,
         apply_host_terminal_theme: bool,
-    ) {
+        pane_input_redirect: Option<&crate::terminal::TerminalId>,
+    ) -> Vec<u8> {
+        let mut redirected_input = Vec::new();
         for event in events {
             let previous_mode = self.state.mode;
             match event {
@@ -1550,7 +1577,11 @@ impl App {
                         crossterm::event::KeyEventKind::Press => {
                             if self.state.mode == Mode::Terminal {
                                 self.suppressed_repeat_keys.remove(&key_id);
-                                self.handle_terminal_key_headless(key);
+                                self.handle_terminal_key_headless(
+                                    key,
+                                    pane_input_redirect,
+                                    &mut redirected_input,
+                                );
                             } else {
                                 self.suppressed_repeat_keys.insert(key_id);
                                 self.handle_non_terminal_key_headless(key);
@@ -1560,7 +1591,11 @@ impl App {
                             if self.state.mode == Mode::Terminal
                                 && !self.suppressed_repeat_keys.contains(&key_id)
                             {
-                                self.handle_terminal_key_headless(key);
+                                self.handle_terminal_key_headless(
+                                    key,
+                                    pane_input_redirect,
+                                    &mut redirected_input,
+                                );
                             }
                             // Repeats in non-terminal modes are ignored
                             // (same as monolithic behavior).
@@ -1581,27 +1616,38 @@ impl App {
                 crate::raw_input::RawInputEvent::Paste(text) => {
                     if self.state.mode != Mode::Terminal {
                         self.paste_into_active_text_input(&text);
-                    } else {
-                        if let Some(ws_idx) = self.state.active {
-                            if let Some(ws) = self.state.workspaces.get(ws_idx) {
-                                if let Some(focused) = ws.focused_pane_id() {
-                                    if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
-                                        &self.terminal_runtimes,
-                                        ws_idx,
-                                        focused,
-                                    ) {
-                                        let _ = runtime.try_send_bytes(bytes::Bytes::from(
-                                            if runtime
-                                                .input_state()
-                                                .map(|s| s.bracketed_paste)
-                                                .unwrap_or(false)
-                                            {
-                                                format!("\x1b[200~{text}\x1b[201~")
-                                            } else {
-                                                text
-                                            },
-                                        ));
-                                    }
+                    } else if let Some(terminal_id) = pane_input_redirect {
+                        if let Some(runtime) = self.terminal_runtimes.get(terminal_id) {
+                            let bracketed = runtime
+                                .input_state()
+                                .map(|s| s.bracketed_paste)
+                                .unwrap_or(false);
+                            let payload = if bracketed {
+                                format!("\x1b[200~{text}\x1b[201~")
+                            } else {
+                                text
+                            };
+                            redirected_input.extend_from_slice(payload.as_bytes());
+                        }
+                    } else if let Some(ws_idx) = self.state.active {
+                        if let Some(ws) = self.state.workspaces.get(ws_idx) {
+                            if let Some(focused) = ws.focused_pane_id() {
+                                if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
+                                    &self.terminal_runtimes,
+                                    ws_idx,
+                                    focused,
+                                ) {
+                                    let _ = runtime.try_send_bytes(bytes::Bytes::from(
+                                        if runtime
+                                            .input_state()
+                                            .map(|s| s.bracketed_paste)
+                                            .unwrap_or(false)
+                                        {
+                                            format!("\x1b[200~{text}\x1b[201~")
+                                        } else {
+                                            text
+                                        },
+                                    ));
                                 }
                             }
                         }
@@ -1623,6 +1669,7 @@ impl App {
             }
             self.sync_prefix_input_source(previous_mode);
         }
+        redirected_input
     }
 
     /// Handles a key event in non-terminal mode for the headless server.
@@ -4515,6 +4562,7 @@ last_pane = "prefix+tab"
                 "feature/linear-302".into(),
             )],
             true,
+            None,
         );
 
         assert_eq!(app.state.name_input, "feature/linear-302");
