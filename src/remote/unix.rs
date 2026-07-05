@@ -361,7 +361,7 @@ impl RemoteTransport for IrohTransport {
 
         let config = crate::iroh_bridge::ConnectConfig {
             remote_endpoint_id: remote_id,
-            local_socket: PathBuf::new(), // not used by the bridge itself
+            local_socket: None, // socket is owned by BridgeHandle
             secret_key,
             relay_urls: self.relay_urls.clone(),
         };

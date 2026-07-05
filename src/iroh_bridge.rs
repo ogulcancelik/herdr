@@ -151,7 +151,9 @@ pub async fn run_connect(config: ConnectConfig) -> io::Result<()> {
 /// The endpoint is passed in from the caller so it can be reused across
 /// reconnection attempts.
 async fn run_connect_once(endpoint: &Endpoint, config: &ConnectConfig) -> io::Result<()> {
-    let local_socket = &config.local_socket;
+    let local_socket = config.local_socket.as_ref().ok_or_else(|| {
+        io::Error::other("ConnectConfig.local_socket is required for standalone mode")
+    })?;
     // Remove any stale socket file.
     let _ = std::fs::remove_file(local_socket);
 
@@ -229,7 +231,9 @@ pub struct ConnectConfig {
     /// The remote endpoint's public key (EndpointId).
     pub remote_endpoint_id: EndpointId,
     /// Path to create the local Unix socket for the herdr client.
-    pub local_socket: PathBuf,
+    /// Path to the local Unix socket.  `None` when the socket is managed
+    /// externally (e.g., by [`BridgeHandle`](crate::remote::unix::BridgeHandle)).
+    pub local_socket: Option<PathBuf>,
     /// Optional Ed25519 secret key bytes.  If `None`, a new key is
     /// generated.
     pub secret_key: Option<[u8; 32]>,

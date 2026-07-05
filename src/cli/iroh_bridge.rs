@@ -142,7 +142,7 @@ fn run_connect(args: &[String]) -> std::io::Result<i32> {
 
     let config = ConnectConfig {
         remote_endpoint_id,
-        local_socket,
+        local_socket: Some(local_socket),
         secret_key,
         relay_urls,
     };
