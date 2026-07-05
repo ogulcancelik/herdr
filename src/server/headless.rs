@@ -261,6 +261,44 @@ pub struct HeadlessServer {
     #[cfg(unix)]
     remote_pane_terminals:
         HashMap<crate::server::remote_pane::RemotePaneKey, crate::terminal::TerminalId>,
+    /// The remote's OWN terminal id (`RemotePaneInfo::remote_terminal_id`)
+    /// for each adopted remote pane, keyed by the same `RemotePaneKey` as
+    /// `remote_pane_terminals` (Task 9b, HALF 2). Needed to open
+    /// `RemotePaneAttach::attach` against the right remote terminal channel
+    /// -- distinct from the LOCAL `TerminalId` `remote_pane_terminals` maps
+    /// to, which only identifies this side's host-tagged `TerminalState`.
+    /// A second parallel map rather than widening `remote_pane_terminals`'s
+    /// value, for the same reason that map stays a thin
+    /// `RemotePaneKey`->`TerminalId` association (see its doc comment and
+    /// the commit-2 history of trying and reverting a wrapper struct there).
+    /// Maintained at the same single mutation point
+    /// (`seed_remote_pane_terminal`/`remove_remote_pane_terminal`); the
+    /// bijection assert below covers it.
+    #[cfg(unix)]
+    remote_pane_remote_terminal_ids: HashMap<crate::server::remote_pane::RemotePaneKey, String>,
+    /// The `TerminalId` of the remote pane currently focused for live
+    /// viewing (Task 9b, HALF 2, VIEW-ONLY: routing local input to it is a
+    /// follow-up commit). `None` when no remote pane is focused. Setting
+    /// this to `Some` is what `render_and_stream`'s App branch reads to
+    /// substitute the focused runtime for the workspace panes, and is also
+    /// `focus_remote_pane`'s trigger for the off-loop attach. Mutated only
+    /// by `focus_remote_pane`/`blur_focused_remote_pane` and the
+    /// `RemotePaneAttachFailed`/`HostEvent::AttachFailed` handlers (all on
+    /// the main loop thread).
+    #[cfg(unix)]
+    focused_remote_pane: Option<crate::terminal::TerminalId>,
+    /// The live attach handle for `focused_remote_pane`, once
+    /// `RemotePaneAttachEstablished` registers it (`None` while attaching,
+    /// unfocused, or torn down). Owns the ssh terminal channel + reader
+    /// thread; `blur_focused_remote_pane`/the attach-failed handlers detach
+    /// it (graceful `Detach` write, then `Drop`'s force-close + reader-join)
+    /// so nothing leaks across a focus change. Not read for input/resize
+    /// yet -- routing local input to a focused remote pane is a follow-up
+    /// commit; this commit is VIEW-ONLY (typing does not reach the remote
+    /// pane), so `send_input`/`resize` stay unreachable from production for
+    /// now.
+    #[cfg(unix)]
+    focused_remote_pane_attach: Option<crate::server::remote_pane::RemotePaneAttach>,
     /// Per-host background-thread handle plus the reusable transport
     /// materials, keyed by the same `HostLinkId` `host_links` uses.
     #[cfg(unix)]
@@ -665,6 +703,12 @@ impl HeadlessServer {
             remote_panes: crate::server::remote_pane::RemotePaneRegistry::default(),
             #[cfg(unix)]
             remote_pane_terminals: HashMap::new(),
+            #[cfg(unix)]
+            remote_pane_remote_terminal_ids: HashMap::new(),
+            #[cfg(unix)]
+            focused_remote_pane: None,
+            #[cfg(unix)]
+            focused_remote_pane_attach: None,
             #[cfg(unix)]
             host_link_runtimes: HashMap::new(),
             #[cfg(unix)]
@@ -1748,16 +1792,21 @@ impl HeadlessServer {
             HostEvent::LinkDown { host } => {
                 self.handle_host_link_down(host);
             }
-            HostEvent::TerminalBytes { .. } => {
-                // Seam for Task 9b: route through
-                // `PaneTerminal::process_pty_bytes` once a visibility hook
-                // actually spawns `RemotePaneAttach` for a focused remote
-                // pane; nothing does yet, so this event cannot occur today
-                // (see `RemotePaneAttach`'s doc comment).
+            HostEvent::TerminalBytes {
+                host: _,
+                local_pane,
+                width,
+                height,
+                bytes,
+            } => {
+                self.feed_remote_pane_terminal_bytes(local_pane, width, height, &bytes);
             }
-            HostEvent::AttachFailed { .. } => {
-                // Seam for Task 9b: release the adopted pane / refresh the
-                // snapshot once RemotePaneAttach is actually wired up.
+            HostEvent::AttachFailed {
+                host,
+                local_pane,
+                reason,
+            } => {
+                self.handle_remote_pane_attach_failed_event(host, local_pane, reason);
             }
         }
     }
@@ -1807,8 +1856,11 @@ impl HeadlessServer {
     /// the host-tagged `TerminalState` for one adopted remote pane. `key`
     /// must already be adopted in `remote_panes`; this maintains the
     /// `TerminalId` half of the bijection (`remote_pane_terminals` +
-    /// `self.app.state.terminals`) and, at the same mutation point, the
-    /// sidebar's `AppState::remote_pane_display` projection.
+    /// `self.app.state.terminals`), the remote's own terminal id
+    /// (`remote_pane_remote_terminal_ids`, needed by `focus_remote_pane` to
+    /// open `RemotePaneAttach::attach` against the right remote terminal),
+    /// and, at the same mutation point, the sidebar's
+    /// `AppState::remote_pane_display` projection.
     #[cfg(unix)]
     fn seed_remote_pane_terminal(
         &mut self,
@@ -1816,6 +1868,8 @@ impl HeadlessServer {
         pane: crate::server::remote_pane::RemotePaneInfo,
     ) {
         let host_tag = crate::terminal::TerminalHostTag::new(key.host.0.clone());
+        self.remote_pane_remote_terminal_ids
+            .insert(key.clone(), pane.remote_terminal_id.clone());
         let terminal_id = self
             .remote_pane_terminals
             .entry(key)
@@ -1892,15 +1946,375 @@ impl HeadlessServer {
 
     /// Removes the host-tagged `TerminalState` (if any) tracked for a
     /// released/absent remote pane, keeping `remote_pane_terminals`,
-    /// `self.app.state.terminals`, and `self.app.state.remote_pane_display`
-    /// in lockstep with `remote_panes`. Idempotent: a key with no tracked
-    /// terminal is a no-op.
+    /// `remote_pane_remote_terminal_ids`, `self.app.state.terminals`, and
+    /// `self.app.state.remote_pane_display` in lockstep with
+    /// `remote_panes`. Idempotent: a key with no tracked terminal is a
+    /// no-op. If the removed terminal happens to be the currently focused
+    /// remote pane (e.g. it closed on the remote, or a `Snapshot`
+    /// reconciliation retired it, while focused), blurs it first so the
+    /// live attach + remote-fed runtime don't outlive the pane they were
+    /// for -- this is a normal pane-closed path, not the link-down/input
+    /// coordination deferred to a follow-up commit.
     #[cfg(unix)]
     fn remove_remote_pane_terminal(&mut self, key: &crate::server::remote_pane::RemotePaneKey) {
+        self.remote_pane_remote_terminal_ids.remove(key);
         if let Some(terminal_id) = self.remote_pane_terminals.remove(key) {
+            if self.focused_remote_pane.as_ref() == Some(&terminal_id) {
+                self.blur_focused_remote_pane();
+            }
             self.app.state.terminals.remove(&terminal_id);
             self.app.state.remote_pane_display.remove(&terminal_id);
         }
+    }
+
+    /// Reverse lookup: the `RemotePaneKey` for an already-adopted
+    /// host-tagged terminal, by scanning `remote_pane_terminals`. `focus_
+    /// remote_pane` is the only production caller; the map is small (one
+    /// entry per adopted remote pane) so a linear scan is fine.
+    #[cfg(unix)]
+    fn remote_pane_key_for_terminal(
+        &self,
+        terminal_id: &crate::terminal::TerminalId,
+    ) -> Option<crate::server::remote_pane::RemotePaneKey> {
+        self.remote_pane_terminals
+            .iter()
+            .find(|(_, tid)| *tid == terminal_id)
+            .map(|(key, _)| key.clone())
+    }
+
+    /// `HostEvent::TerminalBytes` handler: sizes and feeds the focused
+    /// remote pane's runtime. A workspace-less runtime is never in
+    /// `pane_infos`, so nothing else resizes it -- this handler is
+    /// deliberately the only place that does. `width`/`height` are the
+    /// remote's actual post-clamp frame dimensions (see the `HostEvent::
+    /// TerminalBytes` doc comment), which is why the local grid is sized
+    /// FROM them rather than from whatever this side originally requested.
+    /// `TerminalRuntime::resize` no-ops when the size is unchanged, so
+    /// calling it every frame is cheap. Guard: no runtime registered (not
+    /// attached, or attaching but not established yet) -> drop, documented,
+    /// no-op.
+    #[cfg(unix)]
+    fn feed_remote_pane_terminal_bytes(
+        &mut self,
+        local_pane: crate::layout::PaneId,
+        width: u16,
+        height: u16,
+        bytes: &[u8],
+    ) {
+        let Some(key) = self.remote_panes.key_for(local_pane).cloned() else {
+            return;
+        };
+        let Some(terminal_id) = self.remote_pane_terminals.get(&key).cloned() else {
+            return;
+        };
+        let Some(runtime) = self.app.terminal_runtimes.get(&terminal_id) else {
+            return;
+        };
+        runtime.resize(height, width, 0, 0);
+        runtime.feed_remote_bytes(bytes);
+    }
+
+    /// The runtime to render in place of the workspace panes when a remote
+    /// pane is focused (Task 9b, HALF 2, VIEW-ONLY). `None` whenever there
+    /// is nothing to substitute: unfocused, or focused but still attaching
+    /// (no `RemotePaneAttachEstablished` yet) -- in that window the
+    /// workspace panes keep rendering normally, which is the honest state
+    /// (the remote grid genuinely isn't available yet). Always `None` on
+    /// non-Unix (multi-host is unix-only).
+    #[cfg(unix)]
+    fn focused_remote_pane_render_target(&self) -> Option<&crate::terminal::TerminalRuntime> {
+        let terminal_id = self.focused_remote_pane.as_ref()?;
+        self.app.terminal_runtimes.get(terminal_id)
+    }
+
+    #[cfg(not(unix))]
+    fn focused_remote_pane_render_target(&self) -> Option<&crate::terminal::TerminalRuntime> {
+        None
+    }
+
+    /// Focuses one remote pane for live viewing (Task 9b, HALF 2,
+    /// VIEW-ONLY: typing does not reach the remote pane yet -- that is a
+    /// follow-up commit). Tears down any previously-focused remote pane
+    /// first (`blur_focused_remote_pane`), so a rapid refocus never leaves
+    /// two live attaches/runtimes around. Not reachable from the sidebar
+    /// yet -- clicking a remote entry to focus it needs the typed
+    /// `AgentFocusTarget` refactor `AgentPanelEntry::in_workspace`'s doc
+    /// comment describes, deferred to a follow-up commit; this commit
+    /// proves focus -> attach -> render end to end via tests that call this
+    /// directly (and is exactly the seam that refactor's click handler will
+    /// call into).
+    ///
+    /// Looks up the adopted pane's host/local-`PaneId`/remote-terminal-id,
+    /// then spawns a detached thread that performs the (up to 60s) blocking
+    /// ssh handshake via `RemotePaneAttach::attach` OFF the main loop --
+    /// `attach()` itself must never run on the thread driving the event
+    /// loop. The established attach (or failure) is handed back via
+    /// `ServerEvent::RemotePaneAttachEstablished`/
+    /// `RemotePaneAttachFailed`, whose handlers are the only points that
+    /// mutate `AppState`/`terminal_runtimes` for this (single mutation
+    /// point discipline, same as every other host-event path). The sink
+    /// handed to `attach()` is stamped with the host link's CURRENT
+    /// generation, so the reader thread's `TerminalBytes`/`AttachFailed`
+    /// events reach `handle_host_event`'s generation guard correctly
+    /// stamped instead of being silently dropped.
+    ///
+    /// Exercised directly by this module's own `host_lifecycle` tests (a
+    /// genuine focus -> attach -> render -> blur round trip, including
+    /// against a real second server for the underlying attach machinery),
+    /// but has no non-test caller in this commit -- the sidebar
+    /// click-to-focus wiring is the deferred follow-up mentioned above.
+    /// Remove this allow when that wiring lands.
+    #[allow(dead_code)]
+    #[cfg(unix)]
+    fn focus_remote_pane(&mut self, terminal_id: crate::terminal::TerminalId) {
+        if self.focused_remote_pane.as_ref() == Some(&terminal_id) {
+            return;
+        }
+        self.blur_focused_remote_pane();
+
+        let Some(key) = self.remote_pane_key_for_terminal(&terminal_id) else {
+            debug!(terminal = %terminal_id, "focus_remote_pane: not an adopted remote pane terminal");
+            return;
+        };
+        let Some(local_pane) = self.remote_panes.local_for(&key) else {
+            debug!(terminal = %terminal_id, "focus_remote_pane: remote pane key has no adopted local pane");
+            return;
+        };
+        let Some(remote_terminal_id) = self.remote_pane_remote_terminal_ids.get(&key).cloned()
+        else {
+            debug!(terminal = %terminal_id, "focus_remote_pane: no remote terminal id recorded for this pane");
+            return;
+        };
+        let Some(runtime) = self.host_link_runtimes.get(&key.host) else {
+            debug!(host = %key.host.0, "focus_remote_pane: host link has no active runtime");
+            return;
+        };
+        let generation = runtime.generation;
+        let transport = runtime.transport.open();
+        let sink =
+            crate::server::remote_pane::HostEventSink::new(generation, self.host_event_tx.clone());
+        let server_event_tx = self.server_event_tx.clone();
+        let host = key.host.clone();
+        let (cols, rows) = self.effective_size;
+
+        debug!(
+            host = %host.0,
+            terminal = %terminal_id,
+            pane = local_pane.raw(),
+            "focusing remote pane; attaching off the main loop"
+        );
+        self.focused_remote_pane = Some(terminal_id.clone());
+
+        std::thread::spawn(move || {
+            match crate::server::remote_pane::RemotePaneAttach::attach(
+                host.clone(),
+                local_pane,
+                remote_terminal_id,
+                cols,
+                rows,
+                transport.as_ref(),
+                sink,
+            ) {
+                Ok(attach) => {
+                    let _ =
+                        server_event_tx.blocking_send(ServerEvent::RemotePaneAttachEstablished {
+                            host,
+                            terminal_id,
+                            local_pane,
+                            generation,
+                            attach,
+                        });
+                }
+                Err(err) => {
+                    let _ = server_event_tx.blocking_send(ServerEvent::RemotePaneAttachFailed {
+                        host,
+                        terminal_id,
+                        reason: err.to_string(),
+                    });
+                }
+            }
+        });
+    }
+
+    /// Handles the off-loop attach thread's success handback (see
+    /// `focus_remote_pane`). Guards against three races before registering
+    /// anything, gracefully detaching (and dropping) the just-established
+    /// `attach` instead in every case: (1) focus moved on to something else
+    /// (or was cleared) while the blocking ssh handshake was in flight; (2)
+    /// the host link's generation no longer matches (it was detached or
+    /// reconnected meanwhile) -- registering would keep a live ssh channel
+    /// whose `TerminalBytes` are stamped with a now-superseded generation
+    /// and so would be silently dropped by `handle_host_event` forever; (3)
+    /// the pane itself was released while attaching. Otherwise registers
+    /// `TerminalRuntime::spawn_remote_fed` for `terminal_id` -- the ONLY
+    /// place a remote-fed runtime is inserted (memory budget: only a
+    /// focused pane keeps a live grid + ssh channel) -- and stores `attach`
+    /// so a future input commit has somewhere to reach it (view-only today:
+    /// nothing calls `attach.send_input`/`attach.resize` yet).
+    #[cfg(unix)]
+    fn handle_remote_pane_attach_established(
+        &mut self,
+        host: crate::server::host_link::HostLinkId,
+        terminal_id: crate::terminal::TerminalId,
+        local_pane: crate::layout::PaneId,
+        generation: u64,
+        attach: crate::server::remote_pane::RemotePaneAttach,
+    ) {
+        let still_focused = self.focused_remote_pane.as_ref() == Some(&terminal_id);
+        let generation_current = self
+            .host_link_runtimes
+            .get(&host)
+            .is_some_and(|runtime| runtime.generation == generation);
+        let pane_still_adopted = self.app.state.terminals.contains_key(&terminal_id);
+
+        if !still_focused || !generation_current || !pane_still_adopted {
+            debug!(
+                host = %host.0,
+                terminal = %terminal_id,
+                still_focused,
+                generation_current,
+                pane_still_adopted,
+                "dropping a superseded remote pane attach"
+            );
+            attach.detach();
+            return;
+        }
+
+        let (cols, rows) = self.effective_size;
+        match crate::terminal::TerminalRuntime::spawn_remote_fed(
+            local_pane,
+            rows,
+            cols,
+            self.app.state.pane_scrollback_limit_bytes,
+            self.app.state.host_terminal_theme,
+            self.app.render_notify.clone(),
+            self.app.render_dirty.clone(),
+        ) {
+            Ok(runtime) => {
+                self.app
+                    .terminal_runtimes
+                    .insert(terminal_id.clone(), runtime);
+                self.focused_remote_pane_attach = Some(attach);
+                debug!(
+                    host = %host.0,
+                    terminal = %terminal_id,
+                    "remote pane attach established; runtime registered"
+                );
+            }
+            Err(err) => {
+                warn!(
+                    host = %host.0,
+                    terminal = %terminal_id,
+                    err = %err,
+                    "failed to construct remote-fed runtime for focused pane"
+                );
+                attach.detach();
+                if self.focused_remote_pane.as_ref() == Some(&terminal_id) {
+                    self.focused_remote_pane = None;
+                }
+            }
+        }
+    }
+
+    /// Handles the off-loop attach thread's failure handback (`attach()`
+    /// itself returned `Err`, e.g. ssh unreachable or the handshake was
+    /// refused/timed out -- see `focus_remote_pane`). Distinct from
+    /// `HostEvent::AttachFailed` (handled below), which fires when
+    /// `attach()` succeeded at write time but the remote refused the
+    /// terminal id via a pre-frame `ServerShutdown`. Only clears focus if
+    /// `terminal_id` is still the focused pane -- if focus already moved on
+    /// while this attach attempt was failing, there is nothing to clear.
+    #[cfg(unix)]
+    fn handle_remote_pane_attach_failed(
+        &mut self,
+        host: crate::server::host_link::HostLinkId,
+        terminal_id: crate::terminal::TerminalId,
+        reason: String,
+    ) {
+        if self.focused_remote_pane.as_ref() != Some(&terminal_id) {
+            return;
+        }
+        warn!(host = %host.0, terminal = %terminal_id, reason = %reason, "remote pane attach failed");
+        self.focused_remote_pane = None;
+        self.send_notify_to_foreground_client(
+            protocol::NotifyKind::Toast,
+            format!("could not attach to remote pane on {}", host.0),
+            Some(reason),
+        );
+    }
+
+    /// Handles a mid-attach refusal: `attach()` succeeded at write time (so
+    /// `RemotePaneAttachEstablished` already registered a runtime + stored
+    /// `attach`), but the reader saw a `ServerShutdown` before any
+    /// `Terminal` frame -- the remote refused this `terminal_id` (unknown,
+    /// closed, or already owned). Clears focus, tears down the runtime +
+    /// attach, and notifies the foreground client. Reached only through
+    /// `handle_host_event`'s generation guard, so `local_pane` is
+    /// necessarily current. Idempotent/tolerant: if the pane was already
+    /// released (or was never the focused one), this is a no-op -- the next
+    /// `Snapshot` reconciliation is the authoritative cleanup path either
+    /// way.
+    #[cfg(unix)]
+    fn handle_remote_pane_attach_failed_event(
+        &mut self,
+        host: crate::server::host_link::HostLinkId,
+        local_pane: crate::layout::PaneId,
+        reason: Option<String>,
+    ) {
+        let Some(key) = self.remote_panes.key_for(local_pane).cloned() else {
+            return;
+        };
+        let Some(terminal_id) = self.remote_pane_terminals.get(&key).cloned() else {
+            return;
+        };
+        if self.focused_remote_pane.as_ref() != Some(&terminal_id) {
+            return;
+        }
+
+        let reason_text = reason.unwrap_or_else(|| "unknown reason".to_string());
+        warn!(
+            host = %host.0,
+            terminal = %terminal_id,
+            reason = %reason_text,
+            "remote refused terminal attach for the focused pane"
+        );
+        self.focused_remote_pane = None;
+        if let Some(attach) = self.focused_remote_pane_attach.take() {
+            // The reader that produced this event has already ended, so
+            // this drop's reader-thread join is immediate.
+            attach.detach();
+        }
+        if let Some(runtime) = self.app.terminal_runtimes.remove(&terminal_id) {
+            runtime.shutdown();
+        }
+        self.send_notify_to_foreground_client(
+            protocol::NotifyKind::Toast,
+            format!("remote pane attach refused on {}", host.0),
+            Some(reason_text),
+        );
+    }
+
+    /// Clears `focused_remote_pane`, gracefully detaches any live
+    /// `RemotePaneAttach` (best-effort `Detach` write, then `Drop`'s
+    /// force-close + reader-thread join -- see `RemotePaneAttach::detach`'s
+    /// doc comment), and removes the remote-fed runtime from
+    /// `terminal_runtimes` so nothing leaks across a focus change (memory
+    /// budget: only the focused pane keeps a live runtime + ssh channel).
+    /// Idempotent: a no-op when nothing is focused. This is the "basic
+    /// blur/teardown" this commit guarantees; full link-down teardown
+    /// coordination is a follow-up commit.
+    #[cfg(unix)]
+    fn blur_focused_remote_pane(&mut self) {
+        let Some(terminal_id) = self.focused_remote_pane.take() else {
+            return;
+        };
+        if let Some(attach) = self.focused_remote_pane_attach.take() {
+            attach.detach();
+        }
+        if let Some(runtime) = self.app.terminal_runtimes.remove(&terminal_id) {
+            runtime.shutdown();
+        }
+        debug!(terminal = %terminal_id, "blurred focused remote pane");
     }
 
     /// Test-only bijection check for the Task 9b invariant: every
@@ -1980,6 +2394,22 @@ impl HeadlessServer {
             assert!(
                 tracked.contains(terminal_id),
                 "remote_pane_display tracks {terminal_id}, but it has no remote_pane_terminals record"
+            );
+        }
+
+        // remote_pane_remote_terminal_ids <-> remote_pane_terminals: exactly
+        // the same key set (Task 9b's remote-terminal-id storage), in both
+        // directions.
+        for key in self.remote_pane_remote_terminal_ids.keys() {
+            assert!(
+                self.remote_pane_terminals.contains_key(key),
+                "remote_pane_remote_terminal_ids tracks {key:?}, but remote_pane_terminals has no entry for it"
+            );
+        }
+        for key in self.remote_pane_terminals.keys() {
+            assert!(
+                self.remote_pane_remote_terminal_ids.contains_key(key),
+                "remote_pane_terminals tracks {key:?}, but remote_pane_remote_terminal_ids has no entry for it"
             );
         }
     }
@@ -3689,6 +4119,32 @@ impl HeadlessServer {
                 self.handle_host_event(envelope);
                 true
             }
+            #[cfg(unix)]
+            ServerEvent::RemotePaneAttachEstablished {
+                host,
+                terminal_id,
+                local_pane,
+                generation,
+                attach,
+            } => {
+                self.handle_remote_pane_attach_established(
+                    host,
+                    terminal_id,
+                    local_pane,
+                    generation,
+                    attach,
+                );
+                true
+            }
+            #[cfg(unix)]
+            ServerEvent::RemotePaneAttachFailed {
+                host,
+                terminal_id,
+                reason,
+            } => {
+                self.handle_remote_pane_attach_failed(host, terminal_id, reason);
+                true
+            }
             ServerEvent::QuitSignal => {
                 // The quit check at the top of the loop handles this.
                 // No render needed — the next iteration will initiate shutdown.
@@ -4328,7 +4784,7 @@ impl HeadlessServer {
             let mut frame = match mode {
                 ClientConnectionMode::App => {
                     let render_started = crate::render_prof::timer();
-                    let (buffer, cursor) =
+                    let (mut buffer, mut cursor) =
                         if self.app.state.kitty_graphics_enabled && cell_size.is_known() {
                             crate::server::render_stream::render_virtual_with_runtime_registry(
                                 &mut self.app.state,
@@ -4350,11 +4806,39 @@ impl HeadlessServer {
                         "full_render.render_virtual",
                         render_started,
                     );
+
+                    // Task 9b, HALF 2 (VIEW-ONLY): when a remote pane is
+                    // focused and its runtime is registered, substitute its
+                    // live grid for the workspace panes in the content rect
+                    // -- reusing `render_terminal_virtual` (no bespoke grid
+                    // renderer), pure (only rewrites this client's own
+                    // buffer/cursor, no server/app state touched here).
+                    // `terminal_area` was just computed for THIS client's
+                    // own size by the `render_virtual_with_runtime_registry`
+                    // call above.
+                    let focused_remote_pane_runtime = self.focused_remote_pane_render_target();
+                    if let Some(runtime) = focused_remote_pane_runtime {
+                        crate::server::render_stream::overlay_focused_remote_pane(
+                            &mut buffer,
+                            &mut cursor,
+                            runtime,
+                            self.app.state.view.terminal_area,
+                        );
+                    }
+                    let remote_pane_focused = focused_remote_pane_runtime.is_some();
+
                     let hyperlinks_started = crate::render_prof::timer();
-                    let hyperlinks = crate::server::render_stream::visible_hyperlinks(
-                        &self.app.state,
-                        &self.app.terminal_runtimes,
-                    );
+                    // Local pane hyperlinks would refer to inner_rects now
+                    // covered by the remote pane's grid; skip them while a
+                    // remote pane is shown instead of the workspace panes.
+                    let hyperlinks = if remote_pane_focused {
+                        Vec::new()
+                    } else {
+                        crate::server::render_stream::visible_hyperlinks(
+                            &self.app.state,
+                            &self.app.terminal_runtimes,
+                        )
+                    };
                     crate::render_prof::duration_since(
                         "full_render.visible_hyperlinks",
                         hyperlinks_started,
@@ -5233,6 +5717,12 @@ mod tests {
             remote_panes: crate::server::remote_pane::RemotePaneRegistry::default(),
             #[cfg(unix)]
             remote_pane_terminals: HashMap::new(),
+            #[cfg(unix)]
+            remote_pane_remote_terminal_ids: HashMap::new(),
+            #[cfg(unix)]
+            focused_remote_pane: None,
+            #[cfg(unix)]
+            focused_remote_pane_attach: None,
             #[cfg(unix)]
             host_link_runtimes: HashMap::new(),
             #[cfg(unix)]
@@ -10932,6 +11422,536 @@ next_tab = ""
             );
             remote_b.kill();
             std::env::remove_var(api::SOCKET_PATH_ENV_VAR);
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        // -------------------------------------------------------------
+        // Task 9b commit 4: focus a remote pane -> attach over ssh -> render
+        // its live grid (VIEW-ONLY: routing local input to it is a follow-up
+        // commit). `focus_remote_pane` has no production caller yet --
+        // clicking a remote sidebar entry needs the typed `AgentFocusTarget`
+        // refactor described on its doc comment, deferred to a follow-up
+        // commit -- so these tests call it directly, exactly the seam that
+        // follow-up's click handler will call into.
+        // -------------------------------------------------------------
+
+        /// Registers a fake foreground client and returns its CONTROL
+        /// channel receiver -- NOT the render channel `retained_test_server`
+        /// reads elsewhere in this file. `send_to_client` (which
+        /// `send_notify_to_foreground_client` goes through) writes through
+        /// `writer.control`, so this is what a test needs in order to
+        /// observe a `Notify` actually being sent.
+        fn attach_fake_foreground_client(
+            server: &mut HeadlessServer,
+        ) -> std::sync::mpsc::Receiver<Vec<u8>> {
+            let (client_tx, client_control_rx, _client_render_rx) = test_client_writer();
+            server.clients.insert(
+                1,
+                ClientConnection::new(
+                    (80, 24),
+                    crate::kitty_graphics::HostCellSize::default(),
+                    crate::terminal_theme::TerminalTheme::default(),
+                    None,
+                    1,
+                    RenderEncoding::SemanticFrame,
+                    Some(client_tx),
+                ),
+            );
+            server.foreground_client_id = Some(1);
+            client_control_rx
+        }
+
+        /// Blocking-decodes one framed `ServerMessage::Notify` off a fake
+        /// client's control channel.
+        fn recv_notify(
+            rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+        ) -> (protocol::NotifyKind, String, Option<String>) {
+            let bytes = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("expected a Notify on the client control channel");
+            match read_server_message(bytes) {
+                ServerMessage::Notify {
+                    kind,
+                    message,
+                    body,
+                } => (kind, message, body),
+                other => panic!("expected Notify, got {other:?}"),
+            }
+        }
+
+        /// Completes the real client wire handshake for a `RemotePaneAttach`
+        /// terminal channel on the scripted-remote side: reads `Hello`,
+        /// replies `Welcome`, reads `AttachTerminal` (asserting it names
+        /// `expected_terminal_id`). Mirrors `remote_pane.rs`'s own
+        /// `accept_and_complete_attach_handshake` test helper (private to
+        /// that module, so re-implemented here rather than shared
+        /// cross-module for one helper).
+        fn complete_attach_handshake(conn: &mut UnixStream, expected_terminal_id: &str) {
+            let hello: crate::protocol::ClientMessage =
+                protocol::read_message(conn, MAX_FRAME_SIZE).unwrap();
+            match hello {
+                crate::protocol::ClientMessage::Hello {
+                    version,
+                    requested_encoding,
+                    launch_mode,
+                    ..
+                } => {
+                    assert_eq!(version, crate::protocol::PROTOCOL_VERSION);
+                    assert_eq!(requested_encoding, RenderEncoding::TerminalAnsi);
+                    assert_eq!(
+                        launch_mode,
+                        crate::protocol::ClientLaunchMode::TerminalAttach
+                    );
+                }
+                other => panic!("expected Hello, got {other:?}"),
+            }
+            protocol::write_message(
+                conn,
+                &ServerMessage::Welcome {
+                    version: crate::protocol::PROTOCOL_VERSION,
+                    encoding: RenderEncoding::TerminalAnsi,
+                    error: None,
+                },
+            )
+            .unwrap();
+
+            let attach: crate::protocol::ClientMessage =
+                protocol::read_message(conn, MAX_FRAME_SIZE).unwrap();
+            match attach {
+                crate::protocol::ClientMessage::AttachTerminal {
+                    terminal_id,
+                    takeover,
+                } => {
+                    assert_eq!(terminal_id, expected_terminal_id);
+                    assert!(!takeover, "attach must not request takeover");
+                }
+                other => panic!("expected AttachTerminal, got {other:?}"),
+            }
+        }
+
+        /// Row 0 of `terminal_id`'s runtime, rendered through the exact same
+        /// `render_terminal_virtual` the real render branch
+        /// (`overlay_focused_remote_pane`) reuses, trimmed of trailing
+        /// blanks so assertions don't have to hard-code padding.
+        fn rendered_row0_trimmed(
+            server: &HeadlessServer,
+            terminal_id: &crate::terminal::TerminalId,
+            width: u16,
+            height: u16,
+        ) -> String {
+            let runtime = server
+                .app
+                .terminal_runtimes
+                .get(terminal_id)
+                .expect("runtime should be registered");
+            let (buffer, _cursor) = crate::server::render_stream::render_terminal_virtual(
+                runtime,
+                Rect::new(0, 0, width, height),
+            );
+            (0..width)
+                .map(|x| buffer[(x, 0)].symbol().to_string())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        }
+
+        /// The full happy path end to end: `focus_remote_pane` attaches off
+        /// the main loop, the established runtime is registered and fed by
+        /// generation-stamped `TerminalBytes` (proven with BOTH a stale- and
+        /// a current-generation synthetic envelope, so the generation-stamp
+        /// gotcha the plan calls out is actually exercised, not just
+        /// asserted by reading the code), the render branch's own
+        /// `render_terminal_virtual` shows the live content, and blurring
+        /// tears the runtime + attach down again with nothing left over.
+        ///
+        /// `#[tokio::test]`: `spawn_remote_fed` (via
+        /// `handle_remote_pane_attach_established`) needs an active Tokio
+        /// runtime, unlike every other `host_lifecycle` test above, which
+        /// never constructs a real `TerminalRuntime`.
+        #[tokio::test]
+        async fn focus_remote_pane_attaches_feeds_generation_stamped_frames_and_tears_down_on_blur()
+        {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("focus-remote-pane");
+            fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("remote-api.sock");
+
+            let remote_sock = sock.clone();
+            let remote = std::thread::spawn(move || {
+                let listener = UnixListener::bind(&remote_sock).unwrap();
+
+                // Connection 1: pane.list snapshot with one pane. fake_pane's
+                // terminal_id ("term_w1:p1") is what focus_remote_pane's
+                // attach() AttachTerminals against.
+                let (mut conn, _) = listener.accept().unwrap();
+                let request = read_fake_request(&mut conn);
+                assert!(matches!(request.method, api::schema::Method::PaneList(_)));
+                write_fake_line(
+                    &mut conn,
+                    &api::schema::SuccessResponse {
+                        id: request.id,
+                        result: api::schema::ResponseResult::PaneList {
+                            panes: vec![fake_pane("w1:p1")],
+                        },
+                    },
+                );
+                conn.shutdown(std::net::Shutdown::Both).ok();
+                drop(conn);
+
+                // Connection 2: events.subscribe ack, held open.
+                let (mut conn, _) = listener.accept().unwrap();
+                let request = read_fake_request(&mut conn);
+                assert!(matches!(
+                    request.method,
+                    api::schema::Method::EventsSubscribe(_)
+                ));
+                write_fake_line(
+                    &mut conn,
+                    &api::schema::SuccessResponse {
+                        id: request.id,
+                        result: api::schema::ResponseResult::SubscriptionStarted {},
+                    },
+                );
+
+                // Connection 3: the terminal channel focus_remote_pane's
+                // off-loop attach opens. Play the handshake, then write the
+                // SAME Terminal frame several times with small gaps: the
+                // off-loop thread's RemotePaneAttachEstablished handback and
+                // this reader's first TerminalBytes race independently for
+                // the shared server_event channel, so repeating the frame
+                // guarantees at least one arrives AFTER the runtime is
+                // registered instead of being silently dropped as "not
+                // attached yet" -- exactly like a real remote's periodic
+                // repaints.
+                let (mut conn, _) = listener.accept().unwrap();
+                complete_attach_handshake(&mut conn, "term_w1:p1");
+                for _ in 0..10 {
+                    // The test's main thread may already have blurred (and
+                    // so force-closed/detached) by the time a later
+                    // iteration writes -- a real "the client already
+                    // stopped watching" race, not a bug in this scripted
+                    // remote. Stop quietly instead of unwrapping.
+                    if protocol::write_message(
+                        &mut conn,
+                        &ServerMessage::Terminal(crate::protocol::TerminalFrame {
+                            seq: 1,
+                            width: 80,
+                            height: 24,
+                            full: true,
+                            bytes: b"remote output".to_vec(),
+                        }),
+                    )
+                    .is_err()
+                    {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let mut buf = [0u8; 64];
+                let _ = conn.read(&mut buf);
+            });
+
+            use_fake_remote_socket(&mut server, sock);
+            server.handle_host_attach_api(
+                "test:host:attach".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            wait_for_host_state(&mut server, "workbox", "connected");
+
+            let terminal_id = host_tagged_terminals(&server, "workbox")
+                .first()
+                .expect("remote pane should be adopted as a host-tagged terminal")
+                .id
+                .clone();
+
+            server.focus_remote_pane(terminal_id.clone());
+            assert_eq!(server.focused_remote_pane, Some(terminal_id.clone()));
+
+            // Wait for the off-loop attach's success handback to register
+            // the remote-fed runtime (RemotePaneAttachEstablished).
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                server.drain_server_events();
+                if server.app.terminal_runtimes.get(&terminal_id).is_some() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for the remote-fed runtime to register"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(
+                server.focused_remote_pane_attach.is_some(),
+                "the established RemotePaneAttach handle should be stored"
+            );
+
+            // Wait for a real, generation-stamped TerminalBytes from the
+            // reader thread to actually reach and feed the runtime (proving
+            // frames are NOT silently dropped by the generation guard).
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                server.drain_server_events();
+                if rendered_row0_trimmed(&server, &terminal_id, 80, 24) == "remote output" {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for a real generation-stamped TerminalBytes frame to feed the runtime"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+
+            // Resolve the local PaneId for the synthetic envelopes below by
+            // constructing the RemotePaneKey directly, rather than reaching
+            // into focus_remote_pane's own private lookup helper.
+            let key = crate::server::remote_pane::RemotePaneKey {
+                host: crate::server::host_link::HostLinkId("workbox".to_string()),
+                remote_pane_id: "w1:p1".to_string(),
+            };
+            let local_pane = server
+                .remote_panes
+                .local_for(&key)
+                .expect("remote pane should be adopted");
+            let current_generation = server
+                .host_generation_for_test("workbox")
+                .expect("attached host has a generation");
+
+            // GENERATION GOTCHA proof: an envelope stamped with the WRONG
+            // generation must be dropped by handle_host_event's guard
+            // rather than fed to the runtime.
+            server.handle_host_event(crate::server::remote_pane::HostEventEnvelope {
+                generation: current_generation.wrapping_add(1),
+                event: crate::server::remote_pane::HostEvent::TerminalBytes {
+                    host: crate::server::host_link::HostLinkId("workbox".to_string()),
+                    local_pane,
+                    width: 80,
+                    height: 24,
+                    bytes: b"\x1b[2J\x1b[Hstale generation".to_vec(),
+                },
+            });
+            assert_eq!(
+                rendered_row0_trimmed(&server, &terminal_id, 80, 24),
+                "remote output",
+                "a stale-generation TerminalBytes must be dropped, not fed"
+            );
+
+            // Positive control: the SAME kind of event, correctly stamped
+            // with the host's CURRENT generation, IS fed.
+            server.handle_host_event(crate::server::remote_pane::HostEventEnvelope {
+                generation: current_generation,
+                event: crate::server::remote_pane::HostEvent::TerminalBytes {
+                    host: crate::server::host_link::HostLinkId("workbox".to_string()),
+                    local_pane,
+                    width: 80,
+                    height: 24,
+                    bytes: b"\x1b[2J\x1b[Hsecond frame".to_vec(),
+                },
+            });
+            assert_eq!(
+                rendered_row0_trimmed(&server, &terminal_id, 80, 24),
+                "second frame",
+                "a current-generation TerminalBytes must be fed to the runtime"
+            );
+
+            // Blur: teardown must remove the runtime and detach the live
+            // attach so nothing leaks across a focus change.
+            server.blur_focused_remote_pane();
+            assert_eq!(server.focused_remote_pane, None);
+            assert!(server.focused_remote_pane_attach.is_none());
+            assert!(server.app.terminal_runtimes.get(&terminal_id).is_none());
+
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// `attach()` itself failing (e.g. the remote's `Welcome` rejects
+        /// the handshake -- unknown terminal id, version mismatch, etc.)
+        /// hands back `ServerEvent::RemotePaneAttachFailed`. This must clear
+        /// `focused_remote_pane` (so a stale "attaching..." state doesn't
+        /// linger) and notify the foreground client, without ever
+        /// registering a runtime.
+        #[test]
+        fn focus_remote_pane_attach_failure_clears_focus_and_notifies_without_registering_a_runtime(
+        ) {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("focus-remote-pane-attach-fail");
+            fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("remote-api.sock");
+
+            let remote_sock = sock.clone();
+            let remote = std::thread::spawn(move || {
+                let listener = UnixListener::bind(&remote_sock).unwrap();
+                let _round = serve_attach_round(&listener, vec![fake_pane("w1:p1")]);
+
+                // Connection 3: the terminal channel. Reject the handshake
+                // outright via Welcome{error: Some(_)} -- attach() must
+                // return Err without ever writing AttachTerminal.
+                let (mut conn, _) = listener.accept().unwrap();
+                let _hello: crate::protocol::ClientMessage =
+                    protocol::read_message(&mut conn, MAX_FRAME_SIZE).unwrap();
+                protocol::write_message(
+                    &mut conn,
+                    &ServerMessage::Welcome {
+                        version: crate::protocol::PROTOCOL_VERSION,
+                        encoding: RenderEncoding::TerminalAnsi,
+                        error: Some("no such terminal".to_string()),
+                    },
+                )
+                .unwrap();
+            });
+
+            use_fake_remote_socket(&mut server, sock);
+            server.handle_host_attach_api(
+                "test:host:attach".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            wait_for_host_state(&mut server, "workbox", "connected");
+
+            let terminal_id = host_tagged_terminals(&server, "workbox")
+                .first()
+                .expect("remote pane should be adopted as a host-tagged terminal")
+                .id
+                .clone();
+            let control_rx = attach_fake_foreground_client(&mut server);
+
+            server.focus_remote_pane(terminal_id.clone());
+            assert_eq!(server.focused_remote_pane, Some(terminal_id.clone()));
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                server.drain_server_events();
+                if server.focused_remote_pane.is_none() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for the attach failure handback to clear focus"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(
+                server.app.terminal_runtimes.get(&terminal_id).is_none(),
+                "a failed attach must never register a runtime"
+            );
+            assert!(server.focused_remote_pane_attach.is_none());
+
+            let (kind, message, body) = recv_notify(&control_rx);
+            assert_eq!(kind, protocol::NotifyKind::Toast);
+            assert!(message.contains("workbox"), "message was: {message}");
+            assert!(
+                body.as_deref()
+                    .unwrap_or_default()
+                    .contains("no such terminal"),
+                "body was: {body:?}"
+            );
+
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// A mid-attach refusal: `attach()` succeeds at write time (so
+        /// `RemotePaneAttachEstablished` may already have registered a
+        /// runtime), but the reader sees a `ServerShutdown` BEFORE any
+        /// `Terminal` frame -- the remote refused this terminal id. Must
+        /// converge to focus cleared + no runtime registered + a
+        /// notification, regardless of which handback (established vs.
+        /// this `HostEvent::AttachFailed`) the two independent threads
+        /// happen to deliver first.
+        ///
+        /// `#[tokio::test]`: the established-first ordering can construct a
+        /// real `TerminalRuntime` via `spawn_remote_fed`, which needs an
+        /// active Tokio runtime.
+        #[tokio::test]
+        async fn remote_refusing_the_terminal_attach_mid_stream_clears_focus_and_tears_down() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("focus-remote-pane-refused");
+            fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("remote-api.sock");
+
+            let remote_sock = sock.clone();
+            let remote = std::thread::spawn(move || {
+                let listener = UnixListener::bind(&remote_sock).unwrap();
+                let _round = serve_attach_round(&listener, vec![fake_pane("w1:p1")]);
+
+                let (mut conn, _) = listener.accept().unwrap();
+                complete_attach_handshake(&mut conn, "term_w1:p1");
+                protocol::write_message(
+                    &mut conn,
+                    &ServerMessage::ServerShutdown {
+                        reason: Some("terminal not found".to_string()),
+                    },
+                )
+                .unwrap();
+            });
+
+            use_fake_remote_socket(&mut server, sock);
+            server.handle_host_attach_api(
+                "test:host:attach".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            wait_for_host_state(&mut server, "workbox", "connected");
+
+            let terminal_id = host_tagged_terminals(&server, "workbox")
+                .first()
+                .expect("remote pane should be adopted as a host-tagged terminal")
+                .id
+                .clone();
+            let control_rx = attach_fake_foreground_client(&mut server);
+
+            server.focus_remote_pane(terminal_id.clone());
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                server.drain_server_events();
+                if server.focused_remote_pane.is_none()
+                    && server.app.terminal_runtimes.get(&terminal_id).is_none()
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for the mid-attach refusal to settle"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(server.focused_remote_pane_attach.is_none());
+
+            let (kind, message, body) = recv_notify(&control_rx);
+            assert_eq!(kind, protocol::NotifyKind::Toast);
+            assert!(message.contains("workbox"), "message was: {message}");
+            assert!(
+                body.as_deref()
+                    .unwrap_or_default()
+                    .contains("terminal not found"),
+                "body was: {body:?}"
+            );
+
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            remote.join().unwrap();
             let _ = fs::remove_dir_all(&dir);
         }
     }

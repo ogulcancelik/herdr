@@ -357,6 +357,50 @@ pub(crate) fn render_terminal_virtual(
     (buffer, cursor)
 }
 
+/// Overlays a focused remote pane's live grid onto an already-rendered App
+/// frame's content region (Task 9b, VIEW-ONLY: a focused remote pane takes
+/// over `content_rect` -- where the workspace panes would otherwise draw --
+/// while the sidebar/chrome around it is untouched).
+///
+/// Reuses `render_terminal_virtual` (no bespoke grid renderer): it always
+/// renders into a fresh `(0,0)`-origin backend, so its returned buffer is
+/// repositioned onto `content_rect` via `Buffer::resize` before merging --
+/// since the buffer's cell count already matches `content_rect`'s area,
+/// `resize` only moves the buffer's area rect in place (see its doc
+/// comment), it does not reallocate or drop any rendered cell. `Buffer::
+/// merge` then composites at each buffer's own absolute area, so the
+/// workspace panes' cells at `content_rect` are replaced and everything
+/// outside it (sidebar, tab bar, ...) is left alone. The cursor, if any, is
+/// translated by the same offset. A no-op if `content_rect` is degenerate
+/// (a client that hasn't been laid out to a nonzero size yet).
+///
+/// This function is pure: it only reads `runtime` and rewrites the caller's
+/// already-computed `buffer`/`cursor`, the same "render never mutates
+/// server/app state" contract every other function in this module holds.
+pub(crate) fn overlay_focused_remote_pane(
+    buffer: &mut ratatui::buffer::Buffer,
+    cursor: &mut Option<CursorState>,
+    runtime: &crate::terminal::TerminalRuntime,
+    content_rect: Rect,
+) {
+    if content_rect.width == 0 || content_rect.height == 0 {
+        return;
+    }
+
+    let (mut remote_buffer, remote_cursor) = render_terminal_virtual(
+        runtime,
+        Rect::new(0, 0, content_rect.width, content_rect.height),
+    );
+    remote_buffer.resize(content_rect);
+    buffer.merge(&remote_buffer);
+    *cursor = remote_cursor.map(|c| CursorState {
+        x: c.x.saturating_add(content_rect.x),
+        y: c.y.saturating_add(content_rect.y),
+        visible: c.visible,
+        shape: c.shape,
+    });
+}
+
 pub(crate) fn visible_hyperlinks(
     app_state: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -510,4 +554,130 @@ fn focused_terminal_suppresses_host_cursor(
     app_state
         .runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)
         .is_some_and(crate::terminal::TerminalRuntime::synchronized_output_active)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::PaneId;
+    use ratatui::buffer::Buffer;
+    use ratatui::style::Style;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    /// Task 9b commit 4's render branch (`HeadlessServer`'s App-mode render
+    /// arm in `headless.rs`) reuses this function verbatim to substitute a
+    /// focused remote pane's live grid for the workspace panes in the
+    /// content rect. This test proves the merge itself is correct and pure
+    /// in isolation, without any of that plumbing: cells strictly outside
+    /// `content_rect` (sidebar/chrome) are left untouched, cells inside it
+    /// show the remote runtime's own rendered content translated into
+    /// place, and the cursor (if any) is translated by the same offset.
+    #[tokio::test]
+    async fn overlay_focused_remote_pane_replaces_only_the_content_rect_and_translates_cursor() {
+        let render_notify = Arc::new(Notify::new());
+        let render_dirty = Arc::new(AtomicBool::new(false));
+        let runtime = crate::terminal::TerminalRuntime::spawn_remote_fed(
+            PaneId::from_raw(1),
+            5,
+            20,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            render_notify,
+            render_dirty,
+        )
+        .expect("remote-fed runtime should construct without a PTY");
+        runtime.feed_remote_bytes(b"remote output");
+
+        let outer = Rect::new(0, 0, 40, 10);
+        let content_rect = Rect::new(10, 2, 20, 5);
+        let mut buffer = Buffer::empty(outer);
+        for y in 0..outer.height {
+            buffer.set_string(0, y, "S".repeat(usize::from(outer.width)), Style::default());
+        }
+        let mut cursor: Option<CursorState> = None;
+
+        // Independently compute what render_terminal_virtual alone would
+        // produce for the remote runtime, so the cursor-translation
+        // assertion below doesn't have to hard-code whether the ghostty
+        // grid happens to report a visible cursor.
+        let (_, expected_cursor) = render_terminal_virtual(
+            &runtime,
+            Rect::new(0, 0, content_rect.width, content_rect.height),
+        );
+
+        overlay_focused_remote_pane(&mut buffer, &mut cursor, &runtime, content_rect);
+
+        // Outside content_rect: untouched (still the 'S' sentinel).
+        assert_eq!(
+            buffer[(0, 0)].symbol(),
+            "S",
+            "top-left chrome corner must be untouched"
+        );
+        assert_eq!(
+            buffer[(outer.width - 1, outer.height - 1)].symbol(),
+            "S",
+            "bottom-right chrome corner must be untouched"
+        );
+        assert_eq!(
+            buffer[(content_rect.x - 1, content_rect.y)].symbol(),
+            "S",
+            "column just left of content_rect must be untouched"
+        );
+
+        // Inside content_rect: the fed text appears at the translated
+        // position (row 0 of the remote grid == content_rect.y).
+        let text: String = (0..13)
+            .map(|i| {
+                buffer[(content_rect.x + i, content_rect.y)]
+                    .symbol()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(text, "remote output");
+
+        // Cursor translated by the same (x, y) offset as the content rect,
+        // or still None if the remote grid itself reported none.
+        let translated_expected = expected_cursor.map(|c| CursorState {
+            x: c.x.saturating_add(content_rect.x),
+            y: c.y.saturating_add(content_rect.y),
+            visible: c.visible,
+            shape: c.shape,
+        });
+        assert_eq!(cursor, translated_expected);
+
+        runtime.shutdown();
+    }
+
+    /// A degenerate (zero-area) content rect -- a client that hasn't been
+    /// laid out to a nonzero size yet -- must be a no-op, not a panic from
+    /// indexing an empty buffer.
+    #[tokio::test]
+    async fn overlay_focused_remote_pane_is_a_no_op_for_a_degenerate_content_rect() {
+        let render_notify = Arc::new(Notify::new());
+        let render_dirty = Arc::new(AtomicBool::new(false));
+        let runtime = crate::terminal::TerminalRuntime::spawn_remote_fed(
+            PaneId::from_raw(2),
+            5,
+            20,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            render_notify,
+            render_dirty,
+        )
+        .expect("remote-fed runtime should construct without a PTY");
+
+        let outer = Rect::new(0, 0, 10, 10);
+        let mut buffer = Buffer::empty(outer);
+        buffer.set_string(0, 0, "S", Style::default());
+        let mut cursor: Option<CursorState> = None;
+
+        overlay_focused_remote_pane(&mut buffer, &mut cursor, &runtime, Rect::new(0, 0, 0, 0));
+
+        assert_eq!(buffer[(0, 0)].symbol(), "S");
+        assert_eq!(cursor, None);
+
+        runtime.shutdown();
+    }
 }

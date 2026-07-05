@@ -79,14 +79,12 @@ impl RemotePaneRegistry {
     /// Look up the local id for a remote pane WITHOUT adopting it; `adopt`
     /// is the only path that allocates.
     ///
-    /// No production caller today: `HeadlessServer` (Task 9b) looks up a
-    /// `StatusChanged`/`PaneClosed` pane's terminal through its own
-    /// `remote_pane_terminals` map (keyed by the same `RemotePaneKey`)
-    /// instead of through this method, since that map (unlike this
-    /// registry) also carries the `TerminalId`. Kept for the registry's own
-    /// bijection tests and for `HeadlessServer::
+    /// `HeadlessServer::focus_remote_pane` (Task 9b) uses this to resolve
+    /// the local `PaneId` `RemotePaneAttach::attach`/`HostEvent::
+    /// TerminalBytes` tag their events with, once it has already found the
+    /// pane's `RemotePaneKey` via `remote_pane_terminals`. Also kept for the
+    /// registry's own bijection tests and for `HeadlessServer::
     /// assert_remote_pane_terminal_bijection_for_test`'s cross-check.
-    #[allow(dead_code)]
     pub(crate) fn local_for(&self, key: &RemotePaneKey) -> Option<PaneId> {
         self.by_key.get(key).copied()
     }
@@ -104,12 +102,15 @@ impl RemotePaneRegistry {
             .map(|(key, local)| (key, *local))
     }
 
-    // Test-only helpers: not reachable from production code paths.
-    #[allow(dead_code)]
+    /// Reverse lookup used by `HeadlessServer`'s `HostEvent::AttachFailed`
+    /// handler (Task 9b), which only carries the local `PaneId`, to find
+    /// this pane's `RemotePaneKey` (and from there its `TerminalId` via
+    /// `remote_pane_terminals`).
     pub(crate) fn key_for(&self, local: PaneId) -> Option<&RemotePaneKey> {
         self.by_local.get(&local)
     }
 
+    // Test-only helper: not reachable from production code paths.
     #[allow(dead_code)]
     pub(crate) fn assert_bijection_for_test(&self) {
         assert_eq!(
@@ -154,11 +155,10 @@ pub(crate) struct RemotePaneInfo {
     /// The remote server's `PaneInfo.terminal_id` -- the remote's OWN
     /// terminal identity for this pane, distinct from any local `TerminalId`
     /// the Task 9b consumer allocates for the adopted host-tagged
-    /// `TerminalState`. Not consumed by anything yet; threaded through now
-    /// because HALF 2 (frame streaming) needs it to open
-    /// `RemotePaneAttach::attach`'s terminal channel against the right
-    /// remote terminal, and it is cheap to carry from here on.
-    #[allow(dead_code)] // reserved for HALF 2 frame streaming; see above
+    /// `TerminalState`. Stored in `HeadlessServer::
+    /// remote_pane_remote_terminal_ids` (`seed_remote_pane_terminal`) so
+    /// `focus_remote_pane` can open `RemotePaneAttach::attach`'s terminal
+    /// channel against the right remote terminal.
     pub(crate) remote_terminal_id: String,
     pub(crate) agent_status: AgentStatus,
     pub(crate) label: Option<String>,
@@ -213,9 +213,10 @@ impl From<crate::api::schema::PaneInfo> for RemotePaneInfo {
 /// `Snapshot`/`StatusChanged`/`PaneClosed`/`LinkDown` are consumed by
 /// `HeadlessServer::handle_host_event` (Task 9). `TerminalBytes`/
 /// `AttachFailed` are only ever constructed by `RemotePaneAttach`'s reader
-/// thread, which nothing spawns yet (no visibility hook wires focus changes
-/// to `RemotePaneAttach::attach` -- see that type's doc comment); each stays
-/// individually `#[allow(dead_code)]` below until Task 9b wires that seam.
+/// thread, which `HeadlessServer::focus_remote_pane` (Task 9b, HALF 2)
+/// spawns -- but `focus_remote_pane` itself has no non-test caller yet
+/// (sidebar click-to-focus is a deferred follow-up), so each stays
+/// individually `#[allow(dead_code)]` below until that wiring lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HostEvent {
     Snapshot {
@@ -251,7 +252,7 @@ pub(crate) enum HostEvent {
     /// from the `TerminalFrame` are deliberately dropped:
     /// `process_pty_bytes` is a pure ANSI byte sink that reconstructs a full
     /// grid from the diff stream itself.
-    #[allow(dead_code)] // only constructed by run_attach_reader; see enum doc
+    #[allow(dead_code)] // constructed by run_attach_reader via focus_remote_pane; see enum doc
     TerminalBytes {
         host: HostLinkId,
         local_pane: PaneId,
@@ -268,7 +269,7 @@ pub(crate) enum HostEvent {
     /// that has since closed. Task 9 reacts (release the adopted pane, or
     /// re-fetch the snapshot); a mid-stream `ServerShutdown` never produces
     /// this.
-    #[allow(dead_code)] // only constructed by run_attach_reader; see enum doc
+    #[allow(dead_code)] // constructed by run_attach_reader via focus_remote_pane; see enum doc
     AttachFailed {
         host: HostLinkId,
         local_pane: PaneId,
@@ -322,6 +323,18 @@ pub(crate) struct HostEventSink {
 }
 
 impl HostEventSink {
+    /// Builds a sink that stamps every event with `generation` before it
+    /// reaches the shared bridge channel. Used both by `spawn_host_event_loop`
+    /// (internally) and, since Task 9b, by `HeadlessServer::focus_remote_pane`
+    /// to hand `RemotePaneAttach::attach` a sink stamped with the host's
+    /// CURRENT generation -- without this, the attach reader's
+    /// `TerminalBytes`/`AttachFailed` events would reach `handle_host_event`
+    /// as bare, ungenerationed events and be silently dropped by its
+    /// generation guard.
+    pub(crate) fn new(generation: u64, tx: mpsc::Sender<HostEventEnvelope>) -> Self {
+        Self { generation, tx }
+    }
+
     fn send(&self, event: HostEvent) -> Result<(), mpsc::SendError<HostEventEnvelope>> {
         self.tx.send(HostEventEnvelope {
             generation: self.generation,
@@ -962,11 +975,12 @@ fn read_json_line(
 /// real local vt grid: detection, copy mode, and scrollback keep working
 /// unchanged because they read that same grid.
 ///
-/// Nothing drives this through a real focus-change hook yet, and nothing
-/// consumes `HostEvent::TerminalBytes` yet -- both are Task 9's server
-/// integration. This type defines and tests the protocol-client half of
-/// that seam: handshake, streaming reads, input writes, and graceful
-/// teardown.
+/// Driven by `HeadlessServer::focus_remote_pane` (Task 9b, off the main
+/// loop thread -- see its doc comment) and consumed by `handle_host_event`'s
+/// `TerminalBytes`/`AttachFailed` arms. Input (`send_input`) and resize-sync
+/// (`resize`) are not wired to anything real yet -- that is Task 9b's input
+/// commit -- so this is a VIEW-ONLY consumer today: a focused remote pane
+/// renders live but typing does not reach it.
 /// Upper bound on the blocking attach handshake (Hello -> Welcome ->
 /// AttachTerminal). Mirrors `src/client/mod.rs`'s remote handshake timeout
 /// (`REMOTE_HANDSHAKE_READ_TIMEOUT`, 60s): the terminal channel runs over a
@@ -977,17 +991,22 @@ fn read_json_line(
 /// after this deadline, unblocking the blocking read.
 const ATTACH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 
-// Consumed by the server visibility-hook integration (Task 9b -- deferred,
-// see the multi-host plan's Task 9 scope note: no PaneRuntime exists yet for
-// adopted remote panes).
-#[allow(dead_code)]
 pub(crate) struct RemotePaneAttach {
     write: Mutex<Box<dyn Write + Send>>,
     close: Arc<dyn Fn() + Send + Sync>,
     reader: Option<std::thread::JoinHandle<()>>,
 }
 
-#[allow(dead_code)]
+/// Manual impl: the write half/closer/reader handle carry no meaningful
+/// debug representation (and `Box<dyn Write>`/`Arc<dyn Fn()>` don't derive
+/// `Debug`). Needed so `ServerEvent` (which derives `Debug`) can carry a
+/// `RemotePaneAttach` (Task 9b's `RemotePaneAttachEstablished` handback).
+impl std::fmt::Debug for RemotePaneAttach {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemotePaneAttach").finish_non_exhaustive()
+    }
+}
+
 impl RemotePaneAttach {
     /// Opens `transport.open_terminal()`, performs the client handshake,
     /// sends `AttachTerminal`, and spawns the reader thread. `cols`/`rows`
@@ -1003,6 +1022,12 @@ impl RemotePaneAttach {
     /// nothing wires `LinkState` transitions to that loop yet (Task 9), so
     /// this function does not itself verify the ordering; it only documents
     /// the invariant the eventual caller must preserve.
+    ///
+    /// `events_tx` must be a [`HostEventSink`] stamped with the host's
+    /// CURRENT loop generation (see `HeadlessServer::focus_remote_pane`) --
+    /// the reader thread this spawns feeds `TerminalBytes`/`AttachFailed`
+    /// straight into `handle_host_event`'s generation-guarded consumer, so an
+    /// unstamped/stale-stamped sink means every frame is silently dropped.
     pub(crate) fn attach(
         host: HostLinkId,
         local_pane: PaneId,
@@ -1010,7 +1035,7 @@ impl RemotePaneAttach {
         cols: u16,
         rows: u16,
         transport: &dyn LinkTransport,
-        events_tx: mpsc::Sender<HostEvent>,
+        events_tx: HostEventSink,
     ) -> io::Result<Self> {
         Self::attach_with_timeout(
             ATTACH_HANDSHAKE_TIMEOUT,
@@ -1035,7 +1060,7 @@ impl RemotePaneAttach {
         cols: u16,
         rows: u16,
         transport: &dyn LinkTransport,
-        events_tx: mpsc::Sender<HostEvent>,
+        events_tx: HostEventSink,
     ) -> io::Result<Self> {
         let channel = transport.open_terminal()?;
         // Capture the closer BEFORE the blocking handshake so the watchdog
@@ -1141,6 +1166,11 @@ impl RemotePaneAttach {
     /// check itself -- callers route through `route_remote_pane_input`
     /// first so a non-`Connected` link drops the input instead of reaching
     /// here.
+    ///
+    /// Not called from production yet -- routing local input to a focused
+    /// remote pane is Task 9b's *next* commit (this commit is VIEW-ONLY).
+    /// Exercised directly by this module's own tests.
+    #[allow(dead_code)]
     pub(crate) fn send_input(&self, data: Vec<u8>) -> io::Result<()> {
         let mut write = self
             .write
@@ -1153,8 +1183,12 @@ impl RemotePaneAttach {
     /// Forwards a local pane resize to the remote as `ClientMessage::Resize`
     /// so the remote re-renders at the new size (the attach `Hello` only
     /// carried the size at attach time). Symmetric with `send_input`: same
-    /// write-half mutex. Task 9 wires this to the local pane-resize events
-    /// that already drive the local emulator's resize; nothing calls it yet.
+    /// write-half mutex. A future commit wires this to the local pane-resize
+    /// events that already drive the local emulator's resize; nothing calls
+    /// it in production yet (this commit sizes the local emulator FROM the
+    /// remote's reported frame dims instead -- see `HostEvent::TerminalBytes`
+    /// -- rather than pushing our size to it).
+    #[allow(dead_code)]
     pub(crate) fn resize(
         &self,
         cols: u16,
@@ -1252,7 +1286,7 @@ fn run_attach_reader(
     mut read_half: Box<dyn Read + Send>,
     host: HostLinkId,
     local_pane: PaneId,
-    events_tx: mpsc::Sender<HostEvent>,
+    events_tx: HostEventSink,
 ) {
     let mut seen_first_frame = false;
     loop {
@@ -2453,6 +2487,17 @@ mod tests {
         conn
     }
 
+    /// A `HostEventSink` stamped with `TEST_GENERATION` plus the raw
+    /// envelope receiver, for tests that drive `RemotePaneAttach::attach`
+    /// directly (mirrors `HeadlessServer::focus_remote_pane`'s real usage:
+    /// the sink -- not a bare `mpsc::Sender<HostEvent>` -- is what the
+    /// reader thread's `TerminalBytes`/`AttachFailed` events must be sent
+    /// through, or `handle_host_event`'s generation guard would drop them).
+    fn attach_events_channel() -> (HostEventSink, mpsc::Receiver<HostEventEnvelope>) {
+        let (tx, rx) = mpsc::channel();
+        (HostEventSink::new(TEST_GENERATION, tx), rx)
+    }
+
     /// Pins the real wire protocol end-to-end: the scripted fake remote
     /// plays the real `Welcome`/`Terminal` messages (built from the real
     /// wire types, so this can't drift from the actual protocol), and
@@ -2498,7 +2543,7 @@ mod tests {
             api_socket: sock.clone(),
             client_socket: sock.clone(),
         });
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = attach_events_channel();
         let host = HostLinkId("wb".to_string());
         let local_pane = PaneId::from_raw(7);
 
@@ -2513,9 +2558,7 @@ mod tests {
         )
         .expect("attach should succeed against a well-behaved fake remote");
 
-        let event = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("terminal bytes event");
+        let event = recv_event(&rx, "terminal bytes event");
         assert_eq!(
             event,
             HostEvent::TerminalBytes {
@@ -2568,7 +2611,7 @@ mod tests {
             api_socket: sock.clone(),
             client_socket: sock.clone(),
         });
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = attach_events_channel();
 
         let result = RemotePaneAttach::attach(
             HostLinkId("wb".to_string()),
@@ -2616,7 +2659,7 @@ mod tests {
             api_socket: sock.clone(),
             client_socket: sock.clone(),
         });
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = attach_events_channel();
 
         let attach = RemotePaneAttach::attach(
             HostLinkId("wb".to_string()),
@@ -2687,7 +2730,7 @@ mod tests {
             api_socket: sock.clone(),
             client_socket: sock.clone(),
         });
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = attach_events_channel();
 
         let attach = RemotePaneAttach::attach(
             HostLinkId("wb".to_string()),
@@ -2700,9 +2743,7 @@ mod tests {
         )
         .expect("attach should succeed");
 
-        let event = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("oversized terminal bytes event");
+        let event = recv_event(&rx, "oversized terminal bytes event");
         match event {
             HostEvent::TerminalBytes {
                 width,
@@ -2752,7 +2793,7 @@ mod tests {
             api_socket: sock.clone(),
             client_socket: sock.clone(),
         });
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = attach_events_channel();
 
         let start = std::time::Instant::now();
         let result = RemotePaneAttach::attach_with_timeout(
@@ -2808,7 +2849,7 @@ mod tests {
             api_socket: sock.clone(),
             client_socket: sock.clone(),
         });
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = attach_events_channel();
 
         let attach = RemotePaneAttach::attach(
             HostLinkId("wb".to_string()),
@@ -2862,7 +2903,7 @@ mod tests {
             api_socket: sock.clone(),
             client_socket: sock.clone(),
         });
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = attach_events_channel();
         let host = HostLinkId("wb".to_string());
         let local_pane = PaneId::from_raw(13);
 
@@ -2877,9 +2918,7 @@ mod tests {
         )
         .expect("attach returns Ok the instant AttachTerminal is written");
 
-        let event = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("attach failed event");
+        let event = recv_event(&rx, "attach failed event");
         assert_eq!(
             event,
             HostEvent::AttachFailed {

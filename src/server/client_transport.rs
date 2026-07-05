@@ -354,6 +354,35 @@ pub(crate) enum ServerEvent {
     /// iteration.
     #[cfg(unix)]
     HostEvent(crate::server::remote_pane::HostEventEnvelope),
+    /// `HeadlessServer::focus_remote_pane`'s off-loop attach thread (Task
+    /// 9b) completed `RemotePaneAttach::attach` successfully. Handed back
+    /// here (rather than mutating `AppState`/`terminal_runtimes` from that
+    /// thread) so the single mutation point discipline holds: only
+    /// `handle_server_event` -> `handle_remote_pane_attach_established`
+    /// registers the remote-fed runtime and stores `attach`. `generation`
+    /// is the host link's generation at the moment `attach()` was called,
+    /// so the handler can detect a detach/reconnect race and discard a
+    /// stale attach instead of registering it.
+    #[cfg(unix)]
+    RemotePaneAttachEstablished {
+        host: crate::server::host_link::HostLinkId,
+        terminal_id: crate::terminal::TerminalId,
+        local_pane: crate::layout::PaneId,
+        generation: u64,
+        attach: crate::server::remote_pane::RemotePaneAttach,
+    },
+    /// The same off-loop attach thread's failure handback: `attach()`
+    /// itself returned `Err` (e.g. ssh unreachable, handshake refused or
+    /// timed out) before any reader thread ever started. Distinct from
+    /// `HostEvent::AttachFailed`, which is produced by the reader thread
+    /// AFTER a successful `attach()` when the remote refuses the terminal
+    /// id via a pre-frame `ServerShutdown`.
+    #[cfg(unix)]
+    RemotePaneAttachFailed {
+        host: crate::server::host_link::HostLinkId,
+        terminal_id: crate::terminal::TerminalId,
+        reason: String,
+    },
     /// Ctrl+C or external shutdown signal received.
     QuitSignal,
 }
