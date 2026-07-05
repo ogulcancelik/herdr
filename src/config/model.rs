@@ -804,6 +804,8 @@ pub struct UiConfig {
     pub pane_gaps: bool,
     /// Show agent labels in split pane borders when no manual pane label is set. Default: false.
     pub show_agent_labels_on_pane_borders: bool,
+    /// Show tab numbers before custom tab names in the tab bar. Default: false.
+    pub show_tab_numbers: bool,
     /// Hide the tab row when the workspace has one tab. Default: false.
     pub hide_tab_bar_when_single_tab: bool,
     /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
@@ -998,6 +1000,7 @@ impl Default for UiConfig {
             pane_borders: true,
             pane_gaps: true,
             show_agent_labels_on_pane_borders: false,
+            show_tab_numbers: false,
             hide_tab_bar_when_single_tab: false,
             agent_panel_sort: AgentPanelSortConfig::Spaces,
             accent: "cyan".into(),
@@ -1210,6 +1213,7 @@ agent_panel_scope = "current"
         assert!(default_config.ui.pane_borders);
         assert!(default_config.ui.pane_gaps);
         assert!(!default_config.ui.show_agent_labels_on_pane_borders);
+        assert!(!default_config.ui.show_tab_numbers);
         assert!(!default_config.ui.hide_tab_bar_when_single_tab);
 
         let toml = r#"
@@ -1217,12 +1221,14 @@ agent_panel_scope = "current"
 pane_borders = false
 pane_gaps = true
 show_agent_labels_on_pane_borders = true
+show_tab_numbers = true
 hide_tab_bar_when_single_tab = true
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(!config.ui.pane_borders);
         assert!(config.ui.pane_gaps);
         assert!(config.ui.show_agent_labels_on_pane_borders);
+        assert!(config.ui.show_tab_numbers);
         assert!(config.ui.hide_tab_bar_when_single_tab);
     }
 
