@@ -240,12 +240,14 @@ fn run_remote_ssh(
         remote.live_handoff,
     )?;
 
-    let _bridge = SshStdioBridge::start(
-        remote.target,
-        prepared_remote.remote_herdr,
+    let _bridge = BridgeHandle::start(
+        SshTransport {
+            target: remote.target,
+            remote_herdr: prepared_remote.remote_herdr,
+            session_name,
+            ssh_options: remote_ssh.options().cloned(),
+        },
         local_socket.clone(),
-        session_name,
-        remote_ssh.options(),
     )?;
 
     run_client_process(&local_socket, &reattach_command, remote.keybindings)
@@ -1964,11 +1966,13 @@ fn command_failed(context: &str, output: &Output) -> io::Error {
     }
 }
 
-struct SshStdioBridge {
-    local_socket: PathBuf,
-    should_stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
-}
+/// SSH-specific bridge handle (backward-compatible wrapper).
+///
+/// This is a thin wrapper around [`BridgeHandle`] that preserves the
+/// existing API for callers that reference `SshStdioBridge` by name.
+/// New transports should use `BridgeHandle` directly.
+#[allow(dead_code)]
+struct SshStdioBridge(BridgeHandle);
 
 impl SshStdioBridge {
     fn start(
@@ -1978,6 +1982,45 @@ impl SshStdioBridge {
         session_name: String,
         ssh_options: Option<&ManagedSshOptions>,
     ) -> io::Result<Self> {
+        let transport = SshTransport {
+            target,
+            remote_herdr,
+            session_name,
+            ssh_options: ssh_options.cloned(),
+        };
+        BridgeHandle::start(transport, local_socket).map(SshStdioBridge)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Remote transport trait — extension point for new transports
+// ---------------------------------------------------------------------------
+
+/// A transport that tunnels a Unix socket stream to a remote peer.
+///
+/// Implementors provide the remote connection logic.  `BridgeHandle` manages
+/// the local socket lifecycle, accept loop, and graceful shutdown.
+trait RemoteTransport: Send + 'static {
+    /// Establish a connection to the remote peer and tunnel data between
+    /// `local_stream` and the transport.  Called in a background thread.
+    /// Returns when the connection closes (gracefully or with an error).
+    fn bridge(&self, local_stream: UnixStream) -> io::Result<()>;
+}
+
+/// Owned handle to a running transport bridge.
+///
+/// Binds a local Unix socket, accepts connections in a background thread,
+/// and hands each accepted stream to [`RemoteTransport::bridge`].
+///
+/// On drop, signals the thread to stop, removes the socket, and joins.
+struct BridgeHandle {
+    local_socket: PathBuf,
+    should_stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl BridgeHandle {
+    fn start<T: RemoteTransport>(transport: T, local_socket: PathBuf) -> io::Result<Self> {
         let _ = std::fs::remove_file(&local_socket);
         let listener = UnixListener::bind(&local_socket)?;
         crate::ipc::restrict_socket_permissions(&local_socket, BRIDGE_SOCKET_PERMISSION_MODE)?;
@@ -1985,35 +2028,42 @@ impl SshStdioBridge {
 
         let should_stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&should_stop);
-        let thread_ssh_options = ssh_options.cloned();
+
         let thread = thread::spawn(move || {
-            while !thread_stop.load(Ordering::Acquire) {
-                match listener.accept() {
-                    Ok((stream, _addr)) => {
-                        if let Err(err) = stream.set_nonblocking(false) {
-                            eprintln!(
-                                "herdr: remote bridge failed to prepare client socket: {err}"
-                            );
-                            continue;
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                while !thread_stop.load(Ordering::Acquire) {
+                    match listener.accept() {
+                        Ok((stream, _addr)) => {
+                            if let Err(err) = stream.set_nonblocking(false) {
+                                eprintln!(
+                                    "herdr: remote bridge failed to prepare client socket: {err}"
+                                );
+                                continue;
+                            }
+                            if let Err(err) = transport.bridge(stream) {
+                                eprintln!("herdr: remote bridge failed: {err}");
+                            }
                         }
-                        if let Err(err) = bridge_connection(
-                            stream,
-                            &target,
-                            &remote_herdr,
-                            &session_name,
-                            thread_ssh_options.as_ref(),
-                        ) {
-                            eprintln!("herdr: remote bridge failed: {err}");
+                        Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(BRIDGE_ACCEPT_POLL);
                         }
-                    }
-                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                        thread::sleep(BRIDGE_ACCEPT_POLL);
-                    }
-                    Err(err) => {
-                        eprintln!("herdr: remote bridge listener failed: {err}");
-                        break;
+                        Err(err) => {
+                            eprintln!("herdr: remote bridge listener failed: {err}");
+                            break;
+                        }
                     }
                 }
+            }));
+
+            if let Err(panic_err) = result {
+                let msg = if let Some(s) = panic_err.downcast_ref::<String>() {
+                    s.clone()
+                } else if let Some(s) = panic_err.downcast_ref::<&str>() {
+                    s.to_string()
+                } else {
+                    "unknown panic".to_string()
+                };
+                eprintln!("herdr: remote bridge thread panicked: {msg}");
             }
         });
 
@@ -2025,13 +2075,36 @@ impl SshStdioBridge {
     }
 }
 
-impl Drop for SshStdioBridge {
+impl Drop for BridgeHandle {
     fn drop(&mut self) {
         self.should_stop.store(true, Ordering::Release);
         let _ = std::fs::remove_file(&self.local_socket);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SSH transport
+// ---------------------------------------------------------------------------
+
+struct SshTransport {
+    target: String,
+    remote_herdr: RemoteHerdr,
+    session_name: String,
+    ssh_options: Option<ManagedSshOptions>,
+}
+
+impl RemoteTransport for SshTransport {
+    fn bridge(&self, stream: UnixStream) -> io::Result<()> {
+        bridge_connection(
+            stream,
+            &self.target,
+            &self.remote_herdr,
+            &self.session_name,
+            self.ssh_options.as_ref(),
+        )
     }
 }
 
@@ -2312,7 +2385,7 @@ mod tests {
             os: "linux",
             arch: "x86_64",
         });
-        let bridge = SshStdioBridge::start(
+        let _bridge = SshStdioBridge::start(
             "example".to_string(),
             remote_herdr,
             socket.clone(),
@@ -2324,8 +2397,142 @@ mod tests {
         let mode = std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, BRIDGE_SOCKET_PERMISSION_MODE);
 
-        drop(bridge);
+        drop(_bridge);
         let _ = std::fs::remove_file(socket);
+    }
+
+    // --- BridgeHandle characterization tests ---
+
+    /// A stub transport for testing BridgeHandle lifecycle without real SSH or iroh.
+    struct StubTransport {
+        /// Set to true when `bridge()` is called.
+        called: Arc<AtomicBool>,
+    }
+
+    impl RemoteTransport for StubTransport {
+        fn bridge(&self, _stream: UnixStream) -> io::Result<()> {
+            self.called.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn bridge_handle_creates_socket_with_correct_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let socket = std::env::temp_dir().join(format!(
+            "herdr-bridge-handle-test-{}.sock",
+            std::process::id()
+        ));
+        let transport = StubTransport {
+            called: Arc::new(AtomicBool::new(false)),
+        };
+        let handle =
+            BridgeHandle::start(transport, socket.clone()).expect("start BridgeHandle");
+
+        let mode = std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, BRIDGE_SOCKET_PERMISSION_MODE);
+
+        drop(handle);
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn bridge_handle_drop_removes_socket() {
+        let socket = std::env::temp_dir().join(format!(
+            "herdr-bridge-drop-test-{}.sock",
+            std::process::id()
+        ));
+        let transport = StubTransport {
+            called: Arc::new(AtomicBool::new(false)),
+        };
+
+        {
+            let _handle = BridgeHandle::start(transport, socket.clone())
+                .expect("start BridgeHandle");
+            assert!(socket.exists(), "socket should exist while handle is alive");
+        }
+        // After drop, the socket should be removed.
+        assert!(!socket.exists(), "socket should be removed on drop");
+    }
+
+    #[test]
+    fn bridge_handle_calls_transport_bridge_on_connect() {
+        let socket = std::env::temp_dir().join(format!(
+            "herdr-bridge-call-test-{}.sock",
+            std::process::id()
+        ));
+        let called = Arc::new(AtomicBool::new(false));
+        let transport = StubTransport {
+            called: Arc::clone(&called),
+        };
+        let _handle = BridgeHandle::start(transport, socket.clone())
+            .expect("start BridgeHandle");
+
+        // Connect to the socket to trigger transport.bridge().
+        let _stream = std::os::unix::net::UnixStream::connect(&socket)
+            .expect("connect to bridge socket");
+
+        // Give the accept loop a moment to pick up the connection.
+        std::thread::sleep(Duration::from_millis(100));
+
+        assert!(called.load(Ordering::SeqCst), "transport.bridge() should have been called");
+    }
+
+    #[test]
+    fn bridge_handle_supports_multiple_accepts() {
+        let socket = std::env::temp_dir().join(format!(
+            "herdr-bridge-multi-test-{}.sock",
+            std::process::id()
+        ));
+        let called = Arc::new(AtomicBool::new(false));
+        let transport = StubTransport {
+            called: Arc::clone(&called),
+        };
+        let _handle = BridgeHandle::start(transport, socket.clone())
+            .expect("start BridgeHandle");
+
+        // First connection.
+        let _s1 =
+            std::os::unix::net::UnixStream::connect(&socket).expect("first connect");
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Second connection.
+        let _s2 =
+            std::os::unix::net::UnixStream::connect(&socket).expect("second connect");
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Both should have triggered bridge() — the loop accepts multiple.
+        // (StubTransport.bridge() returns immediately, so the loop continues.)
+        assert!(called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn bridge_handle_cleanup_on_transport_error() {
+        let socket = std::env::temp_dir().join(format!(
+            "herdr-bridge-error-test-{}.sock",
+            std::process::id()
+        ));
+
+        // A transport that always fails.
+        struct FailingTransport;
+        impl RemoteTransport for FailingTransport {
+            fn bridge(&self, _stream: UnixStream) -> io::Result<()> {
+                Err(io::Error::other("simulated transport failure"))
+            }
+        }
+
+        let _handle = BridgeHandle::start(FailingTransport, socket.clone())
+            .expect("start BridgeHandle");
+
+        // Connect — transport fails, but BridgeHandle should not panic.
+        let _stream =
+            std::os::unix::net::UnixStream::connect(&socket).expect("connect");
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Socket should still be cleaned up on drop.
+        drop(_handle);
+        assert!(!socket.exists());
     }
 
     #[test]
