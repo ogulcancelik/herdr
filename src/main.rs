@@ -70,7 +70,9 @@ mod handoff_runtime;
 mod input;
 mod integration;
 mod ipc;
+#[cfg(unix)]
 mod iroh_bridge;
+#[cfg(unix)]
 mod iroh_keyfile;
 mod kitty_graphics;
 mod layout;
