@@ -924,6 +924,29 @@ enum PaneRuntimeIo {
         sender: mpsc::Sender<Bytes>,
         resize_tx: watch::Sender<(u16, u16, u32, u32)>,
     },
+    /// PTY-less mirror for an adopted remote pane (Task 9b): there is no PTY
+    /// or child process on this machine, so this variant carries only what
+    /// `feed_remote_bytes` needs to wake the app-wide render loop once a
+    /// remote frame lands, plus a reusable sink for `process_pty_bytes`'s
+    /// response-channel parameter (dead in `GhosttyPaneTerminal` today; see
+    /// `feed_remote_bytes`'s doc comment). Not platform-gated: nothing here
+    /// touches PTYs, fds, or signals (unlike `Actor`'s `PtyIoActorHandle`),
+    /// matching `RemotePaneAttach`/`HostEvent` in `server::remote_pane`,
+    /// which are themselves left ungated even though today's only consumer
+    /// (`HeadlessServer::handle_host_event`) is `#[cfg(unix)]`.
+    ///
+    /// `render_rt` is the tokio runtime handle captured at construction so
+    /// `feed_remote_bytes` can spawn the delayed-repaint wake a
+    /// graphics-carrying frame needs (see its doc comment) without touching
+    /// `Handle::current()` from whatever thread the host-event bridge later
+    /// calls it on -- mirroring the `delay_rt`/`rt` the PTY `on_read`
+    /// closures capture in `spawn_command_builder`/`from_handoff_fd`.
+    Remote {
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+        render_rt: tokio::runtime::Handle,
+        discard_response_tx: mpsc::Sender<Bytes>,
+    },
 }
 
 impl PaneRuntimeIo {
@@ -932,6 +955,9 @@ impl PaneRuntimeIo {
             PaneRuntimeIo::Actor(actor) => actor.shutdown(),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => {}
+            // No PTY/actor to shut down; the ghostty core is dropped
+            // normally along with the rest of `PaneRuntime`.
+            PaneRuntimeIo::Remote { .. } => {}
         }
     }
 
@@ -943,6 +969,9 @@ impl PaneRuntimeIo {
             PaneRuntimeIo::TestChannel { .. } => {
                 Err(std::io::Error::other("test runtime has no PTY master fd"))
             }
+            PaneRuntimeIo::Remote { .. } => Err(std::io::Error::other(
+                "remote-fed runtime has no PTY master fd",
+            )),
         }
     }
 
@@ -952,6 +981,7 @@ impl PaneRuntimeIo {
             PaneRuntimeIo::Actor(actor) => actor.foreground_process_group_id(),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => None,
+            PaneRuntimeIo::Remote { .. } => None,
         }
     }
 
@@ -961,6 +991,12 @@ impl PaneRuntimeIo {
             PaneRuntimeIo::Actor(actor) => actor.begin_handoff(timeout),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => Ok(()),
+            // Handoff (preserving PTYs across a herdr binary re-exec) has no
+            // analog for a remote-fed mirror: there is no local fd to carry
+            // across. Whether/how an adopted remote pane's SSH-backed attach
+            // should itself survive a handoff is an open question left for
+            // whichever commit adds handoff support for remote panes.
+            PaneRuntimeIo::Remote { .. } => Ok(()),
         }
     }
 
@@ -976,6 +1012,7 @@ impl PaneRuntimeIo {
             }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => Ok(()),
+            PaneRuntimeIo::Remote { .. } => Ok(()),
         }
     }
 
@@ -985,6 +1022,7 @@ impl PaneRuntimeIo {
             PaneRuntimeIo::Actor(actor) => actor.release_after_commit(),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => Ok(()),
+            PaneRuntimeIo::Remote { .. } => Ok(()),
         }
     }
 
@@ -1010,6 +1048,14 @@ impl PaneRuntimeIo {
             PaneRuntimeIo::TestChannel { resize_tx, .. } => {
                 let _ = resize_tx.send((rows, cols, cell_width_px, cell_height_px));
             }
+            // The ghostty core resize already happened in
+            // `PaneRuntime::resize` above; there is no PTY/actor to notify,
+            // and any `terminal_responses` a resize-triggered scrollback
+            // replay produced have nowhere to go (same reasoning as
+            // `feed_remote_bytes`'s dropped `terminal_responses`).
+            PaneRuntimeIo::Remote { .. } => {
+                let _ = terminal_responses;
+            }
         }
     }
 
@@ -1027,6 +1073,7 @@ impl PaneRuntimeIo {
             }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => {}
+            PaneRuntimeIo::Remote { .. } => {}
         }
     }
 
@@ -1035,6 +1082,11 @@ impl PaneRuntimeIo {
             PaneRuntimeIo::Actor(actor) => actor.write_user_input(bytes).await,
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { sender, .. } => sender.send(bytes).await,
+            // Local input has no destination on a read-only remote mirror
+            // yet: routing it out via `RemotePaneAttach::send_input` is
+            // Task 9b's later input commit. Reject rather than silently
+            // dropping so a caller can tell input didn't go anywhere.
+            PaneRuntimeIo::Remote { .. } => Err(mpsc::error::SendError(bytes)),
         }
     }
 
@@ -1043,6 +1095,15 @@ impl PaneRuntimeIo {
             PaneRuntimeIo::Actor(actor) => actor.try_write_user_input(bytes),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { sender, .. } => sender.try_send(bytes),
+            // Reject rather than silently drop, same as `send_bytes`: local
+            // input has no destination on a read-only remote mirror yet.
+            // `Closed` is the least-bad `TrySendError` variant here (there's
+            // no half-full channel to report `Full` for), but it does NOT
+            // mean the pane died -- callers that log `Closed` as pane-dead
+            // (headless.rs `route_remote_pane_input`, api/panes.rs) simply
+            // must not reach this arm until c5 decides real input routing
+            // (out via `RemotePaneAttach::send_input`, not this channel).
+            PaneRuntimeIo::Remote { .. } => Err(mpsc::error::TrySendError::Closed(bytes)),
         }
     }
 }
@@ -1498,6 +1559,165 @@ impl PaneRuntime {
 
     pub fn apply_host_terminal_theme(&self, theme: crate::terminal_theme::TerminalTheme) {
         self.terminal.apply_host_terminal_theme(theme);
+    }
+
+    /// Constructs a PTY-less local emulator for an adopted remote pane
+    /// (Task 9b): the same ghostty vt core + `PaneTerminal` a local
+    /// PTY-backed pane gets, but with no PTY, no child process, and no local
+    /// shell pid. Byte input comes only from `feed_remote_bytes`, driven
+    /// (once the visibility-hook integration lands) by
+    /// `HostEvent::TerminalBytes`. The returned runtime registers into
+    /// `terminal_runtimes` exactly like any other `TerminalRuntime`, so the
+    /// unmodified `collect_dirty_patch` render pull renders it with no
+    /// special-casing.
+    ///
+    /// No local detection task is spawned: `child_pid` stays `0` (there is
+    /// no local process to probe over `/proc` or platform equivalents), and
+    /// an adopted remote pane's agent status is published from the wire
+    /// (`HostEvent::StatusChanged`), never from local screen-based
+    /// detection. `detect_handle` is a harmless already-finished
+    /// `AbortHandle`, matching the `#[cfg(test)]` PTY-less constructors'
+    /// pattern below (`test_with_channel_and_scrollback_bytes`), which is
+    /// this constructor's production counterpart.
+    ///
+    /// Not platform-gated: see `PaneRuntimeIo::Remote`'s doc comment.
+    /// Only called from tests today; the visibility-hook integration is the
+    /// real caller.
+    #[allow(dead_code)]
+    pub(crate) fn spawn_remote_fed(
+        pane_id: PaneId,
+        rows: u16,
+        cols: u16,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+    ) -> std::io::Result<Self> {
+        // `discard_response_tx` only exists to satisfy `process_pty_bytes`'s
+        // signature -- see `feed_remote_bytes`'s doc comment for why nothing
+        // ever needs to receive from it.
+        let (discard_response_tx, _discard_response_rx) = mpsc::channel::<Bytes>(1);
+        let mut terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        terminal
+            .enable_grapheme_cluster_mode()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        if crate::kitty_graphics::is_enabled() {
+            terminal
+                .enable_kitty_graphics()
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        let pane_terminal = GhosttyPaneTerminal::new(terminal, discard_response_tx.clone())?;
+        pane_terminal.apply_host_terminal_theme(host_terminal_theme);
+        let terminal = Arc::new(PaneTerminal::new(pane_terminal));
+
+        Ok(Self {
+            pane_id,
+            terminal,
+            io: PaneRuntimeIo::Remote {
+                render_notify,
+                render_dirty,
+                render_rt: tokio::runtime::Handle::current(),
+                discard_response_tx,
+            },
+            current_size: Cell::new((rows, cols, 0, 0)),
+            child_pid: Arc::new(AtomicU32::new(0)),
+            reported_cwd: Arc::new(Mutex::new(None)),
+            child_wait_completed: None,
+            kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
+            detection_content_seq: Arc::new(AtomicU64::new(0)),
+            full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
+            detect_reset_notify: Arc::new(Notify::new()),
+            pending_release: Arc::new(Mutex::new(None)),
+            preserve_processes_on_drop: true,
+            detect_handle: tokio::spawn(async {}).abort_handle(),
+        })
+    }
+
+    /// Feeds display bytes from an adopted remote pane's already-rendered
+    /// `TerminalAnsi` stream into this pane's own ghostty vt core, exactly
+    /// like a local PTY's `on_read` closure feeds real PTY output through
+    /// `process_pty_bytes` -- so detection, copy-mode selection, and
+    /// scrollback read the same grid either way, with no changes to any of
+    /// those consumers.
+    ///
+    /// `shell_pid` is `0`: the process that produced these bytes runs on a
+    /// different machine, so the local-pid introspection
+    /// `process_pty_bytes` performs when `shell_pid > 0` (a
+    /// `foreground_job` lookup for the scrollback-clear compatibility
+    /// filter, and the transient-default-color-owner tracker) must not run
+    /// against whatever unrelated LOCAL process happens to reuse that pid
+    /// number on this machine. `shell_pid == 0` is the existing sentinel
+    /// that already disables both call sites in
+    /// `GhosttyPaneTerminal::process_pty_bytes`.
+    ///
+    /// `render_delay` IS honored (mirroring the PTY `on_read` closures):
+    /// `process_pty_bytes` returns `request_render == false` +
+    /// `render_delay == Some(..)` exactly for a chunk carrying kitty
+    /// graphics (the immediate repaint is suppressed so the image bytes can
+    /// finish arriving, then a delayed wake repaints). Remote blit frames DO
+    /// carry graphics -- the remote server splices them into every
+    /// `TerminalAnsi` frame (`insert_graphics_before_sync_end` in
+    /// `render_stream.rs`), and each frame is one `feed_remote_bytes` call --
+    /// so without the delayed wake a frame that renders an image and then
+    /// idles would never repaint (the graphics + its text diff would sit
+    /// unpainted until some later non-graphics frame flipped
+    /// `request_render` back on). The delayed task is spawned on the
+    /// runtime handle captured at construction (`render_rt`) so it can't
+    /// panic by touching `Handle::current()` off-runtime.
+    ///
+    /// Any `terminal_responses` the emulator queues in reaction (e.g. a
+    /// DA/DSR reply to a query byte sequence embedded in the remote's
+    /// rendered stream) are intentionally dropped, for two independent
+    /// reasons: (1) `response_writer` is already dead code inside
+    /// `GhosttyPaneTerminal` today -- both `process_pty_bytes` and `new`
+    /// take it as `_response_writer` and never read it; the real response
+    /// channel is the `ProcessBytesResult.terminal_responses` return value,
+    /// which local panes forward to their PTY via the `on_read` closures in
+    /// `spawn_command_builder`/`from_handoff_fd`. (2) Even if something did
+    /// forward them, there is no PTY or child process on this machine to
+    /// deliver a response to -- this is a read-only display mirror of a
+    /// pane whose real terminal lives on the remote host, and that remote
+    /// pane's own real `PaneTerminal` already answered any such query
+    /// against its own grid before rendering the frame mirrored here.
+    /// `result.clipboard_writes` and `result.reported_cwd` are dropped for
+    /// the same mirror reason: if a remote pane's clipboard/cwd ever needs
+    /// to reach this side it belongs on the wire as a `HostEvent`, not
+    /// scraped out of the mirrored display bytes.
+    ///
+    /// Only reachable via a runtime built by `spawn_remote_fed`, which
+    /// nothing outside tests constructs yet.
+    #[allow(dead_code)]
+    pub(crate) fn feed_remote_bytes(&self, bytes: &[u8]) {
+        let PaneRuntimeIo::Remote {
+            render_notify,
+            render_dirty,
+            render_rt,
+            discard_response_tx,
+        } = &self.io
+        else {
+            error!(
+                pane = self.pane_id.raw(),
+                "feed_remote_bytes called on a non-remote-fed pane runtime"
+            );
+            return;
+        };
+        let result = self
+            .terminal
+            .process_pty_bytes(self.pane_id, 0, bytes, discard_response_tx);
+        if result.request_render && !render_dirty.swap(true, Ordering::AcqRel) {
+            render_notify.notify_one();
+        }
+        if let Some(delay) = result.render_delay {
+            let render_notify = render_notify.clone();
+            let render_dirty = render_dirty.clone();
+            render_rt.spawn(async move {
+                tokio::time::sleep(delay).await;
+                if !render_dirty.swap(true, Ordering::AcqRel) {
+                    render_notify.notify_one();
+                }
+            });
+        }
     }
 
     pub fn spawn(
@@ -3891,5 +4111,163 @@ mod tests {
                 observed_at: _,
             } if delivered_pane == pane_id
         ));
+    }
+
+    fn spawn_remote_fed_for_test(
+        rows: u16,
+        cols: u16,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+    ) -> PaneRuntime {
+        PaneRuntime::spawn_remote_fed(
+            PaneId::from_raw(0),
+            rows,
+            cols,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            render_notify,
+            render_dirty,
+        )
+        .expect("remote-fed runtime should construct without a PTY")
+    }
+
+    #[tokio::test]
+    async fn spawn_remote_fed_feeds_ansi_bytes_into_the_local_grid() {
+        let render_notify = Arc::new(Notify::new());
+        let render_dirty = Arc::new(AtomicBool::new(false));
+        let runtime = spawn_remote_fed_for_test(5, 20, render_notify.clone(), render_dirty.clone());
+
+        // Establish the clean dirty-tracking baseline the same way the
+        // server's first render of a newly registered terminal would,
+        // mirroring `dirty_patch_preserves_curly_underline_style` in
+        // `pane/terminal.rs`.
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|frame| runtime.render(frame, Rect::new(0, 0, 20, 5), false))
+            .unwrap();
+        assert!(!render_dirty.load(Ordering::Acquire));
+
+        runtime.feed_remote_bytes(b"hello\x1b[31mworld");
+
+        assert!(
+            render_dirty.load(Ordering::Acquire),
+            "feeding display bytes should mark the app-wide render loop dirty"
+        );
+
+        let patch = match runtime.collect_dirty_patch(20, 5) {
+            TerminalDirtyPatchOutcome::Patch(patch) => patch,
+            other => panic!("expected a dirty patch after feeding remote bytes, got {other:?}"),
+        };
+        let row0 = &patch
+            .rows
+            .iter()
+            .find(|(row, _)| *row == 0)
+            .expect("row 0 should be dirty")
+            .1;
+        let text: String = row0[..10].iter().map(|cell| cell.symbol.as_str()).collect();
+        assert_eq!(text, "helloworld");
+        assert_ne!(
+            row0[0].fg, row0[5].fg,
+            "the embedded SGR 31 should give 'world' a different foreground than 'hello'"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_remote_fed_repaints_graphics_frames_via_the_delayed_wake() {
+        // A frame carrying kitty graphics returns request_render == false +
+        // render_delay == Some(..) from process_pty_bytes (the immediate
+        // repaint is suppressed while the image bytes settle). Remote blit
+        // frames DO carry graphics, so the mirror must honor render_delay or
+        // such a frame would never repaint. Graphics detection is gated on
+        // the global kitty-graphics flag; nextest's process-per-test
+        // isolation keeps this toggle from leaking, and we still reset it.
+        crate::kitty_graphics::set_enabled(true);
+
+        let render_notify = Arc::new(Notify::new());
+        let render_dirty = Arc::new(AtomicBool::new(false));
+        let runtime = spawn_remote_fed_for_test(5, 20, render_notify.clone(), render_dirty.clone());
+
+        // A bare kitty-graphics APC (`\x1b_G ... \x1b\\`), not wrapped in a
+        // synchronized-output pair, forces request_render == false +
+        // render_delay == Some: `has_kitty_graphics_sequence` is true while
+        // synchronized output is off.
+        runtime.feed_remote_bytes(b"\x1b_Gf=24,s=1,v=1,a=T;AAAA\x1b\\");
+
+        // The synchronous feed returned without an immediate wake: the
+        // delayed task spawned for this frame is still inside its
+        // `sleep(..)`, so the flag cannot be set yet. This proves the frame
+        // took the delayed path rather than the immediate one.
+        assert!(
+            !render_dirty.load(Ordering::Acquire),
+            "a graphics frame must not repaint immediately; only the delayed wake should fire"
+        );
+
+        // Wait for the delayed wake rather than sleeping a fixed duration:
+        // correctness comes from the notify, the timeout is only a flake
+        // guard.
+        tokio::time::timeout(std::time::Duration::from_secs(2), render_notify.notified())
+            .await
+            .expect("the delayed graphics-repaint wake should fire");
+        assert!(
+            render_dirty.load(Ordering::Acquire),
+            "the delayed wake must mark the render loop dirty so the graphics frame repaints"
+        );
+
+        crate::kitty_graphics::set_enabled(false);
+    }
+
+    #[tokio::test]
+    async fn spawn_remote_fed_resize_changes_grid_dimensions() {
+        let runtime = spawn_remote_fed_for_test(
+            5,
+            20,
+            Arc::new(Notify::new()),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        assert_eq!(runtime.current_size(), (5, 20));
+        assert_eq!(runtime.scroll_metrics().unwrap().viewport_rows, 5);
+
+        runtime.resize(10, 30, 0, 0);
+
+        assert_eq!(runtime.current_size(), (10, 30));
+        assert_eq!(runtime.scroll_metrics().unwrap().viewport_rows, 10);
+    }
+
+    #[tokio::test]
+    async fn spawn_remote_fed_teardown_drops_cleanly() {
+        let runtime = spawn_remote_fed_for_test(
+            5,
+            20,
+            Arc::new(Notify::new()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        runtime.feed_remote_bytes(b"still here");
+
+        // No PTY/child process exists to reap; explicit shutdown must not
+        // hang, block on process signalling, or panic.
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn spawn_remote_fed_drop_without_explicit_shutdown_is_clean() {
+        let runtime = spawn_remote_fed_for_test(
+            5,
+            20,
+            Arc::new(Notify::new()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        runtime.feed_remote_bytes(b"still here");
+
+        drop(runtime);
+    }
+
+    #[tokio::test]
+    async fn feed_remote_bytes_is_a_guarded_no_op_on_a_non_remote_runtime() {
+        let runtime = PaneRuntime::test_with_screen_bytes(20, 5, b"");
+
+        runtime.feed_remote_bytes(b"should not apply");
+
+        assert!(runtime.visible_text().trim().is_empty());
     }
 }

@@ -203,6 +203,47 @@ impl TerminalRuntime {
         self.0.apply_host_terminal_theme(theme);
     }
 
+    /// Constructs a PTY-less local emulator for an adopted remote pane
+    /// (Task 9b). See `PaneRuntime::spawn_remote_fed`'s doc comment for the
+    /// full rationale; this wrapper only threads the call through like
+    /// every other constructor on this type. Registers into
+    /// `TerminalRuntimeRegistry` exactly like a PTY-backed `TerminalRuntime`.
+    ///
+    /// Only called from tests today; the visibility-hook integration is the
+    /// real caller.
+    #[allow(dead_code)]
+    pub(crate) fn spawn_remote_fed(
+        pane_id: PaneId,
+        rows: u16,
+        cols: u16,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+    ) -> std::io::Result<Self> {
+        crate::pane::PaneRuntime::spawn_remote_fed(
+            pane_id,
+            rows,
+            cols,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            render_notify,
+            render_dirty,
+        )
+        .map(Self)
+    }
+
+    /// Feeds display bytes from an adopted remote pane into this runtime's
+    /// ghostty vt core. See `PaneRuntime::feed_remote_bytes`'s doc comment
+    /// for why `terminal_responses` are dropped and `shell_pid` is `0`.
+    ///
+    /// Only reachable on a runtime built by `spawn_remote_fed`; nothing
+    /// outside tests calls this yet.
+    #[allow(dead_code)]
+    pub(crate) fn feed_remote_bytes(&self, bytes: &[u8]) {
+        self.0.feed_remote_bytes(bytes);
+    }
+
     pub fn begin_graceful_release(&self, agent: crate::detect::Agent) {
         self.0.begin_graceful_release(agent);
     }
@@ -475,5 +516,84 @@ impl TerminalRuntime {
             channel_capacity,
         );
         (Self(runtime), rx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+    use crate::terminal::{TerminalId, TerminalRuntimeRegistry};
+
+    /// End-to-end check that a PTY-less remote-fed runtime works through the
+    /// same registry/render/teardown surface as any other `TerminalRuntime`:
+    /// `TerminalRuntimeRegistry::insert`/`get`/`remove`, `render`, and
+    /// `collect_dirty_patch` all run completely unmodified. Byte-level
+    /// coverage of the ghostty grid itself (ANSI parsing, resize,
+    /// PaneRuntimeIo::Remote's match arms) lives beside `PaneRuntime` in
+    /// `src/pane.rs`; this test only proves the registry round trip.
+    #[tokio::test]
+    async fn remote_fed_runtime_registers_renders_and_tears_down_through_the_registry() {
+        let render_notify = Arc::new(Notify::new());
+        let render_dirty = Arc::new(AtomicBool::new(false));
+        let runtime = TerminalRuntime::spawn_remote_fed(
+            PaneId::from_raw(1),
+            5,
+            20,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            render_notify,
+            render_dirty.clone(),
+        )
+        .expect("remote-fed terminal runtime should construct without a PTY");
+
+        let mut registry = TerminalRuntimeRegistry::new();
+        let terminal_id = TerminalId::alloc();
+        assert!(registry.insert(terminal_id.clone(), runtime).is_none());
+        assert_eq!(registry.len(), 1);
+
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|frame| {
+            registry.get(&terminal_id).expect("just inserted").render(
+                frame,
+                Rect::new(0, 0, 20, 5),
+                false,
+            )
+        })
+        .unwrap();
+
+        registry
+            .get(&terminal_id)
+            .expect("still registered")
+            .feed_remote_bytes(b"remote output");
+        assert!(
+            render_dirty.load(Ordering::Acquire),
+            "feeding bytes through the registry-held runtime should mark the render loop dirty"
+        );
+
+        let patch = match registry
+            .get(&terminal_id)
+            .expect("still registered")
+            .collect_dirty_patch(20, 5)
+        {
+            crate::pane::TerminalDirtyPatchOutcome::Patch(patch) => patch,
+            other => panic!("expected a dirty patch, got {other:?}"),
+        };
+        let row0 = &patch
+            .rows
+            .iter()
+            .find(|(row, _)| *row == 0)
+            .expect("row 0 should be dirty")
+            .1;
+        let text: String = row0[..13].iter().map(|cell| cell.symbol.as_str()).collect();
+        assert_eq!(text, "remote output");
+
+        // Teardown: removing from the registry drops the runtime. There is
+        // no PTY or child process to reap, so this must not hang or panic.
+        let removed = registry.remove(&terminal_id).expect("was registered");
+        removed.shutdown();
+        assert!(registry.get(&terminal_id).is_none());
     }
 }
