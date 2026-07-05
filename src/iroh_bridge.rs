@@ -111,6 +111,9 @@ pub async fn run_serve(config: ServeConfig) -> io::Result<()> {
 /// clock jumps more than 20 seconds between loop iterations, the stale
 /// connection is dropped immediately and a fresh connection is attempted.
 pub async fn run_connect(config: ConnectConfig) -> io::Result<()> {
+    // Bind the endpoint once — reuse across reconnection attempts.
+    let (endpoint, _local_id) = bind_endpoint(config.secret_key, config.relay_urls.clone()).await?;
+
     // Wall-clock freeze detection: track real time to detect suspend.
     let mut last_wall_clock = Instant::now();
     let freeze_threshold = Duration::from_secs(20);
@@ -128,8 +131,11 @@ pub async fn run_connect(config: ConnectConfig) -> io::Result<()> {
         }
         last_wall_clock = now;
 
-        match run_connect_once(&config).await {
-            Ok(()) => return Ok(()),
+        match run_connect_once(&endpoint, &config).await {
+            Ok(()) => {
+                endpoint.close().await;
+                return Ok(());
+            }
             Err(e) => {
                 warn!("iroh bridge connection lost: {e} — reconnecting in {}s", reconnect_delay.as_secs());
                 tokio::time::sleep(reconnect_delay).await;
@@ -139,9 +145,10 @@ pub async fn run_connect(config: ConnectConfig) -> io::Result<()> {
 }
 
 /// Connect once without reconnection logic.  Returns on connection loss.
-async fn run_connect_once(config: &ConnectConfig) -> io::Result<()> {
-    let (endpoint, _local_id) = bind_endpoint(config.secret_key, config.relay_urls.clone()).await?;
-
+///
+/// The endpoint is passed in from the caller so it can be reused across
+/// reconnection attempts.
+async fn run_connect_once(endpoint: &Endpoint, config: &ConnectConfig) -> io::Result<()> {
     let local_socket = &config.local_socket;
     // Remove any stale socket file.
     let _ = std::fs::remove_file(local_socket);
@@ -183,7 +190,6 @@ async fn run_connect_once(config: &ConnectConfig) -> io::Result<()> {
 
     bridge_streams(local_stream, iroh_send, iroh_recv).await;
 
-    endpoint.close().await;
     let _ = std::fs::remove_file(local_socket);
     Ok(())
 }
@@ -365,8 +371,11 @@ async fn bridge_streams(
 /// Load or create a persistent Ed25519 identity key.
 ///
 /// Keys are stored under `~/.config/herdr/iroh/`.  On first run a new key
-/// is generated and written to disk.  The key is stored as raw 32-byte
-/// secret key bytes (not encrypted in this initial version).
+/// is generated and written to disk, encrypted at rest via the keyfile
+/// module.
+///
+/// If a raw (unencrypted) key from a previous herdr version is found,
+/// it is migrated to the encrypted format automatically.
 ///
 /// Returns the 32-byte secret key.
 pub fn load_or_create_identity_key() -> io::Result<[u8; 32]> {
@@ -376,7 +385,37 @@ pub fn load_or_create_identity_key() -> io::Result<[u8; 32]> {
     let key_path = key_dir.join(KEY_FILE_NAME);
     let pub_path = key_dir.join(PUB_KEY_FILE_NAME);
 
+    // Check for legacy raw key file and migrate it.
     if key_path.exists() {
+        let metadata = std::fs::metadata(&key_path)?;
+        // Raw keys are exactly 32 bytes; encrypted keys are much larger.
+        if metadata.len() == 32 {
+            // Read raw key and migrate to encrypted format.
+            let raw_bytes = std::fs::read(&key_path)?;
+            let mut secret = [0u8; 32];
+            secret.copy_from_slice(&raw_bytes);
+
+            // Store the raw key temporarily, then encrypt it.
+            crate::iroh_keyfile::migrate_raw_key(&key_dir, KEY_FILE_NAME, &secret)
+                .map_err(|e| io::Error::other(format!("failed to migrate identity key: {e}")))?;
+
+            // Also write the public key if not present.
+            if !pub_path.exists() {
+                let secret_key = SecretKey::from_bytes(&secret);
+                let public_bytes = secret_key.public();
+                std::fs::write(&pub_path, hex_encode(public_bytes.as_bytes()))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&pub_path, std::fs::Permissions::from_mode(0o644));
+                }
+            }
+
+            info!("migrated legacy raw identity key to encrypted format");
+            return Ok(secret);
+        }
+
+        // Already encrypted — load via keyfile module.
         return crate::iroh_keyfile::load_or_create_key(&key_dir, KEY_FILE_NAME)
             .map_err(|e| io::Error::other(format!("failed to load identity key: {e}")));
     }
@@ -442,27 +481,17 @@ fn home_config_dir() -> Option<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
-// Hex helpers (no dependency needed)
+// Hex helpers
 // ---------------------------------------------------------------------------
 
 fn hex_encode(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-            use std::fmt::Write;
-            let _ = write!(s, "{b:02x}");
-            s
-        })
+    data_encoding::HEXLOWER.encode(bytes)
 }
 
 fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
-    if s.len() % 2 != 0 {
-        return Err("odd hex string length".into());
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string()))
-        .collect()
+    data_encoding::HEXLOWER
+        .decode(s.trim().as_bytes())
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

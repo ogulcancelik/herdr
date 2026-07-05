@@ -335,19 +335,26 @@ fn ensure_iroh_bridge_serve(
         ));
     }
 
-    // Check if the iroh bridge serve is already running by verifying the
-    // remote server client socket exists and the endpoint responds.
-    // For now, we unconditionally (re)start it in the background.
-    let serve_cmd = format!(
-        "nohup {} iroh-bridge serve >/dev/null 2>&1 &",
+    // Check if the iroh bridge is already running by looking for a
+    // herdr iroh-bridge process on the remote host.  If one is found,
+    // skip the nohup spawn to avoid piling up orphaned processes.
+    let check_cmd = format!(
+        "pgrep -f '{} iroh-bridge serve' >/dev/null 2>&1",
         remote_herdr.shell_path
     );
-    let output = ssh.sh_output(&serve_cmd)?;
-    if !output.status.success() {
-        // nohup may produce warnings; check for actual failures.
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.is_empty() && !stderr.contains("nohup") {
-            return Err(command_failed("failed to start iroh bridge serve", &output));
+    let check_output = ssh.sh_output(&check_cmd)?;
+    if !check_output.status.success() {
+        // Bridge not running — start it.
+        let serve_cmd = format!(
+            "nohup {} iroh-bridge serve >/dev/null 2>&1 &",
+            remote_herdr.shell_path
+        );
+        let output = ssh.sh_output(&serve_cmd)?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.is_empty() && !stderr.contains("nohup") {
+                return Err(command_failed("failed to start iroh bridge serve", &output));
+            }
         }
     }
 
@@ -358,17 +365,28 @@ fn ensure_iroh_bridge_serve(
 // Remote endpoint ID persistence
 // ---------------------------------------------------------------------------
 
-/// Path to the remote endpoint ID mapping file.
-fn remote_endpoint_map_path() -> PathBuf {
-    let config_dir = std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join(".config"))
-        .unwrap_or_else(|| PathBuf::from("."));
+fn remote_endpoint_map_path_with_base(base: Option<&Path>) -> PathBuf {
+    let config_dir = if let Some(base) = base {
+        base.to_path_buf()
+    } else {
+        std::env::var_os("HOME")
+            .map(|home| PathBuf::from(home).join(".config"))
+            .unwrap_or_else(|| PathBuf::from("."))
+    };
     config_dir.join("herdr").join("remote_endpoints.toml")
 }
 
 /// Save a target → endpoint_id mapping for future auto-iroh detection.
 fn save_remote_endpoint_mapping(target: &str, endpoint_id: &str) -> io::Result<()> {
-    let path = remote_endpoint_map_path();
+    save_remote_endpoint_mapping_with_base(None, target, endpoint_id)
+}
+
+fn save_remote_endpoint_mapping_with_base(
+    base: Option<&Path>,
+    target: &str,
+    endpoint_id: &str,
+) -> io::Result<()> {
+    let path = remote_endpoint_map_path_with_base(base);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -384,7 +402,11 @@ fn save_remote_endpoint_mapping(target: &str, endpoint_id: &str) -> io::Result<(
 
 /// Look up a stored endpoint ID for a target.
 pub(crate) fn load_remote_endpoint_id(target: &str) -> Option<String> {
-    let path = remote_endpoint_map_path();
+    load_remote_endpoint_id_with_base(None, target)
+}
+
+fn load_remote_endpoint_id_with_base(base: Option<&Path>, target: &str) -> Option<String> {
+    let path = remote_endpoint_map_path_with_base(base);
     let map = load_endpoint_map(&path);
     map.get(target).cloned()
 }
@@ -426,42 +448,55 @@ impl IrohBridge {
         let thread_socket = local_socket.clone();
 
         let thread = thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    eprintln!("herdr: iroh bridge failed to create runtime: {e}");
-                    return;
-                }
-            };
-
-            rt.block_on(async move {
-                let remote_id: iroh::EndpointId = match remote_endpoint_id.parse() {
-                    Ok(id) => id,
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
                     Err(e) => {
-                        eprintln!("herdr: iroh bridge invalid endpoint id: {e}");
+                        eprintln!("herdr: iroh bridge failed to create runtime: {e}");
                         return;
                     }
                 };
 
-                // Load local identity key.
-                let secret_key = crate::iroh_bridge::load_or_create_identity_key().ok();
+                rt.block_on(async move {
+                    let remote_id: iroh::EndpointId = match remote_endpoint_id.parse() {
+                        Ok(id) => id,
+                        Err(e) => {
+                            eprintln!("herdr: iroh bridge invalid endpoint id: {e}");
+                            return;
+                        }
+                    };
 
-                let config = crate::iroh_bridge::ConnectConfig {
-                    remote_endpoint_id: remote_id,
-                    local_socket: thread_socket.clone(),
-                    secret_key,
-                    relay_urls: Vec::new(),
-                };
+                    // Load local identity key.
+                    let secret_key = crate::iroh_bridge::load_or_create_identity_key().ok();
 
-                if let Err(e) = crate::iroh_bridge::run_connect(config).await {
-                    if !thread_stop.load(Ordering::Acquire) {
-                        eprintln!("herdr: iroh bridge failed: {e}");
+                    let config = crate::iroh_bridge::ConnectConfig {
+                        remote_endpoint_id: remote_id,
+                        local_socket: thread_socket.clone(),
+                        secret_key,
+                        relay_urls: Vec::new(),
+                    };
+
+                    if let Err(e) = crate::iroh_bridge::run_connect(config).await {
+                        if !thread_stop.load(Ordering::Acquire) {
+                            eprintln!("herdr: iroh bridge failed: {e}");
+                        }
                     }
-                }
-            });
+                });
+            }));
+
+            if let Err(panic_err) = result {
+                let msg = if let Some(s) = panic_err.downcast_ref::<String>() {
+                    s.clone()
+                } else if let Some(s) = panic_err.downcast_ref::<&str>() {
+                    s.to_string()
+                } else {
+                    "unknown panic".to_string()
+                };
+                eprintln!("herdr: iroh bridge thread panicked: {msg}");
+            }
         });
 
         Ok(Self {
@@ -3365,10 +3400,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let config_dir = dir.path().join(".config");
         std::fs::create_dir_all(config_dir.join("herdr")).unwrap();
-        unsafe { std::env::set_var("HOME", dir.path()) };
 
-        save_remote_endpoint_mapping("dev", "abc123def456").unwrap();
-        let loaded = load_remote_endpoint_id("dev");
+        save_remote_endpoint_mapping_with_base(Some(dir.path()), "dev", "abc123def456").unwrap();
+        let loaded = load_remote_endpoint_id_with_base(Some(dir.path()), "dev");
         assert_eq!(loaded, Some("abc123def456".to_string()));
     }
 
@@ -3377,9 +3411,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let config_dir = dir.path().join(".config");
         std::fs::create_dir_all(config_dir.join("herdr")).unwrap();
-        unsafe { std::env::set_var("HOME", dir.path()) };
 
-        let result = load_remote_endpoint_id("nonexistent");
+        let result = load_remote_endpoint_id_with_base(Some(dir.path()), "nonexistent");
         assert_eq!(result, None);
     }
 
@@ -3388,11 +3421,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let config_dir = dir.path().join(".config");
         std::fs::create_dir_all(config_dir.join("herdr")).unwrap();
-        unsafe { std::env::set_var("HOME", dir.path()) };
 
-        save_remote_endpoint_mapping("dev", "old-id").unwrap();
-        save_remote_endpoint_mapping("dev", "new-id").unwrap();
-        let loaded = load_remote_endpoint_id("dev");
+        save_remote_endpoint_mapping_with_base(Some(dir.path()), "dev", "old-id").unwrap();
+        save_remote_endpoint_mapping_with_base(Some(dir.path()), "dev", "new-id").unwrap();
+        let loaded = load_remote_endpoint_id_with_base(Some(dir.path()), "dev");
         assert_eq!(loaded, Some("new-id".to_string()));
     }
 

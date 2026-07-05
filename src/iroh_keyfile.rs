@@ -105,6 +105,34 @@ pub fn change_passphrase(key_dir: &Path, key_file: &str) -> Result<(), KeyfileEr
     Ok(())
 }
 
+/// Migrate a raw (unencrypted) 32-byte key to the encrypted format.
+///
+/// Reads the raw key bytes, prompts for a new passphrase, and writes
+/// the encrypted keyfile.  The raw file is overwritten atomically.
+pub fn migrate_raw_key(
+    key_dir: &Path,
+    key_file: &str,
+    raw_secret: &[u8; 32],
+) -> Result<(), KeyfileError> {
+    let key_path = key_dir.join(key_file);
+
+    if !io::stdin().is_terminal() {
+        return Err(KeyfileError::Other(
+            "migrating legacy raw key requires a TTY; set $HERDR_IROH_KEY_NEW_PASSPHRASE".into(),
+        ));
+    }
+
+    eprintln!("Found a legacy unencrypted identity key at {}", key_path.display());
+    eprintln!("It will be migrated to an encrypted format. Choose a passphrase.");
+    eprintln!();
+
+    let pass = prompt_new_passphrase_interactive(&key_path)?;
+    write_encrypted_key(&key_path, raw_secret, pass.expose_secret())?;
+
+    eprintln!("key migrated successfully.");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Internal: encryption / decryption
 // ---------------------------------------------------------------------------
@@ -138,7 +166,8 @@ fn read_encrypted_key(path: &Path, passphrase: &str) -> Result<[u8; 32], Keyfile
         .strip_prefix(KEYFILE_MAGIC)
         .ok_or_else(|| KeyfileError::Other("invalid keyfile format: missing magic".into()))?;
 
-    let decoded = base64_decode(body.trim())
+    let decoded = data_encoding::BASE64
+        .decode(body.trim().as_bytes())
         .map_err(|e| KeyfileError::Other(format!("invalid keyfile base64: {e}")))?;
 
     if decoded.len() < 12 + KDF_SALT_LEN + 16 {
@@ -183,7 +212,7 @@ fn write_encrypted_key(path: &Path, secret: &[u8; 32], passphrase: &str) -> Resu
     payload.extend_from_slice(&salt);
     payload.extend_from_slice(&ciphertext);
 
-    let encoded = base64_encode(&payload);
+    let encoded = data_encoding::BASE64.encode(&payload);
     let contents = format!("{KEYFILE_MAGIC}{encoded}\n");
 
     // Atomic write: temp file + rename.
@@ -268,6 +297,10 @@ fn prompt_new_passphrase_interactive(key_path: &Path) -> Result<SecretString, Ke
 // ---------------------------------------------------------------------------
 
 /// Read a file securely: no symlink following, then verify permissions.
+///
+/// On non-Unix platforms, this returns an error — keyfile security
+/// requires platform-specific protections that are not implemented
+/// for this target.
 fn read_file_secure(path: &Path) -> Result<String, KeyfileError> {
     #[cfg(unix)]
     {
@@ -278,18 +311,18 @@ fn read_file_secure(path: &Path) -> Result<String, KeyfileError> {
             .custom_flags(libc::O_NOFOLLOW)
             .open(path)?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let metadata = file.metadata()?;
-        let mode = metadata.permissions().mode() & 0o777;
-        if mode != 0o600 {
-            return Err(KeyfileError::Other(format!(
-                "keyfile {} has insecure permissions {mode:o} (expected 600)",
-                path.display()
-            )));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = file.metadata()?;
+            let mode = metadata.permissions().mode() & 0o777;
+            if mode != 0o600 {
+                return Err(KeyfileError::Other(format!(
+                    "keyfile {} has insecure permissions {mode:o} (expected 600)",
+                    path.display()
+                )));
+            }
         }
-    }
 
         use std::io::Read;
         let mut contents = String::new();
@@ -299,12 +332,16 @@ fn read_file_secure(path: &Path) -> Result<String, KeyfileError> {
 
     #[cfg(not(unix))]
     {
-        let contents = fs::read_to_string(path)?;
-        Ok(contents)
+        Err(KeyfileError::Other(
+            "encrypted identity keys are not supported on this platform".into(),
+        ))
     }
 }
 
 /// Write a file with owner-only permissions (0600).
+///
+/// On non-Unix platforms, this returns an error — keyfile security
+/// requires platform-specific protections.
 fn write_file_private(path: &Path, data: &[u8]) -> Result<(), KeyfileError> {
     #[cfg(unix)]
     {
@@ -316,73 +353,15 @@ fn write_file_private(path: &Path, data: &[u8]) -> Result<(), KeyfileError> {
             .mode(0o600)
             .open(path)?;
         file.write_all(data)?;
+        Ok(())
     }
 
     #[cfg(not(unix))]
     {
-        fs::write(path, data)?;
+        Err(KeyfileError::Other(
+            "encrypted identity keys are not supported on this platform".into(),
+        ))
     }
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Internal: base64 helpers (no external dependency needed)
-// ---------------------------------------------------------------------------
-
-fn base64_encode(data: &[u8]) -> String {
-    use std::fmt::Write;
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        let _ = write!(out, "{}", CHARS[((n >> 18) & 0x3f) as usize] as char);
-        let _ = write!(out, "{}", CHARS[((n >> 12) & 0x3f) as usize] as char);
-        if chunk.len() > 1 {
-            let _ = write!(out, "{}", CHARS[((n >> 6) & 0x3f) as usize] as char);
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            let _ = write!(out, "{}", CHARS[(n & 0x3f) as usize] as char);
-        } else {
-            out.push('=');
-        }
-    }
-    out
-}
-
-fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut out = Vec::with_capacity(s.len() * 3 / 4);
-    let mut buf: u32 = 0;
-    let mut bits: u32 = 0;
-    for c in s.bytes() {
-        let val = match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            b'=' => break,
-            b'\n' | b'\r' | b' ' => continue,
-            _ => return Err(format!("invalid base64 character: {c}")),
-        };
-        buf = (buf << 6) | val as u32;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buf >> bits) as u8);
-            buf &= (1 << bits) - 1;
-        }
-    }
-    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -421,14 +400,14 @@ mod tests {
     #[test]
     fn base64_roundtrip() {
         let input: Vec<u8> = (0..255).collect();
-        let encoded = base64_encode(&input);
-        let decoded = base64_decode(&encoded).unwrap();
+        let encoded = data_encoding::BASE64.encode(&input);
+        let decoded = data_encoding::BASE64.decode(encoded.as_bytes()).unwrap();
         assert_eq!(input, decoded);
     }
 
     #[test]
     fn base64_decode_empty() {
-        assert!(base64_decode("").unwrap().is_empty());
-        assert!(base64_decode("  \n").unwrap().is_empty());
+        assert!(data_encoding::BASE64.decode(b"").unwrap().is_empty());
+        assert!(data_encoding::BASE64.decode(b"  \n").unwrap().is_empty());
     }
 }

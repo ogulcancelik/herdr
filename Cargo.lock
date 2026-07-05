@@ -1401,6 +1401,7 @@ dependencies = [
  "clap_complete",
  "crossterm",
  "ctrlc",
+ "data-encoding",
  "interprocess",
  "iroh",
  "libc",
