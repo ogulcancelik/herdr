@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Prefix-mode bindings can now opt into repeat with `{ key = "prefix+p", repeat = true }`: after the action fires, tapping a prefix binding key again activates it without pressing the prefix again. Supported on `previous_tab`/`next_tab`, `previous_workspace`/`next_workspace`, `previous_agent`/`next_agent`, `cycle_pane_next`/`cycle_pane_previous`, and `swap_pane_left`/`down`/`up`/`right`. (discussions#599)
+
 ## [0.7.1] - 2026-06-24
 
 ### Added

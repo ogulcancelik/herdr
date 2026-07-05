@@ -41,6 +41,7 @@ impl App {
         self.state.update_dismissed = true;
 
         if self.state.is_prefix_key(raw_key) {
+            self.repeat_armed_until = None;
             if !self.pass_through_key_to_focused_pane(raw_key) {
                 leave_command_mode(&mut self.state);
             }
@@ -48,13 +49,20 @@ impl App {
         }
 
         if key.code == KeyCode::Esc {
+            self.repeat_armed_until = None;
             leave_command_mode(&mut self.state);
             return;
         }
 
         if let Some(action) = action_for_key(&self.state, raw_key, BindingDispatch::Prefix) {
+            if self.repeat_armed_until.is_some() && !action_repeat_enabled(&self.state, action) {
+                self.repeat_armed_until = None;
+                leave_command_mode(&mut self.state);
+                return;
+            }
             if action == NavigateAction::EditScrollback {
                 let previous_mode = self.state.mode;
+                self.repeat_armed_until = None;
                 self.launch_focused_scrollback_editor();
                 finish_action_context(&mut self.state, ActionContext::Prefix, previous_mode);
             } else {
@@ -65,10 +73,16 @@ impl App {
         }
 
         if let Some(binding) = command_for_key(&self.state, raw_key, BindingDispatch::Prefix) {
+            if self.repeat_armed_until.is_some() {
+                self.repeat_armed_until = None;
+                leave_command_mode(&mut self.state);
+                return;
+            }
             self.launch_custom_command(binding, ActionContext::Prefix);
             return;
         }
 
+        self.repeat_armed_until = None;
         leave_command_mode(&mut self.state);
     }
 
@@ -107,6 +121,8 @@ impl App {
         context: ActionContext,
     ) {
         let previous_mode = self.state.mode;
+        let repeat_enabled =
+            context == ActionContext::Prefix && action_repeat_enabled(&self.state, action);
         match action {
             NavigateAction::NewWorkspace => {
                 self.runtime_workspace_create(
@@ -344,7 +360,14 @@ impl App {
             }
         }
 
-        finish_action_context(&mut self.state, context, previous_mode);
+        if repeat_enabled && self.state.active.is_some() {
+            self.state.mode = Mode::Prefix;
+            self.repeat_armed_until =
+                Some(std::time::Instant::now() + crate::app::PREFIX_REPEAT_TIMEOUT);
+        } else {
+            self.repeat_armed_until = None;
+            finish_action_context(&mut self.state, context, previous_mode);
+        }
     }
 
     pub(crate) fn focus_workspace_idx_via_api(&mut self, ws_idx: usize) {
@@ -1360,6 +1383,25 @@ fn action_for_key(
     None
 }
 
+fn action_repeat_enabled(state: &AppState, action: NavigateAction) -> bool {
+    let kb = &state.keybinds;
+    match action {
+        NavigateAction::PreviousTab => kb.previous_tab.repeat,
+        NavigateAction::NextTab => kb.next_tab.repeat,
+        NavigateAction::PreviousWorkspace => kb.previous_workspace.repeat,
+        NavigateAction::NextWorkspace => kb.next_workspace.repeat,
+        NavigateAction::PreviousAgent => kb.previous_agent.repeat,
+        NavigateAction::NextAgent => kb.next_agent.repeat,
+        NavigateAction::CyclePaneNext => kb.cycle_pane_next.repeat,
+        NavigateAction::CyclePanePrevious => kb.cycle_pane_previous.repeat,
+        NavigateAction::SwapPaneLeft => kb.swap_pane_left.repeat,
+        NavigateAction::SwapPaneDown => kb.swap_pane_down.repeat,
+        NavigateAction::SwapPaneUp => kb.swap_pane_up.repeat,
+        NavigateAction::SwapPaneRight => kb.swap_pane_right.repeat,
+        _ => false,
+    }
+}
+
 fn navigate_mode_action_for_key(state: &AppState, key: TerminalKey) -> Option<NavigateAction> {
     let action = action_for_key(state, key, BindingDispatch::Prefix)?;
     if matches!(
@@ -1393,6 +1435,7 @@ pub(super) fn execute_navigate_action_in_context(
     context: ActionContext,
 ) {
     let previous_mode = state.mode;
+    let repeat_enabled = context == ActionContext::Prefix && action_repeat_enabled(state, action);
     match action {
         NavigateAction::NewWorkspace => {
             state.request_new_workspace = true;
@@ -1585,7 +1628,11 @@ pub(super) fn execute_navigate_action_in_context(
         NavigateAction::OpenNavigator => state.open_navigator_from(terminal_runtimes),
     }
 
-    finish_action_context(state, context, previous_mode);
+    if repeat_enabled && state.active.is_some() {
+        state.mode = Mode::Prefix;
+    } else {
+        finish_action_context(state, context, previous_mode);
+    }
 }
 
 fn workspace_action_target(state: &AppState, context: ActionContext) -> Option<usize> {
@@ -1835,6 +1882,73 @@ mod tests {
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "main");
         assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn repeat_enabled_prefix_action_stays_in_prefix_mode() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.workspaces[0].test_add_tab(Some("two"));
+        state.workspaces[0].test_add_tab(Some("three"));
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        state.mode = Mode::Prefix;
+        state.keybinds.previous_tab = crate::config::ActionKeybinds::prefix("p").with_repeat(true);
+
+        assert_eq!(state.workspaces[0].active_tab, 0);
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::PreviousTab,
+            ActionContext::Prefix,
+        );
+        assert_eq!(state.mode, Mode::Prefix);
+        assert_eq!(state.workspaces[0].active_tab, 2);
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::PreviousTab,
+            ActionContext::Prefix,
+        );
+        assert_eq!(state.mode, Mode::Prefix);
+        assert_eq!(state.workspaces[0].active_tab, 1);
+    }
+
+    #[test]
+    fn repeat_disabled_prefix_action_exits_prefix_mode_as_before() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.workspaces[0].test_add_tab(Some("two"));
+        state.workspaces[0].test_add_tab(Some("three"));
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        state.mode = Mode::Prefix;
+        state.keybinds.previous_tab = crate::config::ActionKeybinds::prefix("p");
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::PreviousTab,
+            ActionContext::Prefix,
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.workspaces[0].active_tab, 2);
+    }
+
+    #[test]
+    fn repeat_enabled_action_in_direct_context_does_not_arm_prefix() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.workspaces[0].test_add_tab(Some("two"));
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        state.mode = Mode::Terminal;
+        state.keybinds.previous_tab = crate::config::ActionKeybinds::prefix("p").with_repeat(true);
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::PreviousTab,
+            ActionContext::Direct,
+        );
+
+        assert_ne!(state.mode, Mode::Prefix);
     }
 
     #[test]
@@ -2315,6 +2429,96 @@ last_pane = "prefix+tab"
         );
 
         assert_eq!(action, Some(NavigateAction::SwitchTab(2)));
+    }
+
+    #[tokio::test]
+    async fn handle_prefix_key_repeats_previous_tab_on_bare_key_without_prefix() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.workspaces[0].test_add_tab(Some("two"));
+        app.state.workspaces[0].test_add_tab(Some("three"));
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Prefix;
+        app.state.keybinds.previous_tab =
+            crate::config::ActionKeybinds::prefix("p").with_repeat(true);
+
+        app.handle_prefix_key(TerminalKey::new(KeyCode::Char('p'), KeyModifiers::empty()));
+        assert_eq!(app.state.mode, Mode::Prefix);
+        assert_eq!(app.state.workspaces[0].active_tab, 2);
+        assert!(app.repeat_armed_until.is_some());
+
+        app.handle_prefix_key(TerminalKey::new(KeyCode::Char('p'), KeyModifiers::empty()));
+        assert_eq!(app.state.mode, Mode::Prefix);
+        assert_eq!(app.state.workspaces[0].active_tab, 1);
+        assert!(app.repeat_armed_until.is_some());
+    }
+
+    #[tokio::test]
+    async fn handle_prefix_key_unbound_key_exits_armed_prefix_mode_and_clears_deadline() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.workspaces[0].test_add_tab(Some("two"));
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Prefix;
+        app.state.keybinds.previous_tab =
+            crate::config::ActionKeybinds::prefix("p").with_repeat(true);
+
+        app.handle_prefix_key(TerminalKey::new(KeyCode::Char('p'), KeyModifiers::empty()));
+        assert_eq!(app.state.mode, Mode::Prefix);
+        assert!(app.repeat_armed_until.is_some());
+
+        app.handle_prefix_key(TerminalKey::new(KeyCode::Char('z'), KeyModifiers::empty()));
+        assert_ne!(app.state.mode, Mode::Prefix);
+        assert!(app.repeat_armed_until.is_none());
+    }
+
+    #[tokio::test]
+    async fn handle_prefix_key_non_repeat_binding_during_repeat_window_exits_without_firing() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.workspaces[0].test_add_tab(Some("two"));
+        app.state.workspaces[0].test_add_tab(Some("three"));
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Prefix;
+        app.state.keybinds.previous_tab =
+            crate::config::ActionKeybinds::prefix("p").with_repeat(true);
+        app.state.keybinds.next_tab = crate::config::ActionKeybinds::prefix("n");
+
+        // Arm repeat window via repeat-enabled binding.
+        app.handle_prefix_key(TerminalKey::new(KeyCode::Char('p'), KeyModifiers::empty()));
+        assert_eq!(app.state.mode, Mode::Prefix);
+        assert_eq!(app.state.workspaces[0].active_tab, 2);
+        assert!(app.repeat_armed_until.is_some());
+
+        // Press a non-repeat binding during the window — should not fire, should exit.
+        app.handle_prefix_key(TerminalKey::new(KeyCode::Char('n'), KeyModifiers::empty()));
+        assert_ne!(app.state.mode, Mode::Prefix);
+        assert!(app.repeat_armed_until.is_none());
+        assert_eq!(app.state.workspaces[0].active_tab, 2); // unchanged
     }
 
     #[tokio::test]

@@ -189,6 +189,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # rename_tab = "prefix+shift+t"
 # previous_tab = "prefix+p"
 # next_tab = "prefix+n"
+# Repeatable form: after the action fires, tapping the
+# same key again within ~500ms repeats it without pressing the prefix again.
+# Opt-in per binding, default off. Also supported on: previous_workspace,
+# next_workspace, previous_agent, next_agent, cycle_pane_next,
+# cycle_pane_previous, swap_pane_left/down/up/right.
+# previous_tab = { key = "prefix+p", repeat = true }
 # switch_tab = "prefix+1..9"
 # switch_workspace = ""   # optional indexed binding, e.g. "prefix+shift+1..9"
 # close_tab = "prefix+shift+x"

@@ -15,11 +15,19 @@ pub struct LiveKeybindConfig {
     pub keybinds: Keybinds,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(default)]
+pub struct BindingTableConfig {
+    pub key: Box<BindingConfig>,
+    pub repeat: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum BindingConfig {
     One(String),
     Many(Vec<String>),
+    Table(BindingTableConfig),
 }
 
 impl Default for BindingConfig {
@@ -41,7 +49,12 @@ impl BindingConfig {
         match self {
             Self::One(value) => vec![value.as_str()],
             Self::Many(values) => values.iter().map(String::as_str).collect(),
+            Self::Table(table) => table.key.values(),
         }
+    }
+
+    pub(crate) fn repeat(&self) -> bool {
+        matches!(self, Self::Table(table) if table.repeat)
     }
 
     pub(crate) fn has_values(&self) -> bool {
@@ -157,6 +170,7 @@ impl ResolvedBinding {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActionKeybinds {
     pub bindings: Vec<ResolvedBinding>,
+    pub repeat: bool,
 }
 
 impl ActionKeybinds {
@@ -175,6 +189,7 @@ impl ActionKeybinds {
             .expect("prefix binding should parse");
         Self {
             bindings: vec![trigger],
+            repeat: false,
         }
     }
 
@@ -188,7 +203,14 @@ impl ActionKeybinds {
             .expect("direct binding should parse");
         Self {
             bindings: vec![trigger],
+            repeat: false,
         }
+    }
+
+    #[cfg(test)]
+    pub fn with_repeat(mut self, repeat: bool) -> Self {
+        self.repeat = repeat;
+        self
     }
 
     #[cfg(test)]
@@ -719,6 +741,7 @@ fn append_custom_command_bindings(
             continue;
         }
 
+        diagnose_unsupported_repeat(&key_field, &command.key, diagnostics);
         let bindings = parse_action_bindings(
             &key_field,
             &command.key,
@@ -779,7 +802,18 @@ fn parse_action_bindings(
             }
         }
     }
-    ActionKeybinds { bindings }
+    ActionKeybinds {
+        bindings,
+        repeat: config.repeat(),
+    }
+}
+
+fn diagnose_unsupported_repeat(field: &str, config: &BindingConfig, diagnostics: &mut Vec<String>) {
+    if config.repeat() {
+        let diag = format!("repeat is not supported for {field}; ignoring");
+        warn!(message = %diag, "config diagnostic");
+        diagnostics.push(diag);
+    }
 }
 
 fn parse_navigate_bindings(
@@ -789,6 +823,7 @@ fn parse_navigate_bindings(
     diagnostics: &mut Vec<String>,
     source: BindingSource,
 ) -> ActionKeybinds {
+    diagnose_unsupported_repeat(field, config, diagnostics);
     let mut bindings = Vec::new();
     for raw in config.values() {
         let raw = raw.trim();
@@ -815,7 +850,10 @@ fn parse_navigate_bindings(
             }
         }
     }
-    ActionKeybinds { bindings }
+    ActionKeybinds {
+        bindings,
+        repeat: false,
+    }
 }
 
 fn parse_indexed_bindings(
@@ -825,6 +863,7 @@ fn parse_indexed_bindings(
     diagnostics: &mut Vec<String>,
     source: BindingSource,
 ) -> Vec<IndexedKeybind> {
+    diagnose_unsupported_repeat(field, config, diagnostics);
     let mut bindings = Vec::new();
     for raw in config.values() {
         let raw = raw.trim();
@@ -1490,6 +1529,106 @@ next_tab = "prefix+n"
                 KeyModifiers::empty()
             ))]
         );
+    }
+
+    #[test]
+    fn binding_config_table_parses_repeat_flag() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+previous_tab = { key = "prefix+p", repeat = true }
+"#,
+        )
+        .unwrap();
+        let kb = config.keybinds();
+        assert!(kb.previous_tab.repeat);
+        assert_eq!(
+            binding_triggers(&kb.previous_tab),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('p'),
+                KeyModifiers::empty()
+            ))]
+        );
+        assert!(config.collect_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn binding_config_table_with_many_keys_parses_repeat_flag() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+previous_tab = { key = ["prefix+p", "ctrl+alt+p"], repeat = true }
+"#,
+        )
+        .unwrap();
+        let kb = config.keybinds();
+        assert!(kb.previous_tab.repeat);
+        assert_eq!(
+            binding_triggers(&kb.previous_tab),
+            vec![
+                BindingTrigger::Prefix((KeyCode::Char('p'), KeyModifiers::empty())),
+                BindingTrigger::Direct((
+                    KeyCode::Char('p'),
+                    KeyModifiers::CONTROL | KeyModifiers::ALT
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn plain_string_and_array_bindings_default_repeat_false() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+previous_tab = "prefix+p"
+next_tab = ["prefix+n", "ctrl+alt+n"]
+"#,
+        )
+        .unwrap();
+        let kb = config.keybinds();
+        assert!(!kb.previous_tab.repeat);
+        assert!(!kb.next_tab.repeat);
+    }
+
+    #[test]
+    fn repeat_flag_ignored_with_diagnostic_for_custom_command() {
+        let config: Config = toml::from_str(
+            r#"
+[[keys.command]]
+key = { key = "prefix+alt+g", repeat = true }
+command = "lazygit"
+"#,
+        )
+        .unwrap();
+        let diagnostics = config.collect_diagnostics();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.contains("repeat is not supported for keys.command[0].key")),
+            "expected a repeat diagnostic, got: {diagnostics:?}"
+        );
+        let kb = config.keybinds();
+        assert_eq!(kb.custom_commands.len(), 1);
+        assert_eq!(kb.custom_commands[0].command, "lazygit");
+    }
+
+    #[test]
+    fn repeat_flag_ignored_with_diagnostic_for_indexed_binding() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+switch_tab = { key = "prefix+1..9", repeat = true }
+"#,
+        )
+        .unwrap();
+        let diagnostics = config.collect_diagnostics();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.contains("repeat is not supported for keys.switch_tab")),
+            "expected a repeat diagnostic, got: {diagnostics:?}"
+        );
+        assert_eq!(config.keybinds().switch_tab.len(), 9);
     }
 
     #[test]

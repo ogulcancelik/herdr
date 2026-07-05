@@ -3680,6 +3680,8 @@ impl HeadlessServer {
 
         changed |= self.app.clear_due_selection_highlight(now);
 
+        changed |= self.app.clear_due_repeat_armed(now);
+
         if self.has_app_client() {
             self.app.start_git_status_refresh_if_due(now);
         }
@@ -5514,6 +5516,24 @@ next_tab = ""
 
         assert!(!server.handle_scheduled_tasks_headless(now, false));
         assert_eq!(server.app.next_agent_manifest_update_check, None);
+    }
+
+    #[test]
+    fn headless_due_repeat_armed_deadline_exits_prefix_mode() {
+        let mut server = test_headless_server();
+        server
+            .app
+            .state
+            .workspaces
+            .push(crate::workspace::Workspace::test_new("test"));
+        server.app.state.active = Some(0);
+        server.app.state.mode = app::Mode::Prefix;
+        server.app.repeat_armed_until = Some(Instant::now() - Duration::from_secs(1));
+
+        assert!(server.handle_scheduled_tasks_headless(Instant::now(), false));
+
+        assert!(server.app.repeat_armed_until.is_none());
+        assert_eq!(server.app.state.mode, app::Mode::Terminal);
     }
 
     #[tokio::test]

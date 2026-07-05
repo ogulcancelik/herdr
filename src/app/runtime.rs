@@ -265,6 +265,8 @@ impl App {
 
         changed |= self.clear_due_selection_highlight(now);
 
+        changed |= self.clear_due_repeat_armed(now);
+
         self.start_git_status_refresh_if_due(now);
 
         if self
@@ -328,6 +330,26 @@ impl App {
             .is_some_and(|selection| !selection.is_in_progress())
         {
             self.state.clear_selection();
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn clear_due_repeat_armed(&mut self, now: Instant) -> bool {
+        if self
+            .repeat_armed_until
+            .is_none_or(|deadline| now < deadline)
+        {
+            return false;
+        }
+
+        self.repeat_armed_until = None;
+        if self.state.mode == Mode::Prefix {
+            self.state.mode = if self.state.active.is_some() {
+                Mode::Terminal
+            } else {
+                Mode::Navigate
+            };
             return true;
         }
         false
@@ -566,6 +588,7 @@ impl App {
             self.session_save_deadline,
             self.selection_autoscroll_deadline,
             self.selection_highlight_clear_deadline,
+            self.repeat_armed_until,
             render_deadline,
         ]
         .into_iter()
@@ -1067,5 +1090,46 @@ mod tests {
             .pending_agent_resume_plan
             .is_some());
         assert!(app.pending_agent_resume_deadline.is_none());
+    }
+
+    #[test]
+    fn next_loop_deadline_includes_repeat_armed_deadline() {
+        let (mut app, _pane_id) = test_app_with_pane();
+        // Neutralize the git-refresh timer, which `App::new` starts already
+        // overdue once a workspace exists, so it can't race our deadline.
+        app.git_refresh_in_flight = true;
+        let now = Instant::now();
+        app.repeat_armed_until = Some(now + Duration::from_millis(5));
+
+        let deadline = app
+            .next_loop_deadline(now, false)
+            .expect("repeat_armed_until should surface a deadline");
+
+        assert_eq!(deadline, now + Duration::from_millis(5));
+    }
+
+    #[test]
+    fn due_repeat_armed_deadline_exits_prefix_mode() {
+        let (mut app, _pane_id) = test_app_with_pane();
+        app.state.mode = Mode::Prefix;
+        app.repeat_armed_until = Some(Instant::now() - Duration::from_secs(1));
+
+        app.handle_scheduled_tasks(Instant::now(), false);
+
+        assert!(app.repeat_armed_until.is_none());
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn repeat_armed_deadline_not_yet_due_leaves_prefix_mode_untouched() {
+        let (mut app, _pane_id) = test_app_with_pane();
+        app.state.mode = Mode::Prefix;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        app.repeat_armed_until = Some(deadline);
+
+        app.handle_scheduled_tasks(Instant::now(), false);
+
+        assert_eq!(app.repeat_armed_until, Some(deadline));
+        assert_eq!(app.state.mode, Mode::Prefix);
     }
 }
