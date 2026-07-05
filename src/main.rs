@@ -69,6 +69,8 @@ mod ghostty;
 mod handoff_runtime;
 mod input;
 mod integration;
+mod iroh_bridge;
+mod iroh_keyfile;
 mod ipc;
 mod kitty_graphics;
 mod layout;

@@ -14,6 +14,7 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+use tracing::info;
 
 const BRIDGE_ACCEPT_POLL: Duration = Duration::from_millis(50);
 const BRIDGE_SOCKET_PERMISSION_MODE: u32 = 0o600;
@@ -51,11 +52,22 @@ impl RemoteKeybindings {
     }
 }
 
+/// The transport to use for the remote data channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemoteTransport {
+    /// Plain SSH stdio tunnel (default).
+    Ssh,
+    /// iroh QUIC tunnel — SSH is used only for initial binary deployment
+    /// and starting the remote bridge; all terminal I/O goes over QUIC.
+    Iroh,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemoteLaunch {
     pub(crate) target: String,
     pub(crate) keybindings: RemoteKeybindings,
     pub(crate) live_handoff: bool,
+    pub(crate) transport: RemoteTransport,
 }
 
 pub(crate) fn extract_remote_args(
@@ -70,6 +82,7 @@ pub(crate) fn extract_remote_args(
     let mut keybindings = RemoteKeybindings::Local;
     let mut keybindings_seen = false;
     let mut live_handoff = false;
+    let mut iroh = false;
     let mut index = 1;
     while index < args.len() {
         let arg = &args[index];
@@ -79,6 +92,11 @@ pub(crate) fn extract_remote_args(
         }
         if arg == "--handoff" {
             live_handoff = true;
+            index += 1;
+            continue;
+        }
+        if arg == "--iroh" {
+            iroh = true;
             index += 1;
             continue;
         }
@@ -131,6 +149,11 @@ pub(crate) fn extract_remote_args(
         target,
         keybindings,
         live_handoff,
+        transport: if iroh {
+            RemoteTransport::Iroh
+        } else {
+            RemoteTransport::Ssh
+        },
     });
     if remote.is_none() && keybindings_seen {
         return Err("--remote-keybindings requires --remote".to_string());
@@ -166,6 +189,43 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
         remote.keybindings,
         remote.live_handoff,
     );
+
+    match remote.transport {
+        RemoteTransport::Ssh => {
+            // Check if we have a stored iroh endpoint for this target.
+            // If so, auto-upgrade to iroh transport.
+            if let Some(stored_id) = load_remote_endpoint_id(&remote.target) {
+                info!(
+                    "found stored iroh endpoint for {} — using iroh transport",
+                    remote.target
+                );
+                let mut iroh_remote = remote;
+                iroh_remote.transport = RemoteTransport::Iroh;
+                return run_remote_iroh_stored(
+                    iroh_remote,
+                    local_socket,
+                    session_name,
+                    reattach_command,
+                    stored_id,
+                );
+            }
+            run_remote_ssh(remote, local_socket, session_name, reattach_command)
+        }
+        RemoteTransport::Iroh => run_remote_iroh(
+            remote,
+            local_socket,
+            session_name,
+            reattach_command,
+        ),
+    }
+}
+
+fn run_remote_ssh(
+    remote: RemoteLaunch,
+    local_socket: PathBuf,
+    session_name: String,
+    reattach_command: String,
+) -> io::Result<()> {
     let manage_ssh_config = crate::config::Config::load()
         .config
         .remote
@@ -189,6 +249,239 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
     )?;
 
     run_client_process(&local_socket, &reattach_command, remote.keybindings)
+}
+
+/// Run the remote session over iroh QUIC.
+///
+/// SSH is used only for initial binary deployment and to start the remote
+/// iroh bridge server.  All terminal I/O flows over the iroh QUIC connection.
+fn run_remote_iroh(
+    remote: RemoteLaunch,
+    local_socket: PathBuf,
+    _session_name: String,
+    reattach_command: String,
+) -> io::Result<()> {
+    let manage_ssh_config = crate::config::Config::load()
+        .config
+        .remote
+        .manage_ssh_config;
+    let remote_ssh = RemoteSsh::new(remote.target.clone(), manage_ssh_config);
+
+    // Phase 1: SSH bootstrap — ensure the remote herdr binary is installed
+    // and the herdr server is ready.
+    let prepared_remote = prepare_remote_herdr(&remote_ssh, remote.live_handoff)?;
+    ensure_remote_server_ready(
+        &remote_ssh,
+        &prepared_remote.remote_herdr,
+        prepared_remote.installed_or_replaced,
+        prepared_remote.stop_after_install_approved,
+        remote.live_handoff,
+    )?;
+
+    // Phase 2: Get the remote endpoint id and ensure the iroh bridge
+    // server is running on the remote host.
+    let remote_id = ensure_iroh_bridge_serve(&remote_ssh, &prepared_remote.remote_herdr)?;
+
+    // Persist the endpoint mapping so future `herdr --remote dev` can
+    // auto-detect iroh without the --iroh flag.
+    save_remote_endpoint_mapping(&remote.target, &remote_id)?;
+
+    launch_iroh_bridge_and_client(remote_id, local_socket, reattach_command, remote.keybindings)
+}
+
+/// Run iroh remote with a pre-known endpoint ID (from stored mapping).
+/// Skips the SSH-based endpoint ID discovery.
+fn run_remote_iroh_stored(
+    remote: RemoteLaunch,
+    local_socket: PathBuf,
+    _session_name: String,
+    reattach_command: String,
+    stored_id: String,
+) -> io::Result<()> {
+    launch_iroh_bridge_and_client(stored_id, local_socket, reattach_command, remote.keybindings)
+}
+
+/// Shared iroh launch: start bridge + run client.
+fn launch_iroh_bridge_and_client(
+    remote_id: String,
+    local_socket: PathBuf,
+    reattach_command: String,
+    keybindings: RemoteKeybindings,
+) -> io::Result<()> {
+    let bridge = IrohBridge::start(remote_id, local_socket.clone())?;
+    let result = run_client_process(&local_socket, &reattach_command, keybindings);
+    drop(bridge);
+    let _ = std::fs::remove_file(&local_socket);
+    result
+}
+
+/// Ensure the iroh bridge server is running on the remote host via SSH.
+///
+/// Returns the remote endpoint's [`EndpointId`] string.
+fn ensure_iroh_bridge_serve(
+    ssh: &RemoteSsh,
+    remote_herdr: &RemoteHerdr,
+) -> io::Result<String> {
+    // Get (or create) the remote identity and return its endpoint id.
+    let id_cmd = format!("{} iroh-bridge id", remote_herdr.shell_path);
+    let output = ssh.sh_output(&id_cmd)?;
+    if !output.status.success() {
+        return Err(command_failed("failed to get remote iroh endpoint id", &output));
+    }
+    let remote_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if remote_id.is_empty() {
+        return Err(io::Error::other(
+            "remote iroh endpoint id is empty",
+        ));
+    }
+
+    // Check if the iroh bridge serve is already running by verifying the
+    // remote server client socket exists and the endpoint responds.
+    // For now, we unconditionally (re)start it in the background.
+    let serve_cmd = format!(
+        "nohup {} iroh-bridge serve >/dev/null 2>&1 &",
+        remote_herdr.shell_path
+    );
+    let output = ssh.sh_output(&serve_cmd)?;
+    if !output.status.success() {
+        // nohup may produce warnings; check for actual failures.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.is_empty() && !stderr.contains("nohup") {
+            return Err(command_failed("failed to start iroh bridge serve", &output));
+        }
+    }
+
+    Ok(remote_id)
+}
+
+// ---------------------------------------------------------------------------
+// Remote endpoint ID persistence
+// ---------------------------------------------------------------------------
+
+/// Path to the remote endpoint ID mapping file.
+fn remote_endpoint_map_path() -> PathBuf {
+    let config_dir = std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".config"))
+        .unwrap_or_else(|| PathBuf::from("."));
+    config_dir.join("herdr").join("remote_endpoints.toml")
+}
+
+/// Save a target → endpoint_id mapping for future auto-iroh detection.
+fn save_remote_endpoint_mapping(target: &str, endpoint_id: &str) -> io::Result<()> {
+    let path = remote_endpoint_map_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut map = load_endpoint_map(&path);
+    map.insert(target.to_string(), endpoint_id.to_string());
+    let mut content = String::new();
+    for (t, id) in &map {
+        content.push_str(&format!("{t} = \"{id}\"\n"));
+    }
+    fs::write(&path, content)?;
+    Ok(())
+}
+
+/// Look up a stored endpoint ID for a target.
+pub(crate) fn load_remote_endpoint_id(target: &str) -> Option<String> {
+    let path = remote_endpoint_map_path();
+    let map = load_endpoint_map(&path);
+    map.get(target).cloned()
+}
+
+fn load_endpoint_map(path: &Path) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    let Ok(content) = fs::read_to_string(path) else {
+        return map;
+    };
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim().to_string();
+            let value = value.trim().trim_matches('"').to_string();
+            map.insert(key, value);
+        }
+    }
+    map
+}
+
+/// A background iroh bridge that tunnels a local Unix socket to a remote
+/// endpoint over QUIC.
+///
+/// Similar to [`SshStdioBridge`] but uses iroh instead of SSH.
+struct IrohBridge {
+    local_socket: PathBuf,
+    /// Signal to stop the bridge thread.
+    should_stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl IrohBridge {
+    fn start(remote_endpoint_id: String, local_socket: PathBuf) -> io::Result<Self> {
+        let should_stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&should_stop);
+        let thread_socket = local_socket.clone();
+
+        let thread = thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    eprintln!("herdr: iroh bridge failed to create runtime: {e}");
+                    return;
+                }
+            };
+
+            rt.block_on(async move {
+                let remote_id: iroh::EndpointId = match remote_endpoint_id.parse() {
+                    Ok(id) => id,
+                    Err(e) => {
+                        eprintln!("herdr: iroh bridge invalid endpoint id: {e}");
+                        return;
+                    }
+                };
+
+                // Load local identity key.
+                let secret_key = crate::iroh_bridge::load_or_create_identity_key().ok();
+
+                let config = crate::iroh_bridge::ConnectConfig {
+                    remote_endpoint_id: remote_id,
+                    local_socket: thread_socket.clone(),
+                    secret_key,
+                    relay_urls: Vec::new(),
+                };
+
+                if let Err(e) = crate::iroh_bridge::run_connect(config).await {
+                    if !thread_stop.load(Ordering::Acquire) {
+                        eprintln!("herdr: iroh bridge failed: {e}");
+                    }
+                }
+            });
+        });
+
+        Ok(Self {
+            local_socket,
+            should_stop,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for IrohBridge {
+    fn drop(&mut self) {
+        self.should_stop.store(true, Ordering::Release);
+        let _ = std::fs::remove_file(&self.local_socket);
+        if let Some(thread) = self.thread.take() {
+            // Give the thread a moment to notice the stop signal,
+            // but don't block indefinitely.
+            let _ = thread.join();
+        }
+    }
 }
 
 pub(crate) fn run_remote_client_bridge() -> io::Result<()> {
@@ -1970,6 +2263,7 @@ fn sanitize_path_component(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn bridge_socket_is_user_only() {
@@ -3012,5 +3306,117 @@ mod tests {
         InstallSource::temporary(path, dir.clone()).cleanup();
 
         assert!(!dir.exists());
+    }
+
+    // --- --iroh flag extraction tests ---
+
+    #[test]
+    fn extract_remote_args_iroh_flag_defaults_to_ssh() {
+        let args = vec!["herdr".into(), "--remote=dev".into()];
+        let (_cleaned, remote) = extract_remote_args(&args).unwrap();
+        let remote = remote.unwrap();
+        assert_eq!(remote.transport, RemoteTransport::Ssh);
+    }
+
+    #[test]
+    fn extract_remote_args_iroh_flag_sets_transport() {
+        let args = vec!["herdr".into(), "--iroh".into(), "--remote=dev".into()];
+        let (_cleaned, remote) = extract_remote_args(&args).unwrap();
+        let remote = remote.unwrap();
+        assert_eq!(remote.transport, RemoteTransport::Iroh);
+        assert_eq!(remote.target, "dev");
+    }
+
+    #[test]
+    fn extract_remote_args_iroh_after_remote() {
+        let args = vec!["herdr".into(), "--remote=dev".into(), "--iroh".into()];
+        let (_cleaned, remote) = extract_remote_args(&args).unwrap();
+        let remote = remote.unwrap();
+        assert_eq!(remote.transport, RemoteTransport::Iroh);
+    }
+
+    #[test]
+    fn extract_remote_args_iroh_with_space_form() {
+        let args = vec!["herdr".into(), "--remote".into(), "dev".into(), "--iroh".into()];
+        let (_cleaned, remote) = extract_remote_args(&args).unwrap();
+        let remote = remote.unwrap();
+        assert_eq!(remote.transport, RemoteTransport::Iroh);
+        assert_eq!(remote.target, "dev");
+    }
+
+    #[test]
+    fn extract_remote_args_iroh_with_handoff() {
+        let args = vec![
+            "herdr".into(),
+            "--remote=dev".into(),
+            "--iroh".into(),
+            "--handoff".into(),
+        ];
+        let (_cleaned, remote) = extract_remote_args(&args).unwrap();
+        let remote = remote.unwrap();
+        assert_eq!(remote.transport, RemoteTransport::Iroh);
+        assert!(remote.live_handoff);
+    }
+
+    // --- endpoint mapping tests ---
+
+    #[test]
+    fn save_and_load_remote_endpoint_mapping() {
+        let dir = TempDir::new().unwrap();
+        let config_dir = dir.path().join(".config");
+        std::fs::create_dir_all(config_dir.join("herdr")).unwrap();
+        unsafe { std::env::set_var("HOME", dir.path()) };
+
+        save_remote_endpoint_mapping("dev", "abc123def456").unwrap();
+        let loaded = load_remote_endpoint_id("dev");
+        assert_eq!(loaded, Some("abc123def456".to_string()));
+    }
+
+    #[test]
+    fn load_remote_endpoint_id_missing_target() {
+        let dir = TempDir::new().unwrap();
+        let config_dir = dir.path().join(".config");
+        std::fs::create_dir_all(config_dir.join("herdr")).unwrap();
+        unsafe { std::env::set_var("HOME", dir.path()) };
+
+        let result = load_remote_endpoint_id("nonexistent");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn save_remote_endpoint_mapping_updates_existing() {
+        let dir = TempDir::new().unwrap();
+        let config_dir = dir.path().join(".config");
+        std::fs::create_dir_all(config_dir.join("herdr")).unwrap();
+        unsafe { std::env::set_var("HOME", dir.path()) };
+
+        save_remote_endpoint_mapping("dev", "old-id").unwrap();
+        save_remote_endpoint_mapping("dev", "new-id").unwrap();
+        let loaded = load_remote_endpoint_id("dev");
+        assert_eq!(loaded, Some("new-id".to_string()));
+    }
+
+    #[test]
+    fn load_endpoint_map_handles_empty_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("empty.toml");
+        std::fs::write(&path, "").unwrap();
+        let map = load_endpoint_map(&path);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn load_endpoint_map_handles_comments_and_blanks() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.toml");
+        std::fs::write(
+            &path,
+            "# comment\n\ndev = \"abc123\"\n\nprod = \"def456\"\n",
+        )
+        .unwrap();
+        let map = load_endpoint_map(&path);
+        assert_eq!(map.get("dev").unwrap(), "abc123");
+        assert_eq!(map.get("prod").unwrap(), "def456");
+        assert_eq!(map.len(), 2);
     }
 }
