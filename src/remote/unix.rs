@@ -54,7 +54,7 @@ impl RemoteKeybindings {
 
 /// The transport to use for the remote data channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RemoteTransport {
+pub(crate) enum RemoteTransportKind {
     /// Plain SSH stdio tunnel (default).
     Ssh,
     /// iroh QUIC tunnel — SSH is used only for initial binary deployment
@@ -67,7 +67,7 @@ pub(crate) struct RemoteLaunch {
     pub(crate) target: String,
     pub(crate) keybindings: RemoteKeybindings,
     pub(crate) live_handoff: bool,
-    pub(crate) transport: RemoteTransport,
+    pub(crate) transport: RemoteTransportKind,
 }
 
 pub(crate) fn extract_remote_args(
@@ -150,9 +150,9 @@ pub(crate) fn extract_remote_args(
         keybindings,
         live_handoff,
         transport: if iroh {
-            RemoteTransport::Iroh
+            RemoteTransportKind::Iroh
         } else {
-            RemoteTransport::Ssh
+            RemoteTransportKind::Ssh
         },
     });
     if remote.is_none() && keybindings_seen {
@@ -191,7 +191,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
     );
 
     match remote.transport {
-        RemoteTransport::Ssh => {
+        RemoteTransportKind::Ssh => {
             // Check if we have a stored iroh endpoint for this target.
             // If so, auto-upgrade to iroh transport.
             if let Some(stored_id) = load_remote_endpoint_id(&remote.target) {
@@ -200,7 +200,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
                     remote.target
                 );
                 let mut iroh_remote = remote;
-                iroh_remote.transport = RemoteTransport::Iroh;
+                iroh_remote.transport = RemoteTransportKind::Iroh;
                 return run_remote_iroh_stored(
                     iroh_remote,
                     local_socket,
@@ -211,7 +211,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
             }
             run_remote_ssh(remote, local_socket, session_name, reattach_command)
         }
-        RemoteTransport::Iroh => run_remote_iroh(
+        RemoteTransportKind::Iroh => run_remote_iroh(
             remote,
             local_socket,
             session_name,
@@ -303,19 +303,75 @@ fn run_remote_iroh_stored(
     launch_iroh_bridge_and_client(stored_id, local_socket, reattach_command, remote.keybindings)
 }
 
-/// Shared iroh launch: start bridge + run client.
+/// Launch the iroh bridge and client as a single unit.
+///
+/// Uses [`BridgeHandle`] with an [`IrohTransport`] — the same lifecycle
+/// as the SSH path but over QUIC.
 fn launch_iroh_bridge_and_client(
     remote_id: String,
     local_socket: PathBuf,
     reattach_command: String,
     keybindings: RemoteKeybindings,
 ) -> io::Result<()> {
-    let bridge = IrohBridge::start(remote_id, local_socket.clone())?;
+    let transport = IrohTransport {
+        remote_endpoint_id: remote_id,
+    };
+    let bridge = BridgeHandle::start(transport, local_socket.clone())?;
     let result = run_client_process(&local_socket, &reattach_command, keybindings);
     drop(bridge);
     let _ = std::fs::remove_file(&local_socket);
     result
 }
+
+// ---------------------------------------------------------------------------
+// Iroh transport (QUIC)
+// ---------------------------------------------------------------------------
+
+/// An iroh QUIC transport that implements [`RemoteTransport`].
+///
+/// On [`bridge`], loads the local identity key, connects to the remote
+/// endpoint via iroh, opens a bidirectional QUIC stream, and tunnels the
+/// Unix socket stream through it.
+struct IrohTransport {
+    remote_endpoint_id: String,
+}
+
+impl RemoteTransport for IrohTransport {
+    fn bridge(&self, local_stream: UnixStream) -> io::Result<()> {
+        // Convert blocking std UnixStream to async tokio UnixStream.
+        local_stream.set_nonblocking(true)?;
+        let local_stream = tokio::net::UnixStream::from_std(local_stream)?;
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| io::Error::other(format!("failed to create tokio runtime: {e}")))?;
+
+        let remote_id: iroh::EndpointId = self.remote_endpoint_id.parse().map_err(|e| {
+            io::Error::other(format!("invalid endpoint id: {e}"))
+        })?;
+
+        let secret_key = crate::iroh_bridge::load_or_create_identity_key().ok();
+
+        let config = crate::iroh_bridge::ConnectConfig {
+            remote_endpoint_id: remote_id,
+            local_socket: PathBuf::new(), // not used by the bridge itself
+            secret_key,
+            relay_urls: Vec::new(),
+        };
+
+        rt.block_on(async move {
+            let (endpoint, _) = crate::iroh_bridge::bind_endpoint(config.secret_key, config.relay_urls.clone()).await?;
+            let result = crate::iroh_bridge::run_connect_once_with_stream(&endpoint, &config, local_stream).await;
+            endpoint.close().await;
+            result
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Remote endpoint ID persistence
+// ---------------------------------------------------------------------------
 
 /// Ensure the iroh bridge server is running on the remote host via SSH.
 ///
@@ -430,95 +486,6 @@ fn load_endpoint_map(path: &Path) -> BTreeMap<String, String> {
         }
     }
     map
-}
-
-/// A background iroh bridge that tunnels a local Unix socket to a remote
-/// endpoint over QUIC.
-///
-/// Similar to [`SshStdioBridge`] but uses iroh instead of SSH.
-struct IrohBridge {
-    local_socket: PathBuf,
-    /// Signal to stop the bridge thread.
-    should_stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl IrohBridge {
-    fn start(remote_endpoint_id: String, local_socket: PathBuf) -> io::Result<Self> {
-        let should_stop = Arc::new(AtomicBool::new(false));
-        let thread_stop = Arc::clone(&should_stop);
-        let thread_socket = local_socket.clone();
-
-        let thread = thread::spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        eprintln!("herdr: iroh bridge failed to create runtime: {e}");
-                        return;
-                    }
-                };
-
-                rt.block_on(async move {
-                    let remote_id: iroh::EndpointId = match remote_endpoint_id.parse() {
-                        Ok(id) => id,
-                        Err(e) => {
-                            eprintln!("herdr: iroh bridge invalid endpoint id: {e}");
-                            return;
-                        }
-                    };
-
-                    // Load local identity key.
-                    let secret_key = crate::iroh_bridge::load_or_create_identity_key().ok();
-
-                    let config = crate::iroh_bridge::ConnectConfig {
-                        remote_endpoint_id: remote_id,
-                        local_socket: thread_socket.clone(),
-                        secret_key,
-                        relay_urls: Vec::new(),
-                    };
-
-                    if let Err(e) = crate::iroh_bridge::run_connect(config).await {
-                        if !thread_stop.load(Ordering::Acquire) {
-                            eprintln!("herdr: iroh bridge failed: {e}");
-                        }
-                    }
-                });
-            }));
-
-            if let Err(panic_err) = result {
-                let msg = if let Some(s) = panic_err.downcast_ref::<String>() {
-                    s.clone()
-                } else if let Some(s) = panic_err.downcast_ref::<&str>() {
-                    s.to_string()
-                } else {
-                    "unknown panic".to_string()
-                };
-                eprintln!("herdr: iroh bridge thread panicked: {msg}");
-            }
-        });
-
-        Ok(Self {
-            local_socket,
-            should_stop,
-            thread: Some(thread),
-        })
-    }
-}
-
-impl Drop for IrohBridge {
-    fn drop(&mut self) {
-        self.should_stop.store(true, Ordering::Release);
-        let _ = std::fs::remove_file(&self.local_socket);
-        if let Some(thread) = self.thread.take() {
-            // Give the thread a moment to notice the stop signal,
-            // but don't block indefinitely.
-            let _ = thread.join();
-        }
-    }
 }
 
 pub(crate) fn run_remote_client_bridge() -> io::Result<()> {
@@ -3557,7 +3524,7 @@ mod tests {
         let args = vec!["herdr".into(), "--remote=dev".into()];
         let (_cleaned, remote) = extract_remote_args(&args).unwrap();
         let remote = remote.unwrap();
-        assert_eq!(remote.transport, RemoteTransport::Ssh);
+        assert_eq!(remote.transport, RemoteTransportKind::Ssh);
     }
 
     #[test]
@@ -3565,7 +3532,7 @@ mod tests {
         let args = vec!["herdr".into(), "--iroh".into(), "--remote=dev".into()];
         let (_cleaned, remote) = extract_remote_args(&args).unwrap();
         let remote = remote.unwrap();
-        assert_eq!(remote.transport, RemoteTransport::Iroh);
+        assert_eq!(remote.transport, RemoteTransportKind::Iroh);
         assert_eq!(remote.target, "dev");
     }
 
@@ -3574,7 +3541,7 @@ mod tests {
         let args = vec!["herdr".into(), "--remote=dev".into(), "--iroh".into()];
         let (_cleaned, remote) = extract_remote_args(&args).unwrap();
         let remote = remote.unwrap();
-        assert_eq!(remote.transport, RemoteTransport::Iroh);
+        assert_eq!(remote.transport, RemoteTransportKind::Iroh);
     }
 
     #[test]
@@ -3582,7 +3549,7 @@ mod tests {
         let args = vec!["herdr".into(), "--remote".into(), "dev".into(), "--iroh".into()];
         let (_cleaned, remote) = extract_remote_args(&args).unwrap();
         let remote = remote.unwrap();
-        assert_eq!(remote.transport, RemoteTransport::Iroh);
+        assert_eq!(remote.transport, RemoteTransportKind::Iroh);
         assert_eq!(remote.target, "dev");
     }
 
@@ -3596,7 +3563,7 @@ mod tests {
         ];
         let (_cleaned, remote) = extract_remote_args(&args).unwrap();
         let remote = remote.unwrap();
-        assert_eq!(remote.transport, RemoteTransport::Iroh);
+        assert_eq!(remote.transport, RemoteTransportKind::Iroh);
         assert!(remote.live_handoff);
     }
 

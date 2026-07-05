@@ -173,6 +173,21 @@ async fn run_connect_once(endpoint: &Endpoint, config: &ConnectConfig) -> io::Re
         .await
         .map_err(|e| io::Error::other(format!("failed to accept on local socket: {e}")))?;
 
+    run_connect_once_with_stream(endpoint, config, local_stream).await?;
+    let _ = std::fs::remove_file(local_socket);
+    Ok(())
+}
+
+/// Connect once with an already-accepted Unix stream.
+///
+/// Used by [`RemoteTransport`] implementors (e.g., `IrohTransport`) that
+/// receive a pre-accepted stream from `BridgeHandle`.  Binds a fresh iroh
+/// endpoint, connects to the remote, and bridges the stream through.
+pub async fn run_connect_once_with_stream(
+    endpoint: &Endpoint,
+    config: &ConnectConfig,
+    local_stream: tokio::net::UnixStream,
+) -> io::Result<()> {
     let conn = endpoint
         .connect(config.remote_endpoint_id, ALPN)
         .await
@@ -189,8 +204,6 @@ async fn run_connect_once(endpoint: &Endpoint, config: &ConnectConfig) -> io::Re
         .map_err(|e| io::Error::other(format!("failed to open bidirectional stream: {e}")))?;
 
     bridge_streams(local_stream, iroh_send, iroh_recv).await;
-
-    let _ = std::fs::remove_file(local_socket);
     Ok(())
 }
 
@@ -230,7 +243,7 @@ pub struct ConnectConfig {
 
 /// Bind an iroh endpoint with default configuration suitable for a
 /// long-lived bridge.
-async fn bind_endpoint(
+pub async fn bind_endpoint(
     secret_key: Option<[u8; 32]>,
     relay_urls: Vec<String>,
 ) -> io::Result<(Endpoint, EndpointId)> {

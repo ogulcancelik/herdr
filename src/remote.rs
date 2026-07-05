@@ -29,7 +29,7 @@ impl RemoteKeybindings {
 
 #[cfg(windows)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RemoteTransport {
+pub(crate) enum RemoteTransportKind {
     Ssh,
     Iroh,
 }
@@ -40,7 +40,7 @@ pub(crate) struct RemoteLaunch {
     pub(crate) target: String,
     pub(crate) keybindings: RemoteKeybindings,
     pub(crate) live_handoff: bool,
-    pub(crate) transport: RemoteTransport,
+    pub(crate) transport: RemoteTransportKind,
 }
 
 #[cfg(windows)]
@@ -124,9 +124,9 @@ pub(crate) fn extract_remote_args(
         keybindings,
         live_handoff,
         transport: if iroh {
-            RemoteTransport::Iroh
+            RemoteTransportKind::Iroh
         } else {
-            RemoteTransport::Ssh
+            RemoteTransportKind::Ssh
         },
     });
     if remote.is_none() && keybindings_seen {
