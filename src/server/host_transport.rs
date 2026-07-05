@@ -461,4 +461,66 @@ mod tests {
         reader.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Symmetric with `closer_unblocks_a_reader_stuck_in_read`: proves
+    /// `close()` also interrupts a blocked WRITE, not just a blocked read.
+    /// This is what `RemotePaneAttach`'s writer thread (`src/server/
+    /// remote_pane.rs`) relies on for bounded teardown against a wedged
+    /// remote -- a writer stuck inside `write_message` because the peer's
+    /// receive buffer is full and nothing is reading it.
+    ///
+    /// The peer end (`_server_end`) is kept open but never read from, so the
+    /// kernel socket buffer genuinely fills and the writer thread's
+    /// `write_all` call blocks for real (unix domain socket buffers are a
+    /// few hundred KiB by default; a hundred 1 MiB chunks reliably exceeds
+    /// that). Dropping the peer instead would fail the write fast with
+    /// `EPIPE`/`ECONNRESET`, which would not distinguish "close() unblocked
+    /// a genuinely blocked write" from "the write never blocked at all".
+    #[test]
+    fn closer_unblocks_a_writer_stuck_in_a_blocked_write() {
+        let dir = unique_temp_dir("host-transport-close-write");
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("api.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let (server_tx, server_rx) = mpsc::channel();
+        let accept = std::thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            server_tx.send(s).unwrap();
+        });
+        let channel = transport_for(&sock).open_api().unwrap();
+        let _server_end = server_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("server accept");
+        accept.join().unwrap();
+
+        let close = channel.close;
+        let (_read_half, mut write_half) = channel.stream.split();
+        let (result_tx, result_rx) = mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let chunk = vec![0u8; 1024 * 1024];
+            let mut result = Ok(());
+            for _ in 0..100 {
+                if let Err(err) = write_half.write_all(&chunk) {
+                    result = Err(err);
+                    break;
+                }
+            }
+            let _ = result_tx.send(result);
+        });
+        // Bias the test toward closing a writer that is already blocked in
+        // write(); close-before-any-write also passes (the very first write
+        // then fails fast), so this is not a correctness wait.
+        std::thread::sleep(Duration::from_millis(200));
+        close();
+        let result = result_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("writer did not unblock after close()");
+        // Either outcome proves the write returned instead of hanging
+        // forever: a clean full drain (unlikely given the volume written
+        // against an unread peer, but not itself a failure) or an error from
+        // the now-closed socket.
+        let _ = result;
+        writer.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

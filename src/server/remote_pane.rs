@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RemotePaneKey {
@@ -994,10 +994,120 @@ fn read_json_line(
 /// after this deadline, unblocking the blocking read.
 const ATTACH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Bounded grace window `Drop` gives the writer thread to actually flush a
+/// best-effort `Detach` over a still-healthy connection before force-closing
+/// the channel. Mirrors `attach_with_timeout`'s handshake watchdog: short
+/// enough that a genuinely wedged remote (full socket send buffer, blocked
+/// write) doesn't stall teardown, long enough that a healthy remote's tiny
+/// Detach write -- which only needs to reach the kernel's socket buffer, not
+/// be read by the peer -- always finishes well inside it.
+const DETACH_TEARDOWN_GRACE: Duration = Duration::from_secs(2);
+
+/// One message the writer thread drains off `RemotePaneAttach`'s mpsc queue.
+/// `Input`/`Resize` mirror the two `ClientMessage` variants `send_input`/
+/// `resize` used to write directly; `Detach` is the teardown sentinel both
+/// `detach()` and `Drop` enqueue (see their doc comments).
+enum WriteMsg {
+    Input(Vec<u8>),
+    Resize {
+        cols: u16,
+        rows: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    },
+    Detach,
+}
+
+/// Owns the write half of a `RemotePaneAttach`'s terminal channel on its own
+/// thread, symmetric with the reader thread `run_attach_reader` owns the
+/// read half on. `send_input`/`resize`/`detach` never touch the socket
+/// directly -- they enqueue a `WriteMsg` onto the mpsc channel this thread
+/// drains, which is why they can never block the main loop even if this
+/// thread is itself stuck inside a blocking `write_message` call against a
+/// wedged remote (a full kernel socket send buffer that never drains).
+///
+/// Exits on the first write error (a dead connection: further writes would
+/// only fail the same way) or once it sees `WriteMsg::Detach` -- which
+/// arrives either because a caller enqueued it explicitly, or because every
+/// `Sender` clone was dropped without one (`recv()` returning `Err`, folded
+/// into the same arm below): either way means "no more writes are coming",
+/// so it sends one best-effort `Detach` and returns, mirroring the old
+/// synchronous `detach()`'s best-effort semantics.
+fn run_attach_writer(
+    mut write_half: Box<dyn Write + Send>,
+    write_rx: mpsc::Receiver<WriteMsg>,
+    host: HostLinkId,
+    local_pane: PaneId,
+) {
+    loop {
+        let msg = match write_rx.recv() {
+            Ok(msg) => msg,
+            Err(_) => WriteMsg::Detach,
+        };
+        match msg {
+            WriteMsg::Input(data) => {
+                if let Err(err) =
+                    protocol::write_message(&mut write_half, &ClientMessage::Input { data })
+                {
+                    debug!(
+                        host = %host.0,
+                        pane = local_pane.raw(),
+                        err = %err,
+                        "remote pane attach writer failed to forward input; ending writer thread"
+                    );
+                    return;
+                }
+            }
+            WriteMsg::Resize {
+                cols,
+                rows,
+                cell_width_px,
+                cell_height_px,
+            } => {
+                if let Err(err) = protocol::write_message(
+                    &mut write_half,
+                    &ClientMessage::Resize {
+                        cols,
+                        rows,
+                        cell_width_px,
+                        cell_height_px,
+                    },
+                ) {
+                    debug!(
+                        host = %host.0,
+                        pane = local_pane.raw(),
+                        err = %err,
+                        "remote pane attach writer failed to forward resize; ending writer thread"
+                    );
+                    return;
+                }
+            }
+            WriteMsg::Detach => {
+                if let Err(err) = protocol::write_message(&mut write_half, &ClientMessage::Detach) {
+                    debug!(
+                        host = %host.0,
+                        pane = local_pane.raw(),
+                        err = %err,
+                        "failed to send Detach before closing remote pane attach"
+                    );
+                }
+                return;
+            }
+        }
+    }
+}
+
 pub(crate) struct RemotePaneAttach {
-    write: Mutex<Box<dyn Write + Send>>,
+    /// `None` once `detach()` (or `Drop`) has taken it to send the teardown
+    /// sentinel -- see both their doc comments for why this must be an
+    /// `Option` rather than a plain `Sender` (mirrors `reader`/`writer`
+    /// below): `Drop` needs to be able to close this end of the channel
+    /// from `&mut self` before joining the writer thread, which a bare,
+    /// non-`Option` field can't do without a throwaway replacement value.
+    write_tx: Option<mpsc::Sender<WriteMsg>>,
     close: Arc<dyn Fn() + Send + Sync>,
     reader: Option<std::thread::JoinHandle<()>>,
+    writer: Option<std::thread::JoinHandle<()>>,
 }
 
 /// Manual impl: the write half/closer/reader handle carry no meaningful
@@ -1100,10 +1210,17 @@ impl RemotePaneAttach {
             run_attach_reader(read_half, reader_host, local_pane, events_tx);
         });
 
+        let (write_tx, write_rx) = mpsc::channel::<WriteMsg>();
+        let writer_host = host;
+        let writer = std::thread::spawn(move || {
+            run_attach_writer(write_half, write_rx, writer_host, local_pane);
+        });
+
         Ok(Self {
-            write: Mutex::new(write_half),
+            write_tx: Some(write_tx),
             close,
             reader: Some(reader),
+            writer: Some(writer),
         })
     }
 
@@ -1165,33 +1282,62 @@ impl RemotePaneAttach {
             .map_err(|err| io::Error::other(format!("failed to send AttachTerminal: {err}")))
     }
 
-    /// Sends raw input bytes to the remote pane. Performs no link-health
-    /// check itself -- callers route through `route_remote_pane_input`
-    /// first so a non-`Connected` link drops the input instead of reaching
-    /// here.
+    /// Enqueues `msg` onto the writer thread's channel. Never touches the
+    /// socket itself and so can never block the caller (an unbounded mpsc
+    /// `send` is O(1) regardless of whether the writer thread is stuck
+    /// inside a blocking `write_message` against a wedged remote) -- the
+    /// entire point of routing every write through `run_attach_writer`
+    /// instead of writing here directly, on whatever thread called this
+    /// (the main loop, for `send_input`/`resize`). Returns `Err` if the
+    /// writer thread is already gone (an already-detached attach, or one
+    /// whose writer exited after a prior write error): the caller logs and
+    /// drops, exactly like an already-closed channel.
+    fn enqueue(&self, msg: WriteMsg) -> io::Result<()> {
+        self.write_tx
+            .as_ref()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "remote pane attach already detached",
+                )
+            })?
+            .send(msg)
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "remote pane attach writer thread is gone",
+                )
+            })
+    }
+
+    /// Enqueues raw input bytes for the writer thread to forward to the
+    /// remote pane. Performs no link-health check itself -- callers route
+    /// through `route_remote_pane_input` first so a non-`Connected` link
+    /// drops the input instead of reaching here. Non-blocking: see
+    /// `enqueue`'s doc comment.
     ///
     /// Driven by `HeadlessServer::deliver_remote_pane_input` (Task 9b's
     /// input commit) once local input has been encoded against the
     /// focused remote pane's own runtime; also exercised directly by this
     /// module's own tests.
     pub(crate) fn send_input(&self, data: Vec<u8>) -> io::Result<()> {
-        let mut write = self
-            .write
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        protocol::write_message(&mut *write, &ClientMessage::Input { data })
-            .map_err(|err| io::Error::other(err.to_string()))
+        let len = data.len();
+        self.enqueue(WriteMsg::Input(data))?;
+        trace!(
+            bytes = len,
+            "enqueued remote pane input for the writer thread"
+        );
+        Ok(())
     }
 
-    /// Forwards a local pane resize to the remote as `ClientMessage::Resize`
-    /// so the remote re-renders at the new size (the attach `Hello` only
-    /// carried the size at attach time). Symmetric with `send_input`: same
-    /// write-half mutex. A future commit wires this to the local pane-resize
-    /// events that already drive the local emulator's resize; nothing calls
-    /// it in production yet (this commit sizes the local emulator FROM the
-    /// remote's reported frame dims instead -- see `HostEvent::TerminalBytes`
-    /// -- rather than pushing our size to it).
-    #[allow(dead_code)]
+    /// Enqueues a local pane resize as `ClientMessage::Resize` so the remote
+    /// re-renders at the new size (the attach `Hello` only carried the size
+    /// at attach time; a reattach re-sends it too). Non-blocking: see
+    /// `enqueue`'s doc comment -- symmetric with `send_input`, just a
+    /// different `WriteMsg` variant onto the same queue, so resizes stay
+    /// ordered relative to input on the wire (mpsc FIFO). Driven by
+    /// `HeadlessServer`'s resize-sync path once the focused remote pane's
+    /// local content-rect dims change.
     pub(crate) fn resize(
         &self,
         cols: u16,
@@ -1199,57 +1345,77 @@ impl RemotePaneAttach {
         cell_width_px: u32,
         cell_height_px: u32,
     ) -> io::Result<()> {
-        let mut write = self
-            .write
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        protocol::write_message(
-            &mut *write,
-            &ClientMessage::Resize {
-                cols,
-                rows,
-                cell_width_px,
-                cell_height_px,
-            },
-        )
-        .map_err(|err| io::Error::other(err.to_string()))
+        self.enqueue(WriteMsg::Resize {
+            cols,
+            rows,
+            cell_width_px,
+            cell_height_px,
+        })
     }
 
-    /// Graceful teardown: best-effort `ClientMessage::Detach`, then drop
-    /// `self` (see the `Drop` impl for the half-close / force-close / reader
-    /// join sequence that runs either way).
-    pub(crate) fn detach(self) {
-        let mut write = self
-            .write
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Err(err) = protocol::write_message(&mut *write, &ClientMessage::Detach) {
-            debug!(err = %err, "failed to send Detach before closing remote pane attach");
+    /// Graceful teardown: enqueues the `Detach` sentinel (rather than
+    /// writing `ClientMessage::Detach` directly), then drops `self` (see the
+    /// `Drop` impl for the bounded-grace-then-force-close / reader-join
+    /// sequence that runs either way). Taking `write_tx` here -- rather than
+    /// just enqueuing through `enqueue`/`&self` -- means `Drop` can tell
+    /// whether a caller already requested teardown (see its doc comment).
+    pub(crate) fn detach(mut self) {
+        if let Some(tx) = self.write_tx.take() {
+            let _ = tx.send(WriteMsg::Detach);
         }
     }
 }
 
 impl Drop for RemotePaneAttach {
-    /// Split -> drop write half -> (reader thread drains any remaining
-    /// frames until EOF) -> force-close so a remote that never reacts can't
-    /// wedge the reader thread -> join. Runs for every teardown path,
-    /// whether `detach()` was called first (graceful: `Detach` already sent)
-    /// or `self` was simply dropped (e.g. an error path before the caller
-    /// ever got to call `detach()`).
+    /// Runs for every teardown path, whether `detach()` was called first
+    /// (the `Detach` sentinel is already enqueued) or `self` was simply
+    /// dropped (e.g. an error path before the caller ever got to call
+    /// `detach()`, or a test dropping the value directly).
+    ///
+    /// Order matters:
+    /// 1. Take (and so close) this end of the write channel if `detach()`
+    ///    didn't already, sending `Detach` first if it's this method doing
+    ///    so. This MUST happen before joining the writer thread below: the
+    ///    `write_tx` field only actually drops once this whole method
+    ///    returns (Rust drops a `Drop` type's fields after its `drop()` body
+    ///    runs, not during it), so without explicitly taking it here, the
+    ///    writer thread's blocking `recv()` would have nothing to ever wake
+    ///    it and `writer.join()` would hang forever.
+    /// 2. Give the writer thread a bounded grace window
+    ///    (`DETACH_TEARDOWN_GRACE`) to actually flush that `Detach` over a
+    ///    still-healthy connection before force-closing -- the same
+    ///    watchdog shape `attach_with_timeout` uses for the handshake.
+    ///    Force-closing unconditionally right away (instead of after a
+    ///    grace window) would race a healthy writer that hasn't been
+    ///    scheduled yet and could sever the connection before the graceful
+    ///    `Detach` ever reaches the wire.
+    /// 3. Force-close unconditionally (idempotent/harmless if the watchdog
+    ///    above already did) so the reader thread's blocking read -- not
+    ///    bounded by anything yet at this point -- unblocks too. Proven for
+    ///    both transports by host_transport's
+    ///    `closer_unblocks_a_reader_stuck_in_read` test; the analogous
+    ///    `closer_unblocks_a_writer_stuck_in_a_blocked_write` test (same
+    ///    module) proves the same closer also interrupts a blocked WRITE,
+    ///    which is what bounds step 2 against a wedged remote.
+    /// 4. Join both threads.
     fn drop(&mut self) {
-        {
-            // Replacing (rather than moving out of) the write half is what
-            // lets this type have both a consuming `detach()` and a `Drop`
-            // impl: moving a field out of a type that implements `Drop` is
-            // rejected by the compiler, but swapping the boxed value through
-            // `&mut` is not, and still runs the old value's `Drop` (the
-            // unix/ssh write-half impls that half-close the channel).
-            let mut write = self
-                .write
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            *write = Box::new(io::sink());
+        if let Some(tx) = self.write_tx.take() {
+            let _ = tx.send(WriteMsg::Detach);
         }
+
+        if let Some(writer) = self.writer.take() {
+            let (disarm_tx, disarm_rx) = mpsc::channel::<()>();
+            let watchdog_close = Arc::clone(&self.close);
+            let watchdog = std::thread::spawn(move || {
+                if disarm_rx.recv_timeout(DETACH_TEARDOWN_GRACE).is_err() {
+                    watchdog_close();
+                }
+            });
+            let _ = writer.join();
+            let _ = disarm_tx.send(());
+            let _ = watchdog.join();
+        }
+
         // Force-close in case the remote never reacts to Detach/EOF -- this
         // is what actually unblocks the reader thread's blocking read
         // (proven for both transports by host_transport's
@@ -2929,6 +3095,90 @@ mod tests {
         assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
 
         drop(attach);
+        server.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The writer thread's whole reason to exist: enqueuing input never
+    /// blocks the caller, even once the writer thread itself is stuck
+    /// inside a blocking `write_message` against a remote that accepts
+    /// bytes into its kernel socket buffer but never reads them (a
+    /// "blackholed" remote -- as opposed to a closed one, which would fail
+    /// the write fast with an error instead of blocking it). Also proves
+    /// teardown (`Drop`) stays bounded in that state:
+    /// `DETACH_TEARDOWN_GRACE`'s watchdog force-closes the channel, which
+    /// unblocks the writer's stuck write (proven directly at the transport
+    /// layer by host_transport's
+    /// `closer_unblocks_a_writer_stuck_in_a_blocked_write` test), so `drop`
+    /// returns instead of hanging forever.
+    #[test]
+    fn writer_enqueue_never_blocks_on_a_blackholed_remote_and_teardown_is_bounded() {
+        let dir = unique_temp_dir("remote-pane-attach-writer-blackhole");
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("client.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        let (parked_tx, parked_rx) = std::sync::mpsc::channel();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let conn = accept_and_complete_attach_handshake(&listener, "term_w1:p1");
+            // Blackhole: never read again, never close -- bytes accumulate
+            // in the kernel socket buffer until it's full, then further
+            // writes from the other side genuinely block.
+            parked_tx.send(()).unwrap();
+            let _ = stop_rx.recv_timeout(Duration::from_secs(10));
+            drop(conn);
+        });
+
+        let transport: Box<dyn LinkTransport> = Box::new(UnixSocketTransport {
+            api_socket: sock.clone(),
+            client_socket: sock.clone(),
+        });
+        let (tx, _rx) = attach_events_channel();
+
+        let attach = RemotePaneAttach::attach(
+            HostLinkId("wb".to_string()),
+            PaneId::from_raw(21),
+            "term_w1:p1".to_string(),
+            80,
+            24,
+            transport.as_ref(),
+            tx,
+        )
+        .expect("attach should succeed");
+
+        parked_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("fake remote reached the parked state");
+
+        // Flood enough input that the writer thread ends up genuinely
+        // blocked inside a real write() call -- and prove every enqueue
+        // call itself still returns promptly regardless.
+        let chunk = vec![b'x'; 64 * 1024];
+        let enqueue_started = std::time::Instant::now();
+        for _ in 0..64 {
+            attach
+                .send_input(chunk.clone())
+                .expect("enqueue must succeed even while the writer thread is stuck writing");
+        }
+        assert!(
+            enqueue_started.elapsed() < Duration::from_secs(2),
+            "send_input must never block on the writer thread's own blocked write, took {:?}",
+            enqueue_started.elapsed()
+        );
+
+        // Teardown must still be bounded: the DETACH_TEARDOWN_GRACE
+        // watchdog force-closes the channel, unblocking the writer's
+        // stuck write.
+        let drop_started = std::time::Instant::now();
+        drop(attach);
+        assert!(
+            drop_started.elapsed() < Duration::from_secs(8),
+            "teardown must be bounded even against a blackholed remote, took {:?}",
+            drop_started.elapsed()
+        );
+
+        let _ = stop_tx.send(());
         server.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -382,11 +382,19 @@ pub(crate) enum ServerEvent {
     /// timed out) before any reader thread ever started. Distinct from
     /// `HostEvent::AttachFailed`, which is produced by the reader thread
     /// AFTER a successful `attach()` when the remote refuses the terminal
-    /// id via a pre-frame `ServerShutdown`.
+    /// id via a pre-frame `ServerShutdown`. `focus_epoch` mirrors
+    /// `RemotePaneAttachEstablished`'s: it is
+    /// `HeadlessServer::remote_pane_focus_epoch` at the moment
+    /// `attach_remote_pane_for_focus` started THIS attach attempt, so the
+    /// handler can discard a stale failure from a superseded attempt (e.g.
+    /// a first attach that fails on its dead socket AFTER a reconnect
+    /// already spawned a second attach for the same still-focused pane)
+    /// instead of blurring/notifying over the recovering attempt.
     #[cfg(unix)]
     RemotePaneAttachFailed {
         host: crate::server::host_link::HostLinkId,
         terminal_id: crate::terminal::TerminalId,
+        focus_epoch: u64,
         reason: String,
     },
     /// Ctrl+C or external shutdown signal received.

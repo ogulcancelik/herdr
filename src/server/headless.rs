@@ -498,6 +498,56 @@ fn unsupported_host_command_response(id: String) -> String {
     )
 }
 
+/// Shared wheel-encoding core for `apply_terminal_attach_scroll` and
+/// `encode_remote_pane_mouse` -- the two places a scroll-wheel event gets
+/// turned into either wire bytes or a local scrollback nudge, kept as one
+/// function instead of two (drifting) copies of the same
+/// `wheel_routing()` dispatch. `column`/`row`/`modifiers` are the already-
+/// resolved values each caller wants encoded with (a terminal-attach page
+/// key's synthetic scroll has no real cursor position, so that caller
+/// defaults them; a real mouse event always has concrete ones).
+///
+/// `Ok(None)` covers every "nothing to send, and that's expected" case:
+/// `AlternateScroll` legitimately declining to encode, or
+/// `HostScroll`/no input state, which applies the scrollback effect
+/// directly as a side effect instead (a purely local mirror-grid nudge,
+/// never itself put on the wire) and returns `None` too. `Err(())` is
+/// reserved for the one case a caller might legitimately want to treat as a
+/// real failure: `MouseReport` routing was active but the encoder itself
+/// declined. `encode_remote_pane_mouse` doesn't make that distinction --
+/// it never surfaces an error either way -- so it folds `Err` back to
+/// `None` via `.ok().flatten()`.
+fn encode_wheel(
+    runtime: &crate::terminal::TerminalRuntime,
+    wheel_kind: MouseEventKind,
+    column: u16,
+    row: u16,
+    modifiers: KeyModifiers,
+    scroll_lines: usize,
+) -> Result<Option<Vec<u8>>, ()> {
+    match runtime.wheel_routing() {
+        Some(crate::pane::WheelRouting::MouseReport) => {
+            runtime.scroll_reset();
+            runtime
+                .encode_mouse_wheel(wheel_kind, column, row, modifiers)
+                .map(Some)
+                .ok_or(())
+        }
+        Some(crate::pane::WheelRouting::AlternateScroll) => {
+            runtime.scroll_reset();
+            Ok(runtime.encode_alternate_scroll(wheel_kind))
+        }
+        Some(crate::pane::WheelRouting::HostScroll) | None => {
+            match wheel_kind {
+                MouseEventKind::ScrollUp => runtime.scroll_up(scroll_lines.max(1)),
+                MouseEventKind::ScrollDown => runtime.scroll_down(scroll_lines.max(1)),
+                _ => {}
+            }
+            Ok(None)
+        }
+    }
+}
+
 fn apply_terminal_attach_scroll(
     runtime: &crate::terminal::TerminalRuntime,
     source: AttachScrollSource,
@@ -525,38 +575,25 @@ fn apply_terminal_attach_scroll(
         return apply_terminal_attach_input(runtime, input);
     }
 
-    match runtime.wheel_routing() {
-        Some(crate::pane::WheelRouting::MouseReport) => {
-            runtime.scroll_reset();
-            let column = column.unwrap_or(0);
-            let row = row.unwrap_or(0);
-            let Some(bytes) = runtime.encode_mouse_wheel(
-                wheel_kind,
-                column,
-                row,
-                KeyModifiers::from_bits_truncate(modifiers),
-            ) else {
-                return Err(format!(
-                    "failed to encode terminal attach mouse wheel event: {wheel_kind:?}"
-                ));
-            };
+    match encode_wheel(
+        runtime,
+        wheel_kind,
+        column.unwrap_or(0),
+        row.unwrap_or(0),
+        KeyModifiers::from_bits_truncate(modifiers),
+        lines as usize,
+    ) {
+        Ok(Some(bytes)) => {
             runtime
                 .try_send_bytes(Bytes::from(bytes))
-                .map_err(|err| format!("terminal attach mouse wheel input failed: {err}"))?;
+                .map_err(|err| format!("terminal attach wheel input failed: {err}"))?;
         }
-        Some(crate::pane::WheelRouting::AlternateScroll) => {
-            runtime.scroll_reset();
-            let Some(bytes) = runtime.encode_alternate_scroll(wheel_kind) else {
-                return Ok(());
-            };
-            runtime
-                .try_send_bytes(Bytes::from(bytes))
-                .map_err(|err| format!("terminal attach alternate scroll input failed: {err}"))?;
+        Ok(None) => {}
+        Err(()) => {
+            return Err(format!(
+                "failed to encode terminal attach mouse wheel event: {wheel_kind:?}"
+            ));
         }
-        Some(crate::pane::WheelRouting::HostScroll) | None => match direction {
-            AttachScrollDirection::Up => runtime.scroll_up(lines.max(1) as usize),
-            AttachScrollDirection::Down => runtime.scroll_down(lines.max(1) as usize),
-        },
     }
     Ok(())
 }
@@ -569,6 +606,34 @@ fn apply_terminal_attach_input(
     runtime
         .try_send_bytes(Bytes::from(data))
         .map_err(|err| format!("terminal attach input failed: {err}"))
+}
+
+/// The geometric half of `route_client_events_and_forward_to_remote_pane`'s
+/// mouse split, factored out as a pure function so it's directly testable
+/// without a `HeadlessServer`/runtime: is `(column, row)` inside
+/// `content_rect` (the focused remote pane's overlay content rect), and if
+/// so, what are its content-rect-relative coordinates -- the space
+/// `encode_remote_pane_mouse` and the remote's own grid expect. `None` for
+/// a degenerate (zero width/height) rect or a position outside it, in which
+/// case the caller falls back to routing the event through
+/// `App::route_client_events`'s normal hit-testing instead.
+#[cfg(unix)]
+fn translate_mouse_into_content_rect(
+    column: u16,
+    row: u16,
+    content_rect: Rect,
+) -> Option<(u16, u16)> {
+    if content_rect.width == 0 || content_rect.height == 0 {
+        return None;
+    }
+    if column < content_rect.x
+        || row < content_rect.y
+        || column >= content_rect.x + content_rect.width
+        || row >= content_rect.y + content_rect.height
+    {
+        return None;
+    }
+    Some((column - content_rect.x, row - content_rect.y))
 }
 
 /// Mouse encoding for a mouse event landing inside the focused remote
@@ -607,24 +672,16 @@ fn encode_remote_pane_mouse(
         MouseEventKind::ScrollUp
         | MouseEventKind::ScrollDown
         | MouseEventKind::ScrollLeft
-        | MouseEventKind::ScrollRight => match runtime.wheel_routing() {
-            Some(crate::pane::WheelRouting::MouseReport) => {
-                runtime.scroll_reset();
-                runtime.encode_mouse_wheel(mouse.kind, column, row, mouse.modifiers)
-            }
-            Some(crate::pane::WheelRouting::AlternateScroll) => {
-                runtime.scroll_reset();
-                runtime.encode_alternate_scroll(mouse.kind)
-            }
-            Some(crate::pane::WheelRouting::HostScroll) | None => {
-                match mouse.kind {
-                    MouseEventKind::ScrollUp => runtime.scroll_up(scroll_lines.max(1)),
-                    MouseEventKind::ScrollDown => runtime.scroll_down(scroll_lines.max(1)),
-                    _ => {}
-                }
-                None
-            }
-        },
+        | MouseEventKind::ScrollRight => encode_wheel(
+            runtime,
+            mouse.kind,
+            column,
+            row,
+            mouse.modifiers,
+            scroll_lines,
+        )
+        .ok()
+        .flatten(),
     }
 }
 
@@ -1194,6 +1251,13 @@ impl HeadlessServer {
                 area,
             );
         }
+        // `terminal_area` was just (re)computed above -- this is the one
+        // place that happens, so it's the right spot to push the focused
+        // remote pane's dims along with it. See `sync_focused_remote_pane_resize`'s
+        // doc comment for why this is safe to call unconditionally (no-op
+        // when there's nothing to resize) and why it can never block here
+        // (the writer thread, not this call, owns the actual socket write).
+        self.sync_focused_remote_pane_resize();
 
         // Shared runtime size changes affect pane wrapping and foreground-driven
         // rendering semantics. Force one fresh frame to every remaining client
@@ -1828,6 +1892,20 @@ impl HeadlessServer {
                 if self.host_links.state(&host).is_none() {
                     return;
                 }
+                // Captured BEFORE `on_connected` below so the reattach hook
+                // can tell a genuine Connecting/Reconnecting -> Connected
+                // transition apart from a Snapshot that arrives while the
+                // link was ALREADY Connected (the internal refresh-cycle
+                // case -- a new pane appearing, or a periodic re-seed).
+                // Reusing this event as the reattach trigger (rather than a
+                // dedicated "reconnected" signal) is required: a reconnect
+                // reuses the SAME generation as the attempt before it (see
+                // `handle_host_link_down`), so a generation change can't be
+                // used to detect it.
+                let was_connected = matches!(
+                    self.host_links.state(&host),
+                    Some(crate::server::host_link::LinkState::Connected)
+                );
                 // Authoritative reconciliation (mandatory consumer contract
                 // from the Task 6/7 reviews): adopt panes new to the
                 // registry, release registered panes missing from this
@@ -1836,6 +1914,9 @@ impl HeadlessServer {
                 self.host_links.on_connected(&host);
                 self.sync_host_link_display(&host);
                 self.reconcile_remote_pane_snapshot(&host, panes);
+                if !was_connected {
+                    self.reattach_focused_remote_pane_if_needed(&host);
+                }
             }
             HostEvent::StatusChanged {
                 host,
@@ -2158,7 +2239,78 @@ impl HeadlessServer {
             return;
         }
         self.blur_focused_remote_pane();
+        self.attach_remote_pane_for_focus(terminal_id);
+    }
 
+    /// The size to attach (or reattach) the focused remote pane's terminal
+    /// channel at: the overlay's own content rect
+    /// (`self.app.state.view.terminal_area`, the same rect
+    /// `render_stream::overlay_focused_remote_pane` draws into and
+    /// `route_client_events_and_forward_to_remote_pane` hit-tests against),
+    /// not the full server size -- the remote would otherwise render larger
+    /// than the area it's actually shown in and clip. Falls back to
+    /// `effective_size` only for the degenerate case (zero width/height,
+    /// e.g. before the view has ever been computed), so attach still gets a
+    /// sane size instead of 0x0.
+    #[cfg(unix)]
+    fn focused_remote_pane_attach_size(&self) -> (u16, u16) {
+        let content_rect = self.app.state.view.terminal_area;
+        if content_rect.width > 0 && content_rect.height > 0 {
+            (content_rect.width, content_rect.height)
+        } else {
+            self.effective_size
+        }
+    }
+
+    /// Pushes the focused remote pane's current content-rect size to the
+    /// remote via the (non-blocking, writer-thread-backed) `RemotePaneAttach::
+    /// resize`, so the remote re-renders at the size it's actually shown at
+    /// instead of whatever it was attached with. Called every time
+    /// `terminal_area` is recomputed -- client resize, sidebar toggle, any
+    /// other layout change -- from
+    /// `resize_shared_runtime_to_effective_size_with_pending_agent_resumes`,
+    /// the one place that recomputes it. A no-op when nothing is focused or
+    /// there is no live attach yet (still attaching, or torn down for a
+    /// transient reconnect -- see `teardown_focused_remote_pane_attach_for_reconnect`),
+    /// or the content rect is degenerate (nothing sane to size to).
+    ///
+    /// Unidirectional by design: this only ever pushes OUR size. The remote
+    /// echoes its actual (post-`clamp_terminal_size`) dims back in every
+    /// `HostEvent::TerminalBytes` frame, and `feed_remote_pane_terminal_bytes`
+    /// sizes the local mirror runtime from THOSE -- not from what this side
+    /// requested -- so the two never fight over who owns sizing.
+    #[cfg(unix)]
+    fn sync_focused_remote_pane_resize(&mut self) {
+        if self.focused_remote_pane.is_none() {
+            return;
+        }
+        let Some(attach) = self.focused_remote_pane_attach.as_ref() else {
+            return;
+        };
+        let content_rect = self.app.state.view.terminal_area;
+        if content_rect.width == 0 || content_rect.height == 0 {
+            return;
+        }
+        if let Err(err) = attach.resize(content_rect.width, content_rect.height, 0, 0) {
+            debug!(err = %err, "failed to enqueue a resize for the focused remote pane");
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn sync_focused_remote_pane_resize(&mut self) {}
+
+    /// The actual off-loop attach: resolves the adopted pane's identity and
+    /// spawns the (up to 60s) blocking ssh handshake thread. Split out of
+    /// `focus_remote_pane` so a reconnect can re-invoke exactly this --
+    /// without `focus_remote_pane`'s own same-terminal early return, which
+    /// would otherwise refuse to reattach a pane that is (correctly) still
+    /// recorded as focused (see `reattach_focused_remote_pane_if_needed`).
+    /// Always bumps `remote_pane_focus_epoch`, including on a reattach: a
+    /// reattach is a NEW attach attempt, and its handback must be told apart
+    /// from a stale one just as any other superseding focus attempt would
+    /// be (see the epoch field's doc comment).
+    #[cfg(unix)]
+    fn attach_remote_pane_for_focus(&mut self, terminal_id: crate::terminal::TerminalId) {
         let Some(key) = self.remote_pane_key_for_terminal(&terminal_id) else {
             debug!(terminal = %terminal_id, "focus_remote_pane: not an adopted remote pane terminal");
             return;
@@ -2182,7 +2334,7 @@ impl HeadlessServer {
             crate::server::remote_pane::HostEventSink::new(generation, self.host_event_tx.clone());
         let server_event_tx = self.server_event_tx.clone();
         let host = key.host.clone();
-        let (cols, rows) = self.effective_size;
+        let (cols, rows) = self.focused_remote_pane_attach_size();
 
         self.remote_pane_focus_epoch = self.remote_pane_focus_epoch.wrapping_add(1);
         let focus_epoch = self.remote_pane_focus_epoch;
@@ -2221,6 +2373,7 @@ impl HeadlessServer {
                     let _ = server_event_tx.blocking_send(ServerEvent::RemotePaneAttachFailed {
                         host,
                         terminal_id,
+                        focus_epoch,
                         reason: err.to_string(),
                     });
                 }
@@ -2300,6 +2453,19 @@ impl HeadlessServer {
                     terminal = %terminal_id,
                     "remote pane attach established; runtime registered"
                 );
+                // Push the CURRENT content-rect size to the just-established
+                // remote. `attach()` carried the size as of when it STARTED
+                // (up to seconds ago, over the ssh handshake), and while it
+                // was in flight `focused_remote_pane_attach` was `None`, so
+                // any resize / sidebar toggle during that window no-oped
+                // `sync_focused_remote_pane_resize` and was lost -- the
+                // remote would stay wrong-sized until the next unrelated
+                // `terminal_area` recompute. Syncing here (now that the
+                // attach handle is set, so the call no longer no-ops) closes
+                // that attach-window gap, and the identical reattach-window
+                // variant too, since a reconnect's reattach hands back
+                // through this same success branch.
+                self.sync_focused_remote_pane_resize();
             }
             Err(err) => {
                 warn!(
@@ -2321,17 +2487,39 @@ impl HeadlessServer {
     /// refused/timed out -- see `focus_remote_pane`). Distinct from
     /// `HostEvent::AttachFailed` (handled below), which fires when
     /// `attach()` succeeded at write time but the remote refused the
-    /// terminal id via a pre-frame `ServerShutdown`. Only clears focus if
-    /// `terminal_id` is still the focused pane -- if focus already moved on
-    /// while this attach attempt was failing, there is nothing to clear.
+    /// terminal id via a pre-frame `ServerShutdown`.
+    ///
+    /// Two guards, both required before clearing focus / notifying:
+    /// - `terminal_id` is still the focused pane -- if focus already moved
+    ///   on while this attach attempt was failing, there is nothing to
+    ///   clear.
+    /// - `focus_epoch` is still the current one -- symmetric with
+    ///   `handle_remote_pane_attach_established`'s epoch guard. A stale
+    ///   failure from a SUPERSEDED attempt on the same still-focused pane
+    ///   (e.g. a first attach that fails on its now-dead socket AFTER a
+    ///   reconnect already spawned a second attach for it) must NOT blur or
+    ///   toast over the live, recovering attempt -- `terminal_id` equality
+    ///   alone cannot tell the two apart, exactly as on the established
+    ///   path.
     #[cfg(unix)]
     fn handle_remote_pane_attach_failed(
         &mut self,
         host: crate::server::host_link::HostLinkId,
         terminal_id: crate::terminal::TerminalId,
+        focus_epoch: u64,
         reason: String,
     ) {
         if self.focused_remote_pane.as_ref() != Some(&terminal_id) {
+            return;
+        }
+        if self.remote_pane_focus_epoch != focus_epoch {
+            debug!(
+                host = %host.0,
+                terminal = %terminal_id,
+                focus_epoch,
+                current_epoch = self.remote_pane_focus_epoch,
+                "dropping a superseded remote pane attach failure; a newer attempt owns this pane"
+            );
             return;
         }
         warn!(host = %host.0, terminal = %terminal_id, reason = %reason, "remote pane attach failed");
@@ -2395,14 +2583,22 @@ impl HeadlessServer {
     }
 
     /// Clears `focused_remote_pane`, gracefully detaches any live
-    /// `RemotePaneAttach` (best-effort `Detach` write, then `Drop`'s
-    /// force-close + reader-thread join -- see `RemotePaneAttach::detach`'s
-    /// doc comment), and removes the remote-fed runtime from
-    /// `terminal_runtimes` so nothing leaks across a focus change (memory
-    /// budget: only the focused pane keeps a live runtime + ssh channel).
-    /// Idempotent: a no-op when nothing is focused. This is the "basic
-    /// blur/teardown" this commit guarantees; full link-down teardown
-    /// coordination is a follow-up commit.
+    /// `RemotePaneAttach` (best-effort `Detach` enqueue, then `Drop`'s
+    /// bounded-grace-then-force-close + reader/writer-thread join -- see
+    /// `RemotePaneAttach::detach`'s doc comment), and removes the remote-fed
+    /// runtime from `terminal_runtimes` so nothing leaks across a focus
+    /// change (memory budget: only the focused pane keeps a live runtime +
+    /// ssh channel). Idempotent: a no-op when nothing is focused.
+    ///
+    /// This is the FULL teardown -- also clearing focus -- used for an
+    /// ordinary blur (a different pane/nothing gets focused) and for the
+    /// terminal `Offline` link state (see `handle_host_link_down`), where
+    /// the pane genuinely cannot recover without the user manually
+    /// re-attaching. A transient `Reconnecting` link drop uses
+    /// `teardown_focused_remote_pane_attach_for_reconnect` instead, which
+    /// tears down the same attach + runtime WITHOUT clearing focus, so the
+    /// pane survives the reconnect and `reattach_focused_remote_pane_if_needed`
+    /// can bring it back live once the link recovers.
     #[cfg(unix)]
     fn blur_focused_remote_pane(&mut self) {
         let Some(terminal_id) = self.focused_remote_pane.take() else {
@@ -2415,6 +2611,78 @@ impl HeadlessServer {
             runtime.shutdown();
         }
         debug!(terminal = %terminal_id, "blurred focused remote pane");
+    }
+
+    /// Reconnect-survival half of the teardown: tears down the focused
+    /// remote pane's now-dead `RemotePaneAttach` (the ssh terminal channel
+    /// is either already dead alongside the API channel that reported
+    /// `LinkDown`, or about to be made moot by the reattach that follows)
+    /// WITHOUT clearing `focused_remote_pane` and WITHOUT tearing down the
+    /// remote-fed runtime -- the pane keeps showing its last rendered frame
+    /// instead of reverting to the workspace panes underneath, and
+    /// `deliver_remote_pane_input`'s existing link-health gate
+    /// (`route_remote_pane_input`) already drops input with a
+    /// not-`Connected` notice for as long as the link isn't `Connected`, so
+    /// nothing needs to change there. Idempotent: a no-op when nothing is
+    /// focused or there is no live attach (e.g. still attaching, or already
+    /// torn down by a previous call).
+    ///
+    /// Driven by `handle_host_link_down` when the link that owns the
+    /// focused pane degrades to the transient `Reconnecting` state (never
+    /// for `Offline`, which uses the full `blur_focused_remote_pane` since
+    /// automatic recovery is exhausted at that point).
+    #[cfg(unix)]
+    fn teardown_focused_remote_pane_attach_for_reconnect(&mut self) {
+        let Some(terminal_id) = self.focused_remote_pane.clone() else {
+            return;
+        };
+        let Some(attach) = self.focused_remote_pane_attach.take() else {
+            return;
+        };
+        attach.detach();
+        debug!(
+            terminal = %terminal_id,
+            "tore down the focused remote pane's attach for a transient reconnect; pane stays focused"
+        );
+    }
+
+    /// Reconnect-survival's other half: re-invokes the off-loop attach
+    /// (`attach_remote_pane_for_focus`) for the focused remote pane if, and
+    /// only if, it belongs to `host` and has no live attach right now --
+    /// the exact state `teardown_focused_remote_pane_attach_for_reconnect`
+    /// leaves it in. Driven from `handle_host_event`'s `Snapshot` arm, only
+    /// on a genuine Connecting/Reconnecting -> Connected transition (see the
+    /// `was_connected` guard there): a Snapshot that arrives while the link
+    /// was ALREADY `Connected` (the ordinary internal refresh cycle) must
+    /// NOT re-trigger this, or a focus that is already mid-attach would
+    /// spawn a second, redundant off-loop attempt for the same pane.
+    /// `attach_remote_pane_for_focus` bumps `remote_pane_focus_epoch` on
+    /// every call including this one, so this reattach's handback is
+    /// correctly told apart from any handback of a superseded attempt (same
+    /// mechanism a rapid manual refocus already relies on).
+    #[cfg(unix)]
+    fn reattach_focused_remote_pane_if_needed(
+        &mut self,
+        host: &crate::server::host_link::HostLinkId,
+    ) {
+        let Some(terminal_id) = self.focused_remote_pane.clone() else {
+            return;
+        };
+        if self.focused_remote_pane_attach.is_some() {
+            return;
+        }
+        let Some(key) = self.remote_pane_key_for_terminal(&terminal_id) else {
+            return;
+        };
+        if &key.host != host {
+            return;
+        }
+        debug!(
+            host = %host.0,
+            terminal = %terminal_id,
+            "host link reconnected; auto-reattaching the still-focused remote pane"
+        );
+        self.attach_remote_pane_for_focus(terminal_id);
     }
 
     /// Task 9b's input commit: the single interception point between the
@@ -2464,16 +2732,10 @@ impl HeadlessServer {
         for event in events {
             match event {
                 crate::raw_input::RawInputEvent::Mouse(mouse) => {
-                    let in_content_rect = content_rect.width > 0
-                        && content_rect.height > 0
-                        && mouse.column >= content_rect.x
-                        && mouse.row >= content_rect.y
-                        && mouse.column < content_rect.x + content_rect.width
-                        && mouse.row < content_rect.y + content_rect.height;
-                    if in_content_rect {
+                    let translated =
+                        translate_mouse_into_content_rect(mouse.column, mouse.row, content_rect);
+                    if let Some((column, row)) = translated {
                         if let Some(runtime) = self.app.terminal_runtimes.get(&terminal_id) {
-                            let column = mouse.column - content_rect.x;
-                            let row = mouse.row - content_rect.y;
                             if let Some(bytes) = encode_remote_pane_mouse(
                                 runtime,
                                 mouse,
@@ -2545,17 +2807,23 @@ impl HeadlessServer {
                     );
                     return;
                 };
-                // NOTE: this is a write through the attach's write half
-                // (a plain blocking `Write`, see `RemotePaneAttach::
-                // send_input`), on the main loop thread. A keystroke's
-                // encoded bytes are a handful of bytes, so this should
-                // never actually block in practice, but unlike a local
-                // pane's `try_send_bytes` (a bounded channel send) this
-                // has no backpressure escape hatch -- a genuinely wedged
-                // remote could stall the main loop here. Tracked as a
-                // known gap for the resize-sync follow-up commit (the
-                // same class of concern already flagged on `detach()`'s
-                // blocking write), not fixed here.
+                // `send_input` only enqueues onto `RemotePaneAttach`'s
+                // writer-thread channel (see its doc comment) -- it never
+                // touches the socket itself, so this can't stall the main
+                // loop even against a wedged remote. This call gates and
+                // delivers the WHOLE batch of bytes `route_client_events_
+                // and_forward_to_remote_pane` collected from every event in
+                // one drained input batch as a single unit, rather than
+                // per-individual-user-action; that is safe (not "one user
+                // action per batch") because of two invariants this file's
+                // main loop already guarantees: the server drains one
+                // batch fully, serially, with no concurrent mutation of
+                // `self` (single-threaded event loop), and every check here
+                // (`host_links.state`, `focused_remote_pane_attach`) reads
+                // CURRENT state at the moment of delivery rather than a
+                // value cached earlier in the batch. So gating once per
+                // batch and gating once per event would observe the exact
+                // same link/attach state either way.
                 if let Err(err) = attach.send_input(bytes) {
                     warn!(
                         host = %key.host.0,
@@ -2698,6 +2966,37 @@ impl HeadlessServer {
         use crate::server::host_link::LinkState;
         let next_state = self.host_links.on_disconnect(&host);
         self.sync_host_link_display(&host);
+
+        // If the focused remote pane belongs to THIS host, its live attach's
+        // ssh channel is dead either way (the same physical link that just
+        // reported LinkDown). Policy (per the c6 quality review): survive a
+        // TRANSIENT Reconnecting -- tear down the now-dead attach, but keep
+        // the pane focused (it shows its last rendered frame; input keeps
+        // being dropped with the existing not-Connected notice via
+        // `deliver_remote_pane_input`'s gate) so
+        // `reattach_focused_remote_pane_if_needed` can bring it back live
+        // once the link reaches Connected again. Fully blur once automatic
+        // retries are exhausted (Offline -- the pane cannot recover without
+        // a manual re-attach) or the link entry is simply gone (`None`, a
+        // concurrent `host.detach`, which already blurs via its own path;
+        // this is just defense in depth, matching `Snapshot`'s belt-and-
+        // braces state check above).
+        let focused_belongs_to_host = self
+            .focused_remote_pane
+            .clone()
+            .and_then(|terminal_id| self.remote_pane_key_for_terminal(&terminal_id))
+            .is_some_and(|key| key.host == host);
+        if focused_belongs_to_host {
+            match next_state {
+                Some(LinkState::Reconnecting { .. }) => {
+                    self.teardown_focused_remote_pane_attach_for_reconnect();
+                }
+                _ => {
+                    self.blur_focused_remote_pane();
+                }
+            }
+        }
+
         let Some(runtime) = self.host_link_runtimes.remove(&host) else {
             // No runtime: the link was detached concurrently. Nothing to
             // join or respawn.
@@ -4455,9 +4754,10 @@ impl HeadlessServer {
             ServerEvent::RemotePaneAttachFailed {
                 host,
                 terminal_id,
+                focus_epoch,
                 reason,
             } => {
-                self.handle_remote_pane_attach_failed(host, terminal_id, reason);
+                self.handle_remote_pane_attach_failed(host, terminal_id, focus_epoch, reason);
                 true
             }
             ServerEvent::QuitSignal => {
@@ -7258,6 +7558,339 @@ next_tab = ""
         drop(runtime);
         drop(_runtime_guard);
         rt.shutdown_timeout(Duration::from_millis(100));
+    }
+
+    // -----------------------------------------------------------------
+    // Remote-pane mouse path: coordinate translation + encode_wheel/
+    // encode_remote_pane_mouse (backfilled by the c6 review's "mouse/paste
+    // path untested" follow-up; this commit touches the same terminal_area
+    // geometry for resize-sync).
+    // -----------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn translate_mouse_into_content_rect_maps_and_bounds_correctly() {
+        let content_rect = Rect::new(10, 4, 20, 6);
+
+        // Top-left corner and bottom-right-most valid cell both map in.
+        assert_eq!(
+            translate_mouse_into_content_rect(10, 4, content_rect),
+            Some((0, 0))
+        );
+        assert_eq!(
+            translate_mouse_into_content_rect(29, 9, content_rect),
+            Some((19, 5))
+        );
+        // An interior point translates relative to the rect's origin.
+        assert_eq!(
+            translate_mouse_into_content_rect(15, 6, content_rect),
+            Some((5, 2))
+        );
+
+        // Just outside each edge is rejected, not clamped.
+        assert_eq!(translate_mouse_into_content_rect(9, 6, content_rect), None);
+        assert_eq!(translate_mouse_into_content_rect(15, 3, content_rect), None);
+        assert_eq!(translate_mouse_into_content_rect(30, 6, content_rect), None);
+        assert_eq!(
+            translate_mouse_into_content_rect(15, 10, content_rect),
+            None
+        );
+
+        // A degenerate rect (never a real overlay target) always misses.
+        assert_eq!(
+            translate_mouse_into_content_rect(0, 0, Rect::new(0, 0, 0, 0)),
+            None
+        );
+    }
+
+    /// `HostScroll` (no mouse-reporting mode, no alternate-scroll active --
+    /// the default for a freshly built runtime): a wheel event scrolls the
+    /// mirror grid's own local scrollback and produces nothing to send.
+    #[test]
+    fn encode_wheel_host_scroll_scrolls_locally_and_sends_nothing() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _guard = rt.enter();
+        let mut bytes = Vec::new();
+        for line in 0..40 {
+            bytes.extend_from_slice(format!("line {line:02}\r\n").as_bytes());
+        }
+        let runtime =
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(20, 5, 4096, &bytes);
+
+        let result = encode_wheel(
+            &runtime,
+            MouseEventKind::ScrollUp,
+            0,
+            0,
+            KeyModifiers::empty(),
+            3,
+        );
+        assert_eq!(result, Ok(None));
+        assert_eq!(
+            runtime
+                .scroll_metrics()
+                .expect("scroll metrics")
+                .offset_from_bottom,
+            3
+        );
+
+        let result = encode_wheel(
+            &runtime,
+            MouseEventKind::ScrollDown,
+            0,
+            0,
+            KeyModifiers::empty(),
+            2,
+        );
+        assert_eq!(result, Ok(None));
+        assert_eq!(
+            runtime
+                .scroll_metrics()
+                .expect("scroll metrics")
+                .offset_from_bottom,
+            1
+        );
+
+        drop(runtime);
+        drop(_guard);
+        rt.shutdown_timeout(Duration::from_millis(100));
+    }
+
+    /// `MouseReport` routing (the pane enabled mouse tracking, e.g. `vim`/
+    /// `htop`): a wheel event is encoded as an SGR mouse report and handed
+    /// back to send, instead of touching local scrollback.
+    #[test]
+    fn encode_wheel_mouse_report_encodes_bytes_to_send() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _guard = rt.enter();
+        let bytes = b"\x1b[?1000h".to_vec();
+        let (runtime, _input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                20, 5, 4096, &bytes, 4,
+            );
+
+        let result = encode_wheel(
+            &runtime,
+            MouseEventKind::ScrollUp,
+            2,
+            3,
+            KeyModifiers::empty(),
+            3,
+        );
+        match result {
+            Ok(Some(encoded)) => assert!(!encoded.is_empty()),
+            other => panic!("expected encoded SGR mouse bytes, got {other:?}"),
+        }
+        // Wheel routing to the pane must not move the local scrollback view.
+        assert_eq!(
+            runtime
+                .scroll_metrics()
+                .expect("scroll metrics")
+                .offset_from_bottom,
+            0
+        );
+
+        drop(runtime);
+        drop(_guard);
+        rt.shutdown_timeout(Duration::from_millis(100));
+    }
+
+    /// `AlternateScroll` routing (a fullscreen pane in the alternate screen
+    /// with alternate-scroll mode on, but no mouse tracking of its own,
+    /// e.g. `less`): a wheel event is encoded as a synthetic arrow-key
+    /// escape instead of an SGR mouse report.
+    #[test]
+    fn encode_wheel_alternate_scroll_encodes_arrow_keys() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _guard = rt.enter();
+        let bytes = b"\x1b[?1049h\x1b[?1007h".to_vec();
+        let (runtime, _input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                20, 5, 4096, &bytes, 4,
+            );
+
+        let routing = runtime.wheel_routing();
+        assert_eq!(
+            routing,
+            Some(crate::pane::WheelRouting::AlternateScroll),
+            "the fixture must actually exercise AlternateScroll routing"
+        );
+
+        let result = encode_wheel(
+            &runtime,
+            MouseEventKind::ScrollUp,
+            0,
+            0,
+            KeyModifiers::empty(),
+            3,
+        );
+        assert_eq!(result, Ok(Some(b"\x1b[A".to_vec())));
+
+        let result = encode_wheel(
+            &runtime,
+            MouseEventKind::ScrollDown,
+            0,
+            0,
+            KeyModifiers::empty(),
+            3,
+        );
+        assert_eq!(result, Ok(Some(b"\x1b[B".to_vec())));
+
+        drop(runtime);
+        drop(_guard);
+        rt.shutdown_timeout(Duration::from_millis(100));
+    }
+
+    /// `encode_remote_pane_mouse`'s button path: a click with mouse
+    /// reporting enabled is encoded (and resets scrollback); the same click
+    /// with no mouse reporting produces nothing (there is nowhere for a
+    /// button event to go without reporting, and no local fallback either).
+    #[cfg(unix)]
+    #[test]
+    fn encode_remote_pane_mouse_button_path_requires_mouse_reporting() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _guard = rt.enter();
+
+        let plain = crate::terminal::TerminalRuntime::test_with_channel(20, 5).0;
+        let down = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 5,
+            row: 2,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert_eq!(encode_remote_pane_mouse(&plain, down, 5, 2, 3), None);
+
+        let (reporting, _input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                20,
+                5,
+                4096,
+                b"\x1b[?1000h",
+                4,
+            );
+        reporting.scroll_up(2);
+        let encoded = encode_remote_pane_mouse(&reporting, down, 5, 2, 3);
+        assert!(
+            encoded.is_some_and(|bytes| !bytes.is_empty()),
+            "a click with mouse reporting enabled must encode"
+        );
+        assert_eq!(
+            reporting
+                .scroll_metrics()
+                .expect("scroll metrics")
+                .offset_from_bottom,
+            0,
+            "a successfully encoded click resets scrollback"
+        );
+
+        drop(plain);
+        drop(reporting);
+        drop(_guard);
+        rt.shutdown_timeout(Duration::from_millis(100));
+    }
+
+    /// `encode_remote_pane_mouse`'s motion path: `Moved` is only encoded
+    /// when the pane has motion reporting enabled (button-motion or
+    /// any-motion mode); a plain button-press-only mouse mode ignores it.
+    #[cfg(unix)]
+    #[test]
+    fn encode_remote_pane_mouse_motion_path_requires_motion_reporting() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _guard = rt.enter();
+
+        let plain = crate::terminal::TerminalRuntime::test_with_channel(20, 5).0;
+        let moved = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 5,
+            row: 2,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert_eq!(encode_remote_pane_mouse(&plain, moved, 5, 2, 3), None);
+
+        // Mode 1003 (SET_BTN_EVENT_MOUSE's any-motion sibling) reports
+        // motion regardless of button state.
+        let (motion, _input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                20,
+                5,
+                4096,
+                b"\x1b[?1003h",
+                4,
+            );
+        let encoded = encode_remote_pane_mouse(&motion, moved, 5, 2, 3);
+        assert!(
+            encoded.is_some_and(|bytes| !bytes.is_empty()),
+            "motion must encode once any-motion reporting is enabled"
+        );
+
+        drop(plain);
+        drop(motion);
+        drop(_guard);
+        rt.shutdown_timeout(Duration::from_millis(100));
+    }
+
+    /// A paste redirected to the focused remote pane's runtime reaches it
+    /// as plain bytes (bracketed if the remote-fed runtime's own input
+    /// state says the pane wants bracketed paste), via
+    /// `App::route_client_events`'s `pane_input_redirect` branch -- proven
+    /// directly here (the c6 review's "mouse/paste path untested" follow-
+    /// up), independent of any host-link/attach machinery.
+    #[tokio::test]
+    async fn paste_redirected_to_focused_remote_pane_forwards_plain_bytes() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            api::EventHub::default(),
+        );
+        let terminal_id = crate::terminal::TerminalId::alloc();
+        let runtime = crate::terminal::TerminalRuntime::spawn_remote_fed(
+            crate::layout::PaneId::alloc(),
+            24,
+            80,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            app.render_notify.clone(),
+            app.render_dirty.clone(),
+        )
+        .expect("remote-fed runtime should construct without a PTY");
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        app.state.mode = crate::app::state::Mode::Terminal;
+
+        let redirected = app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Paste(
+                "pasted text".to_string(),
+            )],
+            true,
+            Some(&terminal_id),
+        );
+        assert_eq!(
+            redirected,
+            b"pasted text".to_vec(),
+            "a fresh remote-fed runtime has no bracketed-paste mode set, so the redirect must forward plain bytes unchanged"
+        );
+
+        let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
+        for (_terminal_id, runtime) in runtimes {
+            runtime.shutdown();
+        }
     }
 
     #[test]
@@ -11987,8 +12620,19 @@ next_tab = ""
             assert_eq!(server.focused_remote_pane, Some(terminal_id.clone()));
 
             // Wait for the off-loop attach's success handback to register
-            // the remote-fed runtime (RemotePaneAttachEstablished).
-            let deadline = Instant::now() + Duration::from_secs(5);
+            // the remote-fed runtime (RemotePaneAttachEstablished). Bounded
+            // at 20s (not the usual 5s used elsewhere in this file): this
+            // path spawns and schedules several independent OS threads
+            // (the fake remote's script thread, the off-loop attach thread,
+            // its reader thread) end to end, which -- unlike the events
+            // themselves, which sit safely buffered on the channel once
+            // sent -- needs actual CPU scheduling time to happen at all, so
+            // a hardcoded 5s deadline was observed to flake under heavy
+            // parallel test-suite load (many nextest binaries contending
+            // for the same cores). 20s gives enough headroom without
+            // masking a genuine regression (a real deadlock/bug still fails
+            // this well before that).
+            let deadline = Instant::now() + Duration::from_secs(20);
             loop {
                 server.drain_server_events();
                 if server.app.terminal_runtimes.get(&terminal_id).is_some() {
@@ -12008,7 +12652,8 @@ next_tab = ""
             // Wait for a real, generation-stamped TerminalBytes from the
             // reader thread to actually reach and feed the runtime (proving
             // frames are NOT silently dropped by the generation guard).
-            let deadline = Instant::now() + Duration::from_secs(5);
+            // Same 20s rationale as above.
+            let deadline = Instant::now() + Duration::from_secs(20);
             loop {
                 server.drain_server_events();
                 if rendered_row0_trimmed(&server, &terminal_id, 80, 24) == "remote output" {
@@ -12181,6 +12826,68 @@ next_tab = ""
             );
             remote.join().unwrap();
             let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// The epoch guard on the FAILURE handback (symmetric with the
+        /// established handback's epoch guard): a stale `AttachFailed` from
+        /// a superseded attach attempt on the still-focused pane must NOT
+        /// blur or toast over the newer, recovering attempt. This is the
+        /// in-flight-reconnect race: a first attach E1 is in flight when the
+        /// link drops; the reconnect spawns a second attach E2 (bumping the
+        /// focus epoch) for the same still-focused pane; E1 then fails on
+        /// its dead socket and hands back an AttachFailed stamped with E1's
+        /// now-stale epoch. Driving `handle_remote_pane_attach_failed`
+        /// directly with a synthetic stale-then-current epoch is the
+        /// unit-level check (mirrors the `handle_remote_pane_attach_
+        /// established` guard tests, which likewise bump the epoch directly
+        /// rather than choreographing two real off-loop threads).
+        #[test]
+        fn stale_epoch_attach_failure_does_not_blur_the_current_attempt() {
+            let mut server = test_headless_server();
+            let control_rx = attach_fake_foreground_client(&mut server);
+
+            // A focused pane, mid-(re)attach: no live attach handle yet, and
+            // the current focus epoch is some value E2 (the reconnect's
+            // attempt). A synthetic terminal id is enough -- this guard runs
+            // before any host/registry lookup.
+            let terminal_id = crate::terminal::TerminalId::alloc();
+            server.focused_remote_pane = Some(terminal_id.clone());
+            server.remote_pane_focus_epoch = 42;
+            let host = crate::server::host_link::HostLinkId("workbox".to_string());
+
+            // A stale failure stamped with an OLDER epoch (E1, the attempt
+            // the reconnect already superseded) must be ignored outright.
+            server.handle_remote_pane_attach_failed(
+                host.clone(),
+                terminal_id.clone(),
+                41,
+                "ssh connection reset".to_string(),
+            );
+            assert_eq!(
+                server.focused_remote_pane,
+                Some(terminal_id.clone()),
+                "a superseded attach's failure must not blur the still-focused, recovering pane"
+            );
+            assert!(
+                control_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+                "a superseded attach's failure must not toast the foreground client"
+            );
+
+            // A CURRENT-epoch failure (the real case) still clears focus and
+            // notifies, exactly as before.
+            server.handle_remote_pane_attach_failed(
+                host,
+                terminal_id.clone(),
+                42,
+                "ssh connection reset".to_string(),
+            );
+            assert_eq!(
+                server.focused_remote_pane, None,
+                "a current-epoch attach failure must still blur the focused pane"
+            );
+            let (kind, message, _body) = recv_notify(&control_rx);
+            assert_eq!(kind, protocol::NotifyKind::Toast);
+            assert!(message.contains("workbox"), "message was: {message}");
         }
 
         /// A mid-attach refusal: `attach()` succeeds at write time (so
@@ -12614,7 +13321,11 @@ next_tab = ""
             terminal_id: &crate::terminal::TerminalId,
         ) {
             server.focus_remote_pane(terminal_id.clone());
-            let deadline = Instant::now() + Duration::from_secs(5);
+            // 20s, not 5s: see the identical wait in
+            // `focus_remote_pane_attaches_feeds_generation_stamped_frames_and_tears_down_on_blur`
+            // for why a hardcoded short deadline here flakes under heavy
+            // parallel test-suite load.
+            let deadline = Instant::now() + Duration::from_secs(20);
             loop {
                 server.drain_server_events();
                 if server.app.terminal_runtimes.get(terminal_id).is_some() {
@@ -12879,6 +13590,431 @@ next_tab = ""
             assert_eq!(kind, protocol::NotifyKind::Toast);
             assert!(message.contains("workbox"), "message was: {message}");
             assert!(message.contains("not connected"), "message was: {message}");
+
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        // -------------------------------------------------------------
+        // Task 9b commit 7: reconnect survival for the focused remote pane
+        // -------------------------------------------------------------
+
+        /// A genuine reconnect (not a synthetic `HostEvent`): the API
+        /// channel drops out from under a focused, live remote pane, the
+        /// link cycles through `reconnecting`, and a fresh connection
+        /// succeeds before the reconnect budget is exhausted. The pane must
+        /// SURVIVE the whole thing -- stay focused throughout, lose its dead
+        /// attach while reconnecting, and come back genuinely live (a NEW
+        /// attach, feeding a NEW frame) once the link is `connected` again,
+        /// with no manual re-focus.
+        ///
+        /// Uses two independent listeners/threads (API and terminal), not
+        /// `use_fake_remote_socket`'s single shared socket: the automatic
+        /// API reconnect (re-opening `events.subscribe`) and the automatic
+        /// terminal reattach race each other as two genuinely independent
+        /// connection attempts once the link recovers, so a single
+        /// sequential fake-remote script scripted for a fixed connection
+        /// order would be racy. Separate sockets make each side's script
+        /// independently sequential and deterministic.
+        #[tokio::test]
+        async fn focused_remote_pane_survives_a_transient_reconnect_and_auto_reattaches() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("reconnect-survival");
+            fs::create_dir_all(&dir).unwrap();
+            let api_sock = dir.join("api.sock");
+            let terminal_sock = dir.join("terminal.sock");
+
+            let api_listener_sock = api_sock.clone();
+            let (drop_link_tx, drop_link_rx) = std::sync::mpsc::channel::<()>();
+            let api_remote = std::thread::spawn(move || {
+                let listener = UnixListener::bind(&api_listener_sock).unwrap();
+
+                // Round 1: the initial attach's snapshot + subscribe, held
+                // open until the test signals the simulated link drop.
+                let conn2 = serve_attach_round(&listener, vec![fake_pane("w1:p1")]);
+                drop_link_rx
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("test signals the link drop");
+                conn2.shutdown(std::net::Shutdown::Both).ok();
+                drop(conn2);
+
+                // Round 2: the automatic reconnect, same pane. Held open for
+                // the rest of the test; nextest's per-test process isolation
+                // reaps this thread on exit.
+                let round2 = serve_attach_round(&listener, vec![fake_pane("w1:p1")]);
+                let mut buf = [0u8; 1];
+                let mut held = round2;
+                let _ = held.read(&mut buf);
+            });
+
+            let terminal_listener_sock = terminal_sock.clone();
+            let terminal_remote = std::thread::spawn(move || {
+                let listener = UnixListener::bind(&terminal_listener_sock).unwrap();
+
+                // Round 1: the initial focus's attach.
+                let (mut conn, _) = listener.accept().unwrap();
+                complete_attach_handshake(&mut conn, "term_w1:p1");
+                for _ in 0..10 {
+                    if protocol::write_message(
+                        &mut conn,
+                        &ServerMessage::Terminal(crate::protocol::TerminalFrame {
+                            seq: 1,
+                            width: 80,
+                            height: 24,
+                            full: true,
+                            bytes: b"first frame".to_vec(),
+                        }),
+                    )
+                    .is_err()
+                    {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                drop(conn);
+
+                // Round 2: the auto-reattach once the link recovers.
+                let (mut conn, _) = listener.accept().unwrap();
+                complete_attach_handshake(&mut conn, "term_w1:p1");
+                for _ in 0..10 {
+                    if protocol::write_message(
+                        &mut conn,
+                        &ServerMessage::Terminal(crate::protocol::TerminalFrame {
+                            seq: 1,
+                            width: 80,
+                            height: 24,
+                            full: true,
+                            bytes: b"reattached output".to_vec(),
+                        }),
+                    )
+                    .is_err()
+                    {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let mut buf = [0u8; 64];
+                let _ = conn.read(&mut buf);
+            });
+
+            let factory: std::sync::Arc<HostTransportFactory> =
+                std::sync::Arc::new(move |_host: &str| {
+                    Box::new(UnixSocketTransport {
+                        api_socket: api_sock.clone(),
+                        client_socket: terminal_sock.clone(),
+                    }) as Box<dyn LinkTransport>
+                });
+            server.host_transport_override_for_test = Some(factory);
+
+            server.handle_host_attach_api(
+                "test:host:attach".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            wait_for_host_state(&mut server, "workbox", "connected");
+
+            let terminal_id = host_tagged_terminals(&server, "workbox")
+                .first()
+                .expect("remote pane should be adopted as a host-tagged terminal")
+                .id
+                .clone();
+            focus_and_wait_for_remote_runtime(&mut server, &terminal_id);
+            let epoch_before_reconnect = server.remote_pane_focus_epoch;
+
+            // Confirm the pane is genuinely live before pulling the plug.
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                server.drain_server_events();
+                if rendered_row0_trimmed(&server, &terminal_id, 80, 24) == "first frame" {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for the initial live frame"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+
+            // Pull the plug: the API channel drops, simulating a transient
+            // link failure.
+            drop_link_tx.send(()).unwrap();
+
+            // The dead attach must be torn down WITHOUT clearing focus --
+            // polling for `focused_remote_pane_attach` going `None` (rather
+            // than the `reconnecting` link-state label, which can be too
+            // short-lived to reliably observe when the very next reconnect
+            // attempt succeeds immediately) is the robust, non-racy signal
+            // that the teardown-for-reconnect path actually ran.
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                server.drain_server_events();
+                if server.focused_remote_pane_attach.is_none() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for the dead attach to be torn down"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(
+                server.focused_remote_pane,
+                Some(terminal_id.clone()),
+                "the pane must stay focused through a transient reconnect"
+            );
+
+            // Auto-reattach: once the link is connected again, a NEW attach
+            // becomes live and feeds a fresh frame, with no manual re-focus.
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                server.drain_server_events();
+                if server.focused_remote_pane_attach.is_some()
+                    && rendered_row0_trimmed(&server, &terminal_id, 80, 24) == "reattached output"
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for the auto-reattach to bring the pane back live"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(
+                server.focused_remote_pane,
+                Some(terminal_id.clone()),
+                "the pane must still be focused after auto-reattach"
+            );
+            assert_ne!(
+                server.remote_pane_focus_epoch, epoch_before_reconnect,
+                "a reattach is a NEW attach attempt and must bump the focus epoch"
+            );
+            assert_eq!(
+                host_list_hosts(&mut server)
+                    .iter()
+                    .find(|entry| entry["host"] == "workbox")
+                    .map(|entry| entry["state"].clone()),
+                Some(serde_json::Value::String("connected".to_string())),
+                "the host link itself must have recovered too"
+            );
+
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            api_remote.join().unwrap();
+            terminal_remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// Terminal `offline` (automatic reconnect exhausted) is different
+        /// from a transient `reconnecting`: there is no automatic path back
+        /// to live without a manual re-attach (see `on_disconnect`'s doc
+        /// comment), so keeping the pane "focused" with a permanently dead
+        /// attach would strand it. The focused remote pane must fully blur
+        /// instead.
+        #[tokio::test]
+        async fn focused_remote_pane_blurs_when_the_host_link_goes_offline() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("reconnect-offline-blur");
+            fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("remote-api.sock");
+
+            let remote_sock = sock.clone();
+            let remote = std::thread::spawn(move || {
+                let listener = UnixListener::bind(&remote_sock).unwrap();
+                let _round = serve_attach_round(&listener, vec![fake_pane("w1:p1")]);
+
+                let (mut conn, _) = listener.accept().unwrap();
+                complete_attach_handshake(&mut conn, "term_w1:p1");
+                for _ in 0..10 {
+                    if protocol::write_message(
+                        &mut conn,
+                        &ServerMessage::Terminal(crate::protocol::TerminalFrame {
+                            seq: 1,
+                            width: 80,
+                            height: 24,
+                            full: true,
+                            bytes: b"live".to_vec(),
+                        }),
+                    )
+                    .is_err()
+                    {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                // `listener` (and `conn2`, held by `_round`) drop when this
+                // closure ends: every subsequent reconnect attempt fails
+                // instantly (ECONNREFUSED), so `on_disconnect`'s attempt
+                // counter climbs straight to offline instead of resetting
+                // on a successful retry -- mirrors
+                // `host_link_down_escalates_to_offline_after_repeated_reconnect_failures`.
+            });
+
+            use_fake_remote_socket(&mut server, sock);
+            server.handle_host_attach_api(
+                "test:host:attach".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            wait_for_host_state(&mut server, "workbox", "connected");
+
+            let terminal_id = host_tagged_terminals(&server, "workbox")
+                .first()
+                .expect("remote pane should be adopted as a host-tagged terminal")
+                .id
+                .clone();
+            focus_and_wait_for_remote_runtime(&mut server, &terminal_id);
+
+            wait_for_host_state(&mut server, "workbox", "offline");
+
+            // The link-state transition to offline is processed through the
+            // same `handle_host_event` call `wait_for_host_state`'s drain
+            // already pumped, so the blur is synchronously visible here.
+            assert_eq!(
+                server.focused_remote_pane, None,
+                "offline must blur the focused remote pane"
+            );
+            assert!(server.focused_remote_pane_attach.is_none());
+            assert!(
+                server.app.terminal_runtimes.get(&terminal_id).is_none(),
+                "the remote-fed runtime must be torn down, not leaked"
+            );
+
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// A resize (or sidebar toggle) DURING the ssh attach handshake must
+        /// not be lost. While the attach is in flight `focused_remote_pane_
+        /// attach` is `None`, so every `sync_focused_remote_pane_resize`
+        /// no-ops; without a sync ON establish, the remote would stay
+        /// rendered at the stale attach-time size until some unrelated
+        /// `terminal_area` recompute happened to fire. This drives that
+        /// window directly: focus at size A (the `Hello` carries A), change
+        /// `terminal_area` to a distinct size B before the Established
+        /// handback is processed, then assert the remote receives a `Resize`
+        /// carrying B (not A) right after establish -- proving the sync
+        /// fires on establish with the CURRENT dims.
+        #[tokio::test]
+        async fn resize_during_the_attach_handshake_is_pushed_on_establish() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("resize-during-attach");
+            fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("remote-api.sock");
+
+            let remote_sock = sock.clone();
+            let (hello_tx, hello_rx) = std::sync::mpsc::channel::<(u16, u16)>();
+            let (resize_tx, resize_rx) = std::sync::mpsc::channel::<(u16, u16)>();
+            let remote = std::thread::spawn(move || {
+                let listener = UnixListener::bind(&remote_sock).unwrap();
+                let _round = serve_attach_round(&listener, vec![fake_pane("w1:p1")]);
+
+                // Terminal channel: read the Hello (capturing its
+                // attach-time dims), complete the handshake, then read the
+                // next message -- which must be the establish-time Resize.
+                let (mut conn, _) = listener.accept().unwrap();
+                let hello: crate::protocol::ClientMessage =
+                    protocol::read_message(&mut conn, MAX_FRAME_SIZE).unwrap();
+                match hello {
+                    crate::protocol::ClientMessage::Hello { cols, rows, .. } => {
+                        hello_tx.send((cols, rows)).unwrap();
+                    }
+                    other => panic!("expected Hello, got {other:?}"),
+                }
+                protocol::write_message(
+                    &mut conn,
+                    &ServerMessage::Welcome {
+                        version: crate::protocol::PROTOCOL_VERSION,
+                        encoding: RenderEncoding::TerminalAnsi,
+                        error: None,
+                    },
+                )
+                .unwrap();
+                let attach: crate::protocol::ClientMessage =
+                    protocol::read_message(&mut conn, MAX_FRAME_SIZE).unwrap();
+                assert!(matches!(
+                    attach,
+                    crate::protocol::ClientMessage::AttachTerminal { .. }
+                ));
+
+                let msg: crate::protocol::ClientMessage =
+                    protocol::read_message(&mut conn, MAX_FRAME_SIZE).unwrap();
+                match msg {
+                    crate::protocol::ClientMessage::Resize { cols, rows, .. } => {
+                        resize_tx.send((cols, rows)).unwrap();
+                    }
+                    other => panic!("expected a Resize after establish, got {other:?}"),
+                }
+                let mut buf = [0u8; 64];
+                let _ = conn.read(&mut buf);
+            });
+
+            use_fake_remote_socket(&mut server, sock);
+            server.handle_host_attach_api(
+                "test:host:attach".to_string(),
+                api::schema::HostAttachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            wait_for_host_state(&mut server, "workbox", "connected");
+
+            let terminal_id = host_tagged_terminals(&server, "workbox")
+                .first()
+                .expect("remote pane should be adopted as a host-tagged terminal")
+                .id
+                .clone();
+
+            // Size A at focus time: the attach's `Hello` carries this.
+            server.app.state.view.terminal_area = Rect::new(0, 0, 80, 24);
+            server.focus_remote_pane(terminal_id.clone());
+            // Simulate a resize WHILE the attach is still in flight (before
+            // the Established handback is drained): `focused_remote_pane_
+            // attach` is still `None`, so a sync right now would no-op and
+            // be lost -- only the sync on establish saves it.
+            server.app.state.view.terminal_area = Rect::new(0, 0, 100, 30);
+
+            // Drain until the Established handback registers the runtime +
+            // attach handle (the establish-time sync fires here).
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                server.drain_server_events();
+                if server.focused_remote_pane_attach.is_some() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for the remote-fed runtime to register"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+
+            let hello_dims = hello_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("fake remote read the Hello");
+            assert_eq!(
+                hello_dims,
+                (80, 24),
+                "the attach Hello must carry the attach-time size A"
+            );
+            let resize_dims = resize_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("fake remote received a Resize on establish");
+            assert_eq!(
+                resize_dims,
+                (100, 30),
+                "the establish-time Resize must carry the CURRENT terminal_area (B), not the stale attach-time size (A)"
+            );
 
             server.handle_host_detach_api(
                 "test:host:detach".to_string(),
