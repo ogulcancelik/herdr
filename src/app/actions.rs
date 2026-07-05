@@ -1291,7 +1291,18 @@ impl AppState {
 
     fn cycle_agent_entry(&mut self, forward: bool) {
         let entries = crate::ui::agent_panel_entries(self);
-        if entries.is_empty() {
+        // Synthetic (workspace-less) remote entries (Task 9b) have no focus
+        // target -- `focus_agent_entry` would just no-op on one -- so
+        // Tab-style cycling only visits `in_workspace` entries. With zero
+        // such entries this is index-for-index the same sequence as before:
+        // `focusable[i] == i`.
+        let focusable: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.in_workspace)
+            .map(|(idx, _)| idx)
+            .collect();
+        if focusable.is_empty() {
             return;
         }
 
@@ -1299,17 +1310,18 @@ impl AppState {
             .active
             .and_then(|idx| self.workspaces.get(idx))
             .and_then(crate::workspace::Workspace::focused_pane_id);
-        let current_idx =
-            focused.and_then(|pane_id| entries.iter().position(|entry| entry.pane_id == pane_id));
-        let target_idx = match (current_idx, forward) {
-            (Some(idx), true) => (idx + 1) % entries.len(),
-            (Some(0), false) => entries.len() - 1,
-            (Some(idx), false) => idx - 1,
+        let current_pos = focused
+            .and_then(|pane_id| entries.iter().position(|entry| entry.pane_id == pane_id))
+            .and_then(|entry_idx| focusable.iter().position(|idx| *idx == entry_idx));
+        let target_pos = match (current_pos, forward) {
+            (Some(pos), true) => (pos + 1) % focusable.len(),
+            (Some(0), false) => focusable.len() - 1,
+            (Some(pos), false) => pos - 1,
             (None, true) => 0,
-            (None, false) => entries.len() - 1,
+            (None, false) => focusable.len() - 1,
         };
 
-        self.focus_agent_entry(target_idx);
+        self.focus_agent_entry(focusable[target_pos]);
     }
 
     pub(crate) fn ensure_agent_panel_entry_visible(&mut self, idx: usize) {
@@ -3594,6 +3606,41 @@ mod tests {
                 ))
             })
             .expect("agent state transition should update pane state");
+    }
+
+    #[test]
+    fn next_agent_skips_synthetic_remote_entries() {
+        let workspace = Workspace::test_new("one");
+        let root = workspace.tabs[0].root_pane;
+
+        let mut state = AppState::test_new();
+        state.workspaces = vec![workspace];
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = Mode::Terminal;
+        mark_agent(&mut state, 0, 0, root);
+
+        // A host-tagged terminal with no workspace home (Task 9b synthetic
+        // entry) sorts after the local entry. Tab-cycling must skip it --
+        // it has no focus target -- rather than silently landing on it and
+        // leaving the user "stuck" until enough presses skip past every
+        // such entry.
+        let remote_id = crate::terminal::TerminalId::alloc();
+        let mut remote_terminal =
+            crate::terminal::TerminalState::new(remote_id.clone(), "/tmp".into());
+        remote_terminal.host = Some(crate::terminal::TerminalHostTag::new("workbox"));
+        remote_terminal.set_agent_name("claude".into());
+        state.terminals.insert(remote_id, remote_terminal);
+        assert_eq!(crate::ui::agent_panel_entries(&state).len(), 2);
+
+        state.next_agent();
+
+        // Only one focusable (in_workspace) entry exists, so cycling wraps
+        // back to it instead of landing on the unfocusable remote entry.
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
+        state.assert_invariants_for_test();
     }
 
     #[test]

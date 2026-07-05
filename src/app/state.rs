@@ -843,20 +843,27 @@ pub enum AgentPanelSort {
 /// `host_link::LinkState`. `app/` sits below `server/` in the dependency
 /// graph, so this is a distinct type; the server layer converts between the
 /// two at the single point where it applies host events to `AppState`
-/// (`HeadlessServer::sync_host_link_display`, Task 9; the same seam is meant
-/// to set `TerminalState::host` once adopted remote panes get a runtime --
-/// still Task 9b/deferred today, so `host_links` entries currently exist
-/// without any tagged terminals alongside them).
+/// (`HeadlessServer::sync_host_link_display`, Task 9). The same seam sets
+/// `TerminalState::host` once a remote pane is adopted (Task 9b); host-tagged
+/// terminals are never homed in a workspace, so the sidebar surfaces them as
+/// synthetic `AgentPanelEntry` rows keyed off [`AppState::remote_pane_display`]
+/// (see that type's doc comment) rather than through `Workspace::pane_details`.
 ///
 /// Sync contract for that wiring:
 /// - Snapshot events are authoritative reconciliation: adopt new panes,
 ///   release missing ones, and re-seed every host's entry in
 ///   [`AppState::host_links`] each time.
 /// - Link state transitions update the entry in place; detaching a host
-///   removes it (and, once Task 9b lands, its terminals' host tags).
+///   removes it and its terminals' host tags.
 ///
 /// `attempt` from `LinkState::Reconnecting` is deliberately not mirrored;
-/// the host section header shows only a spinner.
+/// the host section header shows only a spinner. That header-level indicator
+/// is also the ONLY offline/reconnecting treatment: an individual remote
+/// pane's `AgentPanelEntry` still renders whatever status it last reported
+/// even while its host is `Offline`/`Reconnecting`, on the same reasoning the
+/// spinner-only choice above already documents -- adding a second,
+/// per-entry "this might be stale" indicator would be piling UI onto a
+/// signal the section header already carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 // Constructed only by the `#[cfg(unix)]`-gated multi-host server wiring
 // (`HeadlessServer::sync_host_link_display`, Task 9); genuinely unreachable
@@ -867,6 +874,41 @@ pub enum HostLinkDisplayState {
     Connected,
     Reconnecting,
     Offline,
+}
+
+/// Sidebar display projection for one adopted remote pane's host-tagged
+/// terminal, keyed by that terminal's [`crate::terminal::TerminalId`] in
+/// [`AppState::remote_pane_display`]. Mirrors [`HostLinkDisplayState`]'s
+/// pattern one level down (per-pane instead of per-host): the server is the
+/// only writer, at the same single mutation point that seeds/updates/removes
+/// the host-tagged `TerminalState` itself
+/// (`HeadlessServer::seed_remote_pane_terminal`/the `StatusChanged` arm of
+/// `handle_host_event`/`remove_remote_pane_terminal`, Task 9b), so a
+/// terminal's entry here is created, updated, and torn down in lockstep with
+/// the terminal.
+///
+/// This exists only to recover the one bit `TerminalState::state` cannot
+/// carry: the remote's raw `api::schema::AgentStatus` collapses `Done` and
+/// `Idle` together into `AgentState::Idle`
+/// (`remote_agent_status_to_terminal_state`'s doc comment spells out why --
+/// there is no local `PaneState.seen` bit for a pane that was deliberately
+/// kept out of every workspace). `seen` reconstructs the local `(AgentState,
+/// bool)` display pair the rest of the sidebar already speaks: `false` for a
+/// raw `Done` status, `true` for everything else (every renderer --
+/// `state_label`/`agent_icon`/`state_dot` -- only branches on `seen` for the
+/// `Idle` state, so `true` is exact for `Idle` and an arbitrary-but-harmless
+/// default for `Working`/`Blocked`/`Unknown`). A terminal with `host:
+/// Some(_)` and no entry here just hasn't reported a status yet, which reads
+/// as the same default (`seen: true`) via `Option::unwrap_or(true)` at the
+/// read site -- never a stale/missing-update sentinel to special-case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+// Constructed only by the `#[cfg(unix)]`-gated multi-host server wiring
+// (`HeadlessServer::seed_remote_pane_terminal`, Task 9b); genuinely
+// unreachable on a Windows build (multi-host is unix-only).
+#[cfg_attr(not(unix), allow(dead_code))]
+pub struct RemotePaneDisplay {
+    pub seen: bool,
+    pub custom_status: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1304,6 +1346,12 @@ pub struct AppState {
     /// `HostLinkRegistry` order, so UI host sections stay consistent with it.
     pub host_links:
         std::collections::BTreeMap<crate::terminal::TerminalHostTag, HostLinkDisplayState>,
+    /// Sidebar display projection for adopted remote panes, keyed by their
+    /// host-tagged terminal's id. See [`RemotePaneDisplay`] for the sync
+    /// contract; mirrors `host_links` one level down (per-pane, not
+    /// per-host).
+    pub remote_pane_display:
+        std::collections::HashMap<crate::terminal::TerminalId, RemotePaneDisplay>,
     pub(crate) pane_id_aliases: std::collections::HashMap<u32, PaneId>,
     pub(crate) public_pane_id_aliases: std::collections::HashMap<String, PaneId>,
     pub workspaces: Vec<Workspace>,
@@ -1663,6 +1711,7 @@ impl AppState {
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             host_links: std::collections::BTreeMap::new(),
+            remote_pane_display: std::collections::HashMap::new(),
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces: Vec::new(),
@@ -1973,11 +2022,13 @@ impl AppState {
             }
         }
 
-        // Host tag cross-check: once the host-link registry lives in server
-        // state (Task 8/9), extend this to assert every terminal with
-        // `host: Some(_)` has a matching entry in `RemotePaneRegistry`. For
-        // now the tag is inert -- every terminal defaults to `host: None`,
-        // so this only guards the shape of the tag itself.
+        // Host tag cross-check: this only guards the shape of the tag
+        // itself. The full cross-check against the server's
+        // `RemotePaneRegistry` (every `host: Some(_)` terminal has a matching
+        // adopted remote pane, and vice versa) lives in
+        // `HeadlessServer::assert_remote_pane_terminal_bijection_for_test`,
+        // since `app/` sits below `server/` in the dependency graph and
+        // cannot see that registry.
         for terminal in self.terminals.values() {
             if let Some(host) = &terminal.host {
                 assert!(
@@ -1986,6 +2037,22 @@ impl AppState {
                     terminal.id
                 );
             }
+        }
+
+        // `remote_pane_display` entries must name a live, host-tagged
+        // terminal: the server only ever inserts an entry alongside seeding
+        // the terminal itself, and removes it in the same call that removes
+        // the terminal (`HeadlessServer::seed_remote_pane_terminal`/
+        // `remove_remote_pane_terminal`, Task 9b), so a dangling or
+        // non-host-tagged entry here would mean that lockstep broke.
+        for terminal_id in self.remote_pane_display.keys() {
+            let terminal = self.terminals.get(terminal_id).unwrap_or_else(|| {
+                panic!("remote_pane_display tracks status for missing terminal {terminal_id}")
+            });
+            assert!(
+                terminal.host.is_some(),
+                "remote_pane_display tracks status for non-host-tagged terminal {terminal_id}"
+            );
         }
 
         let assert_live_pane = |pane_id: PaneId, context: &str| {

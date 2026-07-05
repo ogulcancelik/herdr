@@ -138,13 +138,16 @@ impl RemotePaneRegistry {
 /// metadata the sidebar presents for a pane (label/agent/title and friends,
 /// straight from `PaneInfo`).
 ///
-/// The Task 9 host-event consumer (`src/server/headless.rs`) reads
-/// `remote_pane_id` (to key the `RemotePaneRegistry` bijection) but has
-/// nowhere to route `agent_status`/`label`/`agent`/`title`/`display_agent`/
-/// `custom_status` yet -- that needs a host-tagged `TerminalState` per
-/// adopted pane, which Task 9 deliberately defers (see `HostEvent::PaneClosed`
-/// and `StatusChanged` handling in `HeadlessServer::handle_host_event`).
-#[allow(dead_code)]
+/// `remote_pane_id` keys the `RemotePaneRegistry` bijection.
+/// `agent_status`/`label`/`agent`/`display_agent` route into the host-tagged
+/// `TerminalState`'s `state`/`agent_name` at `HeadlessServer::
+/// seed_remote_pane_terminal`; `custom_status` (and the raw `agent_status`
+/// again, for the `Done`-vs-`Idle` bit `TerminalState::state` alone can't
+/// carry) routes into `AppState::remote_pane_display`, the sidebar's true
+/// 5-way-status projection (Task 9b, same mutation point). Only `title` and
+/// `remote_terminal_id` still have nowhere to route -- each carries its own
+/// field-level `#[allow(dead_code)]` below (not a struct-level allow, so a
+/// future genuinely-unused field is not silently masked).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemotePaneInfo {
     pub(crate) remote_pane_id: String,
@@ -155,10 +158,14 @@ pub(crate) struct RemotePaneInfo {
     /// because HALF 2 (frame streaming) needs it to open
     /// `RemotePaneAttach::attach`'s terminal channel against the right
     /// remote terminal, and it is cheap to carry from here on.
+    #[allow(dead_code)] // reserved for HALF 2 frame streaming; see above
     pub(crate) remote_terminal_id: String,
     pub(crate) agent_status: AgentStatus,
     pub(crate) label: Option<String>,
     pub(crate) agent: Option<String>,
+    /// No consumer yet; carried straight from `PaneInfo` for a future
+    /// title-aware sidebar presentation.
+    #[allow(dead_code)] // no consumer yet; see above
     pub(crate) title: Option<String>,
     pub(crate) display_agent: Option<String>,
     pub(crate) custom_status: Option<String>,

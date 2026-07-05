@@ -475,6 +475,13 @@ impl AppState {
         {
             if row == placement.y || row == placement.y + 1 {
                 let detail = &entries[placement.entry_idx];
+                // Synthetic (workspace-less) remote entries have no real
+                // focus target yet (Task 9b defers click focus to a later
+                // frame-streaming commit); clicking one is a no-op rather
+                // than resolving to its inert placeholder ws_idx/pane_id.
+                if !detail.in_workspace {
+                    return None;
+                }
                 return Some((detail.ws_idx, detail.tab_idx, detail.pane_id));
             }
         }
@@ -832,6 +839,58 @@ mod tests {
             app.state.workspaces[1].tabs[0].layout.focused(),
             second_pane
         );
+    }
+
+    #[test]
+    fn clicking_synthetic_remote_agent_row_is_a_no_op() {
+        // Task 9b: a host-tagged terminal with no workspace home renders as
+        // a synthetic AgentPanelEntry, but clicking it must not panic, must
+        // not mis-target another pane, and must not even switch mode --
+        // click-focus for these entries is deferred to a later commit.
+        let mut app = app_for_mouse_test();
+        let first = Workspace::test_new("one");
+        let first_pane = first.tabs[0].root_pane;
+        app.state.workspaces = vec![first];
+        app.state.ensure_test_terminals();
+        let first_terminal_id = app.state.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&first_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        // Not attached to any pane in any workspace.
+        let remote_terminal_id = crate::terminal::TerminalId::alloc();
+        let mut remote_terminal =
+            crate::terminal::TerminalState::new(remote_terminal_id.clone(), "/tmp".into());
+        remote_terminal.host = Some(crate::terminal::TerminalHostTag::new("workbox"));
+        remote_terminal.set_agent_name("claude".into());
+        app.state
+            .terminals
+            .insert(remote_terminal_id, remote_terminal);
+
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+            app.state.view.sidebar_rect,
+            app.state.sidebar_section_split,
+        );
+
+        // Same geometry as
+        // clicking_agent_row_below_host_header_targets_correct_workspace:
+        // header at +6, the entry's name row at +7.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            detail_area.x + 2,
+            detail_area.y + 7,
+        ));
+
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.focused(), first_pane);
     }
 
     #[test]

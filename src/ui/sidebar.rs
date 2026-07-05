@@ -33,6 +33,25 @@ pub(crate) struct AgentPanelEntry {
     /// terminals. Entries are grouped by this tag: local first, then one
     /// section per host sorted by host id.
     pub host: Option<TerminalHostTag>,
+    /// Whether this entry has a real `(ws_idx, tab_idx, pane_id)` focus
+    /// target. `true` for every entry derived from `Workspace::pane_details`;
+    /// `false` for the synthetic entries `agent_panel_entries_with_runtimes`
+    /// appends for host-tagged terminals with no workspace home (Task 9b) --
+    /// those carry inert placeholder `ws_idx`/`tab_idx`/`pane_id` values that
+    /// must not be treated as a real focus target. Click/tap hit-testing
+    /// (`agent_detail_target_at`, `mobile_switcher_target_at`) and keyboard
+    /// nav (`focusable_agent_entries`, `cycle_agent_entry`) check this before
+    /// returning a focus target; render and the row-placement walker don't
+    /// need to (they never dereference a workspace through an entry).
+    ///
+    /// HALF 2 breadcrumb: once remote entries become focusable (frame
+    /// streaming), replace this bool + the placeholder coordinates with a
+    /// typed focus target on `AgentPanelEntry`, e.g. `enum AgentFocusTarget {
+    /// Local { ws_idx, tab_idx, pane_id }, Remote { terminal_id } }`, so every
+    /// consumer is compiler-forced to handle the remote arm instead of relying
+    /// on a sentinel `usize::MAX`/`PaneId(0)` staying inert. Do NOT do that
+    /// conversion in this display-only commit.
+    pub in_workspace: bool,
 }
 
 fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
@@ -145,9 +164,12 @@ fn agent_panel_entries_with_runtimes(
                         .terminal_id(detail.pane_id)
                         .and_then(|terminal_id| app.terminals.get(terminal_id))
                         .and_then(|terminal| terminal.host.clone()),
+                    in_workspace: true,
                 })
         })
         .collect();
+
+    entries.extend(unhomed_remote_pane_entries(app));
 
     if matches!(app.agent_panel_sort, AgentPanelSort::Priority) {
         entries.sort_by_key(|entry| {
@@ -166,6 +188,95 @@ fn agent_panel_entries_with_runtimes(
     entries.sort_by(|a, b| a.host.cmp(&b.host));
 
     entries
+}
+
+/// Placeholder focus target for a synthetic (workspace-less) entry:
+/// deliberately out of range so every real lookup through it (`is_active_pane`,
+/// `AppState::workspaces.get`, `public_pane_id`, ...) safely resolves to
+/// "not found"/`false` instead of aliasing a real pane. Click/tap
+/// hit-testing and keyboard nav additionally check
+/// `AgentPanelEntry::in_workspace` before ever reading this, so this is
+/// defense in depth, not the only guard. This placeholder-coordinate approach
+/// is display-only for Task 9b; see `AgentPanelEntry::in_workspace`'s doc
+/// comment for the HALF 2 plan to replace it with a typed focus-target enum.
+const UNHOMED_ENTRY_WS_IDX: usize = usize::MAX;
+
+/// One `AgentPanelEntry` per host-tagged terminal that no workspace pane
+/// currently references (Task 9b: Option B surfaces adopted remote panes
+/// independently of workspaces). Filtering on "not referenced by any
+/// workspace pane" rather than just "host-tagged" means a future commit that
+/// homes some adopted remote panes in a workspace (frame streaming, HALF 2)
+/// won't double-count them here.
+///
+/// Unlike `Workspace::pane_details`, which drops a pane with no resolvable
+/// agent label, every host-tagged terminal is included regardless of
+/// `agent_name` (the nameless-pane rule): a remote agent that hasn't been
+/// identified yet must not vanish from the panel just because it has no
+/// name yet. `primary_label` falls back to a placeholder in that case.
+///
+/// True 5-way status: `terminal.state` alone only carries the collapsed
+/// `AgentState` (`Done`/`Idle` both fold to `Idle`); `AppState::
+/// remote_pane_display` (populated by the server at the same mutation point
+/// that seeds the terminal, see its doc comment) carries the `seen` bit
+/// needed to tell them apart, exactly like a local pane's `PaneState::seen`
+/// does. A terminal with no projection entry yet (status not reported)
+/// defaults to `seen: true`, matching a freshly-created local pane.
+///
+/// A host whose link is `Offline`/`Reconnecting` gets no special per-entry
+/// treatment here -- see `HostLinkDisplayState`'s doc comment for why the
+/// section header's indicator is considered sufficient on its own.
+fn unhomed_remote_pane_entries(app: &AppState) -> Vec<AgentPanelEntry> {
+    let homed_terminal_ids: std::collections::HashSet<&crate::terminal::TerminalId> = app
+        .workspaces
+        .iter()
+        .flat_map(|ws| &ws.tabs)
+        .flat_map(|tab| tab.panes.values())
+        .map(|pane| &pane.attached_terminal_id)
+        .collect();
+
+    let mut unhomed: Vec<(
+        &crate::terminal::TerminalId,
+        &crate::terminal::TerminalState,
+    )> = app
+        .terminals
+        .iter()
+        .filter(|(id, terminal)| terminal.host.is_some() && !homed_terminal_ids.contains(id))
+        .collect();
+    // Deterministic order within a host section: HashMap iteration order is
+    // an implementation detail, not something a scrolling list should ride
+    // on. The final host-group sort in `agent_panel_entries_with_runtimes`
+    // is stable, so this ordering survives into each host's section.
+    unhomed.sort_by(|(a_id, a_terminal), (b_id, b_terminal)| {
+        a_terminal
+            .host
+            .cmp(&b_terminal.host)
+            .then_with(|| a_id.to_string().cmp(&b_id.to_string()))
+    });
+
+    unhomed
+        .into_iter()
+        .map(|(terminal_id, terminal)| {
+            let display = app.remote_pane_display.get(terminal_id);
+            let agent_label = terminal.agent_name.clone();
+            AgentPanelEntry {
+                ws_idx: UNHOMED_ENTRY_WS_IDX,
+                tab_idx: 0,
+                pane_id: crate::layout::PaneId::from_raw(0),
+                primary_label: agent_label
+                    .clone()
+                    .unwrap_or_else(|| "(unnamed)".to_string()),
+                primary_tab_label: None,
+                agent_label,
+                state: terminal.state,
+                seen: display.map(|info| info.seen).unwrap_or(true),
+                last_agent_state_change_seq: terminal.last_agent_state_change_seq,
+                custom_status: display.and_then(|info| info.custom_status.clone()),
+                state_labels: std::collections::HashMap::new(),
+                host: terminal.host.clone(),
+                in_workspace: false,
+            }
+        })
+        .collect()
 }
 
 pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static str {
@@ -1579,6 +1690,7 @@ mod tests {
             custom_status: None,
             state_labels: std::collections::HashMap::new(),
             host: Some(crate::terminal::TerminalHostTag::new("workbox")),
+            in_workspace: true,
         };
 
         let placements =
@@ -1603,6 +1715,7 @@ mod tests {
             custom_status: None,
             state_labels: std::collections::HashMap::new(),
             host: None,
+            in_workspace: true,
         }
     }
 
@@ -1704,6 +1817,163 @@ mod tests {
         // Offline shows the Blocked glyph.
         assert_eq!(rows[14], " gamma ◉");
         assert_eq!(rows[15], " ○ four");
+    }
+
+    /// Task 9b: host-tagged terminals adopted from a remote host but not
+    /// homed in any workspace (Option B) must still surface in the agent
+    /// panel, grouped under their host, with their TRUE 5-way status --
+    /// including a `Done` pane rendering as "done" (not the generic "idle"
+    /// its collapsed `AgentState::Idle` would otherwise imply) and a
+    /// nameless pane staying visible (the nameless-pane rule).
+    #[test]
+    fn unhomed_host_tagged_terminals_appear_as_synthetic_entries_with_true_status() {
+        let mut app = crate::app::state::AppState::test_new();
+        let local = Workspace::test_new("local");
+        let local_pane = local.tabs[0].root_pane;
+        app.workspaces = vec![local];
+        app.ensure_test_terminals();
+        let local_terminal_id = app.workspaces[0].tabs[0].panes[&local_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&local_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        app.active = Some(0);
+        app.selected = 0;
+
+        let host = crate::terminal::TerminalHostTag::new("workbox");
+
+        // Raw AgentStatus::Done collapses to AgentState::Idle on
+        // TerminalState alone; AppState::remote_pane_display's `seen: false`
+        // is what lets the sidebar tell it apart from a genuinely idle pane.
+        let done_id = crate::terminal::TerminalId::alloc();
+        let mut done_terminal = crate::terminal::TerminalState::new(done_id.clone(), "/tmp".into());
+        done_terminal.host = Some(host.clone());
+        done_terminal.state = AgentState::Idle;
+        done_terminal.set_agent_name("claude".into());
+        app.terminals.insert(done_id.clone(), done_terminal);
+        app.remote_pane_display.insert(
+            done_id.clone(),
+            crate::app::state::RemotePaneDisplay {
+                seen: false,
+                custom_status: Some("reviewed PR #42".into()),
+            },
+        );
+
+        // No agent identified yet. `Workspace::pane_details` would drop a
+        // local pane with no resolvable label; the nameless-pane rule says a
+        // remote entry must not vanish the same way.
+        let working_id = crate::terminal::TerminalId::alloc();
+        let mut working_terminal =
+            crate::terminal::TerminalState::new(working_id.clone(), "/tmp".into());
+        working_terminal.host = Some(host.clone());
+        working_terminal.state = AgentState::Working;
+        app.terminals.insert(working_id.clone(), working_terminal);
+
+        let entries = agent_panel_entries(&app);
+        assert_eq!(entries.len(), 3, "local entry + two unhomed remote entries");
+        assert_eq!(
+            entries[0].host, None,
+            "the local entry stays first: host grouping puts None-host entries before every host section"
+        );
+
+        let done_entry = entries
+            .iter()
+            .find(|entry| entry.host.as_ref() == Some(&host) && entry.agent_label.is_some())
+            .expect("the identified remote entry is present");
+        assert!(!done_entry.in_workspace);
+        assert_eq!(done_entry.state, AgentState::Idle);
+        assert!(
+            !done_entry.seen,
+            "raw AgentStatus::Done must render as unseen-idle (\"done\"), not plain idle"
+        );
+        assert_eq!(done_entry.agent_label.as_deref(), Some("claude"));
+        assert_eq!(done_entry.custom_status.as_deref(), Some("reviewed PR #42"));
+
+        let nameless_entry = entries
+            .iter()
+            .find(|entry| entry.host.as_ref() == Some(&host) && entry.agent_label.is_none())
+            .expect("the nameless remote entry must still be visible");
+        assert!(!nameless_entry.in_workspace);
+        assert_eq!(nameless_entry.state, AgentState::Working);
+        assert_eq!(nameless_entry.primary_label, "(unnamed)");
+    }
+
+    #[test]
+    fn render_agent_detail_shows_true_five_way_status_for_unhomed_remote_entries() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("here")];
+        app.ensure_test_terminals();
+        let here_pane = app.workspaces[0].tabs[0].root_pane;
+        let here_terminal_id = app.workspaces[0].tabs[0].panes[&here_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&here_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        // "alpha": a remote pane whose agent is known and reported Done.
+        let done_id = crate::terminal::TerminalId::alloc();
+        let mut done_terminal = crate::terminal::TerminalState::new(done_id.clone(), "/tmp".into());
+        done_terminal.host = Some(crate::terminal::TerminalHostTag::new("alpha"));
+        done_terminal.state = AgentState::Idle;
+        done_terminal.set_agent_name("claude".into());
+        app.terminals.insert(done_id.clone(), done_terminal);
+        app.remote_pane_display.insert(
+            done_id,
+            crate::app::state::RemotePaneDisplay {
+                seen: false,
+                custom_status: None,
+            },
+        );
+
+        // "zeta": a remote pane with no agent identified yet, still working.
+        let working_id = crate::terminal::TerminalId::alloc();
+        let mut working_terminal =
+            crate::terminal::TerminalState::new(working_id.clone(), "/tmp".into());
+        working_terminal.host = Some(crate::terminal::TerminalHostTag::new("zeta"));
+        working_terminal.state = AgentState::Working;
+        app.terminals.insert(working_id.clone(), working_terminal);
+
+        let mut terminal = Terminal::new(TestBackend::new(26, 13)).expect("test terminal");
+        let runtimes = TerminalRuntimeRegistry::new();
+        terminal
+            .draw(|frame| render_agent_detail(&app, &runtimes, frame, Rect::new(0, 0, 26, 13)))
+            .expect("agent detail should render");
+
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..13)
+            .map(|y| {
+                (0..26)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+
+        assert_eq!(rows[3], " ○ here");
+        assert_eq!(rows[4], "   idle · pi");
+        assert_eq!(rows[6], " alpha");
+        assert_eq!(
+            rows[7], " ● claude",
+            "Idle+seen=false uses the \"done\" dot glyph"
+        );
+        assert_eq!(
+            rows[8], "   done · claude",
+            "raw AgentStatus::Done must render as \"done\", not \"idle\""
+        );
+        assert_eq!(rows[10], " zeta");
+        assert_eq!(
+            rows[11], " ⠋ (unnamed)",
+            "a remote pane with no agent yet still shows up, with a placeholder label"
+        );
+        assert_eq!(rows[12], "   working");
     }
 
     #[test]
@@ -1859,6 +2129,7 @@ mod tests {
             custom_status: None,
             state_labels: std::collections::HashMap::new(),
             host: None,
+            in_workspace: true,
         };
 
         let label = format_agent_panel_primary_label(&entry, 18);

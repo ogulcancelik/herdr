@@ -150,11 +150,18 @@ pub(crate) fn mobile_switcher_target_at(
         let agents_end = cursor + agents.len() * 2;
         if doc_row >= cursor && doc_row < agents_end {
             let idx = (doc_row - cursor) / 2;
-            return agents.get(idx).map(|entry| MobileSwitcherTarget::Agent {
-                ws_idx: entry.ws_idx,
-                tab_idx: entry.tab_idx,
-                pane_id: entry.pane_id,
-            });
+            // Synthetic (workspace-less) remote entries have no real focus
+            // target yet (Task 9b defers click/tap focus to a later frame-
+            // streaming commit); tapping one is a no-op rather than
+            // resolving to its inert placeholder ws_idx/pane_id.
+            return agents
+                .get(idx)
+                .filter(|entry| entry.in_workspace)
+                .map(|entry| MobileSwitcherTarget::Agent {
+                    ws_idx: entry.ws_idx,
+                    tab_idx: entry.tab_idx,
+                    pane_id: entry.pane_id,
+                });
         }
         cursor = agents_end;
     }
@@ -1147,6 +1154,7 @@ mod tests {
             custom_status: None,
             state_labels: std::collections::HashMap::new(),
             host: None,
+            in_workspace: true,
         }
     }
 

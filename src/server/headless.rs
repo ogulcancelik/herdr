@@ -241,19 +241,23 @@ pub struct HeadlessServer {
     /// `PaneId`s (Task 6), reconciled from every `HostEvent::Snapshot`.
     #[cfg(unix)]
     remote_panes: crate::server::remote_pane::RemotePaneRegistry,
-    /// `TerminalId` of the host-tagged `TerminalState` (in
-    /// `self.app.state.terminals`) for each adopted remote pane, keyed by
-    /// the same `RemotePaneKey` `remote_panes` bijects to a local `PaneId`
-    /// (Task 9b). A parallel map -- rather than folding the `TerminalId`
-    /// into `RemotePaneRegistry` itself -- keeps that registry a pure
+    /// The `TerminalId` of the host-tagged `TerminalState` (in
+    /// `self.app.state.terminals`) for each adopted remote pane, keyed by the
+    /// same `RemotePaneKey` `remote_panes` bijects to a local `PaneId` (Task
+    /// 9b). A parallel map -- rather than folding the `TerminalId` into
+    /// `RemotePaneRegistry` itself -- keeps that registry a pure
     /// `RemotePaneKey`<->`PaneId` bijection, reusable/testable on its own;
     /// this mirrors how `host_links` (pure link state machine) and
     /// `AppState.host_links` (display projection) already stay two synced
     /// structures rather than one merged type. Maintained ONLY from
     /// `handle_host_event`/its helpers (the single mutation point), in
-    /// lockstep with `remote_panes` and `self.app.state.terminals`: a key
-    /// has an entry here if and only if it is adopted in `remote_panes`,
-    /// and the named `TerminalId` names a host-tagged terminal there.
+    /// lockstep with `remote_panes`, `self.app.state.terminals`, and
+    /// `self.app.state.remote_pane_display`: a key has an entry here if and
+    /// only if it is adopted in `remote_panes`, and the named `TerminalId`
+    /// names a host-tagged terminal there. The remote's raw `AgentStatus`
+    /// is not stashed here -- it is projected straight into
+    /// `remote_pane_display` (via `sync_remote_pane_display`) the moment it
+    /// arrives, so nothing on the server side needs to hold it.
     #[cfg(unix)]
     remote_pane_terminals:
         HashMap<crate::server::remote_pane::RemotePaneKey, crate::terminal::TerminalId>,
@@ -281,6 +285,16 @@ pub struct HeadlessServer {
     /// production.
     #[cfg(unix)]
     host_transport_override_for_test: Option<std::sync::Arc<HostTransportFactory>>,
+}
+
+/// How `sync_remote_pane_display` should treat a remote pane's
+/// `custom_status` (Task 9b). A Snapshot carries a fresh presentation, so it
+/// `Set`s; a bare `StatusChanged` carries no presentation, so it `Keep`s the
+/// pane's last-known value rather than clobbering it to `None`.
+#[cfg(unix)]
+enum CustomStatusUpdate {
+    Set(Option<String>),
+    Keep,
 }
 
 /// Per-host runtime state kept alive by `HeadlessServer` for as long as a
@@ -1712,6 +1726,9 @@ impl HeadlessServer {
                     if let Some(terminal) = self.app.state.terminals.get_mut(&terminal_id) {
                         terminal.state = remote_agent_status_to_terminal_state(status);
                     }
+                    // Status-only update: refresh `seen`, keep the last
+                    // snapshot's `custom_status` (the wire event carries none).
+                    self.sync_remote_pane_display(&terminal_id, status, CustomStatusUpdate::Keep);
                 }
             }
             HostEvent::PaneClosed {
@@ -1788,9 +1805,10 @@ impl HeadlessServer {
 
     /// Creates (on first adoption) or re-seeds (on every later snapshot)
     /// the host-tagged `TerminalState` for one adopted remote pane. `key`
-    /// must already be adopted in `remote_panes`; this only maintains the
+    /// must already be adopted in `remote_panes`; this maintains the
     /// `TerminalId` half of the bijection (`remote_pane_terminals` +
-    /// `self.app.state.terminals`).
+    /// `self.app.state.terminals`) and, at the same mutation point, the
+    /// sidebar's `AppState::remote_pane_display` projection.
     #[cfg(unix)]
     fn seed_remote_pane_terminal(
         &mut self,
@@ -1803,6 +1821,7 @@ impl HeadlessServer {
             .entry(key)
             .or_insert_with(crate::terminal::TerminalId::alloc)
             .clone();
+
         let terminal = self
             .app
             .state
@@ -1817,35 +1836,81 @@ impl HeadlessServer {
         // first: `pane_details` (src/workspace/aggregate.rs) checks
         // `terminal.agent_name` before falling back to
         // `effective_agent_label()` (hook/detection authority, which an
-        // adopted remote pane never has locally), so `agent_name` is what
-        // must be `Some` for a host-tagged entry to pass that filter once
-        // the sidebar reads them directly (next commit). Prefer the raw
-        // agent identity (`agent`, the remote's own `effective_agent_label`)
-        // over the presentation override (`display_agent`) over the manual
-        // pane label (`label`), so a real agent identity wins when more than
-        // one is present.
+        // adopted remote pane never has locally). Unlike a local pane,
+        // `agent_name` being `None` here does NOT hide the entry -- the
+        // sidebar gives host-tagged terminals their own inclusion rule (a
+        // placeholder label) instead of reusing `pane_details`' drop-if-
+        // no-label filter, since a remote agent that hasn't been identified
+        // yet must not vanish. Prefer the raw agent identity (`agent`, the
+        // remote's own `effective_agent_label`) over the presentation
+        // override (`display_agent`) over the manual pane label (`label`),
+        // so a real agent identity wins when more than one is present.
         match pane.agent.or(pane.display_agent).or(pane.label) {
             Some(label) => terminal.set_agent_name(label),
             None => terminal.clear_agent_name(),
         }
+
+        // A Snapshot carries a fresh presentation, so overwrite custom_status.
+        self.sync_remote_pane_display(
+            &terminal_id,
+            pane.agent_status,
+            CustomStatusUpdate::Set(pane.custom_status),
+        );
+    }
+
+    /// The single place a remote pane's status is projected into
+    /// `AppState::remote_pane_display` for the sidebar (Task 9b). Called from
+    /// `seed_remote_pane_terminal` (every Snapshot re-seed) and the
+    /// `StatusChanged` arm of `handle_host_event`. `seen` is always recomputed
+    /// from the incoming raw `status` (the one bit `TerminalState::state`
+    /// cannot carry -- `Done` vs `Idle`). `custom_status` is only carried by a
+    /// Snapshot, so a bare `StatusChanged` passes [`CustomStatusUpdate::Keep`]
+    /// to preserve the pane's last-known value rather than clobbering it to
+    /// `None`.
+    #[cfg(unix)]
+    fn sync_remote_pane_display(
+        &mut self,
+        terminal_id: &crate::terminal::TerminalId,
+        status: api::schema::AgentStatus,
+        custom_status: CustomStatusUpdate,
+    ) {
+        let seen = status != api::schema::AgentStatus::Done;
+        let entry = self
+            .app
+            .state
+            .remote_pane_display
+            .entry(terminal_id.clone())
+            .or_insert_with(|| crate::app::state::RemotePaneDisplay {
+                seen,
+                custom_status: None,
+            });
+        entry.seen = seen;
+        if let CustomStatusUpdate::Set(custom_status) = custom_status {
+            entry.custom_status = custom_status;
+        }
     }
 
     /// Removes the host-tagged `TerminalState` (if any) tracked for a
-    /// released/absent remote pane, keeping `remote_pane_terminals` and
-    /// `self.app.state.terminals` in lockstep with `remote_panes`.
-    /// Idempotent: a key with no tracked terminal is a no-op.
+    /// released/absent remote pane, keeping `remote_pane_terminals`,
+    /// `self.app.state.terminals`, and `self.app.state.remote_pane_display`
+    /// in lockstep with `remote_panes`. Idempotent: a key with no tracked
+    /// terminal is a no-op.
     #[cfg(unix)]
     fn remove_remote_pane_terminal(&mut self, key: &crate::server::remote_pane::RemotePaneKey) {
         if let Some(terminal_id) = self.remote_pane_terminals.remove(key) {
             self.app.state.terminals.remove(&terminal_id);
+            self.app.state.remote_pane_display.remove(&terminal_id);
         }
     }
 
     /// Test-only bijection check for the Task 9b invariant: every
     /// host-tagged `TerminalState` corresponds to a live `remote_panes`
-    /// entry, and vice versa. `AppState::assert_invariants_for_test` already
-    /// checks the shape of `terminal.host` (non-empty tag), but it cannot
-    /// see `RemotePaneRegistry` -- `app/` sits below `server/` in the
+    /// entry, and vice versa, and `AppState::remote_pane_display` tracks
+    /// exactly the same set of terminals as `remote_pane_terminals`.
+    /// `AppState::assert_invariants_for_test` already checks the shape of
+    /// `terminal.host` (non-empty tag) and that every `remote_pane_display`
+    /// key names a host-tagged terminal, but it cannot see
+    /// `RemotePaneRegistry` -- `app/` sits below `server/` in the
     /// dependency graph, so `AppState` must not import
     /// `crate::server::remote_pane` -- so the full cross-check lives here,
     /// where `remote_panes`, `remote_pane_terminals`, and
@@ -1856,9 +1921,10 @@ impl HeadlessServer {
 
         self.app.state.assert_invariants_for_test();
 
-        // remote_pane_terminals -> remote_panes + app.state.terminals: every
-        // tracked key is still adopted, and its TerminalId names a
-        // host-tagged terminal carrying that key's host.
+        // remote_pane_terminals -> remote_panes + app.state.terminals +
+        // remote_pane_display: every tracked key is still adopted, its
+        // TerminalId names a host-tagged terminal carrying that key's host,
+        // and the sidebar's display projection has a matching entry.
         for (key, terminal_id) in &self.remote_pane_terminals {
             assert!(
                 self.remote_panes.local_for(key).is_some(),
@@ -1876,6 +1942,10 @@ impl HeadlessServer {
                 terminal.host.as_ref().map(|tag| tag.as_str()),
                 Some(key.host.0.as_str()),
                 "terminal {terminal_id} host tag does not match its RemotePaneKey's host"
+            );
+            assert!(
+                self.app.state.remote_pane_display.contains_key(terminal_id),
+                "remote_pane_terminals tracks {key:?} -> {terminal_id}, but remote_pane_display has no entry for it"
             );
         }
 
@@ -1902,6 +1972,15 @@ impl HeadlessServer {
                     terminal.id
                 );
             }
+        }
+
+        // app.state.remote_pane_display -> remote_pane_terminals: no ghost
+        // display entry outlives its terminal record either.
+        for terminal_id in self.app.state.remote_pane_display.keys() {
+            assert!(
+                tracked.contains(terminal_id),
+                "remote_pane_display tracks {terminal_id}, but it has no remote_pane_terminals record"
+            );
         }
     }
 
@@ -10037,6 +10116,7 @@ next_tab = ""
                 let mut done_pane = fake_pane("w1:p2");
                 done_pane.agent_status = api::schema::AgentStatus::Done;
                 done_pane.display_agent = Some("Codex".to_string());
+                done_pane.custom_status = Some("reviewed PR #42".to_string());
                 write_fake_line(
                     &mut conn,
                     &api::schema::SuccessResponse {
@@ -10102,6 +10182,36 @@ next_tab = ""
                 "AgentStatus::Done must invert to AgentState::Idle"
             );
 
+            // Fidelity fix (Task 9b): `TerminalState::state` alone collapses
+            // `Done` and `Idle` into `AgentState::Idle`, so the sidebar's
+            // true 5-way status has to come from `AppState::remote_pane_display`
+            // instead.
+            let claude_display = server
+                .app
+                .state
+                .remote_pane_display
+                .get(&claude.id)
+                .expect("claude's terminal has a remote_pane_display entry");
+            assert!(
+                claude_display.seen,
+                "AgentStatus::Working must decode to seen=true"
+            );
+            let codex_display = server
+                .app
+                .state
+                .remote_pane_display
+                .get(&codex.id)
+                .expect("codex's terminal has a remote_pane_display entry");
+            assert!(
+                !codex_display.seen,
+                "AgentStatus::Done must decode to seen=false so the sidebar renders \"done\", not \"idle\""
+            );
+            assert_eq!(
+                codex_display.custom_status.as_deref(),
+                Some("reviewed PR #42"),
+                "custom_status must route into remote_pane_display too"
+            );
+
             server.assert_remote_pane_terminal_bijection_for_test();
 
             server.handle_host_detach_api(
@@ -10156,6 +10266,31 @@ next_tab = ""
                 crate::detect::AgentState::Blocked,
                 "StatusChanged must update the already-adopted terminal's state"
             );
+            assert!(
+                server.app.state.remote_pane_display[&terminal_id].seen,
+                "Blocked must decode to seen=true (only Done maps to seen=false)"
+            );
+
+            // A later StatusChanged carrying AgentStatus::Done must flip the
+            // fidelity bit even though TerminalState::state alone can't tell
+            // Done and Idle apart (Task 9b fidelity fix).
+            server.handle_host_event(crate::server::remote_pane::HostEventEnvelope {
+                generation,
+                event: crate::server::remote_pane::HostEvent::StatusChanged {
+                    host: crate::server::host_link::HostLinkId("workbox".to_string()),
+                    remote_pane_id: "w1:p0".to_string(),
+                    status: api::schema::AgentStatus::Done,
+                },
+            });
+            assert_eq!(
+                server.app.state.terminals[&terminal_id].state,
+                crate::detect::AgentState::Idle,
+                "AgentStatus::Done must still invert to the collapsed AgentState::Idle"
+            );
+            assert!(
+                !server.app.state.remote_pane_display[&terminal_id].seen,
+                "AgentStatus::Done must decode to seen=false so the sidebar can tell it apart from Idle"
+            );
 
             // Unknown pane id: no-op -- must not adopt, must not panic.
             let before = server.app.state.terminals.len();
@@ -10202,7 +10337,14 @@ next_tab = ""
                 },
             );
             wait_for_host_state(&mut server, "workbox", "connected");
-            assert_eq!(host_tagged_terminals(&server, "workbox").len(), 1);
+            let terminals = host_tagged_terminals(&server, "workbox");
+            assert_eq!(terminals.len(), 1);
+            let terminal_id = terminals[0].id.clone();
+            assert!(server
+                .app
+                .state
+                .remote_pane_display
+                .contains_key(&terminal_id));
 
             let generation = server.host_generation_for_test("workbox").unwrap();
             server.handle_host_event(crate::server::remote_pane::HostEventEnvelope {
@@ -10216,6 +10358,14 @@ next_tab = ""
             assert!(
                 host_tagged_terminals(&server, "workbox").is_empty(),
                 "PaneClosed must remove the pane's host-tagged terminal"
+            );
+            assert!(
+                !server
+                    .app
+                    .state
+                    .remote_pane_display
+                    .contains_key(&terminal_id),
+                "PaneClosed must also remove the terminal's remote_pane_display entry"
             );
             server.assert_remote_pane_terminal_bijection_for_test();
 

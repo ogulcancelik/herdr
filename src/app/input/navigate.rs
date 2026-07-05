@@ -180,9 +180,9 @@ impl App {
                 }
             }
             NavigateAction::FocusAgent(idx) => {
-                if let Some((ws_idx, pane_id)) = self.agent_entry_target(idx) {
+                if let Some((entry_idx, ws_idx, pane_id)) = self.agent_entry_target(idx) {
                     self.focus_pane_internal_via_api(ws_idx, pane_id);
-                    self.state.ensure_agent_panel_entry_visible(idx);
+                    self.state.ensure_agent_panel_entry_visible(entry_idx);
                     leave_navigate_mode(&mut self.state);
                 }
             }
@@ -635,15 +635,37 @@ impl App {
         Some((ws.active_tab as isize + delta).rem_euclid(ws.tabs.len() as isize) as usize)
     }
 
-    fn agent_entry_target(&self, idx: usize) -> Option<(usize, crate::layout::PaneId)> {
-        let entries = crate::ui::agent_panel_entries(&self.state);
-        let target = entries.get(idx)?;
-        Some((target.ws_idx, target.pane_id))
+    /// The agent-panel entries that have a real focus target, each paired
+    /// with its index in the full `agent_panel_entries` list (that full
+    /// index is what `ensure_agent_panel_entry_visible` scrolls to).
+    ///
+    /// Synthetic (workspace-less) remote entries (Task 9b) are filtered out:
+    /// they carry placeholder `ws_idx`/`pane_id`, so
+    /// `focus_pane_internal_via_api` would silently no-op on one while the
+    /// caller still ran `ensure_agent_panel_entry_visible`/`leave_navigate_mode`
+    /// -- i.e. keyboard Next/Prev/FocusAgent would get "stuck" on it. HALF 2
+    /// makes remote entries focusable. With zero synthetic entries this is
+    /// `entries.iter().enumerate()` unchanged, so the live keyboard-nav
+    /// sequence stays byte-for-byte the pre-9b one.
+    fn focusable_agent_entries(&self) -> Vec<(usize, usize, crate::layout::PaneId)> {
+        crate::ui::agent_panel_entries(&self.state)
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.in_workspace)
+            .map(|(entry_idx, entry)| (entry_idx, entry.ws_idx, entry.pane_id))
+            .collect()
+    }
+
+    fn agent_entry_target(&self, idx: usize) -> Option<(usize, usize, crate::layout::PaneId)> {
+        // `idx` is a keybind position (focus-agent-1, -2, ...): it selects the
+        // nth FOCUSABLE entry, so a synthetic remote entry never consumes a
+        // slot. Returns the entry's full-list index too, for ensure-visible.
+        self.focusable_agent_entries().into_iter().nth(idx)
     }
 
     fn relative_agent_entry(&self, forward: bool) -> Option<(usize, usize, crate::layout::PaneId)> {
-        let entries = crate::ui::agent_panel_entries(&self.state);
-        if entries.is_empty() {
+        let focusable = self.focusable_agent_entries();
+        if focusable.is_empty() {
             return None;
         }
         let focused = self
@@ -651,19 +673,22 @@ impl App {
             .active
             .and_then(|idx| self.state.workspaces.get(idx))
             .and_then(crate::workspace::Workspace::focused_pane_id);
-        let current_idx = entries
-            .iter()
-            .position(|entry| Some(entry.pane_id) == focused)
+        let current_pos = focused
+            .and_then(|pane_id| {
+                focusable
+                    .iter()
+                    .position(|(_, _, entry_pane_id)| *entry_pane_id == pane_id)
+            })
             .unwrap_or(0);
-        let next_idx = if forward {
-            (current_idx + 1) % entries.len()
-        } else if current_idx == 0 {
-            entries.len() - 1
+        let next_pos = if forward {
+            (current_pos + 1) % focusable.len()
+        } else if current_pos == 0 {
+            focusable.len() - 1
         } else {
-            current_idx - 1
+            current_pos - 1
         };
-        let target = entries.get(next_idx)?;
-        Some((next_idx, target.ws_idx, target.pane_id))
+        // `(entry_idx, ws_idx, pane_id)`; entry_idx indexes the full list.
+        focusable.get(next_pos).copied()
     }
 
     fn pass_through_key_to_focused_pane(&mut self, key: TerminalKey) -> bool {
@@ -2397,6 +2422,112 @@ last_pane = "prefix+tab"
         app.handle_navigate_key(TerminalKey::new(KeyCode::Char('P'), KeyModifiers::empty()));
 
         assert_eq!(app.state.mode, Mode::RenamePane);
+    }
+
+    /// Task 9b live-path guard: keyboard Next/Prev/FocusAgent must only ever
+    /// target `in_workspace` entries and never get "stuck" on a synthetic
+    /// (workspace-less) remote entry -- whose placeholder `ws_idx`/`pane_id`
+    /// would make `focus_pane_internal_via_api` a silent no-op while
+    /// `leave_navigate_mode` still ran. Next/Prev are driven end-to-end
+    /// through the production dispatcher `App::handle_navigate_key`; FocusAgent
+    /// is driven through `execute_tui_navigate_action` (the exact live arm
+    /// that dispatcher calls), because a FocusAgent keybind is inherently a
+    /// reserved digit key that would collide with workspace-switch bindings in
+    /// this synthetic setup. Both exercise the guarded `agent_entry_target`/
+    /// `relative_agent_entry`, NOT the dead `cycle_agent_entry` path that the
+    /// sibling `next_agent_skips_synthetic_remote_entries` covers.
+    #[tokio::test]
+    async fn live_agent_nav_skips_synthetic_remote_entries() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        // In navigate mode, `handle_navigate_key` matches bindings with the
+        // Prefix dispatch, so bind next/previous as prefix letters.
+        app.state.keybinds.next_agent = crate::config::ActionKeybinds::prefix("a");
+        app.state.keybinds.previous_agent = crate::config::ActionKeybinds::prefix("b");
+
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        let mut local_panes = Vec::new();
+        for ws_idx in 0..2 {
+            let pane = app.state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[ws_idx].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .detected_agent = Some(crate::detect::Agent::Pi);
+            local_panes.push(pane);
+        }
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.workspaces[0].tabs[0]
+            .layout
+            .focus_pane(local_panes[0]);
+
+        // A host-tagged terminal attached to no workspace pane => synthetic
+        // remote entry, which host-grouping sorts after the two locals.
+        let remote_id = crate::terminal::TerminalId::alloc();
+        let mut remote = TerminalState::new(remote_id.clone(), "/tmp".into());
+        remote.host = Some(crate::terminal::TerminalHostTag::new("workbox"));
+        remote.set_agent_name("claude".into());
+        remote.state = crate::detect::AgentState::Working;
+        app.state.terminals.insert(remote_id, remote);
+
+        // Entries: [one (local), two (local), workbox (synthetic)]; only the
+        // two locals are focusable.
+        let entries = crate::ui::agent_panel_entries(&app.state);
+        assert_eq!(entries.len(), 3);
+        assert!(!entries[2].in_workspace);
+
+        fn next(app: &mut App) {
+            app.state.mode = Mode::Navigate;
+            app.handle_navigate_key(TerminalKey::new(KeyCode::Char('a'), KeyModifiers::empty()));
+        }
+        fn prev(app: &mut App) {
+            app.state.mode = Mode::Navigate;
+            app.handle_navigate_key(TerminalKey::new(KeyCode::Char('b'), KeyModifiers::empty()));
+        }
+
+        // NextAgent alternates one <-> two forever. Pre-fix, the third press
+        // targeted the synthetic entry (a no-op) and stuck focus on "two".
+        next(&mut app);
+        assert_eq!(app.state.active, Some(1));
+        next(&mut app);
+        assert_eq!(app.state.active, Some(0));
+        next(&mut app);
+        assert_eq!(app.state.active, Some(1));
+
+        // PreviousAgent likewise only ever visits the two locals.
+        prev(&mut app);
+        assert_eq!(app.state.active, Some(0));
+
+        // FocusAgent by keybind position selects the nth FOCUSABLE entry:
+        // position 1 -> the 2nd local ("two"), never a synthetic entry.
+        app.state.mode = Mode::Navigate;
+        app.execute_tui_navigate_action(NavigateAction::FocusAgent(1), ActionContext::Navigate);
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.mode, Mode::Terminal);
+
+        // Position 2 is the synthetic entry's row, but there is no 3rd
+        // FOCUSABLE agent, so it is a no-op that stays in navigate mode.
+        // Pre-fix, it resolved to the synthetic entry, ran leave_navigate_mode,
+        // and dropped to Terminal without focusing anything.
+        app.state.active = Some(0);
+        app.state.workspaces[0].tabs[0]
+            .layout
+            .focus_pane(local_panes[0]);
+        app.state.mode = Mode::Navigate;
+        app.execute_tui_navigate_action(NavigateAction::FocusAgent(2), ActionContext::Navigate);
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.mode, Mode::Navigate);
     }
 
     #[tokio::test]
