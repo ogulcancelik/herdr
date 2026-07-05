@@ -373,6 +373,20 @@ pub(super) fn open_new_tab_dialog(state: &mut AppState) {
     state.mode = Mode::RenameTab;
 }
 
+/// Opens the "attach host" single-line text-input modal from the sidebar's
+/// `+host` affordance. Clone of `open_rename_workspace`'s skeleton: reuses
+/// the shared `name_input`/`name_input_replace_on_type` buffer rather than a
+/// bespoke input field, starting empty (there is no existing value to
+/// prefill, unlike a rename).
+pub(super) fn open_attach_host_dialog(state: &mut AppState) {
+    state.creating_new_tab = false;
+    state.requested_new_tab_name = None;
+    state.rename_pane_target = None;
+    state.name_input = String::new();
+    state.name_input_replace_on_type = false;
+    state.mode = Mode::AttachHost;
+}
+
 pub(super) fn leave_modal(state: &mut AppState) {
     if state.active.is_some() {
         state.mode = Mode::Terminal;
@@ -392,6 +406,21 @@ pub(super) const RELEASE_NOTES_ACTIONS: &[ModalActionSpec<ModalAction>] = &[Moda
 }];
 
 pub(super) const RENAME_ACTIONS: &[ModalActionSpec<ModalAction>] = &[
+    ModalActionSpec {
+        action: ModalAction::Save,
+        bindings: &[ModalKeyBinding::Enter],
+    },
+    ModalActionSpec {
+        action: ModalAction::Clear,
+        bindings: &[ModalKeyBinding::CtrlC],
+    },
+    ModalActionSpec {
+        action: ModalAction::Cancel,
+        bindings: &[ModalKeyBinding::Esc],
+    },
+];
+
+pub(super) const ATTACH_HOST_ACTIONS: &[ModalActionSpec<ModalAction>] = &[
     ModalActionSpec {
         action: ModalAction::Save,
         bindings: &[ModalKeyBinding::Enter],
@@ -620,6 +649,49 @@ fn handle_rename_edit_key(state: &mut AppState, key: KeyEvent) {
 pub(crate) fn handle_rename_key(state: &mut AppState, key: KeyEvent) {
     if let Some(action) = modal_action_from_key(&key, RENAME_ACTIONS) {
         apply_rename_action(state, action);
+        return;
+    }
+
+    handle_rename_edit_key(state, key);
+}
+
+fn cancel_attach_host_dialog(state: &mut AppState) {
+    state.name_input.clear();
+    state.name_input_replace_on_type = false;
+    leave_modal(state);
+}
+
+/// Submit/clear/cancel for the `AttachHost` modal. Unlike the rename
+/// modal's `Save` (which dispatches a JSON API mutation), submitting here
+/// only sets `AppState::requested_host_attach` -- `host.attach` lives on
+/// `HeadlessServer`, behind the runtime/client boundary, so the app layer
+/// cannot call it directly. `HeadlessServer::handle_deferred_requests_
+/// headless` drains the flag once per main-loop iteration, same pattern as
+/// `requested_remote_pane_focus`.
+pub(super) fn apply_attach_host_action(state: &mut AppState, action: ModalAction) {
+    match action {
+        ModalAction::Save => {
+            let target = state.name_input.trim().to_string();
+            if !target.is_empty() {
+                state.requested_host_attach = Some(target);
+            }
+            cancel_attach_host_dialog(state);
+        }
+        ModalAction::Clear => {
+            state.name_input.clear();
+            state.name_input_replace_on_type = false;
+        }
+        ModalAction::Cancel => cancel_attach_host_dialog(state),
+        _ => {}
+    }
+}
+
+/// Clone of `handle_rename_key`'s shape: reuses `handle_rename_edit_key` for
+/// character editing (it operates generically on `name_input`, with no
+/// rename-specific behavior), so only the submit/cancel table differs.
+pub(crate) fn handle_attach_host_key(state: &mut AppState, key: KeyEvent) {
+    if let Some(action) = modal_action_from_key(&key, ATTACH_HOST_ACTIONS) {
+        apply_attach_host_action(state, action);
         return;
     }
 
@@ -1575,6 +1647,99 @@ mod tests {
             KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
         );
         assert!(state.name_input.is_empty());
+    }
+
+    #[test]
+    fn open_attach_host_dialog_starts_with_empty_input() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.name_input = "stale".into();
+        state.name_input_replace_on_type = true;
+        state.mode = Mode::Terminal;
+
+        open_attach_host_dialog(&mut state);
+
+        assert_eq!(state.mode, Mode::AttachHost);
+        assert!(state.name_input.is_empty());
+        assert!(!state.name_input_replace_on_type);
+    }
+
+    #[test]
+    fn attach_host_dialog_typing_fills_name_input() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_attach_host_dialog(&mut state);
+
+        for ch in "box.lan".chars() {
+            handle_attach_host_key(
+                &mut state,
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()),
+            );
+        }
+
+        assert_eq!(state.name_input, "box.lan");
+        assert_eq!(state.mode, Mode::AttachHost);
+        assert!(state.requested_host_attach.is_none());
+    }
+
+    #[test]
+    fn attach_host_dialog_submit_requests_attach_and_closes() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_attach_host_dialog(&mut state);
+        state.name_input = " box.lan ".into();
+
+        handle_attach_host_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.requested_host_attach.as_deref(), Some("box.lan"));
+        assert_eq!(state.mode, Mode::Terminal);
+        assert!(state.name_input.is_empty());
+    }
+
+    #[test]
+    fn attach_host_dialog_submit_with_empty_target_closes_without_requesting() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_attach_host_dialog(&mut state);
+        state.name_input = "   ".into();
+
+        handle_attach_host_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert!(state.requested_host_attach.is_none());
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn attach_host_dialog_esc_cancels_without_requesting() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_attach_host_dialog(&mut state);
+        state.name_input = "box.lan".into();
+
+        handle_attach_host_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+
+        assert!(state.requested_host_attach.is_none());
+        assert_eq!(state.mode, Mode::Terminal);
+        assert!(state.name_input.is_empty());
+    }
+
+    #[test]
+    fn attach_host_dialog_ctrl_c_clears_without_closing() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_attach_host_dialog(&mut state);
+        state.name_input = "box.lan".into();
+
+        handle_attach_host_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert!(state.name_input.is_empty());
+        assert_eq!(state.mode, Mode::AttachHost);
     }
 
     #[test]

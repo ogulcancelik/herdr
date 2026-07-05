@@ -113,6 +113,109 @@ pub(super) fn render_rename_overlay(app: &AppState, frame: &mut Frame, area: Rec
     );
 }
 
+pub(crate) fn attach_host_button_rects(inner: Rect) -> (Rect, Rect, Rect) {
+    let rects = action_button_row_rects(
+        inner,
+        &[
+            ActionButtonSpec {
+                hint: Some("↵"),
+                label: "attach",
+            },
+            ActionButtonSpec {
+                hint: Some("^c"),
+                label: "clear",
+            },
+            ActionButtonSpec {
+                hint: Some("esc"),
+                label: "cancel",
+            },
+        ],
+        2,
+        3,
+    );
+    (rects[0], rects[1], rects[2])
+}
+
+/// Clone of `render_rename_overlay`'s skeleton (same modal shell size, same
+/// input row / button row layout) for the sidebar's `+host` "attach a remote
+/// host" affordance -- the only real differences are the title and the
+/// extra hint line describing what to type, reusing the row that
+/// `render_rename_overlay` leaves blank for breathing room.
+pub(super) fn render_attach_host_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
+    if app.mode != Mode::AttachHost {
+        return;
+    }
+
+    super::dim_background(frame, area);
+
+    let Some(inner) = render_modal_shell(frame, area, 56, 7, &app.palette) else {
+        return;
+    };
+    if inner.height < 4 {
+        return;
+    }
+
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas::<5>(inner);
+
+    render_modal_header(frame, rows[0], "attach host", &app.palette);
+
+    frame.render_widget(
+        Paragraph::new(" ssh target / alias").style(Style::default().fg(app.palette.overlay0)),
+        rows[1],
+    );
+
+    let input_rect = Rect::new(rows[2].x, rows[2].y, rows[2].width, 1);
+    frame.render_widget(Clear, input_rect);
+    frame.render_widget(
+        Paragraph::new(format!(" {}█", app.name_input)).style(
+            Style::default()
+                .fg(app.palette.text)
+                .bg(app.palette.surface0),
+        ),
+        input_rect,
+    );
+
+    let (attach_rect, clear_rect, cancel_rect) = attach_host_button_rects(inner);
+
+    render_action_button(
+        frame,
+        attach_rect,
+        Some("↵"),
+        "attach",
+        Style::default()
+            .fg(panel_contrast_fg(&app.palette))
+            .bg(app.palette.accent)
+            .add_modifier(Modifier::BOLD),
+    );
+    render_action_button(
+        frame,
+        clear_rect,
+        Some("^c"),
+        "clear",
+        Style::default()
+            .fg(app.palette.text)
+            .bg(app.palette.surface0)
+            .add_modifier(Modifier::BOLD),
+    );
+    render_action_button(
+        frame,
+        cancel_rect,
+        Some("esc"),
+        "cancel",
+        Style::default()
+            .fg(app.palette.text)
+            .bg(app.palette.surface0)
+            .add_modifier(Modifier::BOLD),
+    );
+}
+
 pub(crate) fn new_linked_worktree_inner_rect(area: Rect) -> Option<Rect> {
     centered_popup_rect(
         area,

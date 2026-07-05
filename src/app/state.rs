@@ -756,6 +756,7 @@ pub enum Mode {
     RenameWorkspace,
     RenameTab,
     RenamePane,
+    AttachHost,
     NewLinkedWorktree,
     OpenExistingWorktree,
     ConfirmRemoveWorktree,
@@ -1378,6 +1379,17 @@ pub struct AppState {
     /// the duration between an input handler resolving one and
     /// `HeadlessServer` taking it.
     pub(crate) requested_remote_pane_focus: Option<RemotePaneFocusRequest>,
+    /// Pending "attach this host" request raised by the TUI's `+host`
+    /// sidebar affordance (`AttachHost` modal, `Enter` submits). `host.attach`
+    /// lives on `HeadlessServer` (behind the runtime/client boundary,
+    /// `#[cfg(unix)]`) so `AppState`/`App` cannot call it directly -- this
+    /// mirrors the other deferred `AppState` request flags (`request_new_
+    /// workspace`, `requested_remote_pane_focus`, ...): the app layer sets
+    /// it, and the server drains it once per main-loop iteration in
+    /// `HeadlessServer::handle_deferred_requests_headless`. `None` most of
+    /// the time -- only set for the duration between the modal submit and
+    /// the server taking it.
+    pub(crate) requested_host_attach: Option<String>,
     pub(crate) pane_id_aliases: std::collections::HashMap<u32, PaneId>,
     pub(crate) public_pane_id_aliases: std::collections::HashMap<String, PaneId>,
     pub workspaces: Vec<Workspace>,
@@ -1739,6 +1751,7 @@ impl AppState {
             host_links: std::collections::BTreeMap::new(),
             remote_pane_display: std::collections::HashMap::new(),
             requested_remote_pane_focus: None,
+            requested_host_attach: None,
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces: Vec::new(),

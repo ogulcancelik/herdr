@@ -1178,6 +1178,14 @@ impl HeadlessServer {
             crate::render_prof::event("full_render_cause.deferred_remote_pane_focus");
         }
 
+        // Drained the same way and from the same place as every other
+        // deferred `AppState` request flag above (and `requested_remote_
+        // pane_focus` just above it) -- see `apply_requested_host_attach`.
+        if self.apply_requested_host_attach() {
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_host_attach");
+        }
+
         needs_render
     }
 
@@ -4385,6 +4393,47 @@ impl HeadlessServer {
     fn apply_requested_remote_pane_focus(&mut self) -> bool {
         self.app.state.requested_remote_pane_focus = None;
         false
+    }
+
+    /// Consumes `AppState::requested_host_attach` -- the cross-layer signal
+    /// set by the TUI's `+host` sidebar affordance (the `AttachHost` modal's
+    /// submit action, see `app::input::modal::apply_attach_host_action`).
+    /// `host.attach` lives on `HeadlessServer` (behind the runtime/client
+    /// boundary, `#[cfg(unix)]`) so the app layer cannot call it directly;
+    /// this mirrors `apply_requested_remote_pane_focus` exactly, draining
+    /// once per main-loop iteration from `handle_deferred_requests_headless`.
+    /// A failed attach (bad target, already attached, ...) is surfaced as a
+    /// toast to the foreground client rather than silently dropped -- there
+    /// is no other feedback path back to the modal, which has already
+    /// closed by the time this runs. A successful attach needs no toast: the
+    /// sidebar's Connecting spinner (via `host_links`) already conveys it.
+    #[cfg(unix)]
+    fn apply_requested_host_attach(&mut self) -> bool {
+        let Some(target) = self.app.state.requested_host_attach.take() else {
+            return false;
+        };
+        if let Err((code, message)) = self.attach_host(target) {
+            debug!(code, message = %message, "host attach requested from the TUI failed");
+            self.send_notify_to_foreground_client(protocol::NotifyKind::Toast, message, None);
+        }
+        true
+    }
+
+    /// Multi-host is unix-only (see `attach_host`'s doc comment); on other
+    /// targets there is nothing to attach, but the signal must still be
+    /// drained (with a toast, since the user did click something) so it
+    /// never lingers into a later tick.
+    #[cfg(not(unix))]
+    fn apply_requested_host_attach(&mut self) -> bool {
+        if self.app.state.requested_host_attach.take().is_none() {
+            return false;
+        }
+        self.send_notify_to_foreground_client(
+            protocol::NotifyKind::Toast,
+            "host links are only supported on Unix",
+            None,
+        );
+        true
     }
 
     /// Handles a server event. Returns true if the event requires a re-render.
@@ -11269,6 +11318,96 @@ next_tab = ""
                 "workbox".to_string(),
             ));
             let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// Feature: attach a remote host directly from the TUI. The
+        /// sidebar's `+host` modal never calls `host.attach` itself -- it
+        /// can't, `AppState`/`App` are below the runtime/client boundary --
+        /// it only sets `AppState::requested_host_attach`, which
+        /// `handle_deferred_requests_headless` drains once per main-loop
+        /// iteration (mirrors `requested_remote_pane_focus`). This pins the
+        /// drain's happy path end to end: the flag alone, with no direct
+        /// `host.attach` API call, is enough to reach `connected`.
+        #[test]
+        fn requested_host_attach_is_drained_into_a_real_attach() {
+            let mut server = test_headless_server();
+            let dir = unique_host_test_dir("host-attach-deferred");
+            fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("remote-api.sock");
+
+            let remote_sock = sock.clone();
+            let remote = std::thread::spawn(move || {
+                let listener = UnixListener::bind(&remote_sock).unwrap();
+
+                let (mut conn, _) = listener.accept().unwrap();
+                let request = read_fake_request(&mut conn);
+                assert!(matches!(request.method, api::schema::Method::PaneList(_)));
+                write_fake_line(
+                    &mut conn,
+                    &api::schema::SuccessResponse {
+                        id: request.id,
+                        result: api::schema::ResponseResult::PaneList {
+                            panes: vec![fake_pane("w1:p1")],
+                        },
+                    },
+                );
+                conn.shutdown(std::net::Shutdown::Both).ok();
+                drop(conn);
+
+                let (mut conn, _) = listener.accept().unwrap();
+                let request = read_fake_request(&mut conn);
+                assert!(matches!(
+                    request.method,
+                    api::schema::Method::EventsSubscribe(_)
+                ));
+                write_fake_line(
+                    &mut conn,
+                    &api::schema::SuccessResponse {
+                        id: request.id,
+                        result: api::schema::ResponseResult::SubscriptionStarted {},
+                    },
+                );
+                let mut buf = [0u8; 1];
+                let _ = conn.read(&mut buf);
+            });
+
+            use_fake_remote_socket(&mut server, sock);
+
+            server.app.state.requested_host_attach = Some("workbox".to_string());
+            assert!(server.handle_deferred_requests_headless());
+            assert!(server.app.state.requested_host_attach.is_none());
+
+            let entry = wait_for_host_state(&mut server, "workbox", "connected");
+            assert_eq!(entry["pane_count"], 1);
+
+            server.handle_host_detach_api(
+                "test:host:detach".to_string(),
+                api::schema::HostDetachParams {
+                    host: "workbox".to_string(),
+                },
+            );
+            remote.join().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// The other half of the deferred-flag contract: a bad target has
+        /// no modal left to report back into (the TUI already closed it on
+        /// submit), so the only feedback path is a toast to the foreground
+        /// client -- and the flag must still be cleared so it doesn't leak
+        /// into a later main-loop iteration.
+        #[test]
+        fn requested_host_attach_with_invalid_target_toasts_instead_of_attaching() {
+            let mut server = test_headless_server();
+            let control_rx = attach_fake_foreground_client(&mut server);
+
+            server.app.state.requested_host_attach = Some("-not-a-valid-target".to_string());
+            assert!(server.handle_deferred_requests_headless());
+            assert!(server.app.state.requested_host_attach.is_none());
+
+            let (kind, message, _) = recv_notify(&control_rx);
+            assert_eq!(kind, protocol::NotifyKind::Toast);
+            assert!(!message.is_empty());
+            assert!(host_list_hosts(&mut server).is_empty());
         }
 
         /// Pins the reconnect wiring this task adds on top of Task 3/6's

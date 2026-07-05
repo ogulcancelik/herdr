@@ -52,6 +52,7 @@ pub(super) enum MouseAction {
         ratio: f32,
     },
     RenameModal(ModalAction),
+    AttachHostModal(ModalAction),
     ConfirmCloseAccept,
     ContextMenu {
         menu: ContextMenuState,
@@ -406,6 +407,25 @@ impl AppState {
                     return Some(MouseAction::RenameModal(action));
                 }
 
+                if self.mode == Mode::AttachHost {
+                    let action = self
+                        .attach_host_modal_inner()
+                        .map(crate::ui::attach_host_button_rects)
+                        .and_then(|(attach, clear, cancel)| {
+                            modal_action_from_buttons(
+                                mouse.column,
+                                mouse.row,
+                                &[
+                                    (attach, ModalAction::Save),
+                                    (clear, ModalAction::Clear),
+                                    (cancel, ModalAction::Cancel),
+                                ],
+                            )
+                        })
+                        .unwrap_or(ModalAction::Cancel);
+                    return Some(MouseAction::AttachHostModal(action));
+                }
+
                 if self.mode == Mode::ContextMenu {
                     let item_idx = self.context_menu_item_at(mouse.column, mouse.row);
                     if let Some(menu) = self.context_menu.take() {
@@ -594,6 +614,11 @@ impl AppState {
                         };
                         self.agent_panel_scroll = 0;
                         self.mark_session_dirty();
+                        return None;
+                    }
+
+                    if self.on_agent_panel_attach_host_button(mouse.column, mouse.row) {
+                        super::modal::open_attach_host_dialog(self);
                         return None;
                     }
 
@@ -2522,6 +2547,52 @@ mod tests {
         assert!(app.event_hub.events_after(0).iter().any(|(_, event)| {
             matches!(event.event, crate::api::schema::EventKind::WorkspaceRenamed)
         }));
+    }
+
+    #[test]
+    fn clicking_attach_host_button_requests_host_attach() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("old")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::AttachHost;
+        app.state.name_input = "box.lan".into();
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+        let inner = app.state.attach_host_modal_inner().unwrap();
+        let (attach, _, _) = crate::ui::attach_host_button_rects(inner);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            attach.x,
+            attach.y,
+        ));
+
+        assert_eq!(app.state.requested_host_attach.as_deref(), Some("box.lan"));
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn clicking_attach_host_cancel_does_not_request_attach() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("old")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::AttachHost;
+        app.state.name_input = "box.lan".into();
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+        let inner = app.state.attach_host_modal_inner().unwrap();
+        let (_, _, cancel) = crate::ui::attach_host_button_rects(inner);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            cancel.x,
+            cancel.y,
+        ));
+
+        assert!(app.state.requested_host_attach.is_none());
+        assert_eq!(app.state.mode, Mode::Terminal);
     }
 
     #[test]

@@ -395,6 +395,10 @@ impl AppState {
         self.onboarding_modal_inner(56, 7)
     }
 
+    pub(super) fn attach_host_modal_inner(&self) -> Option<Rect> {
+        self.onboarding_modal_inner(56, 7)
+    }
+
     fn release_notes_body_rect(&self) -> Option<Rect> {
         let inner = self.release_notes_modal_inner()?;
         if inner.height < 8 || inner.width < 4 {

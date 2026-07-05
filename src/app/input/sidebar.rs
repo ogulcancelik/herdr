@@ -449,6 +449,25 @@ impl AppState {
             && row < rect.y + rect.height
     }
 
+    /// Hit-test for the agents header's `+host` affordance (opens the
+    /// `AttachHost` modal). Mirrors `on_agent_panel_sort_toggle` exactly.
+    pub(super) fn on_agent_panel_attach_host_button(&self, col: u16, row: u16) -> bool {
+        if self.sidebar_collapsed {
+            return false;
+        }
+
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+            self.view.sidebar_rect,
+            self.sidebar_section_split,
+        );
+        let rect = crate::ui::agent_panel_attach_host_rect(detail_area, self.agent_panel_sort);
+        rect.width > 0
+            && col >= rect.x
+            && col < rect.x + rect.width
+            && row >= rect.y
+            && row < rect.y + rect.height
+    }
+
     /// Resolves a click row in the expanded agent panel to its typed focus
     /// target (Task 9b, HALF 2). Both `Local` and `Remote` entries now
     /// resolve to a real target -- there is no more inert synthetic-entry
@@ -729,6 +748,33 @@ mod tests {
 
         assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Priority);
         assert_eq!(app.state.agent_panel_scroll, 0);
+    }
+
+    #[test]
+    fn clicking_attach_host_button_opens_attach_host_dialog() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.name_input = "stale".into();
+
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+            app.state.view.sidebar_rect,
+            app.state.sidebar_section_split,
+        );
+        let attach_host_button =
+            crate::ui::agent_panel_attach_host_rect(detail_area, app.state.agent_panel_sort);
+        assert_ne!(attach_host_button, Rect::default());
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            attach_host_button.x,
+            attach_host_button.y,
+        ));
+
+        assert_eq!(app.state.mode, Mode::AttachHost);
+        assert!(app.state.name_input.is_empty());
     }
 
     #[test]

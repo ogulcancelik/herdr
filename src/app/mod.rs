@@ -510,6 +510,7 @@ impl App {
             host_links: std::collections::BTreeMap::new(),
             remote_pane_display: std::collections::HashMap::new(),
             requested_remote_pane_focus: None,
+            requested_host_attach: None,
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces,
@@ -1699,6 +1700,9 @@ impl App {
             }
             Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
                 self.handle_rename_key_via_api(key_event);
+            }
+            Mode::AttachHost => {
+                input::handle_attach_host_key(&mut self.state, key_event);
             }
             Mode::NewLinkedWorktree => {
                 self.handle_worktree_create_key(key_event);

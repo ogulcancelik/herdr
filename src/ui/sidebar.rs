@@ -117,6 +117,35 @@ pub(crate) fn agent_panel_toggle_rect(area: Rect, sort: AgentPanelSort) -> Rect 
     )
 }
 
+const ATTACH_HOST_LABEL: &str = "+host";
+const ATTACH_HOST_TOGGLE_GAP: u16 = 1;
+
+/// Clickable "+host" affordance in the agents section header, next to the
+/// grouped/priority sort toggle -- opens the `AttachHost` modal (see
+/// `app::input::modal::open_attach_host_dialog`). Lives in the SAME header
+/// row as the sort toggle (`area.y + 1`), not a new row, so it does not
+/// shift `AGENT_PANEL_HEADER_ROWS` or any of the row-placement/scroll
+/// invariants (`agent_panel_row_placements`/`agent_panel_max_scroll`/
+/// `ensure_agent_panel_entry_visible`) that assume a fixed 3-row header.
+/// Hides itself (returns `Rect::default()`) rather than overlapping the
+/// " agents" label when the sidebar is too narrow for both.
+pub(crate) fn agent_panel_attach_host_rect(area: Rect, sort: AgentPanelSort) -> Rect {
+    if area.width == 0 || area.height < 2 {
+        return Rect::default();
+    }
+
+    let toggle = agent_panel_toggle_rect(area, sort);
+    let width = display_width_u16(ATTACH_HOST_LABEL);
+    let end_x = toggle.x.saturating_sub(ATTACH_HOST_TOGGLE_GAP);
+    let start_x = end_x.saturating_sub(width);
+    let agents_label_width = display_width_u16(" agents");
+    if start_x < area.x.saturating_add(agents_label_width) || end_x <= start_x {
+        return Rect::default();
+    }
+
+    Rect::new(start_x, area.y + 1, width, 1)
+}
+
 pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     agent_panel_entries_with_runtimes(app, None)
 }
@@ -1316,6 +1345,13 @@ fn render_agent_detail(
             toggle_rect,
         );
     }
+    let attach_host_rect = agent_panel_attach_host_rect(area, app.agent_panel_sort);
+    if attach_host_rect != Rect::default() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(ATTACH_HOST_LABEL, section_header_style(p))),
+            attach_host_rect,
+        );
+    }
 
     let details = agent_panel_entries_from(app, terminal_runtimes);
     let metrics = agent_panel_scroll_metrics(app, area);
@@ -1493,8 +1529,13 @@ mod tests {
         assert_eq!(toggle.y, area.y + area.height - 1);
     }
 
-    /// Characterization: with zero host-tagged terminals the agent panel must
-    /// render exactly the same output as before host grouping existed.
+    /// Characterization: with zero host-tagged terminals the agent panel
+    /// body (entries, host sections, scroll) must render exactly the same
+    /// output as before host grouping existed. The header row's content
+    /// legitimately changed when the `+host` attach-a-remote-host affordance
+    /// was added next to the sort toggle (same row, same
+    /// `AGENT_PANEL_HEADER_ROWS`, no new row) -- see
+    /// `agent_panel_attach_host_rect`.
     #[test]
     fn render_agent_detail_without_hosts_is_unchanged() {
         let mut app = crate::app::state::AppState::test_new();
@@ -1537,7 +1578,7 @@ mod tests {
             rows,
             [
                 "──────────────────────────",
-                " agents            grouped",
+                " agents      +host grouped",
                 "                          ",
                 " ○ one                    ",
                 "   idle · pi              ",
