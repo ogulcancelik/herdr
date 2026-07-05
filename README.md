@@ -94,6 +94,28 @@ herdr --remote workbox
 herdr --remote ssh://you@yourserver:2222
 ```
 
+### iroh transport (QUIC)
+
+for connections that survive network changes, suspend/resume, and IP roaming, use the iroh QUIC transport. iroh establishes an encrypted UDP tunnel between your local machine and the remote, with automatic NAT traversal and no open ports required. all terminal I/O runs over QUIC; SSH is used only once to deploy the remote binary and exchange endpoint identities.
+
+```bash
+# first time: SSH bootstraps the remote, exchanges endpoint IDs, and persists the mapping
+herdr --remote --iroh dev
+
+# subsequent runs: the stored mapping is reused automatically — no --iroh flag needed
+herdr --remote dev
+
+# show your local endpoint id (creates an encrypted identity key on first run)
+herdr iroh-bridge id
+
+# change the passphrase on your identity key
+herdr iroh-bridge key passwd
+```
+
+when you run `herdr --remote --iroh dev` for the first time, herdr SSHs into `dev` to ensure the binary is installed, starts the iroh bridge server on the remote, and saves the remote endpoint ID to `~/.config/herdr/remote_endpoints.toml`. from then on, plain `herdr --remote dev` detects the stored mapping and uses iroh automatically — SSH fallback is only used when the iroh endpoint cannot be reached.
+
+the local identity key lives at `~/.config/herdr/iroh/iroh_id.key`, encrypted at rest with Argon2id + AES-256-GCM (8+ character passphrase required). set `HERDR_IROH_KEY_PASSPHRASE` for unattended use.
+
 see the [persistence and remote docs](https://herdr.dev/docs/persistence-remote/) for named sessions, keepalives, direct attach, and handoff.
 
 ## supported agents

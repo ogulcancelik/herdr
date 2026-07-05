@@ -14,6 +14,8 @@ mod agent;
 mod api;
 mod completion;
 mod integration;
+#[cfg(unix)]
+mod iroh_bridge;
 mod notification;
 mod pane;
 mod plugin;
@@ -76,6 +78,8 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "wait" => run_wait_command(&args[2..])?,
         "integration" => integration::run_integration_command(&args[2..])?,
         "session" => run_session_command(&args[2..])?,
+        #[cfg(unix)]
+        "iroh-bridge" => iroh_bridge::run_iroh_bridge_command(&args[2..])?,
         _ => return Ok(CommandOutcome::NotCli),
     };
 

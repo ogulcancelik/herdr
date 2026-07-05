@@ -1570,27 +1570,25 @@ impl App {
                 crate::raw_input::RawInputEvent::Paste(text) => {
                     if self.state.mode != Mode::Terminal {
                         self.paste_into_active_text_input(&text);
-                    } else {
-                        if let Some(ws_idx) = self.state.active {
-                            if let Some(ws) = self.state.workspaces.get(ws_idx) {
-                                if let Some(focused) = ws.focused_pane_id() {
-                                    if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
-                                        &self.terminal_runtimes,
-                                        ws_idx,
-                                        focused,
-                                    ) {
-                                        let _ = runtime.try_send_bytes(bytes::Bytes::from(
-                                            if runtime
-                                                .input_state()
-                                                .map(|s| s.bracketed_paste)
-                                                .unwrap_or(false)
-                                            {
-                                                format!("\x1b[200~{text}\x1b[201~")
-                                            } else {
-                                                text
-                                            },
-                                        ));
-                                    }
+                    } else if let Some(ws_idx) = self.state.active {
+                        if let Some(ws) = self.state.workspaces.get(ws_idx) {
+                            if let Some(focused) = ws.focused_pane_id() {
+                                if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
+                                    &self.terminal_runtimes,
+                                    ws_idx,
+                                    focused,
+                                ) {
+                                    let _ = runtime.try_send_bytes(bytes::Bytes::from(
+                                        if runtime
+                                            .input_state()
+                                            .map(|s| s.bracketed_paste)
+                                            .unwrap_or(false)
+                                        {
+                                            format!("\x1b[200~{text}\x1b[201~")
+                                        } else {
+                                            text
+                                        },
+                                    ));
                                 }
                             }
                         }
