@@ -96,14 +96,16 @@ herdr --remote ssh://you@yourserver:2222
 
 ### iroh transport (QUIC)
 
-for connections that survive network changes, suspend/resume, and IP roaming, use the iroh QUIC transport. iroh establishes an encrypted UDP tunnel between your local machine and the remote, with automatic NAT traversal and no open ports required. all terminal I/O runs over QUIC; SSH is used only once to deploy the remote binary and exchange endpoint identities.
+for connections that survive network changes, suspend/resume, and IP roaming, use the iroh QUIC transport. iroh establishes an encrypted UDP tunnel between your local machine and the remote, with automatic NAT traversal and no open ports required. all terminal I/O runs over QUIC; SSH is used only once to deploy the remote binary and exchange endpoint identities. full 24-bit true color is preserved — the transport carries herdr's rendered terminal frames verbatim, just like the SSH path.
 
 ```bash
 # first time: SSH bootstraps the remote, exchanges endpoint IDs, and persists the mapping
-herdr --remote --iroh dev
+herdr --remote --iroh workbox
+herdr --remote --iroh ssh://you@yourserver:2222
 
 # subsequent runs: the stored mapping is reused automatically — no --iroh flag needed
-herdr --remote dev
+herdr --remote workbox
+herdr --remote ssh://you@yourserver:2222
 
 # show your local endpoint id (creates an encrypted identity key on first run)
 herdr iroh-bridge id
@@ -112,7 +114,33 @@ herdr iroh-bridge id
 herdr iroh-bridge key passwd
 ```
 
-when you run `herdr --remote --iroh dev` for the first time, herdr SSHs into `dev` to ensure the binary is installed, starts the iroh bridge server on the remote, and saves the remote endpoint ID to `~/.config/herdr/remote_endpoints.toml`. from then on, plain `herdr --remote dev` detects the stored mapping and uses iroh automatically — SSH fallback is only used when the iroh endpoint cannot be reached.
+when you run `herdr --remote --iroh workbox` for the first time, herdr SSHs into `workbox` to ensure the binary is installed, starts the iroh bridge server on the remote, and saves the remote endpoint ID to `~/.config/herdr/remote_endpoints.toml`. from then on, plain `herdr --remote workbox` detects the stored mapping and uses iroh automatically — SSH fallback is only used when the iroh endpoint cannot be reached.
+
+### server-side setup
+
+the remote host needs both the `herdr` binary and `herdr iroh-bridge serve` running. the `--remote` flow auto-deploys the binary via SSH, but if your servers are Nix-managed you can pre-install it declaratively:
+
+```bash
+# one-shot
+nix run github:fr33m0nk/herdr
+
+# home-manager
+{
+  inputs.herdr.url = "github:fr33m0nk/herdr";
+  home.packages = [ inputs.herdr.packages.$${pkgs.system}.default ];
+}
+
+# NixOS systemd service for the iroh bridge
+systemd.user.services.herdr-iroh-bridge = {
+  description = "herdr iroh bridge";
+  wantedBy = [ "default.target" ];
+  serviceConfig = {
+    ExecStart = "$${pkgs.herdr}/bin/herdr iroh-bridge serve";
+    Restart = "always";
+    RestartSec = 5;
+  };
+};
+```
 
 the local identity key lives at `~/.config/herdr/iroh/iroh_id.key`, encrypted at rest with Argon2id + AES-256-GCM (8+ character passphrase required). set `HERDR_IROH_KEY_PASSPHRASE` for unattended use.
 
