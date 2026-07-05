@@ -590,9 +590,9 @@ impl App {
         let workspace_id = create.source_workspace_id.clone();
         let checkout_path = create.checkout_path.display().to_string();
 
-        let immediate_response = self.dispatch_deferred_runtime_mutation(
+        let immediate_response = self.runtime_worktree_create_deferred(
             "tui.worktree.create",
-            crate::api::schema::Method::WorktreeCreate(crate::api::schema::WorktreeCreateParams {
+            crate::api::schema::WorktreeCreateParams {
                 workspace_id: Some(workspace_id),
                 cwd: None,
                 branch: Some(branch),
@@ -600,7 +600,7 @@ impl App {
                 base: Some("HEAD".into()),
                 focus: true,
                 label: None,
-            }),
+            },
         );
         if let Some(message) = immediate_api_error_message(immediate_response.as_deref()) {
             if let Some(create) = &mut self.state.worktree_create {
@@ -720,16 +720,16 @@ impl App {
         };
         let source_workspace_id = open.source_workspace_id.clone();
 
-        let response = self.dispatch_runtime_mutation(
+        let response = self.runtime_worktree_open(
             "tui.worktree.open",
-            crate::api::schema::Method::WorktreeOpen(crate::api::schema::WorktreeOpenParams {
+            crate::api::schema::WorktreeOpenParams {
                 workspace_id: Some(source_workspace_id),
                 cwd: None,
                 path: Some(entry.path.display().to_string()),
                 branch: None,
                 focus: true,
                 label: None,
-            }),
+            },
         );
         if serde_json::from_str::<crate::api::schema::SuccessResponse>(&response).is_ok() {
             self.state.worktree_open = None;
@@ -763,12 +763,12 @@ impl App {
         remove.error = None;
         let workspace_id = remove.workspace_id.clone();
         let force = remove.force_confirmation;
-        let immediate_response = self.dispatch_deferred_runtime_mutation(
+        let immediate_response = self.runtime_worktree_remove_deferred(
             "tui.worktree.remove",
-            crate::api::schema::Method::WorktreeRemove(crate::api::schema::WorktreeRemoveParams {
+            crate::api::schema::WorktreeRemoveParams {
                 workspace_id,
                 force,
-            }),
+            },
         );
         if let Some(message) = immediate_api_error_message(immediate_response.as_deref()) {
             if let Some(remove) = &mut self.state.worktree_remove {
@@ -1085,6 +1085,7 @@ mod tests {
                 crate::api::schema::EventKind::WorkspaceCreated,
                 crate::api::schema::EventKind::TabCreated,
                 crate::api::schema::EventKind::PaneCreated,
+                crate::api::schema::EventKind::LayoutUpdated,
             ]
         );
         shutdown_test_runtimes(&mut app);
@@ -1104,6 +1105,7 @@ mod tests {
             vec![
                 crate::api::schema::EventKind::TabCreated,
                 crate::api::schema::EventKind::PaneCreated,
+                crate::api::schema::EventKind::LayoutUpdated,
             ]
         );
         shutdown_test_runtimes(&mut app);
@@ -1292,6 +1294,7 @@ mod tests {
                 crate::api::schema::EventKind::WorkspaceCreated,
                 crate::api::schema::EventKind::TabCreated,
                 crate::api::schema::EventKind::PaneCreated,
+                crate::api::schema::EventKind::LayoutUpdated,
                 crate::api::schema::EventKind::WorktreeOpened,
             ]
         );
@@ -1339,6 +1342,7 @@ mod tests {
                 crate::api::schema::EventKind::WorkspaceCreated,
                 crate::api::schema::EventKind::TabCreated,
                 crate::api::schema::EventKind::PaneCreated,
+                crate::api::schema::EventKind::LayoutUpdated,
                 crate::api::schema::EventKind::WorktreeOpened,
             ]
         );
@@ -1626,6 +1630,7 @@ mod tests {
                 crate::api::schema::EventKind::WorkspaceCreated,
                 crate::api::schema::EventKind::TabCreated,
                 crate::api::schema::EventKind::PaneCreated,
+                crate::api::schema::EventKind::LayoutUpdated,
                 crate::api::schema::EventKind::WorktreeOpened,
             ]
         );
@@ -1749,6 +1754,7 @@ mod tests {
                 crate::api::schema::EventKind::WorkspaceCreated,
                 crate::api::schema::EventKind::TabCreated,
                 crate::api::schema::EventKind::PaneCreated,
+                crate::api::schema::EventKind::LayoutUpdated,
                 crate::api::schema::EventKind::WorktreeCreated,
             ]
         );

@@ -613,7 +613,7 @@ impl GhosttyPaneTerminal {
             reported_cwd
         };
 
-        let request_render = !synchronized_output && !has_kitty_graphics_sequence;
+        let request_render = !synchronized_output;
         let render_delay = render_delay_after_pty_write(
             synchronized_output,
             has_kitty_graphics_sequence,
@@ -3511,6 +3511,25 @@ mod tests {
 
         let end = pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026l", &tx);
         assert!(end.request_render);
+    }
+
+    #[test]
+    fn kitty_graphics_write_requests_render_with_settle_backstop() {
+        crate::kitty_graphics::set_enabled(true);
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane_terminal = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        let result = pane_terminal.process_pty_bytes(
+            pane_id,
+            0,
+            b"\x1b_Ga=T,f=32,t=d,i=7,p=1,s=1,v=1,q=2;/wAA/w==\x1b\\",
+            &tx,
+        );
+
+        assert!(result.request_render);
+        assert_eq!(result.render_delay, Some(KITTY_GRAPHICS_REDRAW_SETTLE));
     }
 
     #[test]

@@ -1,5 +1,7 @@
 const API_SCHEMA_JSON: &str = include_str!("../../docs/next/api/herdr-api.schema.json");
 
+use crate::api::schema::{EmptyParams, Method, Request};
+
 pub(super) fn run_api_command(args: &[String]) -> std::io::Result<i32> {
     let Some(subcommand) = args.first().map(String::as_str) else {
         print_api_help();
@@ -8,6 +10,7 @@ pub(super) fn run_api_command(args: &[String]) -> std::io::Result<i32> {
 
     match subcommand {
         "schema" => api_schema(&args[1..]),
+        "snapshot" => api_snapshot(&args[1..]),
         "help" | "--help" | "-h" => {
             print_api_help();
             Ok(0)
@@ -50,6 +53,18 @@ fn api_schema(args: &[String]) -> std::io::Result<i32> {
     Ok(0)
 }
 
+fn api_snapshot(args: &[String]) -> std::io::Result<i32> {
+    if !args.is_empty() {
+        eprintln!("usage: herdr api snapshot");
+        return Ok(2);
+    }
+
+    super::print_response(&super::send_request(&Request {
+        id: "cli:api:snapshot".into(),
+        method: Method::SessionSnapshot(EmptyParams::default()),
+    })?)
+}
+
 fn write_schema_file(path: &std::path::Path) -> std::io::Result<()> {
     std::fs::write(path, API_SCHEMA_JSON)
 }
@@ -83,6 +98,7 @@ fn schema_summary_text() -> std::io::Result<String> {
 
 fn print_api_help() {
     eprintln!("herdr api commands:");
+    eprintln!("  herdr api snapshot");
     eprintln!("  herdr api schema [--json | --output PATH]");
 }
 

@@ -618,17 +618,7 @@ impl HeadlessServer {
 
         if self.app.state.request_new_workspace {
             self.app.state.request_new_workspace = false;
-            let response = self.dispatch_headless_runtime_mutation(
-                "headless.workspace.create",
-                crate::api::schema::Method::WorkspaceCreate(
-                    crate::api::schema::WorkspaceCreateParams {
-                        cwd: None,
-                        focus: true,
-                        label: None,
-                        env: Default::default(),
-                    },
-                ),
-            );
+            let response = self.headless_workspace_create("headless.workspace.create", None, None);
             if let Err(error) = response {
                 error!(
                     code = %error.code,
@@ -643,16 +633,7 @@ impl HeadlessServer {
         if self.app.state.request_new_tab {
             self.app.state.request_new_tab = false;
             let label = self.app.state.requested_new_tab_name.take();
-            let response = self.dispatch_headless_runtime_mutation(
-                "headless.tab.create",
-                crate::api::schema::Method::TabCreate(crate::api::schema::TabCreateParams {
-                    workspace_id: None,
-                    cwd: None,
-                    focus: true,
-                    label,
-                    env: Default::default(),
-                }),
-            );
+            let response = self.headless_tab_create("headless.tab.create", label);
             if let Err(error) = response {
                 error!(
                     code = %error.code,
@@ -677,16 +658,10 @@ impl HeadlessServer {
         }
 
         if let Some(cwd) = self.app.state.request_new_workspace_cwd.take() {
-            let response = self.dispatch_headless_runtime_mutation(
+            let response = self.headless_workspace_create(
                 "headless.workspace.create_cwd",
-                crate::api::schema::Method::WorkspaceCreate(
-                    crate::api::schema::WorkspaceCreateParams {
-                        cwd: Some(cwd.display().to_string()),
-                        focus: true,
-                        label: None,
-                        env: Default::default(),
-                    },
-                ),
+                Some(cwd.display().to_string()),
+                None,
             );
             if let Err(error) = response {
                 error!(
@@ -735,6 +710,40 @@ impl HeadlessServer {
         }
 
         needs_render
+    }
+
+    fn headless_workspace_create(
+        &mut self,
+        id: &'static str,
+        cwd: Option<String>,
+        label: Option<String>,
+    ) -> Result<(), api::schema::ErrorBody> {
+        self.dispatch_headless_runtime_mutation(
+            id,
+            api::schema::Method::WorkspaceCreate(api::schema::WorkspaceCreateParams {
+                cwd,
+                focus: true,
+                label,
+                env: Default::default(),
+            }),
+        )
+    }
+
+    fn headless_tab_create(
+        &mut self,
+        id: &'static str,
+        label: Option<String>,
+    ) -> Result<(), api::schema::ErrorBody> {
+        self.dispatch_headless_runtime_mutation(
+            id,
+            api::schema::Method::TabCreate(api::schema::TabCreateParams {
+                workspace_id: None,
+                cwd: None,
+                focus: true,
+                label,
+                env: Default::default(),
+            }),
+        )
     }
 
     fn dispatch_headless_runtime_mutation(
@@ -1831,6 +1840,14 @@ impl HeadlessServer {
                 if self.send_to_foreground_client(ServerMessage::Clipboard { data }) {
                     self.app.show_clipboard_feedback();
                 }
+                true
+            }
+            AppEvent::PrefixInputSource { active } => {
+                // Input-source switching is a client-local host side effect; forward it to the
+                // foreground client (which owns the real TIS switch + run-loop pump), like clipboard.
+                self.send_to_foreground_client(ServerMessage::PrefixInputSource {
+                    active: *active,
+                });
                 true
             }
             AppEvent::StateChanged { pane_id, agent, .. } => {
@@ -3944,8 +3961,11 @@ pub fn run_server() -> io::Result<()> {
         // The server runs headless — disable local notification side effects.
         // Sound and terminal notifications are forwarded to connected clients
         // as ServerMessage::Notify instead of emitted by the server process.
+        // The prefix input-source switch is likewise forwarded to the foreground
+        // client (ServerMessage::PrefixInputSource), never applied in-process.
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
+        app.local_input_source_switch = false;
 
         // Create the headless server.
         let mut server = match HeadlessServer::new(
@@ -4045,6 +4065,7 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         )?;
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
+        app.local_input_source_switch = false;
         crate::server::handoff::report_restored(&mut received.stream)?;
         if std::env::var("HERDR_TEST_HANDOFF_IMPORT_FAIL").as_deref() == Ok("after_restored") {
             return Err(io::Error::other(
@@ -4142,6 +4163,7 @@ mod tests {
         let mut app = crate::app::App::new(&config, true, None, api_rx, event_hub);
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
+        app.local_input_source_switch = false;
 
         let dir = std::env::temp_dir().join(format!(
             "hh-{}-{}",
@@ -4295,6 +4317,7 @@ mod tests {
                 api::schema::EventKind::WorkspaceCreated,
                 api::schema::EventKind::TabCreated,
                 api::schema::EventKind::PaneCreated,
+                api::schema::EventKind::LayoutUpdated,
             ]
         );
         shutdown_test_runtimes(&mut server);
@@ -4325,6 +4348,7 @@ mod tests {
             vec![
                 api::schema::EventKind::TabCreated,
                 api::schema::EventKind::PaneCreated,
+                api::schema::EventKind::LayoutUpdated,
             ]
         );
         let tab_created = events
@@ -7734,6 +7758,107 @@ next_tab = ""
     }
 
     #[test]
+    fn prefix_input_source_targets_foreground_client_only() {
+        let mut server = test_headless_server();
+        let (background_tx, background_control_rx, _background_rx) = test_client_writer();
+        let (foreground_tx, foreground_control_rx, _foreground_rx) = test_client_writer();
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(background_tx),
+            ),
+        );
+        server.clients.insert(
+            2,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                Some(foreground_tx),
+            ),
+        );
+        server.foreground_client_id = Some(2);
+        server.sync_foreground_client_state();
+        // Drain any setup messages (e.g. mouse-capture sync) before exercising the event.
+        while foreground_control_rx
+            .recv_timeout(Duration::from_millis(20))
+            .is_ok()
+        {}
+
+        let changed = server
+            .handle_internal_event_with_forwarding(AppEvent::PrefixInputSource { active: true });
+
+        assert!(changed);
+        match read_server_message(
+            foreground_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("foreground prefix input-source message"),
+        ) {
+            ServerMessage::PrefixInputSource { active } => assert!(active),
+            other => panic!("expected prefix input-source message, got {other:?}"),
+        }
+        assert!(
+            background_control_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "background client should not receive prefix input-source changes"
+        );
+    }
+
+    #[test]
+    fn headless_app_keeps_prefix_input_source_switch_off_process() {
+        // An App-internal drain (e.g. the exhaustive drain at the top of
+        // handle_api_request) can consume a queued PrefixInputSource intent
+        // before the forwarding drain sees it. The headless App must treat the
+        // event as inert instead of switching the host input source from the
+        // server process.
+        struct CountingPrefixInputSource(std::rc::Rc<std::cell::Cell<usize>>);
+        impl crate::platform::PrefixInputSource for CountingPrefixInputSource {
+            fn switch_to_ascii(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+            fn restore(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        let mut server = test_headless_server();
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        server
+            .app
+            .set_prefix_input_source(Box::new(CountingPrefixInputSource(calls.clone())));
+
+        server
+            .app
+            .handle_internal_event(AppEvent::PrefixInputSource { active: true });
+        server
+            .app
+            .handle_internal_event(AppEvent::PrefixInputSource { active: false });
+        assert_eq!(
+            calls.get(),
+            0,
+            "headless server must not apply the host input-source switch"
+        );
+
+        // Sanity: the same event does apply once the flag is on (monolithic semantics).
+        server.app.local_input_source_switch = true;
+        server
+            .app
+            .handle_internal_event(AppEvent::PrefixInputSource { active: true });
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
     fn client_local_notifications_target_foreground_client_only() {
         let mut server = test_headless_server();
         let (background_tx, background_control_rx, _background_rx) = test_client_writer();
@@ -8459,7 +8584,8 @@ next_tab = ""
     }
 
     /// Verify that no direct calls to `self.app.handle_internal_event`
-    /// exist outside of `handle_internal_event_with_forwarding` in this
+    /// (or its `handle_internal_event_with_prefix_sync` wrapper) exist
+    /// outside of `handle_internal_event_with_forwarding` in this
     /// module. This ensures the forwarding bypass cannot be reintroduced.
     ///
     /// The search pattern looks for `handle_internal_event` calls that
@@ -8497,7 +8623,8 @@ next_tab = ""
                         _ => {}
                     }
                 }
-            } else if line.contains("self.app.handle_internal_event(")
+            } else if (line.contains("self.app.handle_internal_event(")
+                || line.contains("self.app.handle_internal_event_with_prefix_sync("))
                 && !line.trim().starts_with("///")
                 && !line.contains("contains(")
             {

@@ -278,6 +278,7 @@ pub(crate) fn tab_focused(workspace_id: &str, tab_id: &str) {
     );
 }
 
+#[cfg(test)]
 pub(crate) fn tab_closed(workspace_id: &str, tab_id: &str) {
     tracing::info!(
         event = "tab.close",

@@ -117,6 +117,7 @@ impl App {
             event: EventKind::PaneCreated,
             data: EventData::PaneCreated { pane: pane.clone() },
         });
+        self.emit_layout_updated_event(ws_idx, target_tab_idx);
 
         encode_success(id, ResponseResult::PaneInfo { pane })
     }
@@ -418,6 +419,9 @@ impl App {
             return encode_error(id, "pane_layout_unavailable", "pane layout unavailable");
         };
         let focused_pane_id = layout.focused_pane_id.clone();
+        if changed {
+            self.emit_layout_updated_snapshot(layout.clone());
+        }
 
         encode_success(
             id,
@@ -587,6 +591,9 @@ impl App {
             return encode_error(id, "pane_layout_unavailable", "pane layout unavailable");
         };
         let focused_pane_id = layout.focused_pane_id.clone();
+        if changed {
+            self.emit_layout_updated_snapshot(layout.clone());
+        }
 
         encode_success(
             id,
@@ -972,7 +979,7 @@ impl App {
             previous_workspace_id: previous_workspace_id.clone(),
             previous_tab_id: previous_tab_id.clone(),
             pane: Box::new(pane.clone()),
-            source_layout: source_layout.map(Box::new),
+            source_layout: source_layout.clone().map(Box::new),
             target_layout: Box::new(target_layout),
             created_workspace: created_workspace.clone(),
             created_tab: created_tab.clone(),
@@ -1025,6 +1032,10 @@ impl App {
                 closed_tab_id: source_removed_tab_id,
             },
         });
+        if let Some(source_layout) = source_layout {
+            self.emit_layout_updated_snapshot(source_layout);
+        }
+        self.emit_layout_updated_snapshot((*move_result.target_layout).clone());
 
         encode_success(id, ResponseResult::PaneMove { move_result })
     }
@@ -1098,6 +1109,9 @@ impl App {
             return encode_error(id, "pane_layout_unavailable", "pane layout unavailable");
         };
         let focused_pane_id = layout.focused_pane_id.clone();
+        if outcome.changed || outcome.focus_changed {
+            self.emit_layout_updated_snapshot(layout.clone());
+        }
 
         encode_success(
             id,
@@ -1453,6 +1467,7 @@ impl App {
             return Err(pane_not_found(id, &target.pane_id));
         };
         let workspace_id = self.public_workspace_id(ws_idx);
+        let layout_update_target = self.layout_update_target_after_pane_removal(ws_idx, pane_id);
         if self.state.close_pane_would_close_workspace(ws_idx, pane_id)
             && self.state.confirm_implicit_worktree_group_close(ws_idx)
         {
@@ -1500,6 +1515,9 @@ impl App {
                     workspace_id,
                 },
             });
+            if let Some((ws_idx, tab_idx)) = layout_update_target {
+                self.emit_layout_updated_event(ws_idx, tab_idx);
+            }
         }
 
         Ok(())
@@ -1679,6 +1697,40 @@ impl App {
             panes,
             splits,
         })
+    }
+
+    pub(crate) fn emit_layout_updated_event(&mut self, ws_idx: usize, tab_idx: usize) {
+        if let Some(layout) = self.pane_layout_snapshot(ws_idx, tab_idx) {
+            self.emit_layout_updated_snapshot(layout);
+        }
+    }
+
+    pub(super) fn emit_layout_updated_snapshot(&mut self, layout: PaneLayoutSnapshot) {
+        self.emit_event(EventEnvelope {
+            event: EventKind::LayoutUpdated,
+            data: EventData::LayoutUpdated { layout },
+        });
+    }
+
+    pub(crate) fn layout_update_target_after_pane_removal(
+        &self,
+        ws_idx: usize,
+        pane_id: PaneId,
+    ) -> Option<(usize, usize)> {
+        let tab_idx = self
+            .state
+            .workspaces
+            .get(ws_idx)?
+            .find_tab_index_for_pane(pane_id)?;
+        let pane_count = self
+            .state
+            .workspaces
+            .get(ws_idx)?
+            .tabs
+            .get(tab_idx)?
+            .layout
+            .pane_count();
+        (pane_count > 1).then_some((ws_idx, tab_idx))
     }
 }
 
@@ -2225,6 +2277,7 @@ mod tests {
         assert_eq!(swap.source_pane_id, source_public);
         assert_eq!(swap.target_pane_id, None);
         assert_eq!(swap.layout.panes.len(), 1);
+        assert!(app.event_hub.events_after(0).is_empty());
     }
 
     #[test]
@@ -2516,11 +2569,29 @@ mod tests {
             .iter()
             .map(|(_, envelope)| envelope.event)
             .collect();
-        assert_eq!(events, vec![EventKind::TabCreated, EventKind::PaneMoved]);
+        assert_eq!(
+            events,
+            vec![
+                EventKind::TabCreated,
+                EventKind::PaneMoved,
+                EventKind::LayoutUpdated,
+                EventKind::LayoutUpdated,
+            ]
+        );
         match &envelopes[0].1.data {
             EventData::TabCreated { tab } => assert!(tab.focused),
             other => panic!("expected tab created event, got {other:?}"),
         }
+        assert!(matches!(
+            &envelopes[2].1.data,
+            EventData::LayoutUpdated { layout }
+                if layout.tab_id == app.public_tab_id(0, 0).unwrap()
+        ));
+        assert!(matches!(
+            &envelopes[3].1.data,
+            EventData::LayoutUpdated { layout }
+                if layout.tab_id == app.public_tab_id(0, 1).unwrap()
+        ));
     }
 
     #[test]
@@ -2637,6 +2708,7 @@ mod tests {
                 EventKind::WorkspaceCreated,
                 EventKind::TabCreated,
                 EventKind::PaneMoved,
+                EventKind::LayoutUpdated,
             ]
         );
         match &envelopes[2].1.data {
@@ -2646,6 +2718,14 @@ mod tests {
         match &envelopes[3].1.data {
             EventData::TabCreated { tab } => assert!(tab.focused),
             other => panic!("expected tab created event, got {other:?}"),
+        }
+        match &envelopes[5].1.data {
+            EventData::LayoutUpdated { layout } => assert_eq!(
+                layout.tab_id,
+                app.public_tab_id(0, 0)
+                    .expect("created workspace should have a first tab")
+            ),
+            other => panic!("expected layout updated event, got {other:?}"),
         }
     }
 
@@ -2860,6 +2940,11 @@ mod tests {
         assert_eq!(zoom.focused_pane_id, zoom.pane_id);
         assert!(zoom.zoomed);
         assert!(zoom.layout.zoomed);
+        assert!(matches!(
+            &app.event_hub.events_after(0).last().expect("layout event").1.data,
+            EventData::LayoutUpdated { layout }
+                if layout.tab_id == app.public_tab_id(0, 0).unwrap() && layout.zoomed
+        ));
 
         let response = app.handle_pane_zoom("req".into(), PaneZoomParams::default());
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -2871,6 +2956,11 @@ mod tests {
         assert!(!zoom.focus_changed);
         assert!(!zoom.zoomed);
         assert!(!zoom.layout.zoomed);
+        assert!(matches!(
+            &app.event_hub.events_after(0).last().expect("layout event").1.data,
+            EventData::LayoutUpdated { layout }
+                if layout.tab_id == app.public_tab_id(0, 0).unwrap() && !layout.zoomed
+        ));
     }
 
     #[test]
@@ -3046,6 +3136,11 @@ mod tests {
         assert_eq!(zoom.reason, Some(PaneZoomReason::AlreadyZoomed));
         assert!(zoom.zoomed);
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(right));
+        assert!(matches!(
+            &app.event_hub.events_after(0).last().expect("layout event").1.data,
+            EventData::LayoutUpdated { layout }
+                if layout.focused_pane_id == app.public_pane_id(0, right).unwrap()
+        ));
     }
 
     #[test]
@@ -3185,6 +3280,12 @@ mod tests {
         assert_eq!(resize.layout.focused_pane_id, right_public);
         assert!((resize.layout.splits[0].ratio - 0.6).abs() < f32::EPSILON);
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(right));
+        assert!(matches!(
+            &app.event_hub.events_after(0).last().expect("layout event").1.data,
+            EventData::LayoutUpdated { layout }
+                if layout.tab_id == app.public_tab_id(0, 0).unwrap()
+                    && (layout.splits[0].ratio - 0.6).abs() < f32::EPSILON
+        ));
     }
 
     #[test]

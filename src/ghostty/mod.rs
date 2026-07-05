@@ -11,7 +11,7 @@
 pub mod bindings;
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -21,7 +21,7 @@ use std::ops::RangeInclusive;
 use std::os::raw::c_char;
 use std::ptr;
 use std::slice;
-use std::sync::{Once, OnceLock};
+use std::sync::{Mutex, Once, OnceLock};
 
 pub use bindings as ffi;
 
@@ -170,10 +170,6 @@ const TERMINAL_DATA_COLOR_CURSOR: ffi::GhosttyTerminalData = 20;
 const KITTY_IMAGE_STORAGE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 const APC_MAX_BYTES: usize = 16 * 1024 * 1024;
 const APC_MAX_BYTES_KITTY: usize = 16 * 1024 * 1024;
-// Kitty image fingerprints are used as a display cache key, not a
-// cryptographic identity. Sampling keeps redraws cheap for multi-megabyte
-// images while still distinguishing normal screenshots/photos/diagrams.
-const KITTY_FINGERPRINT_SAMPLE_BYTES: usize = 4096;
 pub(crate) const KITTY_UNICODE_PLACEHOLDER: u32 = 0x10EEEE;
 // The vendored C headers expose these placement fields, but the checked-in
 // generated bindings predate the names. Keep the explicit values aligned with
@@ -217,6 +213,14 @@ pub struct KittyImageDescriptor {
     pub format: KittyImageFormat,
     pub data_len: usize,
     pub data_fingerprint: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct KittyImageFingerprintEntry {
+    transmit_time_ns: u64,
+    data_ptr: usize,
+    data_len: usize,
+    fingerprint: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -568,6 +572,7 @@ pub fn encode_focus(event: FocusEvent) -> Result<Vec<u8>, Error> {
 pub struct Terminal {
     raw: ffi::GhosttyTerminal_ptr,
     write_pty_callback: Option<Box<WritePtyCallbackState>>,
+    kitty_fingerprints: Mutex<HashMap<u32, KittyImageFingerprintEntry>>,
 }
 
 impl Terminal {
@@ -585,6 +590,7 @@ impl Terminal {
         Ok(Self {
             raw,
             write_pty_callback: None,
+            kitty_fingerprints: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1139,7 +1145,67 @@ impl Terminal {
         }
         placements.extend(self.kitty_virtual_image_placements(graphics, &mut needs_data)?);
         placements.sort_by_key(|placement| placement.z);
+        self.prune_kitty_fingerprints(&placements);
         Ok(placements)
+    }
+
+    /// Fingerprint for `image`, cached per image id and recomputed only when
+    /// the image's transmit time (or data identity) changes.
+    fn kitty_image_fingerprint_cached(
+        &self,
+        image: ffi::GhosttyKittyGraphicsImage,
+        image_id: u32,
+        data: (*const u8, usize),
+        image_width: u32,
+        image_height: u32,
+        format: KittyImageFormat,
+    ) -> u64 {
+        let (data_ptr, data_len) = data;
+        let Ok(transmit_time_ns) = kitty_image_u64(
+            image,
+            ffi::GhosttyKittyGraphicsImageData_GHOSTTY_KITTY_IMAGE_DATA_TRANSMIT_TIME_NS,
+        ) else {
+            return kitty_image_fingerprint(data_ptr, data_len, image_width, image_height, format);
+        };
+
+        if let Ok(cache) = self.kitty_fingerprints.lock() {
+            if let Some(entry) = cache.get(&image_id) {
+                if entry.transmit_time_ns == transmit_time_ns
+                    && entry.data_ptr == data_ptr as usize
+                    && entry.data_len == data_len
+                {
+                    return entry.fingerprint;
+                }
+            }
+        }
+
+        let fingerprint =
+            kitty_image_fingerprint(data_ptr, data_len, image_width, image_height, format);
+        if let Ok(mut cache) = self.kitty_fingerprints.lock() {
+            cache.insert(
+                image_id,
+                KittyImageFingerprintEntry {
+                    transmit_time_ns,
+                    data_ptr: data_ptr as usize,
+                    data_len,
+                    fingerprint,
+                },
+            );
+        }
+        fingerprint
+    }
+
+    fn prune_kitty_fingerprints(&self, placements: &[KittyImagePlacement]) {
+        if let Ok(mut cache) = self.kitty_fingerprints.lock() {
+            if cache.is_empty() {
+                return;
+            }
+            let live: HashSet<u32> = placements
+                .iter()
+                .map(|placement| placement.image_id)
+                .collect();
+            cache.retain(|image_id, _| live.contains(image_id));
+        }
     }
 
     fn kitty_image_placement<F>(
@@ -1198,8 +1264,14 @@ impl Terminal {
             ffi::GhosttyKittyGraphicsPlacementData_GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_PLACEMENT_ID,
         )?;
         let (data_ptr, data_len) = kitty_image_data_ptr_len(image)?;
-        let data_fingerprint =
-            kitty_image_fingerprint(data_ptr, data_len, image_width, image_height, format);
+        let data_fingerprint = self.kitty_image_fingerprint_cached(
+            image,
+            image_id,
+            (data_ptr, data_len),
+            image_width,
+            image_height,
+            format,
+        );
         let descriptor = KittyImageDescriptor {
             image_id,
             placement_id,
@@ -1336,8 +1408,14 @@ impl Terminal {
             };
             let placement_id = run.synthetic_placement_id();
             let (data_ptr, data_len) = kitty_image_data_ptr_len(image)?;
-            let data_fingerprint =
-                kitty_image_fingerprint(data_ptr, data_len, image_width, image_height, format);
+            let data_fingerprint = self.kitty_image_fingerprint_cached(
+                image,
+                image_id,
+                (data_ptr, data_len),
+                image_width,
+                image_height,
+                format,
+            );
             let descriptor = KittyImageDescriptor {
                 image_id,
                 placement_id,
@@ -1750,6 +1828,18 @@ fn kitty_image_u32(
     Ok(out)
 }
 
+fn kitty_image_u64(
+    image: ffi::GhosttyKittyGraphicsImage,
+    data: ffi::GhosttyKittyGraphicsImageData,
+) -> Result<u64, Error> {
+    let mut out = 0u64;
+    unsafe {
+        ffi::ghostty_kitty_graphics_image_get(image, data, (&mut out as *mut u64).cast())
+            .into_result()?;
+    }
+    Ok(out)
+}
+
 fn kitty_image_format(image: ffi::GhosttyKittyGraphicsImage) -> Result<KittyImageFormat, Error> {
     let mut out = ffi::GhosttyKittyImageFormat_GHOSTTY_KITTY_IMAGE_FORMAT_RGBA;
     unsafe {
@@ -1812,6 +1902,8 @@ fn kitty_image_data_from_ptr(ptr_out: *const u8, len: usize) -> Vec<u8> {
     unsafe { slice::from_raw_parts(ptr_out, len) }.to_vec()
 }
 
+// Hashes the full payload. Callers cache the result per image id and only
+// recompute it when the image's transmit time changes.
 fn kitty_image_fingerprint(
     ptr_out: *const u8,
     len: usize,
@@ -1829,21 +1921,8 @@ fn kitty_image_fingerprint(
     }
 
     let data = unsafe { slice::from_raw_parts(ptr_out, len) };
-    hash_kitty_image_data_sample(&mut hasher, data);
+    data.hash(&mut hasher);
     hasher.finish()
-}
-
-fn hash_kitty_image_data_sample(hasher: &mut impl Hasher, data: &[u8]) {
-    let sample = KITTY_FINGERPRINT_SAMPLE_BYTES;
-    if data.len() <= sample * 3 {
-        data.hash(hasher);
-        return;
-    }
-
-    data[..sample].hash(hasher);
-    let middle_start = (data.len() / 2).saturating_sub(sample / 2);
-    data[middle_start..middle_start + sample].hash(hasher);
-    data[data.len() - sample..].hash(hasher);
 }
 
 fn grid_ref_hyperlink_uri(grid_ref: &ffi::GhosttyGridRef) -> Result<Option<String>, Error> {
@@ -2735,29 +2814,39 @@ mod tests {
     }
 
     #[test]
-    fn kitty_image_fingerprint_samples_large_payloads() {
-        let mut data = vec![1u8; KITTY_FINGERPRINT_SAMPLE_BYTES * 4];
+    fn kitty_image_fingerprint_covers_full_payload() {
+        let mut data = vec![1u8; 4096 * 4];
         let original =
             kitty_image_fingerprint(data.as_ptr(), data.len(), 100, 50, KittyImageFormat::Png);
 
-        data[KITTY_FINGERPRINT_SAMPLE_BYTES / 2] = 2;
-        let changed_prefix =
+        data[4096 + 123] = 2;
+        let changed_outside_sampled_windows =
             kitty_image_fingerprint(data.as_ptr(), data.len(), 100, 50, KittyImageFormat::Png);
-        assert_ne!(original, changed_prefix);
+        assert_ne!(original, changed_outside_sampled_windows);
+    }
 
-        data[KITTY_FINGERPRINT_SAMPLE_BYTES / 2] = 1;
-        let middle = data.len() / 2;
-        data[middle] = 3;
-        let changed_middle =
-            kitty_image_fingerprint(data.as_ptr(), data.len(), 100, 50, KittyImageFormat::Png);
-        assert_ne!(original, changed_middle);
+    #[test]
+    fn kitty_image_fingerprint_refreshes_on_retransmission() {
+        let mut terminal = Terminal::new(10, 5, 0).unwrap();
+        terminal.write(b"\x1b_Ga=T,f=32,t=d,i=7,p=3,s=1,v=1,c=10,r=5,q=2;/wAA/w==\x1b\\");
+        let first = terminal
+            .kitty_image_placements_with_data_filter(|_| true)
+            .unwrap();
+        assert_eq!(first.len(), 1);
 
-        data[middle] = 1;
-        let last = data.len() - 1;
-        data[last] = 4;
-        let changed_suffix =
-            kitty_image_fingerprint(data.as_ptr(), data.len(), 100, 50, KittyImageFormat::Png);
-        assert_ne!(original, changed_suffix);
+        // Same id and size, different pixels.
+        terminal.write(b"\x1b_Ga=t,f=32,t=d,i=7,s=1,v=1,q=2;AAAAAA==\x1b\\");
+        let second = terminal
+            .kitty_image_placements_with_data_filter(|_| true)
+            .unwrap();
+        assert_eq!(second.len(), 1);
+        assert_ne!(first[0].data_fingerprint, second[0].data_fingerprint);
+
+        // No retransmission, so the fingerprint stays stable across renders.
+        let third = terminal
+            .kitty_image_placements_with_data_filter(|_| true)
+            .unwrap();
+        assert_eq!(second[0].data_fingerprint, third[0].data_fingerprint);
     }
 
     #[test]

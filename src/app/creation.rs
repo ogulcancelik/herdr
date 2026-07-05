@@ -305,6 +305,7 @@ impl App {
             },
         });
         self.emit_tab_and_pane_created_events(tab, root_pane);
+        self.emit_layout_updated_event(ws_idx, 0);
     }
 
     pub(crate) fn emit_tab_created_events(&mut self, ws_idx: usize, tab_idx: usize) {
@@ -315,6 +316,7 @@ impl App {
             return;
         };
         self.emit_tab_and_pane_created_events(tab, root_pane);
+        self.emit_layout_updated_event(ws_idx, tab_idx);
     }
 
     fn emit_tab_and_pane_created_events(

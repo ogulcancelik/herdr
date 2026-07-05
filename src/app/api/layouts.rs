@@ -207,6 +207,7 @@ impl App {
                 });
             }
         }
+        self.emit_layout_updated_event(ws_idx, new_tab_idx);
 
         let Some(layout) = self.layout_description(ws_idx, new_tab_idx) else {
             return encode_error(id, "layout_apply_failed", "new layout unavailable");
@@ -243,6 +244,7 @@ impl App {
         let Some(layout) = self.layout_description(ws_idx, tab_idx) else {
             return encode_error(id, "layout_not_found", "layout unavailable");
         };
+        self.emit_layout_updated_event(ws_idx, tab_idx);
         encode_success(id, ResponseResult::LayoutSplitRatioSet { layout })
     }
 
@@ -687,6 +689,12 @@ mod tests {
             panic!("expected split layout root");
         };
         assert!((ratio - 0.72).abs() < f32::EPSILON);
+        assert!(matches!(
+            &app.event_hub.events_after(0).last().expect("layout event").1.data,
+            EventData::LayoutUpdated { layout }
+                if layout.tab_id == app.public_tab_id(0, 0).unwrap()
+                    && (layout.splits[0].ratio - 0.72).abs() < f32::EPSILON
+        ));
     }
 
     #[test]
@@ -775,6 +783,12 @@ mod tests {
             second_pane.command,
             Some(vec!["sh".into(), "-c".into(), "true".into()])
         );
+        assert!(matches!(
+            &app.event_hub.events_after(0).last().expect("layout event").1.data,
+            EventData::LayoutUpdated { layout }
+                if layout.tab_id == app.public_tab_id(0, 0).unwrap()
+                    && layout.panes.len() == 2
+        ));
         shutdown_test_runtimes(&mut app);
     }
 

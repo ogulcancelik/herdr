@@ -6,6 +6,23 @@ use super::{ClipboardImage, ForegroundJob, Signal};
 /// Unsupported platform stub.
 pub fn raise_server_nofile_limit() {}
 
+fn raw_command_argv(command: &str, flag: &str) -> Vec<std::ffi::OsString> {
+    vec!["/bin/sh".into(), flag.into(), command.into()]
+}
+
+pub(crate) fn detached_custom_command_process_platform(command: &str) -> std::process::Command {
+    let argv = raw_command_argv(command, "-lc");
+    let mut command = std::process::Command::new(&argv[0]);
+    command.args(&argv[1..]);
+    command
+}
+
+pub(crate) fn pane_custom_command_pty_builder_platform(
+    command: &str,
+) -> portable_pty::CommandBuilder {
+    portable_pty::CommandBuilder::from_argv(raw_command_argv(command, "-c"))
+}
+
 /// Unsupported platform stub.
 pub(crate) fn scrollback_editor_argv(_path: &std::path::Path) -> std::io::Result<Vec<String>> {
     Err(std::io::Error::new(

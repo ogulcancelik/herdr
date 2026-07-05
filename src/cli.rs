@@ -17,6 +17,7 @@ mod integration;
 mod notification;
 mod pane;
 mod plugin;
+mod runtime;
 mod server;
 mod spec;
 mod status;

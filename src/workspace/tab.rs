@@ -416,6 +416,7 @@ impl Tab {
         })
     }
 
+    #[cfg(test)]
     pub fn close_focused(&mut self) -> Option<DetachedPane> {
         let pane_id = self.layout.focused();
         self.detach_pane(pane_id)

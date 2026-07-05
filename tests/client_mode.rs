@@ -483,23 +483,32 @@ fn server_crash_after_attach_causes_lost_connection_error() {
     // terminal setup paths are exercised.
     let mut thin_client = spawn_client_process(&config_home, &runtime_dir, &api_socket);
 
-    // Prove attached before kill by waiting for at least one frame message.
+    // Prove attached before kill by waiting for recognizable rendered app content.
     let mut thin_reader = thin_client
         ._master
         .as_ref()
         .expect("thin client master")
         .try_clone_reader()
         .expect("clone client PTY reader");
-    let attached_before_kill = {
+    let (attached_before_kill, attach_output) = {
         let deadline = Instant::now() + Duration::from_secs(8);
         let mut buf = [0u8; 4096];
         let mut seen = false;
+        let mut output = String::new();
         while Instant::now() < deadline {
             match thin_reader.read(&mut buf) {
                 Ok(n) if n > 0 => {
                     let out = String::from_utf8_lossy(&buf[..n]);
-                    if !out.is_empty() {
+                    output.push_str(&out);
+                    if out.contains("\u{2500}")
+                        || out.contains("workspace")
+                        || out.contains("pane")
+                        || out.contains("terminal")
+                    {
                         seen = true;
+                        break;
+                    }
+                    if output.to_lowercase().contains("herdr:") {
                         break;
                     }
                 }
@@ -507,11 +516,11 @@ fn server_crash_after_attach_causes_lost_connection_error() {
                 Err(_) => thread::sleep(Duration::from_millis(30)),
             }
         }
-        seen
+        (seen, output)
     };
     assert!(
         attached_before_kill,
-        "thin client must complete attach and receive frame before server crash"
+        "thin client must complete attach and receive frame before server crash; output: {attach_output:?}"
     );
 
     // Kill server unexpectedly.

@@ -202,6 +202,8 @@ fn get_base_env() -> BTreeMap<OsString, EnvEntry> {
 #[cfg_attr(feature = "serde_support", derive(Serialize, Deserialize))]
 pub struct CommandBuilder {
     args: Vec<OsString>,
+    #[cfg(windows)]
+    raw_args: Vec<OsString>,
     envs: BTreeMap<OsString, EnvEntry>,
     cwd: Option<OsString>,
     #[cfg(unix)]
@@ -215,6 +217,8 @@ impl CommandBuilder {
     pub fn new<S: AsRef<OsStr>>(program: S) -> Self {
         Self {
             args: vec![program.as_ref().to_owned()],
+            #[cfg(windows)]
+            raw_args: Vec::new(),
             envs: get_base_env(),
             cwd: None,
             #[cfg(unix)]
@@ -227,6 +231,8 @@ impl CommandBuilder {
     pub fn from_argv(args: Vec<OsString>) -> Self {
         Self {
             args,
+            #[cfg(windows)]
+            raw_args: Vec::new(),
             envs: get_base_env(),
             cwd: None,
             #[cfg(unix)]
@@ -254,6 +260,8 @@ impl CommandBuilder {
     pub fn new_default_prog() -> Self {
         Self {
             args: vec![],
+            #[cfg(windows)]
+            raw_args: Vec::new(),
             envs: get_base_env(),
             cwd: None,
             #[cfg(unix)]
@@ -285,6 +293,15 @@ impl CommandBuilder {
         for arg in args {
             self.arg(arg);
         }
+    }
+
+    /// Append raw shell text to the Windows command line without ArgvQuote escaping.
+    #[cfg(windows)]
+    pub fn raw_arg<S: AsRef<OsStr>>(&mut self, arg: S) {
+        if self.is_default_prog() {
+            panic!("attempted to add args to a default_prog builder");
+        }
+        self.raw_args.push(arg.as_ref().to_owned());
     }
 
     pub fn get_argv(&self) -> &Vec<OsString> {
@@ -692,6 +709,15 @@ impl CommandBuilder {
             );
             Self::append_quoted(arg, &mut cmdline);
         }
+        for arg in &self.raw_args {
+            cmdline.push(' ' as u16);
+            anyhow::ensure!(
+                !arg.encode_wide().any(|c| c == 0),
+                "invalid encoding for raw command line argument {:?}",
+                arg
+            );
+            cmdline.extend(arg.encode_wide());
+        }
         // Ensure that the command line is nul terminated too!
         cmdline.push(0);
         Ok((exe, cmdline))
@@ -819,5 +845,28 @@ mod tests {
 
         cmd.env_remove("cARGO_pKG_aUTHORS");
         assert!(cmd.get_env("CARGO_PKG_AUTHORS").is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn raw_arg_appends_unescaped_windows_command_tail() {
+        use std::os::windows::ffi::OsStringExt;
+
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.arg("/d");
+        cmd.arg("/c");
+        cmd.raw_arg(r#"echo "hi""#);
+
+        let (_exe, cmdline) = cmd.cmdline().expect("command line");
+        let nul = cmdline
+            .iter()
+            .position(|ch| *ch == 0)
+            .expect("command line should be nul terminated");
+        let command = OsString::from_wide(&cmdline[..nul])
+            .to_string_lossy()
+            .into_owned();
+
+        assert!(command.ends_with(r#"/d /c echo "hi""#), "{}", command);
+        assert!(!command.contains(r#"\"hi\""#), "{}", command);
     }
 }

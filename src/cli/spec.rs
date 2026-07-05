@@ -128,7 +128,8 @@ fn server_command() -> Command {
 
 fn api_command() -> Command {
     Command::new("api")
-        .about("Inspect socket API metadata")
+        .about("Inspect socket API metadata and live runtime state")
+        .subcommand(Command::new("snapshot").about("Print the live session snapshot"))
         .subcommand(
             Command::new("schema")
                 .about("Print or write the bundled API schema")

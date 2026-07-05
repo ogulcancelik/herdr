@@ -1424,7 +1424,166 @@ command = ["sh", "-c", "sleep 1"]
             .iter()
             .position(|event| *event == crate::api::schema::EventKind::PaneCreated)
             .expect("pane.created should be emitted");
+        let layout_updated = events
+            .iter()
+            .position(|event| *event == crate::api::schema::EventKind::LayoutUpdated)
+            .expect("layout.updated should be emitted");
         assert!(tab_created < pane_created);
+        assert!(pane_created < layout_updated);
+
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plugin_pane_open_zoomed_split_emits_layout_updated() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("plugin-split")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = crate::app::Mode::Terminal;
+
+        let root = unique_temp_path("plugin-pane-split-layout-event");
+        write_manifest_content(
+            &root,
+            r#"
+id = "example.split"
+name = "Split Plugin"
+version = "0.1.0"
+min_herdr_version = "0.6.10"
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "board"
+title = "Plugin Board"
+placement = "split"
+command = ["sh", "-c", "sleep 1"]
+"#,
+        );
+        link_manifest(&mut app, &root);
+
+        let open = app.handle_api_request(Request {
+            id: "pane-open-split".into(),
+            method: Method::PluginPaneOpen(PluginPaneOpenParams {
+                plugin_id: "example.split".into(),
+                entrypoint: "board".into(),
+                placement: Some(PluginPanePlacement::Zoomed),
+                workspace_id: None,
+                target_pane_id: None,
+                direction: Some(crate::api::schema::SplitDirection::Right),
+                cwd: None,
+                focus: true,
+                env: std::collections::HashMap::new(),
+            }),
+        });
+        let ResponseResult::PluginPaneOpened { .. } = response_result(&open) else {
+            panic!("expected plugin pane opened response: {open}");
+        };
+
+        let events = event_hub.events_after(0);
+        let pane_created = events
+            .iter()
+            .position(|(_, event)| event.event == crate::api::schema::EventKind::PaneCreated)
+            .expect("pane.created should be emitted");
+        let layout_updated = events
+            .iter()
+            .position(|(_, event)| event.event == crate::api::schema::EventKind::LayoutUpdated)
+            .expect("layout.updated should be emitted");
+        assert!(pane_created < layout_updated);
+        assert!(matches!(
+            &events[layout_updated].1.data,
+            crate::api::schema::EventData::LayoutUpdated { layout }
+                if layout.zoomed && layout.panes.len() == 2
+        ));
+
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plugin_pane_open_overlay_emits_layout_updated() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("plugin-overlay")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = crate::app::Mode::Terminal;
+
+        let root = unique_temp_path("plugin-pane-overlay-layout-event");
+        write_manifest_content(
+            &root,
+            r#"
+id = "example.overlay"
+name = "Overlay Plugin"
+version = "0.1.0"
+min_herdr_version = "0.6.10"
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "board"
+title = "Plugin Board"
+placement = "overlay"
+command = ["sh", "-c", "sleep 1"]
+"#,
+        );
+        link_manifest(&mut app, &root);
+
+        let open = app.handle_api_request(Request {
+            id: "pane-open-overlay".into(),
+            method: Method::PluginPaneOpen(PluginPaneOpenParams {
+                plugin_id: "example.overlay".into(),
+                entrypoint: "board".into(),
+                placement: None,
+                workspace_id: None,
+                target_pane_id: None,
+                direction: None,
+                cwd: None,
+                focus: true,
+                env: std::collections::HashMap::new(),
+            }),
+        });
+        let ResponseResult::PluginPaneOpened { .. } = response_result(&open) else {
+            panic!("expected plugin pane opened response: {open}");
+        };
+
+        let events = event_hub.events_after(0);
+        let pane_created = events
+            .iter()
+            .position(|(_, event)| event.event == crate::api::schema::EventKind::PaneCreated)
+            .expect("pane.created should be emitted");
+        let layout_updated = events
+            .iter()
+            .position(|(_, event)| event.event == crate::api::schema::EventKind::LayoutUpdated)
+            .expect("layout.updated should be emitted");
+        assert!(pane_created < layout_updated);
+        assert!(matches!(
+            &events[layout_updated].1.data,
+            crate::api::schema::EventData::LayoutUpdated { layout }
+                if layout.zoomed && layout.panes.len() == 2
+        ));
 
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();

@@ -1,6 +1,5 @@
 use crate::api::schema::{
-    Method, Request, WorktreeCreateParams, WorktreeListParams, WorktreeOpenParams,
-    WorktreeRemoveParams,
+    WorktreeCreateParams, WorktreeListParams, WorktreeOpenParams, WorktreeRemoveParams,
 };
 
 pub(super) fn run_worktree_command(args: &[String]) -> std::io::Result<i32> {
@@ -60,10 +59,7 @@ fn worktree_list(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     }
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:worktree:list".into(),
-        method: Method::WorktreeList(WorktreeListParams { workspace_id, cwd }),
-    })?)
+    super::runtime::worktree_list(WorktreeListParams { workspace_id, cwd })
 }
 
 fn worktree_create(args: &[String]) -> std::io::Result<i32> {
@@ -148,18 +144,15 @@ fn worktree_create(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     }
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:worktree:create".into(),
-        method: Method::WorktreeCreate(WorktreeCreateParams {
-            workspace_id,
-            cwd,
-            branch,
-            base,
-            path,
-            label,
-            focus,
-        }),
-    })?)
+    super::runtime::worktree_create(WorktreeCreateParams {
+        workspace_id,
+        cwd,
+        branch,
+        base,
+        path,
+        label,
+        focus,
+    })
 }
 
 fn worktree_open(args: &[String]) -> std::io::Result<i32> {
@@ -241,17 +234,14 @@ fn worktree_open(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     }
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:worktree:open".into(),
-        method: Method::WorktreeOpen(WorktreeOpenParams {
-            workspace_id,
-            cwd,
-            path,
-            branch,
-            label,
-            focus,
-        }),
-    })?)
+    super::runtime::worktree_open(WorktreeOpenParams {
+        workspace_id,
+        cwd,
+        path,
+        branch,
+        label,
+        focus,
+    })
 }
 
 fn worktree_remove(args: &[String]) -> std::io::Result<i32> {
@@ -286,13 +276,10 @@ fn worktree_remove(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     };
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:worktree:remove".into(),
-        method: Method::WorktreeRemove(WorktreeRemoveParams {
-            workspace_id,
-            force,
-        }),
-    })?)
+    super::runtime::worktree_remove(WorktreeRemoveParams {
+        workspace_id,
+        force,
+    })
 }
 
 fn print_worktree_help() {

@@ -1354,6 +1354,10 @@ async fn run_client_loop(
         .set_nonblocking(false)
         .map_err(ClientError::ConnectionFailed)?;
 
+    // This (foreground) client owns the prefix ASCII input-source switch; a no-op on non-macOS.
+    use crate::platform::PrefixInputSource;
+    let mut prefix_input_source = crate::platform::RealPrefixInputSource::default();
+
     // Main event loop.
     while !should_quit.load(Ordering::Acquire) {
         let event = tokio::select! {
@@ -1558,6 +1562,13 @@ async fn run_client_loop(
                         }
                         state.mouse_capture_active = desired;
                         host_mouse_capture_active.store(desired, Ordering::Release);
+                    }
+                }
+                ServerMessage::PrefixInputSource { active } => {
+                    if active {
+                        prefix_input_source.switch_to_ascii();
+                    } else {
+                        prefix_input_source.restore();
                     }
                 }
                 ServerMessage::Welcome { .. } => {

@@ -85,20 +85,39 @@ try {
     }
 
     Invoke-Checked $exe @("agent", "start", "smoke", "--", $env:ComSpec, "/K", "dir")
-    Start-Sleep -Seconds 2
-    $read = & $exe agent read smoke --source recent --lines 40 --format text
-    if ($LASTEXITCODE -ne 0) {
-        throw "command failed with exit code $LASTEXITCODE`: $exe agent read smoke"
-    }
-    $text = $read -join "`n"
+    $text = ""
+    $deadline = (Get-Date).AddSeconds(15)
+    do {
+        Start-Sleep -Milliseconds 500
+        try {
+            $read = & $exe agent read smoke --source recent --lines 40 --format text 2>&1
+            $readExitCode = $LASTEXITCODE
+        } catch {
+            $read = @($_.Exception.Message)
+            $readExitCode = 1
+        }
+        $text = $read -join "`n"
+        if ($readExitCode -eq 0 -and $text -match "File\(s\)" -and $text -match "Dir\(s\)") {
+            break
+        }
+    } while ((Get-Date) -lt $deadline)
+
     if ($text -notmatch "File\(s\)" -or $text -notmatch "Dir\(s\)") {
         throw "pane read did not include cmd.exe directory output: $text"
     }
 } finally {
     if ($null -ne $server) {
-        & $exe server stop 2>$null
+        try {
+            $stopOutput = & $exe server stop 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "server stop during cleanup exited with $LASTEXITCODE`: $($stopOutput -join "`n")"
+            }
+        } catch {
+            Write-Host "server stop during cleanup failed: $($_.Exception.Message)"
+        }
         Wait-Process -Id $server.Id -Timeout 10 -ErrorAction SilentlyContinue
     }
+    $global:LASTEXITCODE = 0
     $env:PATH = $oldPath
     $env:HERDR_SESSION = $oldSession
     Remove-Item -Recurse -Force $fakeDir -ErrorAction SilentlyContinue

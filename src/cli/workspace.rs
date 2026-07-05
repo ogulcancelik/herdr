@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 
-use crate::api::schema::{
-    EmptyParams, Method, Request, WorkspaceCreateParams, WorkspaceRenameParams, WorkspaceTarget,
-};
+use crate::api::schema::{WorkspaceCreateParams, WorkspaceRenameParams};
 
 pub(super) fn run_workspace_command(args: &[String]) -> std::io::Result<i32> {
     let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
@@ -34,10 +32,7 @@ fn workspace_list(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     }
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:workspace:list".into(),
-        method: Method::WorkspaceList(EmptyParams::default()),
-    })?)
+    super::runtime::workspace_list()
 }
 
 fn workspace_create(args: &[String]) -> std::io::Result<i32> {
@@ -95,15 +90,12 @@ fn workspace_create(args: &[String]) -> std::io::Result<i32> {
         }
     }
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:workspace:create".into(),
-        method: Method::WorkspaceCreate(WorkspaceCreateParams {
-            cwd,
-            focus,
-            label,
-            env,
-        }),
-    })?)
+    super::runtime::workspace_create(WorkspaceCreateParams {
+        cwd,
+        focus,
+        label,
+        env,
+    })
 }
 
 fn workspace_get(args: &[String]) -> std::io::Result<i32> {
@@ -116,12 +108,7 @@ fn workspace_get(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     }
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:workspace:get".into(),
-        method: Method::WorkspaceGet(WorkspaceTarget {
-            workspace_id: super::normalize_workspace_id(raw_workspace_id),
-        }),
-    })?)
+    super::runtime::workspace_get(super::normalize_workspace_id(raw_workspace_id))
 }
 
 fn workspace_focus(args: &[String]) -> std::io::Result<i32> {
@@ -134,12 +121,7 @@ fn workspace_focus(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     }
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:workspace:focus".into(),
-        method: Method::WorkspaceFocus(WorkspaceTarget {
-            workspace_id: super::normalize_workspace_id(raw_workspace_id),
-        }),
-    })?)
+    super::runtime::workspace_focus(super::normalize_workspace_id(raw_workspace_id))
 }
 
 fn workspace_rename(args: &[String]) -> std::io::Result<i32> {
@@ -148,13 +130,10 @@ fn workspace_rename(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     }
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:workspace:rename".into(),
-        method: Method::WorkspaceRename(WorkspaceRenameParams {
-            workspace_id: super::normalize_workspace_id(&args[0]),
-            label: args[1..].join(" "),
-        }),
-    })?)
+    super::runtime::workspace_rename(WorkspaceRenameParams {
+        workspace_id: super::normalize_workspace_id(&args[0]),
+        label: args[1..].join(" "),
+    })
 }
 
 fn workspace_close(args: &[String]) -> std::io::Result<i32> {
@@ -167,12 +146,7 @@ fn workspace_close(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     }
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:workspace:close".into(),
-        method: Method::WorkspaceClose(WorkspaceTarget {
-            workspace_id: super::normalize_workspace_id(raw_workspace_id),
-        }),
-    })?)
+    super::runtime::workspace_close(super::normalize_workspace_id(raw_workspace_id))
 }
 
 fn print_workspace_help() {

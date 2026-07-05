@@ -593,10 +593,12 @@ impl Workspace {
         true
     }
 
+    #[cfg(test)]
     pub fn close_active_tab(&mut self) -> bool {
         self.close_tab(self.active_tab)
     }
 
+    #[cfg(test)]
     pub fn split_focused(
         &mut self,
         direction: Direction,
@@ -873,6 +875,7 @@ impl Workspace {
     }
 
     /// Close the focused pane. Returns true if the workspace should close.
+    #[cfg(test)]
     pub fn close_focused(&mut self) -> bool {
         let pane_count = self
             .active_tab()
@@ -1156,6 +1159,7 @@ impl Workspace {
         self.public_pane_numbers.remove(&pane_id);
     }
 
+    #[cfg(test)]
     fn close_active_tab_and_report(&mut self) -> bool {
         if self.tabs.len() <= 1 {
             return true;

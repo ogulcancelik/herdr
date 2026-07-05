@@ -71,6 +71,19 @@ class VendorPortablePtyTests(unittest.TestCase):
         ]
         self.assertEqual(missing, [])
 
+    def test_listed_local_vendor_patches_exist(self) -> None:
+        project_root = Path(__file__).resolve().parent.parent
+        index = project_root / "vendor" / "portable-pty.patches.md"
+        text = index.read_text()
+        listed = [
+            line.split("`", 2)[1]
+            for line in text.splitlines()
+            if line.startswith("patch: `vendor/patches/portable-pty/")
+        ]
+
+        missing = [path for path in listed if not (project_root / path).exists()]
+        self.assertEqual(missing, [])
+
     def test_local_vendor_patches_are_applied_to_vendored_tree(self) -> None:
         project_root = Path(__file__).resolve().parent.parent
         patch_dir = project_root / "vendor" / "patches" / "portable-pty"

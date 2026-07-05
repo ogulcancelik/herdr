@@ -768,6 +768,33 @@ pub enum Mode {
     Navigator,
 }
 
+impl Mode {
+    /// Whether keys in this mode are commands/navigation (an ASCII input source is wanted) rather
+    /// than free text. This is an explicit **allowlist** of the prefix command/navigation realm:
+    /// any mode NOT listed defaults to leaving the user's IME alone (the safe default), so adding a
+    /// new text-entry or overlay mode can never silently force ASCII. Used by
+    /// `sync_prefix_input_source` (gated by `switch_ascii_input_source_in_prefix`) so multi-level
+    /// prefix commands keep ASCII until they return to the terminal.
+    ///
+    /// Known limitation: `Navigator`'s search box is also held on ASCII, since this `Mode`-level
+    /// predicate can't see `search_focused` (non-ASCII filtering there would need a runtime check).
+    pub(crate) fn wants_ascii_input(self) -> bool {
+        matches!(
+            self,
+            Mode::Prefix
+                | Mode::Navigate
+                | Mode::Navigator
+                | Mode::Copy
+                | Mode::Resize
+                | Mode::ConfirmClose
+                | Mode::ConfirmRemoveWorktree
+                | Mode::ContextMenu
+                | Mode::GlobalMenu
+                | Mode::KeybindHelp
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NavigatorTarget {
     Workspace {

@@ -4,6 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 
 use crate::app::PaneClickState;
 use crate::input::TerminalKey;
+#[cfg(test)]
 use ratatui::layout::Direction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -520,6 +521,7 @@ pub(crate) fn modal_paste_target_active(state: &AppState) -> bool {
 
 // Note: split_pane needs runtime (event_tx for PTY spawn), so it lives on App
 impl AppState {
+    #[cfg(test)]
     pub(crate) fn split_pane(
         &mut self,
         terminal_runtimes: &mut crate::terminal::TerminalRuntimeRegistry,

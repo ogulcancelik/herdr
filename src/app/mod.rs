@@ -137,6 +137,10 @@ pub struct App {
     pub(crate) full_redraw_pending: bool,
     pub(crate) overlay_panes: HashMap<crate::layout::PaneId, OverlayPaneState>,
     pub(crate) local_terminal_notifications: bool,
+    /// Whether this process applies `AppEvent::PrefixInputSource` to the host input source.
+    /// The headless server sets this to false: the switch belongs to the foreground client,
+    /// even when an App-internal drain consumes the event before the forwarding drain.
+    pub(crate) local_input_source_switch: bool,
     pub(crate) config_reloaded_from_disk: bool,
     prefix_input_source: Box<dyn crate::platform::PrefixInputSource>,
 }
@@ -731,6 +735,7 @@ impl App {
             full_redraw_pending: false,
             overlay_panes: HashMap::new(),
             local_terminal_notifications: true,
+            local_input_source_switch: true,
             config_reloaded_from_disk: false,
             prefix_input_source: Box::new(crate::platform::RealPrefixInputSource::default()),
         }
@@ -821,15 +826,23 @@ impl App {
     }
 
     pub(crate) fn sync_prefix_input_source(&mut self, previous_mode: Mode) {
-        match (
-            previous_mode == Mode::Prefix,
-            self.state.mode == Mode::Prefix,
+        // Emit the input-source intent on entering/leaving the ASCII realm, like `ClipboardWrite`;
+        // the foreground (client, or this app in monolithic mode) applies the switch. Keyed on the
+        // realm so multi-level prefix commands stay ASCII. The switch is flag-gated but the restore
+        // always fires on exit, so a mid-interaction flag toggle can't strand the host on ASCII.
+        let active = match (
+            previous_mode.wants_ascii_input(),
+            self.state.mode.wants_ascii_input(),
         ) {
-            (false, true) if self.state.switch_ascii_input_source_in_prefix => {
-                self.prefix_input_source.switch_to_ascii();
-            }
-            (true, false) => self.prefix_input_source.restore(),
-            _ => {}
+            (false, true) if self.state.switch_ascii_input_source_in_prefix => true,
+            (true, false) => false,
+            _ => return,
+        };
+        if let Err(err) = self
+            .event_tx
+            .try_send(crate::events::AppEvent::PrefixInputSource { active })
+        {
+            tracing::warn!(active, %err, "failed to queue prefix input-source change");
         }
     }
 
@@ -889,16 +902,14 @@ impl App {
 
             if self.state.request_new_workspace {
                 self.state.request_new_workspace = false;
-                self.dispatch_runtime_mutation(
+                self.runtime_workspace_create(
                     "tui.workspace.create",
-                    crate::api::schema::Method::WorkspaceCreate(
-                        crate::api::schema::WorkspaceCreateParams {
-                            cwd: None,
-                            focus: true,
-                            label: None,
-                            env: Default::default(),
-                        },
-                    ),
+                    crate::api::schema::WorkspaceCreateParams {
+                        cwd: None,
+                        focus: true,
+                        label: None,
+                        env: Default::default(),
+                    },
                 );
                 needs_render = true;
             }
@@ -906,15 +917,15 @@ impl App {
             if self.state.request_new_tab {
                 self.state.request_new_tab = false;
                 let label = self.state.requested_new_tab_name.take();
-                self.dispatch_runtime_mutation(
+                self.runtime_tab_create(
                     "tui.tab.create",
-                    crate::api::schema::Method::TabCreate(crate::api::schema::TabCreateParams {
+                    crate::api::schema::TabCreateParams {
                         workspace_id: None,
                         cwd: None,
                         focus: true,
                         label,
                         env: Default::default(),
-                    }),
+                    },
                 );
                 needs_render = true;
             }
@@ -930,16 +941,14 @@ impl App {
             }
 
             if let Some(cwd) = self.state.request_new_workspace_cwd.take() {
-                self.dispatch_runtime_mutation(
+                self.runtime_workspace_create(
                     "tui.workspace.create_cwd",
-                    crate::api::schema::Method::WorkspaceCreate(
-                        crate::api::schema::WorkspaceCreateParams {
-                            cwd: Some(cwd.display().to_string()),
-                            focus: true,
-                            label: None,
-                            env: Default::default(),
-                        },
-                    ),
+                    crate::api::schema::WorkspaceCreateParams {
+                        cwd: Some(cwd.display().to_string()),
+                        focus: true,
+                        label: None,
+                        env: Default::default(),
+                    },
                 );
                 needs_render = true;
             }
@@ -1779,83 +1788,171 @@ mod tests {
         }
     }
 
+    /// Drain the app event channel, returning the `active` flags of any emitted
+    /// `PrefixInputSource` events (the host-local input-source intents).
+    fn drained_prefix_active(app: &mut App) -> Vec<bool> {
+        let mut out = Vec::new();
+        while let Ok(ev) = app.event_rx.try_recv() {
+            if let crate::events::AppEvent::PrefixInputSource { active } = ev {
+                out.push(active);
+            }
+        }
+        out
+    }
+
     #[test]
-    fn sync_prefix_input_source_switches_then_restores_when_enabled() {
+    fn sync_prefix_input_source_emits_switch_then_restore_when_enabled() {
         let mut app = test_app();
         app.state.switch_ascii_input_source_in_prefix = true;
+
+        // Terminal -> Prefix emits the ASCII-switch intent.
+        app.state.mode = Mode::Prefix;
+        app.sync_prefix_input_source(Mode::Terminal);
+        assert_eq!(drained_prefix_active(&mut app), vec![true]);
+
+        // Prefix -> Terminal emits the restore intent.
+        app.state.mode = Mode::Terminal;
+        app.sync_prefix_input_source(Mode::Prefix);
+        assert_eq!(drained_prefix_active(&mut app), vec![false]);
+    }
+
+    #[test]
+    fn sync_prefix_input_source_does_not_emit_switch_when_flag_disabled() {
+        let mut app = test_app();
+        app.state.switch_ascii_input_source_in_prefix = false;
+
+        // Entering the realm with the flag off emits nothing.
+        app.state.mode = Mode::Prefix;
+        app.sync_prefix_input_source(Mode::Terminal);
+        assert!(drained_prefix_active(&mut app).is_empty());
+
+        // Leaving the realm still emits the restore (harmless if nothing was switched), so a
+        // mid-interaction flag toggle can't strand the host on ASCII.
+        app.state.mode = Mode::Terminal;
+        app.sync_prefix_input_source(Mode::Prefix);
+        assert_eq!(drained_prefix_active(&mut app), vec![false]);
+    }
+
+    #[test]
+    fn mode_wants_ascii_input_classification() {
+        // Allowlist: the prefix command/navigation realm wants ASCII.
+        for mode in [
+            Mode::Prefix,
+            Mode::Navigate,
+            Mode::Navigator,
+            Mode::Copy,
+            Mode::Resize,
+            Mode::ConfirmClose,
+            Mode::ConfirmRemoveWorktree,
+            Mode::ContextMenu,
+            Mode::GlobalMenu,
+            Mode::KeybindHelp,
+        ] {
+            assert!(mode.wants_ascii_input(), "{mode:?} should want ASCII");
+        }
+        // Everything else (terminal, text entry, startup overlays) keeps the user's IME.
+        for mode in [
+            Mode::Terminal,
+            Mode::RenameWorkspace,
+            Mode::RenameTab,
+            Mode::RenamePane,
+            Mode::NewLinkedWorktree,
+            Mode::OpenExistingWorktree,
+            Mode::Settings,
+            Mode::Onboarding,
+            Mode::ReleaseNotes,
+            Mode::ProductAnnouncement,
+        ] {
+            assert!(!mode.wants_ascii_input(), "{mode:?} should keep the IME");
+        }
+    }
+
+    #[test]
+    fn sync_prefix_input_source_keeps_realm_across_multi_level_prefix_commands() {
+        let mut app = test_app();
+        app.state.switch_ascii_input_source_in_prefix = true;
+
+        // Terminal -> Prefix switches once.
+        app.state.mode = Mode::Prefix;
+        app.sync_prefix_input_source(Mode::Terminal);
+        assert_eq!(drained_prefix_active(&mut app), vec![true]);
+
+        // Prefix -> sub-mode and sub-mode -> sub-mode stay in the realm: no emit.
+        app.state.mode = Mode::Navigator;
+        app.sync_prefix_input_source(Mode::Prefix);
+        app.state.mode = Mode::Resize;
+        app.sync_prefix_input_source(Mode::Navigator);
+        assert!(
+            drained_prefix_active(&mut app).is_empty(),
+            "must not switch or restore while still in the realm"
+        );
+
+        // Leaving the realm back to the terminal restores.
+        app.state.mode = Mode::Terminal;
+        app.sync_prefix_input_source(Mode::Resize);
+        assert_eq!(drained_prefix_active(&mut app), vec![false]);
+    }
+
+    #[test]
+    fn sync_prefix_input_source_restores_when_entering_rename_text_mode() {
+        let mut app = test_app();
+        app.state.switch_ascii_input_source_in_prefix = true;
+
+        app.state.mode = Mode::Prefix;
+        app.sync_prefix_input_source(Mode::Terminal);
+        assert_eq!(drained_prefix_active(&mut app), vec![true]);
+
+        // Prefix -> RenameTab leaves the realm (text entry wants the IME): restore.
+        app.state.mode = Mode::RenameTab;
+        app.sync_prefix_input_source(Mode::Prefix);
+        assert_eq!(drained_prefix_active(&mut app), vec![false]);
+    }
+
+    #[test]
+    fn handle_internal_event_prefix_input_source_applies_switch_and_restore() {
+        // The monolithic (in-process) path applies the host switch when it consumes the event.
+        let mut app = test_app();
         let fake = FakePrefixInputSource::switching();
         let switch_calls = fake.switch_calls.clone();
         let restore_calls = fake.restore_calls.clone();
         app.set_prefix_input_source(Box::new(fake));
 
-        // Terminal -> Prefix should switch to ASCII.
-        app.state.mode = Mode::Prefix;
-        app.sync_prefix_input_source(Mode::Terminal);
+        app.handle_internal_event(crate::events::AppEvent::PrefixInputSource { active: true });
         assert_eq!(switch_calls.get(), 1);
         assert_eq!(restore_calls.get(), 0);
 
-        // Prefix -> Terminal should restore the saved source.
-        app.state.mode = Mode::Terminal;
-        app.sync_prefix_input_source(Mode::Prefix);
-        assert_eq!(switch_calls.get(), 1);
+        app.handle_internal_event(crate::events::AppEvent::PrefixInputSource { active: false });
         assert_eq!(restore_calls.get(), 1);
     }
 
     #[test]
-    fn sync_prefix_input_source_is_noop_when_flag_disabled() {
+    fn handle_internal_event_prefix_input_source_restore_is_safe_when_switch_was_noop() {
+        // Already-ASCII / failed-switch case: the restore on leave must stay harmless.
         let mut app = test_app();
-        app.state.switch_ascii_input_source_in_prefix = false;
-        let fake = FakePrefixInputSource::switching();
-        let switch_calls = fake.switch_calls.clone();
-        let restore_calls = fake.restore_calls.clone();
-        app.set_prefix_input_source(Box::new(fake));
-
-        app.state.mode = Mode::Prefix;
-        app.sync_prefix_input_source(Mode::Terminal);
-        app.state.mode = Mode::Terminal;
-        app.sync_prefix_input_source(Mode::Prefix);
-
-        assert_eq!(switch_calls.get(), 0);
-        assert_eq!(restore_calls.get(), 0);
-    }
-
-    #[test]
-    fn sync_prefix_input_source_restore_is_safe_when_switch_was_noop() {
-        // Simulates the already-ASCII / failed-switch case: switch reports no
-        // change, and the later restore on leave must stay harmless.
-        let mut app = test_app();
-        app.state.switch_ascii_input_source_in_prefix = true;
         let fake = FakePrefixInputSource::no_op();
         let switch_calls = fake.switch_calls.clone();
         let restore_calls = fake.restore_calls.clone();
         app.set_prefix_input_source(Box::new(fake));
 
-        app.state.mode = Mode::Prefix;
-        app.sync_prefix_input_source(Mode::Terminal);
-        app.state.mode = Mode::Terminal;
-        app.sync_prefix_input_source(Mode::Prefix);
-
+        app.handle_internal_event(crate::events::AppEvent::PrefixInputSource { active: true });
+        app.handle_internal_event(crate::events::AppEvent::PrefixInputSource { active: false });
         assert_eq!(switch_calls.get(), 1);
         assert_eq!(restore_calls.get(), 0);
     }
 
     #[tokio::test]
-    async fn raw_input_dispatch_restores_input_source_when_leaving_prefix() {
-        // Leaving prefix mode happens inside the raw-input dispatch, not in
-        // `handle_key` itself — the sync must sit at the dispatch layer so any
-        // event that exits prefix (here Esc) still restores the host source.
+    async fn raw_input_dispatch_emits_input_source_intent_when_leaving_prefix() {
+        // Leaving prefix mode happens inside the raw-input dispatch, not in `handle_key` itself —
+        // the sync must sit at the dispatch layer so any event that exits prefix (here Esc) still
+        // emits the restore intent.
         let mut app = test_app();
         app.state.switch_ascii_input_source_in_prefix = true;
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
-        let fake = FakePrefixInputSource::switching();
-        let switch_calls = fake.switch_calls.clone();
-        let restore_calls = fake.restore_calls.clone();
-        app.set_prefix_input_source(Box::new(fake));
 
-        // ctrl+b (the default prefix key) enters prefix mode → switch edge.
+        // ctrl+b (the default prefix key) enters prefix mode → switch intent.
         app.handle_raw_input_event(raw_key(
             KeyCode::Char('b'),
             KeyModifiers::CONTROL,
@@ -1863,11 +1960,9 @@ mod tests {
         ))
         .await;
         assert_eq!(app.state.mode, Mode::Prefix);
-        assert_eq!(switch_calls.get(), 1);
-        assert_eq!(restore_calls.get(), 0);
+        assert_eq!(drained_prefix_active(&mut app), vec![true]);
 
-        // Esc leaves prefix mode → restore edge, even though the exit is decided
-        // below `handle_key`.
+        // Esc leaves prefix mode → restore intent.
         app.handle_raw_input_event(raw_key(
             KeyCode::Esc,
             KeyModifiers::empty(),
@@ -1875,7 +1970,7 @@ mod tests {
         ))
         .await;
         assert_eq!(app.state.mode, Mode::Terminal);
-        assert_eq!(restore_calls.get(), 1);
+        assert_eq!(drained_prefix_active(&mut app), vec![false]);
     }
 
     fn config_env_lock() -> &'static Mutex<()> {

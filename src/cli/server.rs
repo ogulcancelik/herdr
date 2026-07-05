@@ -30,7 +30,13 @@ fn server_stop(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     }
 
-    super::send_ok_request(Method::ServerStop(EmptyParams::default()))
+    match crate::session::stop_active_server() {
+        Ok(()) => Ok(0),
+        Err(err) => {
+            eprintln!("{err}");
+            Ok(1)
+        }
+    }
 }
 
 fn server_reload_config(args: &[String]) -> std::io::Result<i32> {

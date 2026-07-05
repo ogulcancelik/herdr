@@ -67,6 +67,22 @@ impl App {
             return;
         }
 
+        if let AppEvent::PrefixInputSource { active } = ev {
+            // Monolithic path applies the switch here. Server mode forwards it to the foreground
+            // client instead (see HeadlessServer::handle_internal_event_with_forwarding); should an
+            // App-internal drain consume the event before the forwarding drain, the flag keeps the
+            // switch out of the headless server process.
+            if !self.local_input_source_switch {
+                return;
+            }
+            if active {
+                self.prefix_input_source.switch_to_ascii();
+            } else {
+                self.prefix_input_source.restore();
+            }
+            return;
+        }
+
         if let AppEvent::GitStatusRefreshed {
             results,
             cache_updates,
@@ -188,6 +204,13 @@ impl App {
                 }
             }
         }
+        let pane_exit_layout_target = if let AppEvent::PaneDied { pane_id } = &ev {
+            self.find_pane(*pane_id).and_then(|(ws_idx, _)| {
+                self.layout_update_target_after_pane_removal(ws_idx, *pane_id)
+            })
+        } else {
+            None
+        };
 
         let released_agent = if let AppEvent::HookAgentReleased {
             pane_id,
@@ -258,6 +281,9 @@ impl App {
                 was_overlay_focused_in_tab,
                 tab_zoomed_before_exit,
             );
+        }
+        if let Some((ws_idx, tab_idx)) = pane_exit_layout_target {
+            self.emit_layout_updated_event(ws_idx, tab_idx);
         }
 
         if self.local_terminal_notifications
@@ -1724,6 +1750,90 @@ mod tests {
         assert_eq!(overlay_tab.layout.focused(), previous_focus);
         assert!(overlay_tab.zoomed);
         assert!(app.overlay_panes.is_empty());
+    }
+
+    #[test]
+    fn pane_exit_emits_layout_updated_when_tab_survives() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
+        let mut workspace = crate::workspace::Workspace::test_new("pane-exit-layout");
+        let dead_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+
+        app.handle_internal_event(AppEvent::PaneDied { pane_id: dead_pane });
+
+        let events = event_hub.events_after(0);
+        let pane_exited = events
+            .iter()
+            .position(|(_, event)| event.event == crate::api::schema::EventKind::PaneExited)
+            .expect("pane.exited should be emitted");
+        let layout_updated = events
+            .iter()
+            .position(|(_, event)| event.event == crate::api::schema::EventKind::LayoutUpdated)
+            .expect("layout.updated should be emitted");
+        assert!(pane_exited < layout_updated);
+        assert!(matches!(
+            &events[layout_updated].1.data,
+            crate::api::schema::EventData::LayoutUpdated { layout }
+                if layout.tab_id == tab_id && layout.panes.len() == 1
+        ));
+    }
+
+    #[test]
+    fn overlay_exit_layout_updated_uses_restored_zoom_state() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
+        let mut workspace = crate::workspace::Workspace::test_new("overlay-layout");
+        let previous_focus = workspace.tabs[0].root_pane;
+        let overlay_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(previous_focus);
+        workspace.tabs[0].zoomed = true;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.mode = Mode::Terminal;
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+        app.overlay_panes.insert(
+            overlay_pane,
+            OverlayPaneState {
+                ws_idx: 0,
+                tab_idx: 0,
+                previous_focus,
+                previous_zoomed: false,
+                temp_files: Vec::new(),
+            },
+        );
+
+        app.handle_internal_event(AppEvent::PaneDied {
+            pane_id: overlay_pane,
+        });
+
+        let events = event_hub.events_after(0);
+        let layout_updated = events
+            .iter()
+            .rposition(|(_, event)| event.event == crate::api::schema::EventKind::LayoutUpdated)
+            .expect("layout.updated should be emitted");
+        assert!(matches!(
+            &events[layout_updated].1.data,
+            crate::api::schema::EventData::LayoutUpdated { layout }
+                if layout.tab_id == tab_id && layout.zoomed
+        ));
     }
 
     #[test]

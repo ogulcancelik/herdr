@@ -1426,6 +1426,7 @@ impl AppState {
             && rect_contains(self.view.toast_hit_area, col, row)
     }
 
+    #[cfg(test)]
     pub(crate) fn focus_toast_target(&mut self) {
         let Some(target) = self.toast.as_ref().and_then(|toast| toast.target.clone()) else {
             return;
@@ -1847,6 +1848,16 @@ mod tests {
         detect::{Agent, AgentState},
         workspace::Workspace,
     };
+
+    fn mark_worktree_space_member(workspace: &mut Workspace, ws_idx: usize, key: &str) {
+        workspace.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: key.into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: format!("/repo/worktree-{ws_idx}").into(),
+            is_linked_worktree: ws_idx != 0,
+        });
+    }
 
     #[tokio::test]
     async fn terminal_wheel_uses_configured_mouse_scroll_lines() {
@@ -3237,6 +3248,109 @@ mod tests {
             .events_after(0)
             .iter()
             .any(|(_, event)| { matches!(event.event, crate::api::schema::EventKind::TabClosed) }));
+    }
+
+    #[test]
+    fn clicking_pane_context_menu_close_leaves_context_menu_mode() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("one");
+        let first_pane = ws.tabs[0].root_pane;
+        let second_pane = ws.test_split(Direction::Horizontal);
+        ws.tabs[0].layout.focus_pane(second_pane);
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let first_info = app
+            .state
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == first_pane)
+            .expect("first pane info")
+            .clone();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            first_info.inner_rect.x + 1,
+            first_info.inner_rect.y + 1,
+        ));
+
+        let menu_state = app.state.context_menu.as_ref().expect("pane context menu");
+        let close_idx = menu_state
+            .items()
+            .iter()
+            .position(|item| *item == "Close pane")
+            .expect("close pane menu item");
+        let menu = app
+            .state
+            .context_menu_rect()
+            .expect("pane context menu rect");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu.x + 2,
+            menu.y + 1 + close_idx as u16,
+        ));
+
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
+        assert!(app.state.context_menu.is_none());
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app.event_hub.events_after(0).iter().any(|(_, event)| {
+            matches!(event.event, crate::api::schema::EventKind::PaneClosed)
+        }));
+    }
+
+    #[test]
+    fn clicking_pane_context_menu_close_last_parent_group_pane_keeps_confirmation_mode() {
+        let mut app = app_for_mouse_test();
+        let mut parent = Workspace::test_new("main");
+        let pane_id = parent.tabs[0].root_pane;
+        mark_worktree_space_member(&mut parent, 0, "repo-key");
+        let mut child = Workspace::test_new("issue");
+        mark_worktree_space_member(&mut child, 1, "repo-key");
+        app.state.workspaces = vec![parent, child];
+        app.state.active = Some(0);
+        app.state.selected = 1;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let pane_info = app
+            .state
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == pane_id)
+            .expect("pane info")
+            .clone();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            pane_info.inner_rect.x + 1,
+            pane_info.inner_rect.y + 1,
+        ));
+
+        let menu_state = app.state.context_menu.as_ref().expect("pane context menu");
+        let close_idx = menu_state
+            .items()
+            .iter()
+            .position(|item| *item == "Close pane")
+            .expect("close pane menu item");
+        let menu = app
+            .state
+            .context_menu_rect()
+            .expect("pane context menu rect");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu.x + 2,
+            menu.y + 1 + close_idx as u16,
+        ));
+
+        assert_eq!(app.state.selected, 0);
+        assert_eq!(app.state.mode, Mode::ConfirmClose);
+        assert_eq!(app.state.workspaces.len(), 2);
+        assert!(app.state.context_menu.is_none());
     }
 
     #[test]

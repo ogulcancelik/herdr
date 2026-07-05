@@ -121,6 +121,9 @@ Call `session.snapshot` again after reconnecting or when the local cache may be
 stale. Attached worktree provenance is included on workspace records. Full repo
 worktree discovery remains `worktree.list`.
 
+From the CLI, `herdr api snapshot` prints the live `session.snapshot` response
+as JSON for clients and agents that want a simple bootstrap command.
+
 Pane control methods use public pane ids such as `w1:p1`. Methods whose
 schema makes `pane_id` optional use the server's active focused pane when it is
 omitted. `pane.move` always requires the source `pane_id`.
@@ -628,6 +631,10 @@ that workspace.
 Pane event subscriptions include `pane.created`, `pane.closed`, `pane.focused`,
 `pane.moved`, `pane.exited`, `pane.agent_detected`,
 `pane.output_matched`, and `pane.agent_status_changed`.
+Layout event subscriptions include `layout.updated`. The event carries the
+updated `PaneLayoutSnapshot` for one tab. Clients that bootstrap with
+`session.snapshot` should replace the cached layout with the same
+`workspace_id` and `tab_id`.
 
 Worktree event subscriptions include `worktree.created`, `worktree.opened`, and `worktree.removed`. Worktree events describe Git checkout lifecycle. `worktree.created` includes the opened `workspace` and created `worktree`. `worktree.opened` includes the target `workspace`, opened `worktree`, and `already_open`. `worktree.removed` includes the `workspace_id`, removed `worktree`, and `forced`.
 
