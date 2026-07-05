@@ -62,7 +62,7 @@ jobs:
         if: matrix.kind == 'unix'
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          targets: ${{ runner.os == 'Linux' && 'aarch64-unknown-linux-musl' || '' }}
+          targets: ${{ runner.os == 'Linux' && 'aarch64-unknown-linux-gnu' || '' }}
 
       - name: Install Rust
         if: matrix.kind == 'windows'
@@ -118,34 +118,22 @@ jobs:
         if: matrix.kind == 'unix'
         run: just ci '${{ matrix.nextest_filter }}'
 
-      - name: Build release binary x86_64 (PR only)
-        if: matrix.kind == 'unix' && github.event_name == 'pull_request'
-        run: cargo build --release --locked
-
-      - name: Upload x86_64 artifact (PR only)
-        if: matrix.kind == 'unix' && github.event_name == 'pull_request'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: herdr-${{ runner.os }}-${{ runner.arch }}
-          path: target/release/herdr
-          retention-days: 3
-
       - name: Install Linux aarch64 cross-compile tools (PR only)
         if: runner.os == 'Linux' && github.event_name == 'pull_request'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Build release binary aarch64 (PR only)
         if: runner.os == 'Linux' && github.event_name == 'pull_request'
         env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build --release --locked --target aarch64-unknown-linux-musl
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --locked --target aarch64-unknown-linux-gnu
 
       - name: Upload aarch64 artifact (PR only)
         if: runner.os == 'Linux' && github.event_name == 'pull_request'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: herdr-linux-aarch64
-          path: target/aarch64-unknown-linux-musl/release/herdr
+          path: target/aarch64-unknown-linux-gnu/release/herdr
           retention-days: 3
 
       - name: Run Windows checks
@@ -165,14 +153,6 @@ jobs:
           Invoke-Checked cargo @("test", "--locked", "--target", "x86_64-pc-windows-msvc", "--bin", "herdr", "windows_")
           Invoke-Checked cargo @("test", "--locked", "--target", "x86_64-pc-windows-msvc", "--bin", "herdr", "server::client_transport::tests")
           Invoke-Checked cargo @("build", "--locked", "--target", "x86_64-pc-windows-msvc")
-
-      - name: Upload Windows binary artifact (PR only)
-        if: matrix.kind == 'windows' && github.event_name == 'pull_request'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: herdr-windows-x86_64
-          path: target/x86_64-pc-windows-msvc/debug/herdr.exe
-          retention-days: 3
 
       - name: Smoke ConPTY pane
         if: matrix.kind == 'windows'
