@@ -557,6 +557,52 @@ fn run_devin_hook(
     )
 }
 
+fn run_droid_hook(action: &str, hook_input: &str) -> Option<serde_json::Value> {
+    run_shell_hook(
+        "src/integration/assets/droid/herdr-agent-state.sh",
+        &[action],
+        hook_input,
+    )
+}
+
+fn assert_droid_hook_exits_with_open_stdin() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("herdr.sock");
+    let hook_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/integration/assets/droid/herdr-agent-state.sh");
+    let mut child = Command::new("bash")
+        .arg(hook_path)
+        .arg("session")
+        .env("HERDR_ENV", "1")
+        .env("HERDR_SOCKET_PATH", &socket_path)
+        .env("HERDR_PANE_ID", "p_test")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let stdin = child.stdin.take().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "droid hook exited with {status}");
+            drop(stdin);
+            cleanup_test_base(&base);
+            return;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            drop(stdin);
+            cleanup_test_base(&base);
+            panic!("droid hook did not exit while stdin stayed open");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn run_shell_hook(asset_path: &str, args: &[&str], hook_input: &str) -> Option<serde_json::Value> {
     run_shell_hook_with_env(asset_path, args, hook_input, &[])
 }
@@ -750,6 +796,22 @@ fn devin_hook_reports_session_id_from_stdin_without_state() {
     assert_eq!(request["params"]["agent"], "devin");
     assert_eq!(request["params"]["agent_session_id"], "devin-session");
     assert!(request["params"].get("state").is_none());
+}
+
+#[test]
+fn droid_hook_reports_session_id_from_stdin() {
+    let request = run_droid_hook("session", r#"{"session_id":"droid-session"}"#)
+        .expect("droid session start should report session identity");
+
+    assert_eq!(request["method"], "pane.report_agent_session");
+    assert_eq!(request["params"]["agent"], "droid");
+    assert_eq!(request["params"]["agent_session_id"], "droid-session");
+    assert!(request["params"].get("state").is_none());
+}
+
+#[test]
+fn droid_hook_does_not_wait_forever_for_open_stdin() {
+    assert_droid_hook_exits_with_open_stdin();
 }
 
 #[test]

@@ -125,7 +125,7 @@ const DROID_HOOK_ASSET: &str = if cfg!(windows) {
 } else {
     include_str!("assets/droid/herdr-agent-state.sh")
 };
-const DROID_INTEGRATION_VERSION: u32 = 2;
+const DROID_INTEGRATION_VERSION: u32 = 3;
 const DROID_HOOK_EVENTS: [(&str, &str); 1] = [("SessionStart", "session")];
 const DROID_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 9] = [
     ("SessionStart", "idle"),
