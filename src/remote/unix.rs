@@ -383,8 +383,9 @@ impl RemoteTransport for IrohTransport {
             relay_urls: self.relay_urls.clone(),
         };
 
-        let rt = tokio::runtime::Builder::new_current_thread()
+        let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
+            .worker_threads(1)
             .build()
             .map_err(|e| io::Error::other(format!("failed to create tokio runtime: {e}")))?;
 
