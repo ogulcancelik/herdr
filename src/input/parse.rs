@@ -109,7 +109,7 @@ fn parse_legacy_ctrl_char(ch: char) -> Option<TerminalKey> {
         28 => Some(TerminalKey::new(KeyCode::Char('\\'), KeyModifiers::CONTROL)),
         29 => Some(TerminalKey::new(KeyCode::Char(']'), KeyModifiers::CONTROL)),
         30 => Some(TerminalKey::new(KeyCode::Char('^'), KeyModifiers::CONTROL)),
-        31 => Some(TerminalKey::new(KeyCode::Char('-'), KeyModifiers::CONTROL)),
+        31 => Some(TerminalKey::new(KeyCode::Char('/'), KeyModifiers::CONTROL)),
         _ => None,
     }
 }
@@ -684,6 +684,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_ctrl_slash_sequences() {
+        let key = parse_terminal_key_sequence("\x1f").unwrap();
+        assert_eq!(key.code, KeyCode::Char('/'));
+        assert_eq!(key.modifiers, KeyModifiers::CONTROL);
+
+        let key = parse_terminal_key_sequence("\x1b[47;5u").unwrap();
+        assert_eq!(key.code, KeyCode::Char('/'));
+        assert_eq!(key.modifiers, KeyModifiers::CONTROL);
+
+        let key = parse_terminal_key_sequence("\x1b[27;5;47~").unwrap();
+        assert_eq!(key.code, KeyCode::Char('/'));
+        assert_eq!(key.modifiers, KeyModifiers::CONTROL);
+    }
+
+    #[test]
     fn parse_legacy_ctrl_b_sequence() {
         let key = parse_terminal_key_sequence("\x02").unwrap();
         assert_eq!(key.code, KeyCode::Char('b'));
@@ -732,7 +747,7 @@ mod tests {
             (b'\x1c', '\\'),
             (b'\x1d', ']'),
             (b'\x1e', '^'),
-            (b'\x1f', '-'),
+            (b'\x1f', '/'),
         ] {
             let key = parse_terminal_key_sequence(std::str::from_utf8(&[byte]).unwrap()).unwrap();
             assert_terminal_key_eq(
