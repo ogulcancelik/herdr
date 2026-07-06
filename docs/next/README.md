@@ -200,6 +200,7 @@ automatic detection works out of the box. process name matching plus terminal ou
 | [github copilot cli](https://github.com/features/copilot) | ✓ | ✓ | ✓ |
 | [qodercli](https://qoder.com/cli) | ✓ | ✓ | ✓ |
 | [kiro cli](https://kiro.dev/docs/cli/) | ✓ | ✓ | — |
+| [codebuddy](https://codebuddy.ai) | ✓ | ✓ | ✓ |
 
 detected but not fully tested: gemini cli, cline.
 
@@ -223,6 +224,7 @@ herdr integration install kilo
 herdr integration install hermes
 herdr integration install qodercli
 herdr integration install cursor
+herdr integration install codebuddy
 ```
 
 see the [integrations docs](https://herdr.dev/docs/integrations/) for setup details.

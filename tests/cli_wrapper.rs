@@ -682,6 +682,96 @@ fn codex_hook_reports_session_id_from_stdin() {
     assert!(request["params"].get("state").is_none());
 }
 
+fn run_codebuddy_hook(action: &str, hook_input: &str) -> Option<serde_json::Value> {
+    run_shell_hook(
+        "src/integration/assets/codebuddy/herdr-agent-state.sh",
+        &[action],
+        hook_input,
+    )
+}
+
+#[test]
+fn codebuddy_hook_reports_session_id_from_stdin() {
+    let request = run_codebuddy_hook(
+        "session",
+        r#"{"hook_event_name":"SessionStart","session_id":"codebuddy-session"}"#,
+    )
+    .expect("codebuddy hook should report session identity");
+
+    assert_eq!(request["method"], "pane.report_agent_session");
+    assert_eq!(request["params"]["agent_session_id"], "codebuddy-session");
+    assert_eq!(request["params"]["agent"], "codebuddy");
+    assert!(request["params"].get("state").is_none());
+}
+
+#[test]
+fn codebuddy_hook_reports_working_state() {
+    let request = run_codebuddy_hook(
+        "working",
+        r#"{"hook_event_name":"UserPromptSubmit","session_id":"codebuddy-session","prompt":"hi"}"#,
+    )
+    .expect("codebuddy hook should report working state");
+
+    assert_eq!(request["method"], "pane.report_agent_session");
+    assert_eq!(request["params"]["state"], "working");
+    assert_eq!(request["params"]["agent"], "codebuddy");
+    assert_eq!(request["params"]["agent_session_id"], "codebuddy-session");
+}
+
+#[test]
+fn codebuddy_hook_reports_idle_state_on_stop() {
+    let request = run_codebuddy_hook(
+        "idle",
+        r#"{"hook_event_name":"Stop","session_id":"codebuddy-session","stop_hook_active":false}"#,
+    )
+    .expect("codebuddy hook should report idle state on Stop");
+
+    assert_eq!(request["method"], "pane.report_agent_session");
+    assert_eq!(request["params"]["state"], "idle");
+    assert_eq!(request["params"]["agent"], "codebuddy");
+}
+
+#[test]
+fn codebuddy_hook_reports_blocked_state_on_notification() {
+    let request = run_codebuddy_hook(
+        "blocked",
+        r#"{"hook_event_name":"Notification","session_id":"codebuddy-session"}"#,
+    )
+    .expect("codebuddy hook should report blocked state on Notification");
+
+    assert_eq!(request["method"], "pane.report_agent_session");
+    assert_eq!(request["params"]["state"], "blocked");
+    assert_eq!(request["params"]["agent"], "codebuddy");
+}
+
+#[test]
+fn codebuddy_hook_session_ignores_non_session_start_events() {
+    assert!(run_codebuddy_hook(
+        "session",
+        r#"{"hook_event_name":"UserPromptSubmit","session_id":"codebuddy-session"}"#
+    )
+    .is_none());
+    assert!(run_codebuddy_hook(
+        "session",
+        r#"{"hook_event_name":"Stop","session_id":"codebuddy-session"}"#
+    )
+    .is_none());
+}
+
+#[test]
+fn codebuddy_hook_ignores_unknown_actions() {
+    assert!(run_codebuddy_hook(
+        "release",
+        r#"{"hook_event_name":"SessionEnd","session_id":"codebuddy-session"}"#
+    )
+    .is_none());
+    assert!(run_codebuddy_hook(
+        "unknown",
+        r#"{"hook_event_name":"Foo","session_id":"codebuddy-session"}"#
+    )
+    .is_none());
+}
+
 #[test]
 fn copilot_hook_reports_session_id_from_stdin() {
     let request = run_copilot_hook(

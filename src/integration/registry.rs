@@ -21,6 +21,7 @@ pub(crate) fn integration_target_label(
         crate::api::schema::IntegrationTarget::Hermes => "hermes",
         crate::api::schema::IntegrationTarget::Qodercli => "qodercli",
         crate::api::schema::IntegrationTarget::Cursor => "cursor",
+        crate::api::schema::IntegrationTarget::Codebuddy => "codebuddy",
     }
 }
 
@@ -47,6 +48,7 @@ pub(crate) fn integration_target_command_names(
         crate::api::schema::IntegrationTarget::Hermes => &["hermes"],
         crate::api::schema::IntegrationTarget::Qodercli => qodercli_command_names(),
         crate::api::schema::IntegrationTarget::Cursor => cursor_command_names(),
+        crate::api::schema::IntegrationTarget::Codebuddy => &["codebuddy"],
     }
 }
 
@@ -65,6 +67,7 @@ pub(crate) fn integration_target_supported(target: crate::api::schema::Integrati
                 | crate::api::schema::IntegrationTarget::Droid
                 | crate::api::schema::IntegrationTarget::Kimi
                 | crate::api::schema::IntegrationTarget::Qodercli
+                | crate::api::schema::IntegrationTarget::Codebuddy
         )
     }
 
@@ -251,7 +254,7 @@ fn integration_specs() -> [(
     crate::api::schema::IntegrationTarget,
     io::Result<PathBuf>,
     u32,
-); 13] {
+); 14] {
     [
         (
             crate::api::schema::IntegrationTarget::Pi,
@@ -320,6 +323,11 @@ fn integration_specs() -> [(
             crate::api::schema::IntegrationTarget::Cursor,
             cursor_dir().map(|dir| dir.join(super::CURSOR_HOOK_INSTALL_NAME)),
             super::CURSOR_INTEGRATION_VERSION,
+        ),
+        (
+            crate::api::schema::IntegrationTarget::Codebuddy,
+            codebuddy_dir().map(|dir| dir.join("hooks").join(super::CODEBUDDY_HOOK_INSTALL_NAME)),
+            super::CODEBUDDY_INTEGRATION_VERSION,
         ),
     ]
 }

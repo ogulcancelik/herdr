@@ -179,6 +179,30 @@ const QODERCLI_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 12] = [
 const CURSOR_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const CURSOR_HOOK_ASSET: &str = include_str!("assets/cursor/herdr-agent-state.sh");
 const CURSOR_INTEGRATION_VERSION: u32 = 1;
+const CODEBUDDY_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
+    "herdr-agent-state.ps1"
+} else {
+    "herdr-agent-state.sh"
+};
+const CODEBUDDY_HOOK_ASSET: &str = if cfg!(windows) {
+    include_str!("assets/codebuddy/herdr-agent-state.ps1")
+} else {
+    include_str!("assets/codebuddy/herdr-agent-state.sh")
+};
+const CODEBUDDY_INTEGRATION_VERSION: u32 = 3;
+const CODEBUDDY_HOOK_EVENTS: [(&str, &str); 5] = [
+    ("SessionStart", "session"),
+    ("UserPromptSubmit", "working"),
+    ("PreToolUse", "working"),
+    ("Stop", "idle"),
+    ("Notification", "blocked"),
+];
+const CODEBUDDY_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 4] = [
+    ("SessionStart", "idle"),
+    ("UserPromptSubmit", "session"),
+    ("PreToolUse", "session"),
+    ("Stop", "session"),
+];
 const INTEGRATION_VERSION_MARKER: &str = "HERDR_INTEGRATION_VERSION=";
 
 pub(crate) const INSTALL_WARNING_PREFIX: &str = "warning:";

@@ -213,3 +213,17 @@ pub(crate) struct HermesUninstallResult {
     pub removed_plugin_dir: bool,
     pub updated_config: bool,
 }
+
+#[derive(Debug)]
+pub(crate) struct CodebuddyInstallPaths {
+    pub hook_path: PathBuf,
+    pub settings_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct CodebuddyUninstallResult {
+    pub hook_path: PathBuf,
+    pub settings_path: PathBuf,
+    pub removed_hook_file: bool,
+    pub updated_settings: bool,
+}

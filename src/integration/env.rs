@@ -16,6 +16,7 @@ pub(crate) const KIMI_CODE_HOME_ENV_VAR: &str = "KIMI_CODE_HOME";
 pub(crate) const COPILOT_HOME_ENV_VAR: &str = "COPILOT_HOME";
 pub(crate) const QODERCLI_CONFIG_DIR_ENV_VAR: &str = "QODER_CONFIG_DIR";
 pub(crate) const CURSOR_CONFIG_DIR_ENV_VAR: &str = "CURSOR_CONFIG_DIR";
+pub(crate) const CODEBUDDY_HOME_ENV_VAR: &str = "CODEBUDDY_HOME";
 
 pub(crate) fn apply_pane_base_env(cmd: &mut CommandBuilder) {
     cmd.env(crate::api::SOCKET_PATH_ENV_VAR, crate::api::socket_path());
@@ -122,6 +123,10 @@ pub(crate) fn qodercli_dir() -> io::Result<PathBuf> {
 
 pub(crate) fn cursor_dir() -> io::Result<PathBuf> {
     config_dir_from_env_or_home(CURSOR_CONFIG_DIR_ENV_VAR, &[".cursor"])
+}
+
+pub(crate) fn codebuddy_dir() -> io::Result<PathBuf> {
+    config_dir_from_env_or_home(CODEBUDDY_HOME_ENV_VAR, &[".codebuddy"])
 }
 
 pub(crate) fn home_dir() -> io::Result<PathBuf> {

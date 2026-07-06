@@ -13,6 +13,10 @@ id = "claude"
 path = "claude.toml"
 
 [[agents]]
+id = "codebuddy"
+path = "codebuddy.toml"
+
+[[agents]]
 id = "cline"
 path = "cline.toml"
 

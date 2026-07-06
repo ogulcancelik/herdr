@@ -1,0 +1,31 @@
+id = "codebuddy"
+version = "2026.07.06.5"
+min_engine_version = 1
+updated_at = "2026-07-06T00:00:00Z"
+
+[[rules]]
+id = "confirmation_blocked"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+visible_blocker = true
+all = [
+  { contains = ["Enter to select"] },
+  { any = [{ contains = ["↑/↓ to navigate"] }, { contains = ["Esc to cancel"] }] },
+]
+
+[[rules]]
+id = "prompt_idle"
+state = "idle"
+priority = 200
+region = "whole_recent"
+visible_idle = true
+line_regex = ['^\s*> .+↵ send$']
+
+[[rules]]
+id = "working_catchall"
+state = "working"
+priority = 50
+region = "whole_recent"
+visible_working = true
+regex = ['(?s).+']

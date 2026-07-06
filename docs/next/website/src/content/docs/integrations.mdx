@@ -1,11 +1,11 @@
 ---
 title: Integrations
-description: Install Herdr integrations for Pi, OMP, Claude Code, Codex, GitHub Copilot CLI, Devin CLI, Droid, Kimi Code CLI, OpenCode, Kilo Code CLI, Hermes Agent, Qoder CLI, and Cursor Agent CLI.
+description: Install Herdr integrations for Pi, OMP, Claude Code, Codex, GitHub Copilot CLI, Devin CLI, Droid, Kimi Code CLI, OpenCode, Kilo Code CLI, Hermes Agent, Qoder CLI, Cursor Agent CLI, and CodeBuddy.
 ---
 
 Herdr detects supported agents automatically. Official integrations can add native session identity for restore, lifecycle state reports, or both.
 
-Use integrations when you want native agent session restore from Claude Code/Codex/Copilot/Devin-style hooks, direct lifecycle reports from Pi/OMP/Kimi/OpenCode/Kilo/Hermes-style hooks or plugins, or both. See [Agents](/docs/agents/) for the full status authority model.
+Use integrations when you want native agent session restore from Claude Code/Codex/Copilot/Devin/CodeBuddy-style hooks, direct lifecycle reports from Pi/OMP/Kimi/OpenCode/Kilo/Hermes-style hooks or plugins, or both. See [Agents](/docs/agents/) for the full status authority model.
 
 ## Install integrations
 
@@ -25,6 +25,7 @@ herdr integration install kilo
 herdr integration install hermes
 herdr integration install qodercli
 herdr integration install cursor
+herdr integration install codebuddy
 ```
 
 ## Uninstall integrations
@@ -43,6 +44,7 @@ herdr integration uninstall kilo
 herdr integration uninstall hermes
 herdr integration uninstall qodercli
 herdr integration uninstall cursor
+herdr integration uninstall codebuddy
 ```
 
 ## How Herdr uses integrations
@@ -51,14 +53,14 @@ Herdr uses integrations in two different ways:
 
 | Integration type | Agents | Effect |
 | --- | --- | --- |
-| Lifecycle authority | Pi, OMP, Kimi Code CLI, OpenCode, Kilo Code CLI, Hermes Agent | When installed and actively reporting for the pane, hook or plugin events author `idle`, `working`, and `blocked`. Herdr does not also use screen manifest fallback for that same lifecycle authority. |
+| Lifecycle authority | Pi, OMP, Kimi Code CLI, OpenCode, Kilo Code CLI, Hermes Agent, CodeBuddy | When installed and actively reporting for the pane, hook or plugin events author `idle`, `working`, and `blocked`. Herdr does not also use screen manifest fallback for that same lifecycle authority. |
 | Session identity | Claude Code, Codex, GitHub Copilot CLI, Devin CLI, Droid, Qoder CLI, Cursor Agent CLI | The integration reports native session references for restore. State still comes from Herdr's screen manifest detection. |
 
 Custom socket integrations can also report state when they define state that is not visible in the native terminal UI.
 
-Some integrations report native agent session references. Herdr uses official session references to resume Claude Code, Codex, Devin CLI, Droid, Kimi Code CLI, Qoder CLI, Cursor Agent CLI, GitHub Copilot CLI, Pi, OMP, Hermes Agent, OpenCode, and Kilo Code CLI panes after a Herdr server restart unless `[session] resume_agents_on_restore = false` disables it.
+Some integrations report native agent session references. Herdr uses official session references to resume Claude Code, Codex, Devin CLI, Droid, Kimi Code CLI, Qoder CLI, Cursor Agent CLI, GitHub Copilot CLI, CodeBuddy, Pi, OMP, Hermes Agent, OpenCode, and Kilo Code CLI panes after a Herdr server restart unless `[session] resume_agents_on_restore = false` disables it.
 
-Native session restore requires current Herdr integrations: Pi integration version `2`, OMP version `3`, Claude Code version `6`, Codex version `5`, GitHub Copilot CLI version `2`, Devin CLI version `2`, Droid version `2`, Kimi Code CLI version `3`, Qoder CLI version `2`, Cursor Agent CLI version `1`, OpenCode version `5`, Kilo Code CLI version `1`, or Hermes Agent version `2`. Check installed versions with `herdr integration status`.
+Native session restore requires current Herdr integrations: Pi integration version `2`, OMP version `3`, Claude Code version `6`, Codex version `5`, GitHub Copilot CLI version `2`, Devin CLI version `2`, Droid version `2`, Kimi Code CLI version `3`, Qoder CLI version `2`, Cursor Agent CLI version `1`, CodeBuddy version `3`, OpenCode version `5`, Kilo Code CLI version `1`, or Hermes Agent version `2`. Check installed versions with `herdr integration status`.
 
 ## Pi
 
@@ -239,6 +241,20 @@ The hook reports session identity through Cursor's `sessionStart` hook while Cur
 Herdr uses `~/.cursor` by default, or `CURSOR_CONFIG_DIR` when set. The Cursor config directory must already exist. Install writes `herdr-agent-state.sh` and adds a Herdr `sessionStart` entry to `hooks.json`. Uninstall removes the matching hook entry and deletes the hook script.
 
 After Cursor emits a session start event, Herdr can use the reported session id to resume the pane with `cursor-agent --resume <id>`. The `cursor-agent` command must be on `PATH` when Herdr restores the pane; Herdr does not launch the generic `agent` command.
+
+## CodeBuddy
+
+Install the CodeBuddy hook:
+
+```bash
+herdr integration install codebuddy
+```
+
+The CodeBuddy hook reports session identity and lifecycle state through the same local socket API used by other integrations. When installed, the hook is the lifecycle authority for `idle`, `working`, and `blocked`; Herdr does not also use screen manifest fallback for that authority.
+
+Herdr uses `~/.codebuddy` by default, or `CODEBUDDY_HOME` when set. The CodeBuddy config directory must already exist. Install writes `hooks/herdr-agent-state.sh`, updates `settings.json` hooks, and registers `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `Stop`, and `Notification` hook entries. Uninstall removes Herdr entries from `settings.json` and deletes the hook script.
+
+After CodeBuddy emits a session-bearing event, Herdr can use the reported session id to resume the pane with `codebuddy --resume <id>`.
 
 ## Custom status labels
 

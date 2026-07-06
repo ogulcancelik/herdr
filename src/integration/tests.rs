@@ -1321,6 +1321,266 @@ fn install_codex_errors_when_config_dir_missing() {
 }
 
 #[test]
+fn install_codebuddy_writes_hook_and_updates_settings() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let codebuddy_dir = base.join(".codebuddy");
+    fs::create_dir_all(&codebuddy_dir).unwrap();
+    fs::write(
+        codebuddy_dir.join("settings.json"),
+        r#"{"permissions":{"allow":["Read"]},"hooks":{}}"#,
+    )
+    .unwrap();
+    std::env::set_var(CODEBUDDY_HOME_ENV_VAR, &codebuddy_dir);
+
+    let installed = install_codebuddy().unwrap();
+    let hook_content = fs::read_to_string(&installed.hook_path).unwrap();
+    let settings: Value =
+        serde_json::from_str(&fs::read_to_string(&installed.settings_path).unwrap()).unwrap();
+
+    assert_eq!(
+        installed.hook_path,
+        codebuddy_dir
+            .join("hooks")
+            .join(CODEBUDDY_HOOK_INSTALL_NAME)
+    );
+    assert_eq!(installed.settings_path, codebuddy_dir.join("settings.json"));
+    assert_eq!(hook_content, CODEBUDDY_HOOK_ASSET);
+    assert!(settings["permissions"]["allow"].is_array());
+    for (event, _) in CODEBUDDY_HOOK_EVENTS {
+        assert!(
+            settings["hooks"].get(event).is_some(),
+            "expected hooks.{event} to be registered"
+        );
+        let command = settings["hooks"][event][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(
+            command.contains(CODEBUDDY_HOOK_INSTALL_NAME),
+            "expected codebuddy {event} hook command to reference hook script"
+        );
+    }
+
+    std::env::remove_var(CODEBUDDY_HOME_ENV_VAR);
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_codebuddy_uses_codebuddy_home_env() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let codebuddy_dir = base.join("custom-codebuddy");
+    fs::create_dir_all(&codebuddy_dir).unwrap();
+    std::env::set_var(CODEBUDDY_HOME_ENV_VAR, &codebuddy_dir);
+
+    let installed = install_codebuddy().unwrap();
+
+    assert_eq!(installed.settings_path, codebuddy_dir.join("settings.json"));
+    assert_eq!(
+        installed.hook_path,
+        codebuddy_dir
+            .join("hooks")
+            .join(CODEBUDDY_HOOK_INSTALL_NAME)
+    );
+
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_codebuddy_is_idempotent_for_hook_entries() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let codebuddy_dir = base.join(".codebuddy");
+    fs::create_dir_all(&codebuddy_dir).unwrap();
+    std::env::set_var(CODEBUDDY_HOME_ENV_VAR, &codebuddy_dir);
+
+    install_codebuddy().unwrap();
+    install_codebuddy().unwrap();
+
+    let settings: Value =
+        serde_json::from_str(&fs::read_to_string(codebuddy_dir.join("settings.json")).unwrap())
+            .unwrap();
+    for (event, _) in CODEBUDDY_HOOK_EVENTS {
+        let entries = settings["hooks"]
+            .get(event)
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("expected hooks.{event} to be present"));
+        assert_eq!(
+            entries.len(),
+            1,
+            "expected hooks.{event} to contain exactly one entry, got {entries:?}"
+        );
+    }
+
+    std::env::remove_var(CODEBUDDY_HOME_ENV_VAR);
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_codebuddy_removes_old_state_hook_entries_and_preserves_user_hooks() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let codebuddy_dir = base.join(".codebuddy");
+    let hooks_dir = codebuddy_dir.join("hooks");
+    fs::create_dir_all(&hooks_dir).unwrap();
+    let hook_path = hooks_dir.join(CODEBUDDY_HOOK_INSTALL_NAME);
+    let settings = serde_json::json!({
+        "hooks": {
+            "UserPromptSubmit": [{
+                "matcher": "*",
+                "hooks": [
+                    {"type": "command", "command": format!("bash '{}' working", hook_path.display()), "timeout": 10},
+                    {"type": "command", "command": "echo keep-user", "timeout": 10}
+                ]
+            }],
+            "Stop": [{
+                "matcher": "*",
+                "hooks": [
+                    {"type": "command", "command": format!("bash '{}' idle", hook_path.display()), "timeout": 10},
+                    {"type": "command", "command": "echo keep-stop", "timeout": 10}
+                ]
+            }]
+        }
+    });
+    fs::write(
+        codebuddy_dir.join("settings.json"),
+        serde_json::to_string_pretty(&settings).unwrap(),
+    )
+    .unwrap();
+    std::env::set_var(CODEBUDDY_HOME_ENV_VAR, &codebuddy_dir);
+
+    install_codebuddy().unwrap();
+
+    let settings: Value =
+        serde_json::from_str(&fs::read_to_string(codebuddy_dir.join("settings.json")).unwrap())
+            .unwrap();
+    // User hooks inside the same matcher array as herdr hooks are preserved.
+    assert_eq!(
+        settings["hooks"]["UserPromptSubmit"][0]["hooks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
+        "echo keep-user"
+    );
+    assert_eq!(
+        settings["hooks"]["Stop"][0]["hooks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        settings["hooks"]["Stop"][0]["hooks"][0]["command"],
+        "echo keep-stop"
+    );
+    // UserPromptSubmit keeps user hook in its own matcher entry; install adds
+    // a separate herdr matcher entry alongside it.
+    assert_eq!(
+        settings["hooks"]["UserPromptSubmit"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    // Stop also had a user hook entry; install adds a herdr entry alongside.
+    assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 2);
+    // Events that only had herdr hooks are reduced to exactly one herdr entry.
+    for (event, _) in CODEBUDDY_HOOK_EVENTS {
+        if event == "UserPromptSubmit" || event == "Stop" {
+            continue;
+        }
+        assert_eq!(
+            settings["hooks"][event].as_array().unwrap().len(),
+            1,
+            "expected hooks.{event} to have exactly one entry after install"
+        );
+    }
+
+    std::env::remove_var(CODEBUDDY_HOME_ENV_VAR);
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn uninstall_codebuddy_removes_herdr_hooks_and_preserves_others() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let codebuddy_dir = base.join(".codebuddy");
+    let hooks_dir = codebuddy_dir.join("hooks");
+    fs::create_dir_all(&hooks_dir).unwrap();
+    let hook_path = hooks_dir.join(CODEBUDDY_HOOK_INSTALL_NAME);
+    fs::write(&hook_path, CODEBUDDY_HOOK_ASSET).unwrap();
+    let mut settings = serde_json::json!({
+        "hooks": {}
+    });
+    for (event, action) in CODEBUDDY_HOOK_EVENTS {
+        settings["hooks"][event] = serde_json::json!([{
+            "matcher": "*",
+            "hooks": [
+                {"type": "command", "command": format!("bash '{}' {}", hook_path.display(), action), "timeout": 10},
+                {"type": "command", "command": format!("echo keep-{}", event), "timeout": 10}
+            ]
+        }]);
+    }
+    fs::write(
+        codebuddy_dir.join("settings.json"),
+        serde_json::to_string_pretty(&settings).unwrap(),
+    )
+    .unwrap();
+    std::env::set_var(CODEBUDDY_HOME_ENV_VAR, &codebuddy_dir);
+
+    let result = uninstall_codebuddy().unwrap();
+    let settings: Value =
+        serde_json::from_str(&fs::read_to_string(codebuddy_dir.join("settings.json")).unwrap())
+            .unwrap();
+
+    assert!(result.removed_hook_file);
+    assert!(result.updated_settings);
+    assert!(!result.hook_path.exists());
+    // Herdr hook entries are removed, but user hooks (echo keep-...) remain.
+    for (event, _) in CODEBUDDY_HOOK_EVENTS {
+        let entries = settings["hooks"]
+            .get(event)
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("expected hooks.{event} to remain with user hook"));
+        assert_eq!(
+            entries.len(),
+            1,
+            "expected hooks.{event} to keep user hook only"
+        );
+        assert_eq!(
+            entries[0]["hooks"][0]["command"],
+            format!("echo keep-{}", event)
+        );
+    }
+
+    std::env::remove_var(CODEBUDDY_HOME_ENV_VAR);
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_codebuddy_errors_when_config_dir_missing() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let missing = base.join(".codebuddy");
+    std::env::set_var(CODEBUDDY_HOME_ENV_VAR, &missing);
+
+    let err = install_codebuddy().unwrap_err().to_string();
+
+    assert!(
+        err.contains("codebuddy directory not found"),
+        "unexpected error: {err}"
+    );
+
+    std::env::remove_var(CODEBUDDY_HOME_ENV_VAR);
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
 fn install_kimi_writes_hook_and_updates_config() {
     let _lock = integration_env_lock();
     let base = unique_base();
