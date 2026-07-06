@@ -136,6 +136,18 @@ jobs:
           path: target/aarch64-unknown-linux-gnu/release/herdr
           retention-days: 3
 
+      - name: Build release binary macOS ARM64 (PR only)
+        if: runner.os == 'macOS' && github.event_name == 'pull_request'
+        run: cargo build --release --locked
+
+      - name: Upload macOS ARM64 artifact (PR only)
+        if: runner.os == 'macOS' && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: herdr-macos-arm64
+          path: target/release/herdr
+          retention-days: 3
+
       - name: Run Windows checks
         if: matrix.kind == 'windows'
         shell: pwsh
