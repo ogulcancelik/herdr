@@ -88,11 +88,25 @@ pub(crate) struct MastracodeInstallPaths {
 }
 
 #[derive(Debug)]
+pub(crate) struct CommandCodeInstallPaths {
+    pub hook_path: PathBuf,
+    pub settings_path: PathBuf,
+}
+
+#[derive(Debug)]
 pub(crate) struct MastracodeUninstallResult {
     pub hook_path: PathBuf,
     pub hooks_path: PathBuf,
     pub removed_hook_file: bool,
     pub updated_hooks: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct CommandCodeUninstallResult {
+    pub hook_path: PathBuf,
+    pub settings_path: PathBuf,
+    pub removed_hook_file: bool,
+    pub updated_settings: bool,
 }
 
 #[derive(Debug)]

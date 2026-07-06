@@ -4565,6 +4565,83 @@ mod tests {
     }
 
     #[test]
+    fn commandcode_hook_report_sets_working_state() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0]
+            .panes
+            .get(&pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::CommandCode),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+        state.handle_app_event(AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:commandcode".into(),
+            agent_label: "commandcode".into(),
+            state: AgentState::Working,
+            message: None,
+            custom_status: None,
+            seq: Some(1),
+            session_ref: crate::agent_resume::AgentSessionRef::id("commandcode-session"),
+        });
+
+        let terminal = state.terminals.get(&terminal_id).unwrap();
+        assert_eq!(terminal.state, AgentState::Working);
+        let authority = terminal.hook_authority.as_ref().unwrap();
+        assert_eq!(
+            authority.session_ref.as_ref(),
+            Some(&crate::agent_resume::AgentSessionRef::id("commandcode-session").unwrap())
+        );
+    }
+
+    #[test]
+    fn commandcode_visible_blocker_overrides_hook_working() {
+        let mut state = app_with_workspaces(&["active"]);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0]
+            .panes
+            .get(&pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+
+        state.handle_app_event(AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:commandcode".into(),
+            agent_label: "commandcode".into(),
+            state: AgentState::Working,
+            message: None,
+            custom_status: None,
+            seq: Some(1),
+            session_ref: crate::agent_resume::AgentSessionRef::id("commandcode-session"),
+        });
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::CommandCode),
+            state: AgentState::Blocked,
+            visible_blocker: true,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+
+        let terminal = state.terminals.get(&terminal_id).unwrap();
+        assert_eq!(terminal.state, AgentState::Blocked);
+        assert!(terminal.hook_authority.is_some());
+    }
+
+    #[test]
     fn reserved_native_release_report_does_not_clear_screen_state() {
         let mut state = app_with_workspaces(&["active"]);
         let pane_id = *state.workspaces[0].panes.keys().next().unwrap();

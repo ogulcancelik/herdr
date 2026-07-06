@@ -197,6 +197,22 @@ const MASTRACODE_HOOK_EVENTS: [(&str, &str); 12] = [
     ("Stop", "idle"),
     ("SessionEnd", "release"),
 ];
+const COMMANDCODE_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
+    "herdr-agent-state.ps1"
+} else {
+    "herdr-agent-state.sh"
+};
+const COMMANDCODE_HOOK_ASSET: &str = if cfg!(windows) {
+    include_str!("assets/commandcode/herdr-agent-state.ps1")
+} else {
+    include_str!("assets/commandcode/herdr-agent-state.sh")
+};
+const COMMANDCODE_INTEGRATION_VERSION: u32 = 1;
+const COMMANDCODE_HOOK_EVENTS: [(&str, &str); 3] = [
+    ("PreToolUse", "working"),
+    ("PostToolUse", "working"),
+    ("Stop", "idle"),
+];
 const INTEGRATION_VERSION_MARKER: &str = "HERDR_INTEGRATION_VERSION=";
 
 pub(crate) const INSTALL_WARNING_PREFIX: &str = "warning:";

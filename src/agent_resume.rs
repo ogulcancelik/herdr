@@ -147,6 +147,13 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
                 session_ref.value.clone(),
             ]
         }
+        ("herdr:commandcode", "commandcode", AgentSessionRefKind::Id) => {
+            vec![
+                "commandcode".into(),
+                "--resume".into(),
+                session_ref.value.clone(),
+            ]
+        }
         ("herdr:pi", "pi", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
             vec!["pi".into(), "--session".into(), session_ref.value.clone()]
         }
@@ -214,6 +221,7 @@ fn is_official_agent_source(source: &str, agent: &str) -> bool {
             | ("herdr:kimi", "kimi")
             | ("herdr:omp", "omp")
             | ("herdr:mastracode", "mastracode")
+            | ("herdr:commandcode", "commandcode")
             | ("herdr:pi", "pi")
             | ("herdr:hermes", "hermes")
             | ("herdr:opencode", "opencode")
@@ -331,6 +339,16 @@ mod tests {
             .unwrap()
             .argv,
             vec!["mastracode", "--thread", "mastracode-session"]
+        );
+        assert_eq!(
+            plan(
+                "herdr:commandcode",
+                "commandcode",
+                &AgentSessionRef::id("commandcode-session").unwrap()
+            )
+            .unwrap()
+            .argv,
+            vec!["commandcode", "--resume", "commandcode-session"]
         );
         assert_eq!(
             plan(

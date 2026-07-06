@@ -712,3 +712,115 @@ fn codex_osc_working_beats_weak_blocker_screen() {
         Some("osc_title_working")
     );
 }
+
+#[test]
+fn commandcode_shell_permission_prompt_is_blocked() {
+    let screen = r#"
+┌───────────────────────────────────────────────────────────────────────────┐
+│ Execute Shell Command                                                     │
+│                                                                           │
+│ Command Code needs to execute rm -rf /tmp/test-permission-prompt.         │
+│                                                                           │
+│ Forcefully remove the directory /tmp/test-permission-prompt and all its   │
+│ contents without prompting                                                │
+│                                                                           │
+│ ❯ 1. Yes                                                                  │
+│   2. Yes, allow all edits during this session [shift+tab]                 │
+│   3. No, and tell Command Code what to do differently                     │
+└───────────────────────────────────────────────────────────────────────────┘
+"#;
+    let result = explain(Agent::CommandCode, screen);
+
+    assert_eq!(result.state, AgentState::Blocked);
+    assert!(result.visible_blocker);
+}
+
+#[test]
+fn commandcode_ask_prompt_is_idle() {
+    let screen = r#"
+─────────────────────────────────────────────────────────────────────────────
+❯ Ask your question...
+─────────────────────────────────────────────────────────────────────────────
+  ? for shortcuts                      [ctrl+t] continuous learning ◻ TASTE
+"#;
+    let result = explain(Agent::CommandCode, screen);
+
+    assert_eq!(result.state, AgentState::Idle);
+    assert!(result.visible_idle);
+}
+
+#[test]
+fn commandcode_completed_thought_with_ask_prompt_is_idle() {
+    let screen = r#"
+Thought for 4s
+
+Done.
+
+─────────────────────────────────────────────────────────────────────────────
+❯ Ask your question...
+─────────────────────────────────────────────────────────────────────────────
+  ? for shortcuts                      [ctrl+t] continuous learning ◻ TASTE
+"#;
+    let result = explain(Agent::CommandCode, screen);
+
+    assert_eq!(result.state, AgentState::Idle);
+    assert!(result.visible_idle);
+    assert!(!result.visible_working);
+}
+
+#[test]
+fn commandcode_typed_prompt_is_idle() {
+    let screen = r#"
+─────────────────────────────────────────────────────────────────────────────
+❯ explain the current repo
+─────────────────────────────────────────────────────────────────────────────
+"#;
+    let result = explain(Agent::CommandCode, screen);
+
+    assert_eq!(result.state, AgentState::Idle);
+    assert!(result.visible_idle);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("input_prompt_idle")
+    );
+}
+
+#[test]
+fn commandcode_philosophizing_is_working() {
+    let screen = r#"
+❯ explain current repo
+
+ · Philosophizing… esc to interrupt • 1s • ↓0
+─────────────────────────────────────────────────────────────────────────────
+❯ Ask your question...
+─────────────────────────────────────────────────────────────────────────────
+  ? for shortcuts                      [ctrl+t] continuous learning ◼ TASTE
+"#;
+    let result = explain(Agent::CommandCode, screen);
+
+    assert_eq!(result.state, AgentState::Working);
+    assert!(result.visible_working);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("interrupt_hint_working")
+    );
+}
+
+#[test]
+fn commandcode_organizing_is_working() {
+    let screen = r#"
+⌘ Organizing… esc to interrupt • 6s • ↓ 39
+─────────────────────────────────────────────────────────────────────────────
+❯ Ask your question...
+─────────────────────────────────────────────────────────────────────────────
+  ? for shortcuts                      [ctrl+t] continuous learning ◼ TASTE
+"#;
+    let result = explain(Agent::CommandCode, screen);
+
+    assert_eq!(result.state, AgentState::Working);
+    assert!(result.visible_working);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("interrupt_hint_working")
+    );
+}

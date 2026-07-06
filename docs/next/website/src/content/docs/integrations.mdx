@@ -1,6 +1,6 @@
 ---
 title: Integrations
-description: Install Herdr integrations for Pi, OMP, Claude Code, Codex, GitHub Copilot CLI, Devin CLI, Droid, Kimi Code CLI, OpenCode, Kilo Code CLI, Hermes Agent, Qoder CLI, Cursor Agent CLI, and MastraCode.
+description: Install Herdr integrations for Pi, OMP, Claude Code, Codex, CommandCode, GitHub Copilot CLI, Devin CLI, Droid, Kimi Code CLI, OpenCode, Kilo Code CLI, Hermes Agent, Qoder CLI, Cursor Agent CLI, and MastraCode.
 ---
 
 Herdr detects supported agents automatically. Official integrations can add native session identity for restore, lifecycle state reports, or both.
@@ -16,6 +16,7 @@ herdr integration install pi
 herdr integration install omp
 herdr integration install claude
 herdr integration install codex
+herdr integration install commandcode
 herdr integration install copilot
 herdr integration install devin
 herdr integration install droid
@@ -35,6 +36,7 @@ herdr integration uninstall pi
 herdr integration uninstall omp
 herdr integration uninstall claude
 herdr integration uninstall codex
+herdr integration uninstall commandcode
 herdr integration uninstall copilot
 herdr integration uninstall devin
 herdr integration uninstall droid
@@ -54,13 +56,13 @@ Herdr uses integrations in two different ways:
 | Integration type | Agents | Effect |
 | --- | --- | --- |
 | Lifecycle authority | Pi, OMP, Kimi Code CLI, OpenCode, Kilo Code CLI, Hermes Agent, MastraCode | When installed and actively reporting for the pane, hook or plugin events author `idle`, `working`, and `blocked`. Herdr does not also use screen manifest fallback for that same lifecycle authority. |
-| Session identity | Claude Code, Codex, GitHub Copilot CLI, Devin CLI, Droid, Qoder CLI, Cursor Agent CLI | The integration reports native session references for restore. State still comes from Herdr's screen manifest detection. |
+| Session identity | Claude Code, Codex, CommandCode, GitHub Copilot CLI, Devin CLI, Droid, Qoder CLI, Cursor Agent CLI | The integration reports native session references for restore. State still comes from Herdr's screen manifest detection. |
 
 Custom socket integrations can also report state when they define state that is not visible in the native terminal UI.
 
-Some integrations report native agent session references. Herdr uses official session references to resume Claude Code, Codex, Devin CLI, Droid, Kimi Code CLI, Qoder CLI, Cursor Agent CLI, GitHub Copilot CLI, Pi, OMP, Hermes Agent, OpenCode, Kilo Code CLI, and MastraCode panes after a Herdr server restart unless `[session] resume_agents_on_restore = false` disables it.
+Some integrations report native agent session references. Herdr uses official session references to resume Claude Code, Codex, CommandCode, Devin CLI, Droid, Kimi Code CLI, Qoder CLI, Cursor Agent CLI, GitHub Copilot CLI, Pi, OMP, Hermes Agent, OpenCode, Kilo Code CLI, and MastraCode panes after a Herdr server restart unless `[session] resume_agents_on_restore = false` disables it.
 
-Native session restore requires current Herdr integrations: Pi integration version `2`, OMP version `3`, Claude Code version `6`, Codex version `5`, GitHub Copilot CLI version `2`, Devin CLI version `2`, Droid version `2`, Kimi Code CLI version `3`, Qoder CLI version `2`, Cursor Agent CLI version `1`, OpenCode version `5`, Kilo Code CLI version `1`, Hermes Agent version `2`, or MastraCode version `1`. Check installed versions with `herdr integration status`.
+Native session restore requires current Herdr integrations: Pi integration version `2`, OMP version `3`, Claude Code version `6`, Codex version `5`, CommandCode version `1`, GitHub Copilot CLI version `2`, Devin CLI version `2`, Droid version `2`, Kimi Code CLI version `3`, Qoder CLI version `2`, Cursor Agent CLI version `1`, OpenCode version `5`, Kilo Code CLI version `1`, Hermes Agent version `2`, or MastraCode version `1`. Check installed versions with `herdr integration status`.
 
 ## Pi
 
@@ -119,6 +121,20 @@ herdr integration install codex
 The Codex hook reports session identity through the same local socket API used by other integrations. Codex state comes from Herdr's screen manifest detection.
 
 Herdr uses `~/.codex` by default, or `CODEX_HOME` when set. The Codex config directory must already exist. Install writes `herdr-agent-state.sh`, updates `hooks.json`, and ensures `[features] hooks = true` in `config.toml`. It also removes the deprecated top-level `codex_hooks` flag when present. Uninstall removes Herdr entries from `hooks.json` and deletes the hook script, but leaves `config.toml` unchanged.
+
+## CommandCode
+
+Install the CommandCode hook:
+
+```bash
+herdr integration install commandcode
+```
+
+The hook reports CommandCode session identity and working/idle lifecycle hints from `PreToolUse`, `PostToolUse`, and `Stop`. Permission prompts still come from Herdr's screen manifest detection because CommandCode hooks do not emit a separate blocker event while the prompt is waiting.
+
+Herdr uses `~/.commandcode` by default, or `COMMANDCODE_HOME` when set. The CommandCode config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and updates `settings.json` with Herdr hook entries. Uninstall removes the matching hook entries and deletes the hook script.
+
+After CommandCode emits a session-bearing event, Herdr can use the reported session id to resume the pane with `commandcode --resume <id>`.
 
 ## GitHub Copilot CLI
 

@@ -400,7 +400,7 @@ request_path = "sounds/request.mp3"
 
 `path` sets one sound for all sound notifications. `done_path` and `request_path` override only the finished and needs-input sounds.
 
-Per-agent sound overrides accept `default`, `on`, or `off`. Use detected agent labels such as `claude`, `codex`, `devin`, or `droid` as keys. Droid is muted by default.
+Per-agent sound overrides accept `default`, `on`, or `off`. Use detected agent labels such as `claude`, `codex`, `commandcode`, `devin`, or `droid` as keys. Droid is muted by default.
 
 ```toml
 [ui.sound.agents]
@@ -469,7 +469,7 @@ Herdr can restart supported agent panes in their native conversation sessions af
 resume_agents_on_restore = true
 ```
 
-This is enabled by default. Herdr only resumes panes that reported a native session reference through an official Herdr integration. Supported resume targets are Claude Code, Codex, Cursor Agent CLI, GitHub Copilot CLI, Droid, Kimi Code CLI, Qoder CLI, Pi, Hermes Agent, OpenCode, and Kilo Code CLI. Unsupported, missing, invalid, duplicated, or stale session references restore as a normal shell in the saved pane directory.
+This is enabled by default. Herdr only resumes panes that reported a native session reference through an official Herdr integration. Supported resume targets are Claude Code, Codex, CommandCode, Cursor Agent CLI, GitHub Copilot CLI, Droid, Kimi Code CLI, Qoder CLI, Pi, Hermes Agent, OpenCode, and Kilo Code CLI. Unsupported, missing, invalid, duplicated, or stale session references restore as a normal shell in the saved pane directory.
 
 Session references are stored in the local Herdr session snapshot. They are not shown in normal pane, agent, status, or event output.
 
@@ -477,7 +477,7 @@ For how native agent session restore differs from pane screen history and live h
 
 ## IME cursor tracking
 
-When the focused pane hides its cursor and paints its own — common in AI-agent TUIs like Claude Code, pi, codex, and Devin — macOS native input methods stop tracking the candidate window position because the outer terminal stops reporting the cursor.
+When the focused pane hides its cursor and paints its own — common in AI-agent TUIs like Claude Code, pi, codex, CommandCode, and Devin — macOS native input methods stop tracking the candidate window position because the outer terminal stops reporting the cursor.
 
 Set `reveal_hidden_cursor_for_cjk_ime = true` to expose the focused pane's cursor anchor to the outer terminal regardless of the pane's `?25l` request:
 
@@ -490,7 +490,7 @@ cjk_ime_cursor_shape = "steady_block"
 
 When enabled, the cursor stays visible at the focused pane's reported position. If the pane reports no cursor position, the anchor falls back to the pane's top-left so a stable IME hint is always available.
 
-`cjk_ime_agents` is an optional allow-list. When empty, the reveal applies to any focused pane. When non-empty, the reveal only applies if the focused pane's detected agent matches one of the listed names — useful to enable the reveal only for AI-agent TUIs that paint their own cursor while leaving plain shells untouched. Accepted names: `pi`, `claude`, `codex`, `gemini`, `cursor`, `devin`, `agy`, `cline`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`, `kilo`, `qodercli`, and `qoder`. Unknown names are ignored; if the list contains no valid names, the reveal does not apply.
+`cjk_ime_agents` is an optional allow-list. When empty, the reveal applies to any focused pane. When non-empty, the reveal only applies if the focused pane's detected agent matches one of the listed names — useful to enable the reveal only for AI-agent TUIs that paint their own cursor while leaving plain shells untouched. Accepted names: `pi`, `claude`, `codex`, `commandcode`, `gemini`, `cursor`, `devin`, `agy`, `cline`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`, `kilo`, `qodercli`, and `qoder`. Unknown names are ignored; if the list contains no valid names, the reveal does not apply.
 
 `cjk_ime_cursor_shape` controls the DECSCUSR shape rendered for the IME anchor. Accepted values: `block`, `steady_block` (default), `underline`, `steady_underline`, `bar`, `steady_bar`.
 

@@ -21,6 +21,10 @@ id = "codex"
 path = "codex.toml"
 
 [[agents]]
+id = "commandcode"
+path = "commandcode.toml"
+
+[[agents]]
 id = "cursor"
 path = "cursor.toml"
 

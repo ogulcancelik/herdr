@@ -181,6 +181,7 @@ fn spawn_named_server(
         .env_remove("HERDR_SOCKET_PATH")
         .env_remove("HERDR_CLIENT_SOCKET_PATH")
         .env_remove("HERDR_ENV")
+        .env_remove("HERDR_SESSION")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -225,7 +226,8 @@ fn run_named_cli_with_env_and_socket_override(
         .env("XDG_CONFIG_HOME", config_home)
         .env("XDG_RUNTIME_DIR", runtime_dir)
         .env_remove("HERDR_CLIENT_SOCKET_PATH")
-        .env_remove("HERDR_ENV");
+        .env_remove("HERDR_ENV")
+        .env_remove("HERDR_SESSION");
     for (key, value) in envs {
         command.env(key, value);
     }
@@ -298,6 +300,7 @@ fn spawn_herdr_with_config(
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
     cmd.env("SHELL", "/bin/sh");
     cmd.env_remove("HERDR_ENV");
+    cmd.env_remove("HERDR_SESSION");
     if let Some(path) = path_override {
         cmd.env("PATH", path);
     }
@@ -536,6 +539,14 @@ fn run_codex_hook(action: &str, hook_input: &str) -> Option<serde_json::Value> {
     )
 }
 
+fn run_commandcode_hook(action: &str, hook_input: &str) -> Option<serde_json::Value> {
+    run_shell_hook(
+        "src/integration/assets/commandcode/herdr-agent-state.sh",
+        &[action],
+        hook_input,
+    )
+}
+
 fn run_copilot_hook(hook_input: &str) -> Option<serde_json::Value> {
     run_shell_hook(
         "src/integration/assets/copilot/herdr-agent-state.sh",
@@ -680,6 +691,30 @@ fn codex_hook_reports_session_id_from_stdin() {
     assert_eq!(request["method"], "pane.report_agent_session");
     assert_eq!(request["params"]["agent_session_id"], "codex-session");
     assert!(request["params"].get("state").is_none());
+}
+
+#[test]
+fn commandcode_hook_reports_state_and_session_id_from_stdin() {
+    let request = run_commandcode_hook(
+        "working",
+        r#"{"hook_event_name":"PreToolUse","session_id":"commandcode-session"}"#,
+    )
+    .expect("commandcode hook should report state");
+
+    assert_eq!(request["method"], "pane.report_agent");
+    assert_eq!(request["params"]["source"], "herdr:commandcode");
+    assert_eq!(request["params"]["agent"], "commandcode");
+    assert_eq!(request["params"]["state"], "working");
+    assert_eq!(request["params"]["agent_session_id"], "commandcode-session");
+}
+
+#[test]
+fn commandcode_hook_ignores_unknown_action() {
+    assert!(run_commandcode_hook(
+        "session",
+        r#"{"hook_event_name":"SessionStart","session_id":"commandcode-session"}"#
+    )
+    .is_none());
 }
 
 #[test]
@@ -1067,6 +1102,7 @@ fn completion_command_prints_zsh_script_without_session_startup() {
         .env_remove("HERDR_SOCKET_PATH")
         .env_remove("HERDR_CLIENT_SOCKET_PATH")
         .env_remove("HERDR_ENV")
+        .env_remove("HERDR_SESSION")
         .output()
         .unwrap();
 

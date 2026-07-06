@@ -100,6 +100,7 @@ fn spawn_client_process(
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
     cmd.env("SHELL", "/bin/sh");
     cmd.env_remove("HERDR_ENV");
+    cmd.env_remove("HERDR_SESSION");
 
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());
@@ -143,6 +144,7 @@ fn spawn_server(
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
     cmd.env("SHELL", "/bin/sh");
     cmd.env_remove("HERDR_ENV");
+    cmd.env_remove("HERDR_SESSION");
 
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());
@@ -368,6 +370,7 @@ fn client_sees_headless_startup_config_diagnostic() {
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
     cmd.env("SHELL", "/bin/sh");
     cmd.env_remove("HERDR_ENV");
+    cmd.env_remove("HERDR_SESSION");
 
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());
@@ -440,6 +443,7 @@ fn server_unreachable_shows_clear_error() {
         .env("HERDR_SOCKET_PATH", &api_socket)
         .env_remove("HERDR_CLIENT_SOCKET_PATH")
         .env_remove("HERDR_ENV")
+        .env_remove("HERDR_SESSION")
         .output()
         .expect("client command should run");
 
@@ -806,6 +810,7 @@ fn client_receives_notify_on_agent_state_change() {
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
     cmd.env("SHELL", "/bin/sh");
     cmd.env_remove("HERDR_ENV");
+    cmd.env_remove("HERDR_SESSION");
 
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());

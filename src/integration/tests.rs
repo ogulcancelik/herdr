@@ -101,6 +101,7 @@ fn clear_integration_path_env() {
     std::env::remove_var("XDG_CONFIG_HOME");
     std::env::remove_var(QODERCLI_CONFIG_DIR_ENV_VAR);
     std::env::remove_var(CURSOR_CONFIG_DIR_ENV_VAR);
+    std::env::remove_var(COMMANDCODE_HOME_ENV_VAR);
 }
 
 fn kimi_hook_command(hook_path: &Path, action: &str) -> String {
@@ -183,6 +184,7 @@ fn windows_supports_only_cli_hook_integrations() {
     assert!(integration_target_supported(IntegrationTarget::Droid));
     assert!(integration_target_supported(IntegrationTarget::Kimi));
     assert!(integration_target_supported(IntegrationTarget::Qodercli));
+    assert!(integration_target_supported(IntegrationTarget::Commandcode));
 }
 
 #[cfg(windows)]
@@ -301,6 +303,9 @@ fn command_available_finds_windows_command_shims_on_path() {
 
     fs::write(bin.join("codex.exe"), "").unwrap();
     assert!(command_available("codex"));
+
+    fs::write(bin.join("commandcode.cmd"), "@echo off\r\n").unwrap();
+    assert!(command_available("commandcode"));
 
     assert!(!command_available("missing-agent"));
 
@@ -2942,6 +2947,161 @@ fn install_qodercli_errors_when_config_dir_missing() {
     );
 
     std::env::remove_var(QODERCLI_CONFIG_DIR_ENV_VAR);
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_commandcode_writes_hook_and_updates_settings() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let commandcode_dir = base.join(".commandcode");
+    fs::create_dir_all(&commandcode_dir).unwrap();
+    fs::write(
+        commandcode_dir.join("settings.json"),
+        r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"echo keep-me"}]}]}}"#,
+    )
+    .unwrap();
+    std::env::set_var(COMMANDCODE_HOME_ENV_VAR, &commandcode_dir);
+
+    let installed = install_commandcode().unwrap();
+
+    assert_eq!(
+        installed.hook_path,
+        commandcode_dir
+            .join("hooks")
+            .join(COMMANDCODE_HOOK_INSTALL_NAME)
+    );
+    assert_eq!(
+        installed.settings_path,
+        commandcode_dir.join("settings.json")
+    );
+    let hook_content = fs::read_to_string(&installed.hook_path).unwrap();
+    assert!(hook_content.contains("HERDR_INTEGRATION_ID=commandcode"));
+
+    let settings: Value =
+        serde_json::from_str(&fs::read_to_string(commandcode_dir.join("settings.json")).unwrap())
+            .unwrap();
+    let hooks = settings.get("hooks").and_then(Value::as_object).unwrap();
+    for (event, action) in COMMANDCODE_HOOK_EVENTS {
+        let command = hook_command(&installed.hook_path, Some(action));
+        let entries = hooks.get(event).and_then(Value::as_array).unwrap();
+        assert!(
+            entries.iter().any(|entry| {
+                entry
+                    .get("hooks")
+                    .and_then(Value::as_array)
+                    .is_some_and(|hook_entries| {
+                        hook_entries.iter().any(|hook| {
+                            hook.get("type").and_then(Value::as_str) == Some("command")
+                                && hook.get("command").and_then(Value::as_str)
+                                    == Some(command.as_str())
+                                && hook.get("timeout").and_then(Value::as_u64) == Some(5)
+                        })
+                    })
+            }),
+            "missing commandcode hook for {event}"
+        );
+    }
+    assert!(
+        hooks["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| { entry["hooks"][0]["command"].as_str() == Some("echo keep-me") }),
+        "foreign hook should be preserved"
+    );
+
+    std::env::remove_var(COMMANDCODE_HOME_ENV_VAR);
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_commandcode_is_idempotent_for_hook_entries() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let commandcode_dir = base.join(".commandcode");
+    fs::create_dir_all(&commandcode_dir).unwrap();
+    std::env::set_var(COMMANDCODE_HOME_ENV_VAR, &commandcode_dir);
+
+    install_commandcode().unwrap();
+    install_commandcode().unwrap();
+
+    let settings: Value =
+        serde_json::from_str(&fs::read_to_string(commandcode_dir.join("settings.json")).unwrap())
+            .unwrap();
+    let hooks = settings.get("hooks").and_then(Value::as_object).unwrap();
+    for (event, _) in COMMANDCODE_HOOK_EVENTS {
+        let entries = hooks.get(event).and_then(Value::as_array).unwrap();
+        assert_eq!(
+            entries.len(),
+            1,
+            "expected hooks.{event} to contain exactly one entry, got {entries:?}"
+        );
+    }
+
+    std::env::remove_var(COMMANDCODE_HOME_ENV_VAR);
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn uninstall_commandcode_removes_herdr_hooks_and_preserves_others() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let commandcode_dir = base.join(".commandcode");
+    fs::create_dir_all(&commandcode_dir).unwrap();
+    std::env::set_var(COMMANDCODE_HOME_ENV_VAR, &commandcode_dir);
+
+    install_commandcode().unwrap();
+    let mut settings: Value =
+        serde_json::from_str(&fs::read_to_string(commandcode_dir.join("settings.json")).unwrap())
+            .unwrap();
+    settings["hooks"]["PreToolUse"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "hooks": [{"type": "command", "command": "echo user-defined"}],
+        }));
+    fs::write(
+        commandcode_dir.join("settings.json"),
+        serde_json::to_string_pretty(&settings).unwrap(),
+    )
+    .unwrap();
+
+    let result = uninstall_commandcode().unwrap();
+    assert!(result.removed_hook_file);
+    assert!(result.updated_settings);
+
+    let settings: Value =
+        serde_json::from_str(&fs::read_to_string(commandcode_dir.join("settings.json")).unwrap())
+            .unwrap();
+    let hooks = settings.get("hooks").and_then(Value::as_object).unwrap();
+    let remaining = hooks.get("PreToolUse").and_then(Value::as_array).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(
+        remaining[0]["hooks"][0]["command"].as_str(),
+        Some("echo user-defined")
+    );
+    assert!(hooks.get("PostToolUse").is_none());
+    assert!(hooks.get("Stop").is_none());
+
+    std::env::remove_var(COMMANDCODE_HOME_ENV_VAR);
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_commandcode_errors_when_config_dir_missing() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let missing = base.join(".commandcode");
+    std::env::set_var(COMMANDCODE_HOME_ENV_VAR, &missing);
+
+    let err = install_commandcode().unwrap_err().to_string();
+    assert!(
+        err.contains("commandcode config directory not found"),
+        "unexpected error: {err}"
+    );
+
+    std::env::remove_var(COMMANDCODE_HOME_ENV_VAR);
     let _ = fs::remove_dir_all(base);
 }
 

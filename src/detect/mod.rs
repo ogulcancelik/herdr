@@ -51,6 +51,7 @@ pub enum Agent {
     Cline,
     Omp,
     Mastracode,
+    CommandCode,
     OpenCode,
     GithubCopilot,
     Kimi,
@@ -64,7 +65,7 @@ pub enum Agent {
 }
 
 impl Agent {
-    pub const SCREEN_MANIFEST_AGENTS: [Self; 18] = [
+    pub const SCREEN_MANIFEST_AGENTS: [Self; 19] = [
         Self::Pi,
         Self::Claude,
         Self::Codex,
@@ -73,6 +74,7 @@ impl Agent {
         Self::Devin,
         Self::Antigravity,
         Self::Cline,
+        Self::CommandCode,
         Self::OpenCode,
         Self::GithubCopilot,
         Self::Kimi,
@@ -98,6 +100,7 @@ pub fn agent_label(agent: Agent) -> &'static str {
         Agent::Cline => "cline",
         Agent::Omp => "omp",
         Agent::Mastracode => "mastracode",
+        Agent::CommandCode => "commandcode",
         Agent::OpenCode => "opencode",
         Agent::GithubCopilot => "copilot",
         Agent::Kimi => "kimi",
@@ -124,6 +127,7 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
         "cline" => Some(Agent::Cline),
         "omp" => Some(Agent::Omp),
         "mastracode" | "mastra-code" | "mastra code" => Some(Agent::Mastracode),
+        "cmd" | "commandcode" | "command-code" | "command code" => Some(Agent::CommandCode),
         "opencode" | "open-code" => Some(Agent::OpenCode),
         "copilot" | "github-copilot" | "ghcs" => Some(Agent::GithubCopilot),
         "kimi" | "kimi-code" | "kimi code" => Some(Agent::Kimi),
@@ -142,6 +146,9 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
 /// Returns `None` for plain shells or unrecognized programs.
 pub fn identify_agent(process_name: &str) -> Option<Agent> {
     let name = normalized_agent_lookup_name(process_name);
+    if name == "cmd" {
+        return (!cfg!(windows)).then_some(Agent::CommandCode);
+    }
     // Match against known binary names
     match name.as_str() {
         "pi" => Some(Agent::Pi),
@@ -154,6 +161,7 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
         "cline" => Some(Agent::Cline),
         "omp" => Some(Agent::Omp),
         "mastracode" | "mastra-code" | "mastra code" => Some(Agent::Mastracode),
+        "commandcode" | "command-code" | "command code" => Some(Agent::CommandCode),
         "opencode" | "open-code" => Some(Agent::OpenCode),
         "copilot" | "github-copilot" | "ghcs" => Some(Agent::GithubCopilot),
         "kimi" | "kimi-code" | "kimi code" => Some(Agent::Kimi),
@@ -628,6 +636,10 @@ mod tests {
         assert_eq!(identify_agent("omp"), Some(Agent::Omp));
         assert_eq!(identify_agent("mastracode"), Some(Agent::Mastracode));
         assert_eq!(identify_agent("mastra-code"), Some(Agent::Mastracode));
+        assert_eq!(identify_agent("commandcode"), Some(Agent::CommandCode));
+        assert_eq!(identify_agent("command-code"), Some(Agent::CommandCode));
+        #[cfg(not(windows))]
+        assert_eq!(identify_agent("cmd"), Some(Agent::CommandCode));
         assert_eq!(identify_agent("opencode"), Some(Agent::OpenCode));
         assert_eq!(identify_agent("opencode.exe"), Some(Agent::OpenCode));
         assert_eq!(identify_agent("kimi"), Some(Agent::Kimi));
@@ -655,6 +667,8 @@ mod tests {
         assert_eq!(parse_agent_label("omp"), Some(Agent::Omp));
         assert_eq!(parse_agent_label("mastracode"), Some(Agent::Mastracode));
         assert_eq!(parse_agent_label("mastra code"), Some(Agent::Mastracode));
+        assert_eq!(parse_agent_label("cmd"), Some(Agent::CommandCode));
+        assert_eq!(parse_agent_label("command-code"), Some(Agent::CommandCode));
         assert_eq!(parse_agent_label("opencode.exe"), Some(Agent::OpenCode));
         assert_eq!(parse_agent_label("copilot"), Some(Agent::GithubCopilot));
         assert_eq!(parse_agent_label("kimi-code"), Some(Agent::Kimi));
@@ -672,6 +686,7 @@ mod tests {
     #[test]
     fn agent_labels_use_display_names() {
         assert_eq!(agent_label(Agent::Pi), "pi");
+        assert_eq!(agent_label(Agent::CommandCode), "commandcode");
         assert_eq!(agent_label(Agent::GithubCopilot), "copilot");
         assert_eq!(agent_label(Agent::OpenCode), "opencode");
         assert_eq!(agent_label(Agent::Devin), "devin");
