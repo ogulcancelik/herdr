@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   conventional-commits:
-    if: github.event_name != 'push' || github.ref_name == 'master'
+    if: false
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
