@@ -712,3 +712,43 @@ fn codex_osc_working_beats_weak_blocker_screen() {
         Some("osc_title_working")
     );
 }
+
+// --- Github Copilot rules ---
+
+#[test]
+fn github_copilot_manifest_detects_working_and_blocked_states() {
+    // Test the newly added "esc interrupt" working rule
+    let working = explain(Agent::GithubCopilot, "Copilot is working (esc interrupt)");
+    assert_eq!(working.state, AgentState::Working);
+    assert_eq!(
+        working.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("working_cancel_hint")
+    );
+    assert!(working.visible_working);
+
+    // Test other existing working cancel rules to ensure consistency
+    let working_cancel = explain(
+        Agent::GithubCopilot,
+        "Copilot working (esc again to cancel)",
+    );
+    assert_eq!(working_cancel.state, AgentState::Working);
+    assert_eq!(
+        working_cancel
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("working_cancel_hint")
+    );
+
+    // Test selection blocker (blocked state)
+    let blocked = explain(
+        Agent::GithubCopilot,
+        "select option\nenter to select\nesc cancel",
+    );
+    assert_eq!(blocked.state, AgentState::Blocked);
+    assert_eq!(
+        blocked.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("selection_blocker")
+    );
+    assert!(blocked.visible_blocker);
+}

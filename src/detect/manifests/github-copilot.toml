@@ -1,7 +1,7 @@
 id = "copilot"
-version = "2026.06.22.1"
+version = "2026.07.07.1"
 min_engine_version = 1
-updated_at = "2026-06-22T10:52:26Z"
+updated_at = "2026-07-07T14:15:00Z"
 aliases = ["github-copilot", "ghcs"]
 
 [[rules]]
@@ -33,4 +33,5 @@ any = [
   { contains = ["esc to cancel"] },
   { contains = ["esc cancel"] },
   { contains = ["esc again to cancel"] },
+  { contains = ["esc interrupt"]}
 ]
