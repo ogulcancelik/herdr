@@ -1288,6 +1288,18 @@ pub(crate) struct PaneFocusTarget {
     pub pane_id: PaneId,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingClose {
+    Workspace,
+    Pane(PaneId),
+}
+
+impl Default for PendingClose {
+    fn default() -> Self {
+        Self::Workspace
+    }
+}
+
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 pub struct AppState {
@@ -1389,6 +1401,8 @@ pub struct AppState {
     pub redraw_on_focus_gained: bool,
     pub mouse_scroll_lines: usize,
     pub confirm_close: bool,
+    pub confirm_close_pane: bool,
+    pub pending_close: PendingClose,
     pub prompt_new_tab_name: bool,
     pub pane_borders: bool,
     pub pane_gaps: bool,
@@ -1747,6 +1761,8 @@ impl AppState {
             redraw_on_focus_gained: true,
             mouse_scroll_lines: crate::config::DEFAULT_MOUSE_SCROLL_LINES,
             confirm_close: true,
+            confirm_close_pane: false,
+            pending_close: PendingClose::Workspace,
             prompt_new_tab_name: true,
             pane_borders: true,
             pane_gaps: false,

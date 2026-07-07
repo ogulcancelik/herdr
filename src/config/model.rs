@@ -796,6 +796,8 @@ pub struct UiConfig {
     pub mouse_scroll_lines: Option<NonZeroUsize>,
     /// Ask for confirmation before closing a workspace. Default: true.
     pub confirm_close: bool,
+    /// Ask for confirmation before closing a pane. Default: false.
+    pub confirm_close_pane: bool,
     /// Ask for a tab name before creating a new tab. Default: true.
     pub prompt_new_tab_name: bool,
     /// Draw borders around split panes. Default: true.
@@ -994,6 +996,7 @@ impl Default for UiConfig {
             redraw_on_focus_gained: true,
             mouse_scroll_lines: None,
             confirm_close: true,
+            confirm_close_pane: false,
             prompt_new_tab_name: true,
             pane_borders: true,
             pane_gaps: true,
@@ -1250,6 +1253,30 @@ prompt_new_tab_name = false
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(!config.ui.prompt_new_tab_name);
+    }
+
+    #[test]
+    fn confirm_close_pane_defaults_off_and_parses() {
+        let default_config = Config::default();
+        assert!(!default_config.ui.confirm_close_pane);
+
+        let config: Config = toml::from_str(
+            r#"
+[ui]
+confirm_close = true
+"#,
+        )
+        .unwrap();
+        assert!(!config.ui.confirm_close_pane);
+
+        let config: Config = toml::from_str(
+            r#"
+[ui]
+confirm_close_pane = true
+"#,
+        )
+        .unwrap();
+        assert!(config.ui.confirm_close_pane);
     }
 
     #[test]
