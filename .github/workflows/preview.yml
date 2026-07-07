@@ -186,7 +186,10 @@ jobs:
 
       - name: Install Linux build tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build musl-tools gcc-aarch64-linux-gnu crossbuild-essential-arm64
+        run: |
+          sudo find /etc/apt/sources.list.d -type f \( -iname '*microsoft*' -o -iname '*azure-cli*' \) -print -delete
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build musl-tools gcc-aarch64-linux-gnu crossbuild-essential-arm64
 
       - name: Install macOS build tools
         if: runner.os == 'macOS'
