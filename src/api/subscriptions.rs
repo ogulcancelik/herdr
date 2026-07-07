@@ -263,6 +263,7 @@ impl ActiveSubscription {
                         display_agent: probe.display_agent,
                         custom_status: probe.custom_status,
                         state_labels: probe.state_labels,
+                        agent_session: probe.agent_session,
                     });
 
                 Ok(Self::AgentStatusChanged(Box::new(
@@ -375,6 +376,7 @@ impl ActiveAgentStatusChangedSubscription {
                 display_agent,
                 custom_status,
                 state_labels,
+                agent_session: _,
             } = event.data
             else {
                 continue;
@@ -414,6 +416,7 @@ impl ActiveAgentStatusChangedSubscription {
                     display_agent,
                     custom_status,
                     state_labels,
+                    agent_session: None,
                 }),
             });
         }
@@ -481,6 +484,7 @@ impl ActiveAgentStatusChangedSubscription {
                 display_agent: pane.display_agent,
                 custom_status: pane.custom_status,
                 state_labels: pane.state_labels,
+                agent_session: pane.agent_session,
             }),
         })
     }
@@ -625,6 +629,7 @@ mod tests {
                 display_agent: None,
                 custom_status: custom_status.map(str::to_string),
                 state_labels: HashMap::new(),
+                agent_session: None,
             },
         }
     }
@@ -746,6 +751,7 @@ mod tests {
                 display_agent: None,
                 custom_status: None,
                 state_labels: HashMap::new(),
+                agent_session: None,
             }),
             request_prefix: "test".into(),
         };
@@ -793,6 +799,7 @@ mod tests {
                 display_agent: None,
                 custom_status: Some("short lived".into()),
                 state_labels: HashMap::new(),
+                agent_session: None,
             }),
             request_prefix: "test".into(),
         };

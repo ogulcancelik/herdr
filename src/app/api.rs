@@ -570,6 +570,17 @@ impl App {
             || update.previous_presentation != update.presentation
         {
             let presentation = update.presentation.clone();
+            // Look up the agent session info from the pane's terminal so
+            // plugins receive the session ID without an extra API call.
+            let agent_session = self
+                .state
+                .workspaces
+                .get(update.ws_idx)
+                .and_then(|ws| ws.pane_state(update.pane_id))
+                .and_then(|pane| self.state.terminals.get(&pane.attached_terminal_id))
+                .and_then(|terminal| {
+                    crate::app::creation::terminal_agent_session_info(terminal)
+                });
             self.emit_event(crate::api::schema::EventEnvelope {
                 event: crate::api::schema::EventKind::PaneAgentStatusChanged,
                 data: crate::api::schema::EventData::PaneAgentStatusChanged {
@@ -581,6 +592,7 @@ impl App {
                     display_agent: presentation.display_agent,
                     custom_status: presentation.custom_status,
                     state_labels: presentation.state_labels,
+                    agent_session,
                 },
             });
         }
