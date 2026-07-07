@@ -262,7 +262,7 @@ impl TerminalState {
         if process_exited
             && self.hook_authority_not_newer_than(now)
             && self.hook_authority.as_ref().is_some_and(|authority| {
-                crate::detect::parse_agent_label(&authority.agent_label) == agent
+                agent.is_none() || crate::detect::parse_agent_label(&authority.agent_label) == agent
             })
         {
             let cleared_source = self
