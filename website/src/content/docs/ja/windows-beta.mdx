@@ -57,6 +57,23 @@ Windows Terminal は特定のエージェント向けに画像貼り付け経路
 
 Kitty graphics は実験的なままで、まだ Windows でのサポートを謳っていません。Windows Terminal での画像レンダリングを特にテストしているのでない限り、`experimental.kitty_graphics = false` のままにしてください。
 
+## 既知の注意点
+
+### カーソル描画
+
+Windows のターミナルは ConPTY 経由で Herdr を実行するため、フルスクリーン再描画中にネイティブの端末カーソルがちらついたり、ジャンプしたり、古い位置を一瞬表示したりすることがあります。Herdr のデフォルト `host_cursor = "auto"` は、Windows では Herdr のカーソルを端末セルの内容として描画し、Linux と macOS ではネイティブの端末カーソルを使い続けます。Windows でのトレードオフは、外側ターミナルのネイティブな点滅、形状、カーソル色の代わりに、Herdr 内で安定した非点滅カーソルを表示することです。
+
+Windows で外側ターミナルのカーソルに戻すには、次を設定してください:
+
+```toml
+[ui]
+host_cursor = "native"
+```
+
+### キーボードとマウス
+
+Windows のターミナルは、修飾キー付きのキーをすべて同じ形で報告するわけではありません。Herdr は Windows Terminal と Windows 上の Alacritty ではマウス報告と `ctrl+j` を保持しますが、`shift+enter` は外側ターミナルが修飾付き Enter として区別して報告する場合にだけ動作します。Windows またはターミナルがそれを通常の Enter として報告する場合、Herdr は通常の Enter を転送します。
+
 ## コピーと貼り付け
 
 Herdr のペインテキストコピーは Windows ベータで動作します。ペイン内でテキストをドラッグ選択すると Herdr 経由でコピーされます。

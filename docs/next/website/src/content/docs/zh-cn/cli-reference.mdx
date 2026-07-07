@@ -19,6 +19,7 @@ herdr --no-session            # 单进程逃生舱
 herdr --default-config        # 打印默认配置
 herdr update                  # 从配置的通道下载并安装
 herdr update --handoff        # 对受支持的运行中服务器启用实时交接
+herdr completion zsh          # 生成 zsh 补全脚本
 herdr channel show            # 打印 stable 或 preview
 herdr channel set preview     # 启用预览构建
 herdr channel set stable      # 把 Linux/macOS 直接安装切回稳定版
@@ -31,6 +32,48 @@ herdr --version               # 打印版本
 herdr status
 herdr status server
 herdr status client
+```
+
+API schema 命令:
+
+```bash
+herdr api schema
+herdr api schema --json
+herdr api schema --output herdr-api.schema.json
+```
+
+`herdr api schema` 会打印安装的二进制中包含的 socket 协议 schema 简短摘要。需要完整 JSON Schema 文档时使用 `--json`;要写入文件则使用 `--output PATH`。
+
+## Shell 补全
+
+```bash
+herdr completion zsh
+herdr completions zsh
+herdr completion bash
+herdr completion fish
+herdr completion powershell
+herdr completion elvish
+```
+
+`completion` 会把脚本打印到 stdout。`completions` 是别名。临时 zsh 会话可以直接加载脚本:
+
+```bash
+source <(herdr completion zsh)
+```
+
+持久 zsh 设置中,把生成的 `_herdr` 函数写到 `compinit` 运行前已经在 `fpath` 上的位置:
+
+```bash
+mkdir -p ~/.zfunc
+herdr completion zsh > ~/.zfunc/_herdr
+```
+
+然后确认 `.zshrc` 包含:
+
+```zsh
+fpath=(~/.zfunc $fpath)
+autoload -Uz compinit
+compinit
 ```
 
 ## 服务器

@@ -65,6 +65,7 @@ Process:
    - Treat `docs/next/README.md` as the next-release root README, and `docs/next/website/src/content/docs/` as the full next-release mirror of website docs.
    - Compare meaningful user-facing changes in the range against next-release docs first.
    - Flag missing release docs for new or changed features, commands, config keys, protocol behavior, integrations, defaults, and compatibility notes.
+   - Compare English next-release website docs against `docs/next/website/src/content/docs/ja/` and `docs/next/website/src/content/docs/zh-cn/`. Flag missing localized files, stale localized files, and heading-outline drift where translated docs do not have the same section structure as English.
    - Compare `docs/next/README.md` against root `README.md`, and compare the staged website-doc mirror against `website/src/content/docs/`. Flag each difference as intended to ship in this release, stale, or needing user decision.
    - Also audit example config snippets for release readiness.
 
@@ -75,7 +76,7 @@ Process:
      ```bash
      just release-docs-check
      ```
-   - This check must include root `README.md`, root `CHANGELOG.md`, the removed root doc files, and exact 1:1 sync between `docs/next/website/src/content/docs/` and `website/src/content/docs/`.
+   - This check must include root `README.md`, root `CHANGELOG.md`, the removed root doc files, exact 1:1 sync between `docs/next/website/src/content/docs/` and `website/src/content/docs/`, and localized heading-outline parity between English, Japanese, and Simplified Chinese docs.
    - Do not run `just release` unless the working tree is clean and the docs check passes.
 
 9. Apply changes only when asked.

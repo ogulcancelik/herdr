@@ -19,6 +19,7 @@ herdr --no-session            # シングルプロセスの逃げ道
 herdr --default-config        # デフォルト設定を表示
 herdr update                  # 設定済みチャンネルからダウンロードしてインストール
 herdr update --handoff        # 対応する実行中サーバーでライブハンドオフにオプトイン
+herdr completion zsh          # zsh 補完スクリプトを生成
 herdr channel show            # stable または preview を表示
 herdr channel set preview     # プレビュービルドにオプトイン
 herdr channel set stable      # Linux/macOS の直接インストールを安定版に戻す
@@ -31,6 +32,48 @@ herdr --version               # バージョンを表示
 herdr status
 herdr status server
 herdr status client
+```
+
+API スキーマコマンド:
+
+```bash
+herdr api schema
+herdr api schema --json
+herdr api schema --output herdr-api.schema.json
+```
+
+`herdr api schema` は、インストール済みバイナリに同梱されたソケットプロトコルスキーマの短い概要を表示します。完全な JSON Schema ドキュメントが欲しいときは `--json` を使い、ファイルに書き出すには `--output PATH` を使ってください。
+
+## シェル補完
+
+```bash
+herdr completion zsh
+herdr completions zsh
+herdr completion bash
+herdr completion fish
+herdr completion powershell
+herdr completion elvish
+```
+
+`completion` はスクリプトを標準出力に表示します。`completions` はエイリアスです。一時的な zsh セッションでは、スクリプトを直接読み込めます:
+
+```bash
+source <(herdr completion zsh)
+```
+
+永続的な zsh 設定では、生成された `_herdr` 関数を `compinit` が実行される前の `fpath` 上に置いてください:
+
+```bash
+mkdir -p ~/.zfunc
+herdr completion zsh > ~/.zfunc/_herdr
+```
+
+その後、`.zshrc` に次の内容があることを確認してください:
+
+```zsh
+fpath=(~/.zfunc $fpath)
+autoload -Uz compinit
+compinit
 ```
 
 ## サーバー
