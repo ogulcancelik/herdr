@@ -33,5 +33,5 @@ any = [
   { contains = ["esc to cancel"] },
   { contains = ["esc cancel"] },
   { contains = ["esc again to cancel"] },
-  { contains = ["esc interrupt"]}
+  { contains = ["esc interrupt"] }
 ]

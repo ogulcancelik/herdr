@@ -717,7 +717,7 @@ fn codex_osc_working_beats_weak_blocker_screen() {
 
 #[test]
 fn github_copilot_manifest_detects_working_and_blocked_states() {
-    // Test the newly added "esc interrupt" working rule
+    // Test "esc interrupt" working rule (added copilot CLI v1.0.69-2)
     let working = explain(Agent::GithubCopilot, "Copilot is working (esc interrupt)");
     assert_eq!(working.state, AgentState::Working);
     assert_eq!(
@@ -726,7 +726,7 @@ fn github_copilot_manifest_detects_working_and_blocked_states() {
     );
     assert!(working.visible_working);
 
-    // Test other existing working cancel rules to ensure consistency
+    // Test working cancel rules
     let working_cancel = explain(
         Agent::GithubCopilot,
         "Copilot working (esc again to cancel)",
