@@ -1872,6 +1872,7 @@ mod tests {
         config::Config,
         workspace::Workspace,
     };
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn app_with_test_workspace() -> (App, String) {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3625,5 +3626,149 @@ mod tests {
 
             assert_eq!(metadata_error_code(&response), "invalid_metadata_ttl");
         }
+    }
+
+    #[test]
+    fn api_pane_close_defers_non_last_pane_when_pane_confirmation_enabled() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.confirm_close_pane = true;
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let right = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        let right_public = app.public_pane_id(0, right).unwrap();
+
+        let response = app.handle_pane_close(
+            "req".into(),
+            PaneTarget {
+                pane_id: right_public,
+            },
+        );
+
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "confirmation_required");
+        assert_eq!(app.state.mode, Mode::ConfirmClose);
+        assert_eq!(app.state.pending_close, PendingClose::Pane(right));
+        assert_eq!(app.state.selected, 0);
+        assert!(app.state.workspaces[0]
+            .find_tab_index_for_pane(right)
+            .is_some());
+        assert!(app.state.workspaces[0]
+            .find_tab_index_for_pane(root)
+            .is_some());
+    }
+
+    #[test]
+    fn api_confirm_close_accept_removes_deferred_pane_and_emits_pane_closed() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.confirm_close_pane = true;
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let right = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        let right_public = app.public_pane_id(0, right).unwrap();
+        let _ = app.handle_pane_close(
+            "req".into(),
+            PaneTarget {
+                pane_id: right_public.clone(),
+            },
+        );
+        assert_eq!(app.state.pending_close, PendingClose::Pane(right));
+
+        app.handle_confirm_close_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.pending_close, PendingClose::Workspace);
+        assert!(app.state.workspaces[0]
+            .find_tab_index_for_pane(right)
+            .is_none());
+        assert!(app.state.workspaces[0]
+            .find_tab_index_for_pane(root)
+            .is_some());
+        let envelopes = app.event_hub.events_after(0);
+        assert!(envelopes.iter().any(|(_, envelope)| matches!(
+            &envelope.data,
+            EventData::PaneClosed { pane_id, .. } if pane_id == &right_public
+        )));
+        assert!(!envelopes
+            .iter()
+            .any(|(_, envelope)| matches!(envelope.event, EventKind::WorkspaceClosed)));
+    }
+
+    #[test]
+    fn api_confirm_close_accept_defers_to_workspace_when_pane_became_last() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.confirm_close_pane = true;
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let right = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        let right_public = app.public_pane_id(0, right).unwrap();
+        let _ = app.handle_pane_close(
+            "req".into(),
+            PaneTarget {
+                pane_id: right_public,
+            },
+        );
+        assert_eq!(app.state.pending_close, PendingClose::Pane(right));
+
+        // Sibling auto-exits while the confirm modal is open: the captured pane
+        // becomes the last pane in the workspace.
+        app.state.workspaces[0].close_pane(root);
+        assert!(app.state.close_pane_would_close_workspace(0, right));
+
+        app.handle_confirm_close_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        // Must NOT silently bypass the workspace guard: it routes to workspace
+        // confirmation instead of closing outright.
+        assert_eq!(app.state.mode, Mode::ConfirmClose);
+        assert_eq!(app.state.pending_close, PendingClose::Workspace);
+        assert_eq!(app.state.selected, 0);
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert!(app.state.workspaces[0]
+            .find_tab_index_for_pane(right)
+            .is_some());
+
+        // A second confirmation now closes the workspace.
+        app.handle_confirm_close_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(app.state.workspaces.is_empty());
+    }
+
+    #[test]
+    fn api_confirm_close_accept_ignores_vanished_pane_without_closing_workspace() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.confirm_close_pane = true;
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let right = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        let right_public = app.public_pane_id(0, right).unwrap();
+        let _ = app.handle_pane_close(
+            "req".into(),
+            PaneTarget {
+                pane_id: right_public,
+            },
+        );
+        assert_eq!(app.state.pending_close, PendingClose::Pane(right));
+
+        // The captured pane vanishes entirely before the user confirms.
+        app.state.workspaces[0].close_pane(right);
+        assert!(app.state.workspaces[0]
+            .find_tab_index_for_pane(right)
+            .is_none());
+
+        app.handle_confirm_close_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        // Graceful no-op: the surviving pane and workspace remain, scope reset.
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert!(app.state.workspaces[0]
+            .find_tab_index_for_pane(root)
+            .is_some());
+        assert_eq!(app.state.pending_close, PendingClose::Workspace);
+        assert_eq!(app.state.mode, Mode::Terminal);
     }
 }

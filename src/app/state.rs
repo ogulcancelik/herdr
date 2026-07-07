@@ -1288,16 +1288,11 @@ pub(crate) struct PaneFocusTarget {
     pub pane_id: PaneId,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PendingClose {
+    #[default]
     Workspace,
     Pane(PaneId),
-}
-
-impl Default for PendingClose {
-    fn default() -> Self {
-        Self::Workspace
-    }
 }
 
 /// All application state — pure data, no channels or async runtime.

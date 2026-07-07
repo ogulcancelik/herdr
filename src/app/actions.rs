@@ -1875,10 +1875,6 @@ impl AppState {
         else {
             return;
         };
-        if self.close_pane_would_close_workspace(ws_idx, pane_id) {
-            return;
-        }
-
         self.selection = None;
         self.selection_autoscroll = None;
         self.mark_session_dirty();

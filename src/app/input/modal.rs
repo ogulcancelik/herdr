@@ -659,6 +659,24 @@ pub(super) fn open_confirm_close(state: &mut AppState) {
 
 #[cfg(test)]
 pub(crate) fn confirm_close_accept(state: &mut AppState) {
+    // If the pending pane became the last pane (e.g. a sibling exited while the
+    // modal was open), closing it would close the workspace. When workspace
+    // confirmation is enabled, route back to the workspace confirmation instead
+    // of silently closing outright — keeping the confirm modal open.
+    if let PendingClose::Pane(pane_id) = state.pending_close {
+        if let Some(ws_idx) = state
+            .workspaces
+            .iter()
+            .position(|ws| ws.find_tab_index_for_pane(pane_id).is_some())
+        {
+            if state.confirm_close && state.close_pane_would_close_workspace(ws_idx, pane_id) {
+                state.selected = ws_idx;
+                state.pending_close = PendingClose::Workspace;
+                state.mode = Mode::ConfirmClose;
+                return;
+            }
+        }
+    }
     match state.pending_close {
         PendingClose::Workspace => state.close_selected_workspace(),
         PendingClose::Pane(pane_id) => state.close_pane_confirmed(pane_id),
@@ -1025,6 +1043,28 @@ impl App {
     }
 
     pub(super) fn confirm_close_accept_via_api(&mut self) {
+        // If the pending pane became the last pane (e.g. a sibling exited while
+        // the modal was open), closing it would close the workspace. When
+        // workspace confirmation is enabled, route back to the workspace
+        // confirmation instead of silently closing outright — keeping the
+        // confirm modal open.
+        if let PendingClose::Pane(pane_id) = self.state.pending_close {
+            if let Some(ws_idx) = self
+                .state
+                .workspaces
+                .iter()
+                .position(|ws| ws.find_tab_index_for_pane(pane_id).is_some())
+            {
+                if self.state.confirm_close
+                    && self.state.close_pane_would_close_workspace(ws_idx, pane_id)
+                {
+                    self.state.selected = ws_idx;
+                    self.state.pending_close = PendingClose::Workspace;
+                    self.state.mode = Mode::ConfirmClose;
+                    return;
+                }
+            }
+        }
         match self.state.pending_close {
             PendingClose::Workspace => {
                 let ws_idx = self.state.selected;
