@@ -44,6 +44,8 @@ mod settings;
 mod sidebar;
 mod terminal;
 
+#[cfg(test)]
+pub(crate) use self::modal::{confirm_close_accept, confirm_close_cancel};
 pub(crate) use self::{
     modal::{
         handle_global_menu_key, handle_keybind_help_key, handle_navigator_key,

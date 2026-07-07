@@ -7,6 +7,7 @@ use crate::{
     app::{
         state::{
             AppState, ContextMenuKind, ContextMenuState, MenuListState, Mode, NavigatorStateFilter,
+            PendingClose,
         },
         App,
     },
@@ -652,12 +653,17 @@ pub(crate) fn handle_resize_key(state: &mut AppState, raw_key: TerminalKey) {
 }
 
 pub(super) fn open_confirm_close(state: &mut AppState) {
+    state.pending_close = PendingClose::Workspace;
     state.mode = Mode::ConfirmClose;
 }
 
 #[cfg(test)]
-pub(super) fn confirm_close_accept(state: &mut AppState) {
-    state.close_selected_workspace();
+pub(crate) fn confirm_close_accept(state: &mut AppState) {
+    match state.pending_close {
+        PendingClose::Workspace => state.close_selected_workspace(),
+        PendingClose::Pane(pane_id) => state.close_pane_confirmed(pane_id),
+    }
+    state.pending_close = PendingClose::Workspace;
     if state.workspaces.is_empty() {
         state.mode = Mode::Navigate;
     } else {
@@ -665,7 +671,8 @@ pub(super) fn confirm_close_accept(state: &mut AppState) {
     }
 }
 
-pub(super) fn confirm_close_cancel(state: &mut AppState) {
+pub(crate) fn confirm_close_cancel(state: &mut AppState) {
+    state.pending_close = PendingClose::Workspace;
     state.mode = Mode::Navigate;
 }
 
@@ -1018,10 +1025,29 @@ impl App {
     }
 
     pub(super) fn confirm_close_accept_via_api(&mut self) {
-        let ws_idx = self.state.selected;
-        if ws_idx < self.state.workspaces.len() {
-            self.close_workspace_idx_via_api(ws_idx);
+        match self.state.pending_close {
+            PendingClose::Workspace => {
+                let ws_idx = self.state.selected;
+                if ws_idx < self.state.workspaces.len() {
+                    self.close_workspace_idx_via_api(ws_idx);
+                }
+            }
+            PendingClose::Pane(pane_id) => {
+                if let Some(ws_idx) = self
+                    .state
+                    .workspaces
+                    .iter()
+                    .position(|ws| ws.find_tab_index_for_pane(pane_id).is_some())
+                {
+                    let _ = self.close_pane_confirmed(
+                        "tui.confirm_close_pane".to_string(),
+                        ws_idx,
+                        pane_id,
+                    );
+                }
+            }
         }
+        self.state.pending_close = PendingClose::Workspace;
         self.state.mode = if self.state.active.is_some() {
             Mode::Terminal
         } else {

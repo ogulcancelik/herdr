@@ -14,9 +14,7 @@ use crate::api::schema::{
     PaneZoomResult, ReadFormat, ReadSource, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
-use crate::app::App;
-#[cfg(test)]
-use crate::app::Mode;
+use crate::app::{App, Mode, PendingClose};
 use crate::layout::{find_in_direction, NavDirection, PaneId};
 
 use super::super::api_helpers::{
@@ -1465,11 +1463,6 @@ impl App {
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
             return Err(pane_not_found(id, &target.pane_id));
         };
-        let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) else {
-            return Err(pane_not_found(id, &target.pane_id));
-        };
-        let workspace_id = self.public_workspace_id(ws_idx);
-        let layout_update_target = self.layout_update_target_after_pane_removal(ws_idx, pane_id);
         if self.state.close_pane_would_close_workspace(ws_idx, pane_id)
             && self.state.confirm_implicit_worktree_group_close(ws_idx)
         {
@@ -1479,11 +1472,39 @@ impl App {
                 "closing this pane would close a worktree group",
             ));
         }
+        if self.state.confirm_close_pane
+            && !self.state.close_pane_would_close_workspace(ws_idx, pane_id)
+        {
+            self.state.pending_close = PendingClose::Pane(pane_id);
+            self.state.selected = ws_idx;
+            self.state.mode = Mode::ConfirmClose;
+            return Err(encode_error(
+                id,
+                "confirmation_required",
+                "closing this pane requires confirmation",
+            ));
+        }
+
+        self.close_pane_confirmed(id, ws_idx, pane_id)
+    }
+
+    pub(crate) fn close_pane_confirmed(
+        &mut self,
+        id: String,
+        ws_idx: usize,
+        pane_id: PaneId,
+    ) -> Result<(), String> {
+        let target_pane_id = self.public_pane_id(ws_idx, pane_id);
+        let Some(public_pane_id) = target_pane_id else {
+            return Err(pane_not_found(id, &pane_id.raw().to_string()));
+        };
+        let workspace_id = self.public_workspace_id(ws_idx);
+        let layout_update_target = self.layout_update_target_after_pane_removal(ws_idx, pane_id);
         let workspace_snapshot = self.workspace_info(ws_idx);
         let terminal_id = self.state.terminal_id_for_pane(ws_idx, pane_id);
         let should_close_workspace = {
             let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
-                return Err(pane_not_found(id, &target.pane_id));
+                return Err(pane_not_found(id, &pane_id.raw().to_string()));
             };
             ws.close_pane(pane_id)
         };

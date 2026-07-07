@@ -11,7 +11,7 @@ use super::widgets::{
     action_button_row_rects, centered_popup_rect, panel_contrast_fg, render_action_button,
     render_modal_header, render_modal_shell, render_panel_shell, ActionButtonSpec,
 };
-use crate::app::{state::WorktreeOpenState, AppState, Mode};
+use crate::app::{state::WorktreeOpenState, AppState, Mode, PendingClose};
 
 const NEW_LINKED_WORKTREE_POPUP_WIDTH: u16 = 68;
 const NEW_LINKED_WORKTREE_POPUP_HEIGHT: u16 = 12;
@@ -596,6 +596,13 @@ fn render_open_worktree_search(
 }
 
 fn confirm_close_overlay_text(app: &AppState) -> (String, String) {
+    if matches!(app.pending_close, PendingClose::Pane(_)) {
+        return (
+            "Close pane?".to_string(),
+            "Pane — terminates the running process".to_string(),
+        );
+    }
+
     let ws_name = app
         .workspaces
         .get(app.selected)
@@ -757,7 +764,7 @@ pub(crate) fn confirm_close_button_rects(inner: Rect) -> (Rect, Rect) {
 #[cfg(test)]
 mod tests {
     use crate::{
-        app::{state::WorktreeCreateState, AppState},
+        app::{state::WorktreeCreateState, AppState, PendingClose},
         workspace::Workspace,
     };
     use ratatui::{backend::TestBackend, layout::Rect, Terminal};
@@ -790,6 +797,17 @@ mod tests {
 
         assert_eq!(title, "Close worktree group?");
         assert_eq!(detail, "main — 2 workspaces, 2 panes");
+    }
+
+    #[test]
+    fn confirm_close_text_reports_pane_scope() {
+        let mut app = AppState::test_new();
+        app.pending_close = PendingClose::Pane(crate::layout::PaneId::alloc());
+
+        let (title, detail) = confirm_close_overlay_text(&app);
+
+        assert_eq!(title, "Close pane?");
+        assert_eq!(detail, "Pane — terminates the running process");
     }
 
     #[test]

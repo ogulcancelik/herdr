@@ -15,8 +15,8 @@ use unicode_width::UnicodeWidthChar;
 
 use super::state::{
     text_matches_query, AgentNotificationDelivery, AppState, Mode, NavigatorRow,
-    NavigatorStateFilter, NavigatorTarget, PaneFocusTarget, PendingAgentNotification, ToastKind,
-    ToastNotification, ToastTarget, ViewLayout,
+    NavigatorStateFilter, NavigatorTarget, PaneFocusTarget, PendingAgentNotification, PendingClose,
+    ToastKind, ToastNotification, ToastTarget, ViewLayout,
 };
 
 fn is_background_completion_transition(prev_state: AgentState, new_state: AgentState) -> bool {
@@ -1776,6 +1776,7 @@ impl AppState {
     pub(crate) fn confirm_implicit_worktree_group_close(&mut self, ws_idx: usize) -> bool {
         if self.confirm_close && self.workspace_close_would_close_worktree_group(ws_idx) {
             self.selected = ws_idx;
+            self.pending_close = PendingClose::Workspace;
             self.mode = Mode::ConfirmClose;
             true
         } else {
@@ -1817,6 +1818,23 @@ impl AppState {
             }
         }
 
+        if let Some(ws_idx) = active {
+            if let Some(pane_id) = self
+                .workspaces
+                .get(ws_idx)
+                .and_then(crate::workspace::Workspace::focused_pane_id)
+            {
+                if self.confirm_close_pane
+                    && !self.close_pane_would_close_workspace(ws_idx, pane_id)
+                {
+                    self.pending_close = PendingClose::Pane(pane_id);
+                    self.selected = ws_idx;
+                    self.mode = Mode::ConfirmClose;
+                    return true;
+                }
+            }
+        }
+
         self.selection = None;
         self.selection_autoscroll = None;
         self.mark_session_dirty();
@@ -1846,6 +1864,39 @@ impl AppState {
             self.remove_unattached_terminal_ids(terminal_ids);
         }
         false
+    }
+
+    #[cfg(test)]
+    pub(crate) fn close_pane_confirmed(&mut self, pane_id: PaneId) {
+        let Some(ws_idx) = self
+            .workspaces
+            .iter()
+            .position(|ws| ws.find_tab_index_for_pane(pane_id).is_some())
+        else {
+            return;
+        };
+        if self.close_pane_would_close_workspace(ws_idx, pane_id) {
+            return;
+        }
+
+        self.selection = None;
+        self.selection_autoscroll = None;
+        self.mark_session_dirty();
+        let terminal_ids = self
+            .terminal_id_for_pane(ws_idx, pane_id)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let should_close_workspace = self
+            .workspaces
+            .get_mut(ws_idx)
+            .is_some_and(|ws| ws.close_pane(pane_id));
+        self.remove_plugin_pane_records([pane_id]);
+        if should_close_workspace {
+            self.selected = ws_idx;
+            self.close_selected_workspace();
+        } else {
+            self.remove_unattached_terminal_ids(terminal_ids);
+        }
     }
 
     #[cfg(test)]
@@ -3073,6 +3124,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::input::{confirm_close_accept, confirm_close_cancel};
     use crate::detect::{Agent, AgentState};
     use crate::workspace::Workspace;
     use ratatui::layout::Direction;
@@ -5189,6 +5241,77 @@ mod tests {
     }
 
     #[test]
+    fn close_pane_closes_immediately_when_pane_confirmation_disabled() {
+        let mut state = app_with_workspaces(&["test"]);
+        let closed = state.workspaces[0].test_split(Direction::Horizontal);
+        state.ensure_test_terminals();
+        let mode = state.mode;
+
+        let deferred = state.close_pane();
+
+        assert!(!deferred);
+        assert_eq!(state.mode, mode);
+        assert!(state.workspaces[0]
+            .find_tab_index_for_pane(closed)
+            .is_none());
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn close_pane_prompts_with_pane_scope_when_enabled() {
+        let mut state = app_with_workspaces(&["test"]);
+        state.confirm_close_pane = true;
+        let pane_id = state.workspaces[0].test_split(Direction::Horizontal);
+        state.ensure_test_terminals();
+
+        let deferred = state.close_pane();
+
+        assert!(deferred);
+        assert_eq!(state.mode, Mode::ConfirmClose);
+        assert_eq!(state.pending_close, PendingClose::Pane(pane_id));
+        assert!(state.workspaces[0]
+            .find_tab_index_for_pane(pane_id)
+            .is_some());
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn confirm_close_accept_removes_pending_pane_and_resets_scope() {
+        let mut state = app_with_workspaces(&["test"]);
+        state.confirm_close_pane = true;
+        let pane_id = state.workspaces[0].test_split(Direction::Horizontal);
+        state.ensure_test_terminals();
+
+        assert!(state.close_pane());
+        confirm_close_accept(&mut state);
+
+        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.pending_close, PendingClose::Workspace);
+        assert!(state.workspaces[0]
+            .find_tab_index_for_pane(pane_id)
+            .is_none());
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn confirm_close_cancel_keeps_pending_pane_and_resets_scope() {
+        let mut state = app_with_workspaces(&["test"]);
+        state.confirm_close_pane = true;
+        let pane_id = state.workspaces[0].test_split(Direction::Horizontal);
+        state.ensure_test_terminals();
+
+        assert!(state.close_pane());
+        confirm_close_cancel(&mut state);
+
+        assert_eq!(state.mode, Mode::Navigate);
+        assert_eq!(state.pending_close, PendingClose::Workspace);
+        assert!(state.workspaces[0]
+            .find_tab_index_for_pane(pane_id)
+            .is_some());
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
     fn pane_process_exit_publish_marks_agent_idle_before_pane_removal() {
         let mut state = app_with_workspaces(&["active", "background"]);
         state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
@@ -5323,8 +5446,32 @@ mod tests {
 
         assert!(deferred);
         assert_eq!(state.mode, Mode::ConfirmClose);
+        assert_eq!(state.pending_close, PendingClose::Workspace);
         assert_eq!(state.selected, 0);
         assert_eq!(state.workspaces.len(), 2);
+    }
+
+    #[test]
+    fn close_pane_last_pane_with_pane_confirmation_uses_workspace_confirm() {
+        let mut state = app_with_workspaces(&["parent", "child"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree(&mut state, 1);
+        state.confirm_close_pane = true;
+        state.active = Some(0);
+        state.selected = 1;
+
+        let deferred = state.close_pane();
+
+        assert!(deferred);
+        assert_eq!(state.mode, Mode::ConfirmClose);
+        assert_eq!(state.pending_close, PendingClose::Workspace);
+        assert_eq!(state.selected, 0);
+
+        confirm_close_accept(&mut state);
+
+        assert!(state.workspaces.is_empty());
+        assert_eq!(state.pending_close, PendingClose::Workspace);
+        state.assert_invariants_for_test();
     }
 
     #[test]
