@@ -205,7 +205,8 @@ fn parse_xterm_modified_special_sequence(data: &str) -> Option<TerminalKey> {
     let (code_part, modifier_part) = tilde_body.split_once(';')?;
     let (modifier_text, event_type) = split_modifier_and_event(modifier_part);
     let mod_value = modifier_text.parse::<u8>().ok()?.checked_sub(1)?;
-    let code = match code_part {
+    let primary_code = code_part.split(':').next().unwrap_or(code_part);
+    let code = match primary_code {
         "2" => KeyCode::Insert,
         "3" => KeyCode::Delete,
         "5" => KeyCode::PageUp,
@@ -674,6 +675,14 @@ mod tests {
     #[test]
     fn parse_ghostty_enhanced_delete_repeat_sequence() {
         let key = parse_terminal_key_sequence("\x1b[3;1:2~").unwrap();
+        assert_eq!(key.code, KeyCode::Delete);
+        assert_eq!(key.modifiers, KeyModifiers::empty());
+        assert_eq!(key.kind, crossterm::event::KeyEventKind::Repeat);
+    }
+
+    #[test]
+    fn parse_ghostty_subparam_delete_sequence() {
+        let key = parse_terminal_key_sequence("\x1b[3::99;1:2~").unwrap();
         assert_eq!(key.code, KeyCode::Delete);
         assert_eq!(key.modifiers, KeyModifiers::empty());
         assert_eq!(key.kind, crossterm::event::KeyEventKind::Repeat);
