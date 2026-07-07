@@ -165,15 +165,7 @@ pub(crate) fn handle_navigator_key(
     if state.navigator.search_focused {
         match key.code {
             KeyCode::Esc => {
-                if state.navigator.query.is_empty() {
-                    state.navigator.search_focused = false;
-                    leave_modal(state);
-                } else {
-                    state.navigator.query.clear();
-                    state.navigator.state_filter = None;
-                    state.navigator.search_focused = false;
-                    state.clamp_navigator_selection_from(terminal_runtimes);
-                }
+                state.navigator.search_focused = false;
             }
             KeyCode::Enter => {
                 state.accept_navigator_selection_from(terminal_runtimes);
@@ -208,19 +200,12 @@ pub(crate) fn handle_navigator_key(
 
     match key.code {
         KeyCode::Esc => {
-            if state.navigator.query.is_empty() && state.navigator.state_filter.is_none() {
-                leave_modal(state);
-            } else {
-                state.navigator.query.clear();
-                state.navigator.state_filter = None;
-                state.clamp_navigator_selection_from(terminal_runtimes);
-            }
+            leave_modal(state);
         }
         KeyCode::Enter => {
             state.accept_navigator_selection_from(terminal_runtimes);
         }
         KeyCode::Char('/') => {
-            state.navigator.query.clear();
             state.navigator.state_filter = None;
             state.navigator.search_focused = true;
             state.clamp_navigator_selection_from(terminal_runtimes);
@@ -1641,6 +1626,107 @@ mod tests {
         insert_navigator_search_text(&mut state, &terminal_runtimes, "beta");
 
         assert!(state.navigator.query.is_empty());
+    }
+
+    #[test]
+    fn navigator_empty_search_escape_returns_to_commands() {
+        let mut state = state_with_workspaces(&["alpha", "beta"]);
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.mode = Mode::Navigator;
+        state.navigator.search_focused = true;
+
+        handle_navigator_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Navigator);
+        assert!(!state.navigator.search_focused);
+        assert!(state.navigator.query.is_empty());
+
+        handle_navigator_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::empty()),
+        );
+
+        assert_eq!(
+            state.navigator.state_filter,
+            Some(NavigatorStateFilter::Working)
+        );
+        assert!(state.navigator.query.is_empty());
+
+        handle_navigator_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn navigator_search_escape_blurs_then_next_escape_closes() {
+        let mut state = state_with_workspaces(&["alpha", "beta"]);
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.mode = Mode::Navigator;
+        state.navigator.search_focused = true;
+        state.navigator.query = "a".into();
+
+        handle_navigator_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Navigator);
+        assert!(!state.navigator.search_focused);
+        assert_eq!(state.navigator.query, "a");
+
+        handle_navigator_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.navigator.selected, 1);
+        assert_eq!(state.navigator.query, "a");
+
+        handle_navigator_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Navigator);
+        assert!(state.navigator.search_focused);
+        assert_eq!(state.navigator.query, "a");
+
+        handle_navigator_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.navigator.query, "al");
+
+        handle_navigator_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Navigator);
+        assert!(!state.navigator.search_focused);
+
+        handle_navigator_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
     }
 
     #[test]

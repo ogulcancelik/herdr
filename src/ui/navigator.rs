@@ -479,17 +479,30 @@ fn render_footer(app: &AppState, frame: &mut Frame, area: Rect) {
     let p = &app.palette;
     let key = Style::default().fg(p.accent).add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(p.overlay0);
-    let line = Line::from(vec![
-        Span::styled(" enter", key),
-        Span::styled(" switch  ", dim),
-        Span::styled("/", key),
-        Span::styled(" search  ", dim),
-        Span::styled("b/w/i/d/a", key),
-        Span::styled(" states  ", dim),
-        Span::styled("j/k/↑↓", key),
-        Span::styled(" move  ", dim),
-        Span::styled("esc", key),
-        Span::styled(" close", dim),
-    ]);
+    let line = if app.navigator.search_focused {
+        Line::from(vec![
+            Span::styled(" enter", key),
+            Span::styled(" switch  ", dim),
+            Span::styled("↑↓", key),
+            Span::styled(" move  ", dim),
+            Span::styled("ctrl+u", key),
+            Span::styled(" clear  ", dim),
+            Span::styled("esc", key),
+            Span::styled(" back", dim),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" enter", key),
+            Span::styled(" switch  ", dim),
+            Span::styled("/", key),
+            Span::styled(" search  ", dim),
+            Span::styled("b/w/i/d/a", key),
+            Span::styled(" states  ", dim),
+            Span::styled("j/k/↑↓", key),
+            Span::styled(" move  ", dim),
+            Span::styled("esc", key),
+            Span::styled(" close", dim),
+        ])
+    };
     frame.render_widget(Paragraph::new(line), area);
 }
