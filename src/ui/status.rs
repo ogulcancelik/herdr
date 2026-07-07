@@ -224,7 +224,7 @@ pub(super) fn state_label(state: AgentState, seen: bool) -> &'static str {
         (AgentState::Working, _) => "working",
         (AgentState::Idle, false) => "done",
         (AgentState::Idle, true) => "idle",
-        (AgentState::Unknown, _) => "idle",
+        (AgentState::Unknown, _) => "unknown",
     }
 }
 
@@ -257,6 +257,12 @@ mod tests {
         CopyFeedback {
             message: "copied to clipboard".to_string(),
         }
+    }
+
+    #[test]
+    fn unknown_agent_state_is_labeled_unknown() {
+        assert_eq!(state_label(AgentState::Unknown, true), "unknown");
+        assert_eq!(state_label(AgentState::Unknown, false), "unknown");
     }
 
     #[test]

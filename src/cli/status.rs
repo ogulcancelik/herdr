@@ -91,6 +91,8 @@ fn print_full_status(json: bool) -> std::io::Result<i32> {
         return Ok(0);
     }
 
+    println!("summary: {}", status_summary(&server));
+    println!();
     println!("client:");
     println!("  version: {}", crate::build_info::version());
     println!(
@@ -98,12 +100,19 @@ fn print_full_status(json: bool) -> std::io::Result<i32> {
         crate::config::Config::load().config.update.channel.as_str()
     );
     println!("  protocol: {}", crate::protocol::PROTOCOL_VERSION);
+    println!(
+        "  session: {}",
+        option_label(crate::session::active_name().as_deref())
+    );
+    println!("  binary: {}", current_exe_label());
     println!();
     println!("server:");
     print_server_status_body(&server, "  ");
     println!();
     println!("update:");
     println!("  restart_needed: {}", restart_needed_label(&server));
+    println!();
+    println!("next: {}", status_next_action(&server));
 
     Ok(0)
 }
@@ -114,7 +123,9 @@ fn print_server_status(json: bool) -> std::io::Result<i32> {
         print_json(&server_status_json(&server))?;
         return Ok(0);
     }
+    println!("summary: {}", status_summary(&server));
     print_server_status_body(&server, "");
+    println!("next: {}", status_next_action(&server));
     Ok(0)
 }
 
@@ -124,12 +135,21 @@ fn print_client_status(json: bool) -> std::io::Result<()> {
         return Ok(());
     }
 
+    println!(
+        "summary: client {} on {}",
+        crate::build_info::version(),
+        crate::config::Config::load().config.update.channel.as_str()
+    );
     println!("version: {}", crate::build_info::version());
     println!(
         "channel: {}",
         crate::config::Config::load().config.update.channel.as_str()
     );
     println!("protocol: {}", crate::protocol::PROTOCOL_VERSION);
+    println!(
+        "session: {}",
+        option_label(crate::session::active_name().as_deref())
+    );
     println!("binary: {}", current_exe_label());
     Ok(())
 }
@@ -207,6 +227,50 @@ fn restart_needed_label(server: &ServerRuntimeStatus) -> &'static str {
         },
         ServerRuntimeStatus::NotRunning => "no",
     }
+}
+
+fn status_summary(server: &ServerRuntimeStatus) -> &'static str {
+    match server {
+        ServerRuntimeStatus::Running {
+            version, protocol, ..
+        } => {
+            let current_version = crate::build_info::version();
+            let version_matches = version.as_deref() == Some(current_version.as_str());
+            let protocol_matches = *protocol == Some(crate::protocol::PROTOCOL_VERSION);
+            if version_matches && protocol_matches {
+                "server running; client and server match"
+            } else if protocol_mismatch(*protocol) {
+                "server running; protocol mismatch"
+            } else if version_mismatch(version.as_deref()) {
+                "server running; restart recommended"
+            } else {
+                "server running; compatibility unknown"
+            }
+        }
+        ServerRuntimeStatus::NotRunning => "server not running",
+    }
+}
+
+fn status_next_action(server: &ServerRuntimeStatus) -> &'static str {
+    match server {
+        ServerRuntimeStatus::Running { protocol, .. } if protocol_mismatch(*protocol) => {
+            "run `herdr server stop`, then launch `herdr` again"
+        }
+        ServerRuntimeStatus::Running { version, .. } if version_mismatch(version.as_deref()) => {
+            "restart Herdr when convenient to use the installed client version"
+        }
+        ServerRuntimeStatus::Running { .. } => "no action needed",
+        ServerRuntimeStatus::NotRunning => "run `herdr` to launch the persistent session",
+    }
+}
+
+fn protocol_mismatch(protocol: Option<u32>) -> bool {
+    protocol.is_some_and(|value| value != crate::protocol::PROTOCOL_VERSION)
+}
+
+fn version_mismatch(version: Option<&str>) -> bool {
+    let current_version = crate::build_info::version();
+    version.is_some_and(|value| value != current_version.as_str())
 }
 
 #[derive(Serialize)]
@@ -328,4 +392,53 @@ fn print_status_help() {
     eprintln!("  herdr status [--json]         show local client and running server status");
     eprintln!("  herdr status server [--json]  show running server status");
     eprintln!("  herdr status client [--json]  show local client binary status");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn running_server(version: Option<String>, protocol: Option<u32>) -> ServerRuntimeStatus {
+        ServerRuntimeStatus::Running {
+            version,
+            protocol,
+            capabilities: None,
+        }
+    }
+
+    #[test]
+    fn status_summary_reports_matching_running_server() {
+        let server = running_server(
+            Some(crate::build_info::version()),
+            Some(crate::protocol::PROTOCOL_VERSION),
+        );
+
+        assert_eq!(
+            status_summary(&server),
+            "server running; client and server match"
+        );
+        assert_eq!(status_next_action(&server), "no action needed");
+    }
+
+    #[test]
+    fn status_summary_reports_not_running_server() {
+        let server = ServerRuntimeStatus::NotRunning;
+
+        assert_eq!(status_summary(&server), "server not running");
+        assert_eq!(
+            status_next_action(&server),
+            "run `herdr` to launch the persistent session"
+        );
+    }
+
+    #[test]
+    fn status_summary_prioritizes_protocol_mismatch() {
+        let server = running_server(Some(crate::build_info::version()), Some(0));
+
+        assert_eq!(status_summary(&server), "server running; protocol mismatch");
+        assert_eq!(
+            status_next_action(&server),
+            "run `herdr server stop`, then launch `herdr` again"
+        );
+    }
 }

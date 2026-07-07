@@ -1616,6 +1616,10 @@ fn status_commands_report_client_and_server_versions() {
     let full_stdout = String::from_utf8_lossy(&full.stdout);
     assert!(full_stdout.contains("client:\n"), "stdout: {full_stdout}");
     assert!(
+        full_stdout.contains("summary: server running; client and server match"),
+        "stdout: {full_stdout}"
+    );
+    assert!(
         full_stdout.contains(&format!("  version: {}", env!("CARGO_PKG_VERSION"))),
         "stdout: {full_stdout}"
     );
@@ -1637,6 +1641,10 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {full_stdout}"
     );
     assert!(
+        full_stdout.contains("next: no action needed"),
+        "stdout: {full_stdout}"
+    );
+    assert!(
         full_stdout.contains(&socket_path.display().to_string()),
         "stdout: {full_stdout}"
     );
@@ -1644,6 +1652,10 @@ fn status_commands_report_client_and_server_versions() {
     let server = run_cli(&socket_path, &["status", "server"]);
     assert!(server.status.success());
     let server_stdout = String::from_utf8_lossy(&server.stdout);
+    assert!(
+        server_stdout.contains("summary: server running; client and server match"),
+        "stdout: {server_stdout}"
+    );
     assert!(
         server_stdout.contains("status: running"),
         "stdout: {server_stdout}"
@@ -1660,6 +1672,10 @@ fn status_commands_report_client_and_server_versions() {
     let client = run_cli(&socket_path, &["status", "client"]);
     assert!(client.status.success());
     let client_stdout = String::from_utf8_lossy(&client.stdout);
+    assert!(
+        client_stdout.contains("summary: client "),
+        "stdout: {client_stdout}"
+    );
     assert!(
         client_stdout.contains(&format!("version: {}", env!("CARGO_PKG_VERSION"))),
         "stdout: {client_stdout}"
@@ -1713,8 +1729,16 @@ fn status_reports_not_running_when_server_socket_is_missing() {
     let status = run_cli(&socket_path, &["status"]);
     assert!(status.status.success());
     let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("summary: server not running"),
+        "stdout: {stdout}"
+    );
     assert!(stdout.contains("  status: not running"), "stdout: {stdout}");
     assert!(stdout.contains("  restart_needed: no"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("next: run `herdr` to launch the persistent session"),
+        "stdout: {stdout}"
+    );
     assert!(
         stdout.contains(&socket_path.display().to_string()),
         "stdout: {stdout}"

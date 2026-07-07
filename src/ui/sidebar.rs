@@ -845,7 +845,12 @@ fn render_workspace_list(
 
     let metrics = workspace_list_scroll_metrics(app, area);
     let scrollbar_rect = workspace_list_scrollbar_rect(app, area);
+    let body = workspace_list_body_rect(area, scrollbar_rect.is_some());
     let cards = &app.view.workspace_card_areas;
+
+    if cards.is_empty() {
+        render_sidebar_empty_state(frame, body, "no spaces", "nothing open yet", p);
+    }
 
     for card in cards {
         let i = card.ws_idx;
@@ -1060,6 +1065,11 @@ fn render_agent_detail(
         return;
     }
 
+    if details.is_empty() {
+        render_sidebar_empty_state(frame, body, "no agents", "waiting for agent activity", p);
+        return;
+    }
+
     let mut row_y = body.y;
     let body_bottom = body.y + body.height;
     for detail in details.iter().skip(app.agent_panel_scroll) {
@@ -1135,6 +1145,44 @@ fn render_agent_detail(
 
     if let Some(track) = scrollbar_rect {
         render_scrollbar(frame, metrics, track, p.surface_dim, p.overlay0, "▕");
+    }
+}
+
+fn render_sidebar_empty_state(
+    frame: &mut Frame,
+    area: Rect,
+    title: &'static str,
+    detail: &'static str,
+    p: &Palette,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let has_detail = area.height >= 2 && area.width >= 14;
+    let title_y = if has_detail {
+        area.y + area.height.saturating_sub(2) / 2
+    } else {
+        area.y + area.height / 2
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            title,
+            Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+        ))
+        .alignment(Alignment::Center),
+        Rect::new(area.x, title_y, area.width, 1),
+    );
+
+    if has_detail {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                detail,
+                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+            ))
+            .alignment(Alignment::Center),
+            Rect::new(area.x, title_y.saturating_add(1), area.width, 1),
+        );
     }
 }
 
@@ -1215,6 +1263,32 @@ mod tests {
 
         assert_eq!(toggle.x, area.x + area.width - 2);
         assert_eq!(toggle.y, area.y + area.height - 1);
+    }
+
+    #[test]
+    fn sidebar_empty_state_renders_title_and_detail() {
+        let app = crate::app::state::AppState::test_new();
+        let mut terminal =
+            Terminal::new(TestBackend::new(30, 6)).expect("test terminal should initialize");
+
+        terminal
+            .draw(|frame| {
+                render_sidebar_empty_state(
+                    frame,
+                    Rect::new(0, 0, 30, 6),
+                    "no agents",
+                    "waiting for agent activity",
+                    &app.palette,
+                )
+            })
+            .expect("empty state should render");
+
+        let rendered = buffer_text(terminal.backend().buffer());
+        assert!(rendered.contains("no agents"), "rendered: {rendered}");
+        assert!(
+            rendered.contains("waiting for agent activity"),
+            "rendered: {rendered}"
+        );
     }
 
     #[test]
@@ -1467,6 +1541,14 @@ mod tests {
                 render_workspace_list(&app, &runtimes, frame, Rect::new(0, 0, 15, 6), false)
             })
             .expect("workspace list should render");
+    }
+
+    fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+        buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
     }
 
     fn workspace_with_worktree_space(
