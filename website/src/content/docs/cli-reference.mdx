@@ -179,7 +179,16 @@ herdr pane close <pane_id>
 For pane commands that accept `--current`, Herdr uses the calling pane's
 `HERDR_PANE_ID` when the command runs inside a Herdr pane. For `pane split`,
 an explicit pane id or `--pane ID` splits that pane, `--current` splits the
-calling pane, and an omitted target keeps using the UI-focused pane.
+calling pane, and an omitted target defaults to the calling pane when
+`HERDR_PANE_ID` is set. Outside a Herdr pane, an omitted target falls back to
+the UI-focused pane.
+
+`tab create` without `--workspace` defaults to `HERDR_WORKSPACE_ID` when the
+CLI runs inside a Herdr pane.
+
+`agent start` without `--tab` passes the calling pane through the socket API
+as `caller_pane_id`, so `--split` anchors to your pane instead of the
+UI-focused pane. `--tab` still targets the requested tab.
 
 Read output:
 

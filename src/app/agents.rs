@@ -150,6 +150,31 @@ impl App {
                 extra_env,
                 focus,
             )?
+        } else if let Some(caller_pane_id) = params.caller_pane_id {
+            let (ws_idx, target_pane) =
+                self.parse_pane_id(&caller_pane_id)
+                    .ok_or_else(|| AgentStartError::TargetNotFound {
+                        target: caller_pane_id.clone(),
+                    })?;
+            if let Some(workspace_id) = params.workspace_id.as_deref() {
+                let requested_ws_idx = self.parse_workspace_id(workspace_id).ok_or_else(|| {
+                    AgentStartError::TargetNotFound {
+                        target: workspace_id.to_string(),
+                    }
+                })?;
+                if requested_ws_idx != ws_idx {
+                    return Err(AgentStartError::PlacementConflict);
+                }
+            }
+            self.spawn_agent_split(
+                ws_idx,
+                target_pane,
+                params.split.unwrap_or(SplitDirection::Right),
+                cwd,
+                &argv,
+                extra_env,
+                focus,
+            )?
         } else if let Some(workspace_id) = params.workspace_id {
             let ws_idx = self.parse_workspace_id(&workspace_id).ok_or_else(|| {
                 AgentStartError::TargetNotFound {

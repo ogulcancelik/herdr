@@ -45,13 +45,12 @@ important: ids can compact when tabs, panes, or workspaces are closed. do not tr
 
 ## discover yourself
 
-see what panes exist and which one is focused:
+your pane is the one running this command (`HERDR_PANE_ID`), not necessarily the UI-focused pane. if the operator clicked another tab while you work, `herdr pane list` may show a different pane as `focused`.
 
 ```bash
+herdr pane current
 herdr pane list
 ```
-
-the focused pane is yours. other panes are your neighbors.
 
 list workspaces:
 
@@ -116,7 +115,13 @@ herdr pane read 1-1 --source recent --lines 50
 split your pane to the right and keep focus on your current pane:
 
 ```bash
-herdr pane split 1-2 --direction right --no-focus
+herdr pane split --current --direction right --no-focus
+```
+
+or pass your pane id explicitly:
+
+```bash
+herdr pane split "$HERDR_PANE_ID" --direction right --no-focus
 ```
 
 that prints json with the new pane nested at `result.pane.pane_id`. parse that value, then run a command in that pane:

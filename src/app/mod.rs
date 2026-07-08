@@ -3902,6 +3902,7 @@ mod tests {
                 cwd: None,
                 workspace_id: None,
                 tab_id: None,
+                caller_pane_id: None,
                 split: Some(crate::api::schema::SplitDirection::Right),
                 focus: true,
                 argv: vec![exiting_test_command().into()],
@@ -3917,6 +3918,49 @@ mod tests {
 
         assert_eq!(app.state.active, Some(0));
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(root));
+
+        let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
+        for (_terminal_id, runtime) in runtimes {
+            runtime.shutdown();
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_start_splits_from_caller_pane_when_ui_focus_differs() {
+        let mut app = test_app();
+        let workspace = Workspace::test_new("agent-start-caller");
+        let root = workspace.tabs[0].root_pane;
+        let right = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.workspaces[0].tabs[0].layout.focus_pane(root);
+        let right_public = app.public_pane_id(0, right).unwrap();
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_agent_start_caller".into(),
+            method: crate::api::schema::Method::AgentStart(crate::api::schema::AgentStartParams {
+                name: "worker".into(),
+                cwd: None,
+                workspace_id: None,
+                tab_id: None,
+                caller_pane_id: Some(right_public.clone()),
+                split: Some(crate::api::schema::SplitDirection::Right),
+                focus: false,
+                argv: vec![exiting_test_command().into()],
+                env: Default::default(),
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["result"]["type"], "agent_started");
+        let started_pane = response["result"]["agent"]["pane_id"].as_str().unwrap();
+        let root_public = app.public_pane_id(0, root).unwrap();
+        assert_ne!(started_pane, root_public);
+        assert_ne!(started_pane, right_public);
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(root));
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 3);
 
         let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
         for (_terminal_id, runtime) in runtimes {

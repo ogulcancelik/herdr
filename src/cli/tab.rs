@@ -51,6 +51,9 @@ fn tab_list(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn tab_create(args: &[String]) -> std::io::Result<i32> {
+    let env_workspace_id = std::env::var("HERDR_WORKSPACE_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
     let mut workspace_id = None;
     let mut cwd = None;
     let mut focus = false;
@@ -112,6 +115,10 @@ fn tab_create(args: &[String]) -> std::io::Result<i32> {
                 return Ok(2);
             }
         }
+    }
+
+    if workspace_id.is_none() {
+        workspace_id = env_workspace_id.map(super::normalize_workspace_id);
     }
 
     super::runtime::tab_create(TabCreateParams {

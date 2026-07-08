@@ -282,6 +282,9 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     }
 
+    let env_pane_id = std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
     let mut cwd = None;
     let mut workspace_id = None;
     let mut tab_id = None;
@@ -361,6 +364,11 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
             cwd,
             workspace_id,
             tab_id,
+            caller_pane_id: if tab_id.is_none() {
+                env_pane_id.map(super::normalize_pane_id)
+            } else {
+                None
+            },
             split,
             focus,
             argv: args[separator + 1..].to_vec(),

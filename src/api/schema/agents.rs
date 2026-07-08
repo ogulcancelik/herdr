@@ -39,6 +39,8 @@ pub struct AgentStartParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_pane_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split: Option<SplitDirection>,
     #[serde(default)]
     pub focus: bool,

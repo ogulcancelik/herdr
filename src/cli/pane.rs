@@ -618,6 +618,10 @@ fn parse_pane_split_args(
         );
     };
 
+    if pane_id.is_none() {
+        pane_id = env_pane_id.map(super::normalize_pane_id);
+    }
+
     Ok(PaneSplitParams {
         workspace_id: None,
         target_pane_id: pane_id,
@@ -1483,9 +1487,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_pane_split_args_omitted_target_keeps_focused_fallback() {
+    fn parse_pane_split_args_omitted_target_defaults_to_caller_pane() {
         let params =
             parse_pane_split_args(&args(&["--direction", "down"]), Some("issue-1")).unwrap();
+
+        assert_eq!(params.target_pane_id, Some("issue-1".into()));
+        assert_eq!(params.direction, crate::api::schema::SplitDirection::Down);
+    }
+
+    #[test]
+    fn parse_pane_split_args_omitted_target_without_env_keeps_focused_fallback() {
+        let params = parse_pane_split_args(&args(&["--direction", "down"]), None).unwrap();
 
         assert_eq!(params.target_pane_id, None);
         assert_eq!(params.direction, crate::api::schema::SplitDirection::Down);
