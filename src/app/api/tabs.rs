@@ -155,6 +155,13 @@ impl App {
         };
         tab.set_custom_name(params.label.clone());
         crate::logging::tab_renamed(&workspace_id, &tab_id);
+        if self.state.active == Some(ws_idx) {
+            // Reflow the tab bar so the new label width takes effect immediately.
+            // The tab bar renders into cached hit areas; without this refresh the
+            // old geometry lingers until the next refresh (e.g. a tab switch),
+            // leaving the visible label stale. Mirrors handle_tab_move.
+            self.state.refresh_tab_bar_view();
+        }
         self.schedule_session_save();
         self.emit_event(EventEnvelope {
             event: EventKind::TabRenamed,
@@ -340,6 +347,37 @@ mod tests {
                     && tabs[2].tab_id == moved_id
             )
         }));
+    }
+
+    #[test]
+    fn api_tab_rename_reflows_active_tab_bar() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        let workspace = Workspace::test_new("tabs");
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.view.tab_bar_rect = ratatui::layout::Rect::new(0, 0, 60, 1);
+        app.state.refresh_tab_bar_view();
+
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+        let width_before = app.state.view.tab_hit_areas[0].width;
+
+        app.handle_tab_rename(
+            "req".into(),
+            TabRenameParams {
+                tab_id,
+                label: "a much longer custom tab label".into(),
+            },
+        );
+
+        let width_after = app.state.view.tab_hit_areas[0].width;
+        assert!(
+            width_after > width_before,
+            "tab bar should reflow to the new label width immediately: \
+             before={width_before}, after={width_after}"
+        );
     }
 
     #[tokio::test]
