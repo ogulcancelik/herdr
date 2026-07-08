@@ -15,7 +15,7 @@ use super::config_edit::{
 use super::env::{
     claude_dir, codex_dir, copilot_dir, cursor_dir, devin_dir, droid_dir, hermes_dir,
     hermes_plugin_dir, kilo_dir, kimi_dir, mastracode_dir, omp_extension_dir, opencode_dir,
-    pi_extension_dir, qodercli_dir,
+    pi_extension_dir, qodercli_dir, grok_dir,
 };
 use super::file_ops::{
     make_executable, remove_dir_all_if_exists, remove_file_if_exists, remove_legacy_bash_hook_file,
@@ -27,7 +27,7 @@ use super::types::{
     HermesInstallPaths, HermesUninstallResult, KiloInstallPaths, KiloUninstallResult,
     KimiInstallPaths, KimiUninstallResult, MastracodeInstallPaths, MastracodeUninstallResult,
     OmpInstallPaths, OmpUninstallResult, OpenCodeInstallPaths, OpenCodeUninstallResult,
-    PiUninstallResult, QodercliInstallPaths, QodercliUninstallResult,
+    PiUninstallResult, QodercliInstallPaths, QodercliUninstallResult, GrokInstallPaths, GrokUninstallResult,
 };
 use super::{
     CLAUDE_HOOK_ASSET, CLAUDE_HOOK_INSTALL_NAME, CODEX_HOOK_ASSET, CODEX_HOOK_INSTALL_NAME,
@@ -43,6 +43,7 @@ use super::{
     OMP_EXTENSION_INSTALL_NAME, OPENCODE_PLUGIN_ASSET, OPENCODE_PLUGIN_INSTALL_NAME,
     PI_EXTENSION_ASSET, PI_EXTENSION_INSTALL_NAME, QODERCLI_HOOK_ASSET, QODERCLI_HOOK_EVENTS,
     QODERCLI_HOOK_INSTALL_NAME, QODERCLI_REMOVED_LIFECYCLE_HOOK_EVENTS,
+    GROK_HOOK_ASSET, GROK_HOOK_INSTALL_NAME,
 };
 
 pub(crate) fn install_pi() -> io::Result<PathBuf> {
@@ -1016,6 +1017,48 @@ pub(crate) fn install_cursor() -> io::Result<CursorInstallPaths> {
     })
 }
 
+pub(crate) fn install_grok() -> io::Result<GrokInstallPaths> {
+    let dir = grok_dir()?;
+    if !dir.is_dir() {
+        // Create base dir so hooks subdir can be made.
+        fs::create_dir_all(&dir)?;
+    }
+
+    let hook_path = dir.join(GROK_HOOK_INSTALL_NAME);
+    fs::write(&hook_path, GROK_HOOK_ASSET)?;
+    make_executable(&hook_path)?;
+
+    let hooks_dir = dir.join("hooks");
+    fs::create_dir_all(&hooks_dir)?;
+
+    let hooks_json_path = hooks_dir.join("herdr-agent-state.json");
+    // Write a dedicated hooks registration file. Grok loads all *.json under ~/.grok/hooks/
+    // Use Grok's nested hooks format with SessionStart.
+    let quoted = shell_single_quote(&hook_path.display().to_string());
+    let command = format!("bash {} session", quoted);
+    let hooks_json = json!({
+        "hooks": {
+            "SessionStart": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": command,
+                            "timeout": 10
+                        }
+                    ]
+                }
+            ]
+        }
+    });
+    fs::write(&hooks_json_path, serde_json::to_string_pretty(&hooks_json)?)?;
+
+    Ok(GrokInstallPaths {
+        hook_path,
+        hooks_json_path,
+    })
+}
+
 pub(crate) fn uninstall_qodercli() -> io::Result<QodercliUninstallResult> {
     let hook_path = qodercli_dir()?
         .join("hooks")
@@ -1105,6 +1148,22 @@ pub(crate) fn uninstall_cursor() -> io::Result<CursorUninstallResult> {
         hooks_path,
         removed_hook_file,
         updated_hooks,
+    })
+}
+
+pub(crate) fn uninstall_grok() -> io::Result<GrokUninstallResult> {
+    let home = grok_dir()?;
+    let hook_path = home.join(GROK_HOOK_INSTALL_NAME);
+    let hooks_json_path = home.join("hooks").join("herdr-agent-state.json");
+
+    let removed_hook_file = remove_file_if_exists(&hook_path)?;
+    let removed_hooks_json = remove_file_if_exists(&hooks_json_path)?;
+
+    Ok(GrokUninstallResult {
+        hook_path,
+        hooks_json_path,
+        removed_hook_file,
+        removed_hooks_json,
     })
 }
 

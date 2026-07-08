@@ -26,6 +26,7 @@ herdr integration install hermes
 herdr integration install qodercli
 herdr integration install cursor
 herdr integration install mastracode
+herdr integration install grok
 ```
 
 ## Uninstall integrations
@@ -45,6 +46,7 @@ herdr integration uninstall hermes
 herdr integration uninstall qodercli
 herdr integration uninstall cursor
 herdr integration uninstall mastracode
+herdr integration uninstall grok
 ```
 
 ## How Herdr uses integrations
@@ -255,6 +257,20 @@ The hook reports MastraCode lifecycle state and thread identity to Herdr for aut
 Herdr uses `~/.mastracode`. Install writes `hooks/herdr-agent-state.sh` and adds Herdr command entries to `hooks.json`, creating the directory when missing. Uninstall removes the matching hook entries and deletes the hook script.
 
 Herdr resumes stored MastraCode threads with `mastracode --thread <id>`.
+
+## Grok Build (grok)
+
+Install the Grok Build integration:
+
+```
+herdr integration install grok
+```
+
+*Terminal window*
+
+The integration reports native Grok session identity for restore via `grok --resume <id>`. Lifecycle state still comes from Herdr’s screen manifest detection.
+
+Herdr uses `~/.grok` (override with `GROK_CONFIG_DIR`). Install writes `herdr-agent-state.sh` and a registration under `~/.grok/hooks/herdr-agent-state.json`. Uninstall removes the hook script and the registration file.
 
 ## Custom status labels
 

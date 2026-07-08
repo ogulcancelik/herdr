@@ -96,6 +96,20 @@ pub(crate) struct MastracodeUninstallResult {
 }
 
 #[derive(Debug)]
+pub(crate) struct GrokInstallPaths {
+    pub hook_path: PathBuf,
+    pub hooks_json_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct GrokUninstallResult {
+    pub hook_path: PathBuf,
+    pub hooks_json_path: PathBuf,
+    pub removed_hook_file: bool,
+    pub removed_hooks_json: bool,
+}
+
+#[derive(Debug)]
 pub(crate) struct QodercliUninstallResult {
     pub hook_path: PathBuf,
     pub settings_path: PathBuf,

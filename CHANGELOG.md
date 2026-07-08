@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Added Grok Build (`grok`) integration: `herdr integration install grok` installs a SessionStart hook that reports native session ids for resume with `grok --resume <id>`. State detection continues to use the bundled grok screen manifest. (#xxxx)
+
 ## [0.7.3] - 2026-07-08
 
 ### Fixed
