@@ -48,42 +48,13 @@ function importFresh(modulePath: string) {
   return import(`${modulePath}?test=${importCounter}`);
 }
 
-for (const integration of integrations) {
-  test(`${integration.name} reload preserves working state when the agent is active`, async () => {
-    const recordingSocketPath = join(
-      tmpdir(),
-      `herdr-${integration.name.toLowerCase().replaceAll(" ", "-")}-${process.pid}.sock`,
-    );
-    socketPath = recordingSocketPath;
-    await rm(recordingSocketPath, { force: true });
+type Handler = (event: unknown, context: unknown) => unknown;
 
-    const requests: unknown[] = [];
-    const recordingServer = createServer((socket) => {
-      let input = "";
-      socket.setEncoding("utf8");
-      socket.on("data", (chunk) => {
-        input += chunk;
-        const newline = input.indexOf("\n");
-        if (newline === -1) {
-          return;
-        }
-        requests.push(JSON.parse(input.slice(0, newline)));
-        socket.end("{}\n");
-      });
-    });
-    server = recordingServer;
-    await new Promise<void>((resolve, reject) => {
-      recordingServer.once("error", reject);
-      recordingServer.listen(recordingSocketPath, resolve);
-    });
-
-    process.env.HERDR_ENV = "1";
-    process.env.HERDR_SOCKET_PATH = recordingSocketPath;
-    process.env.HERDR_PANE_ID = "test:p1";
-
-    type Handler = (event: unknown, context: unknown) => unknown;
-    const handlers = new Map<string, Handler>();
-    const pi = {
+function createExtensionHarness() {
+  const handlers = new Map<string, Handler>();
+  return {
+    handlers,
+    pi: {
       on(event: string, handler: Handler) {
         handlers.set(event, handler);
       },
@@ -92,7 +63,50 @@ for (const integration of integrations) {
           return () => {};
         },
       },
-    };
+    },
+  };
+}
+
+function configureIntegrationEnvironment(recordingSocketPath: string) {
+  process.env.HERDR_ENV = "1";
+  process.env.HERDR_SOCKET_PATH = recordingSocketPath;
+  process.env.HERDR_PANE_ID = "test:p1";
+}
+
+async function startRecordingServer(name: string): Promise<unknown[]> {
+  const recordingSocketPath = join(tmpdir(), `herdr-${name}-${process.pid}.sock`);
+  socketPath = recordingSocketPath;
+  await rm(recordingSocketPath, { force: true });
+
+  const requests: unknown[] = [];
+  const recordingServer = createServer((socket) => {
+    let input = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      input += chunk;
+      const newline = input.indexOf("\n");
+      if (newline === -1) {
+        return;
+      }
+      requests.push(JSON.parse(input.slice(0, newline)));
+      socket.end("{}\n");
+    });
+  });
+  server = recordingServer;
+  await new Promise<void>((resolve, reject) => {
+    recordingServer.once("error", reject);
+    recordingServer.listen(recordingSocketPath, resolve);
+  });
+  configureIntegrationEnvironment(recordingSocketPath);
+  return requests;
+}
+
+for (const integration of integrations) {
+  test(`${integration.name} reload preserves working state when the agent is active`, async () => {
+    const requests = await startRecordingServer(
+      integration.name.toLowerCase().replaceAll(" ", "-"),
+    );
+    const { handlers, pi } = createExtensionHarness();
 
     const { default: install } = await importFresh(integration.modulePath);
     install(pi);
@@ -133,6 +147,40 @@ for (const integration of integrations) {
   });
 }
 
+test("Pi reports the session replacement source", async () => {
+  const requests = await startRecordingServer("pi-session-source");
+  const { handlers, pi } = createExtensionHarness();
+
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  const sessionStart = handlers.get("session_start");
+  expect(sessionStart).toBeDefined();
+  await sessionStart?.(
+    { reason: "new" },
+    {
+      hasUI: true,
+      isIdle: () => true,
+      sessionManager: {
+        getSessionFile: () => "/tmp/pi-new.jsonl",
+        getSessionId: () => "pi-new",
+      },
+    },
+  );
+
+  const reportedSession = () =>
+    requests.find((request) => isRecord(request) && request.method === "pane.report_agent_session");
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline && reportedSession() === undefined) {
+    await Bun.sleep(5);
+  }
+
+  const request = reportedSession();
+  expect(request).toBeDefined();
+  expect(isRecord(request) && isRecord(request.params) ? request.params.session_start_source : null)
+    .toBe("new");
+});
+
 test("Pi retries working state after an unanswered socket attempt", async () => {
   const recordingSocketPath = join(tmpdir(), `herdr-pi-retry-${process.pid}.sock`);
   socketPath = recordingSocketPath;
@@ -167,22 +215,8 @@ test("Pi retries working state after an unanswered socket attempt", async () => 
     recordingServer.listen(recordingSocketPath, resolve);
   });
 
-  process.env.HERDR_ENV = "1";
-  process.env.HERDR_SOCKET_PATH = recordingSocketPath;
-  process.env.HERDR_PANE_ID = "test:p1";
-
-  type Handler = (event: unknown, context: unknown) => unknown;
-  const handlers = new Map<string, Handler>();
-  const pi = {
-    on(event: string, handler: Handler) {
-      handlers.set(event, handler);
-    },
-    events: {
-      on() {
-        return () => {};
-      },
-    },
-  };
+  configureIntegrationEnvironment(recordingSocketPath);
+  const { handlers, pi } = createExtensionHarness();
 
   const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
   install(pi);

@@ -797,6 +797,26 @@ impl TerminalState {
         }
     }
 
+    fn forget_stale_full_lifecycle_hook_session(
+        &mut self,
+        source: &str,
+        agent_label: &str,
+        session_ref: &crate::agent_resume::AgentSessionRef,
+    ) {
+        let remove_source = self
+            .stale_full_lifecycle_hook_sessions
+            .get_mut(source)
+            .is_some_and(|stale_sessions| {
+                stale_sessions.retain(|stale| {
+                    stale.agent_label != agent_label || &stale.session_ref != session_ref
+                });
+                stale_sessions.is_empty()
+            });
+        if remove_source {
+            self.stale_full_lifecycle_hook_sessions.remove(source);
+        }
+    }
+
     fn detected_state_observed_before_release_suppression(
         &self,
         detected_agent: Option<Agent>,
@@ -913,6 +933,11 @@ impl TerminalState {
                 Some("startup" | "clear" | "resume" | "compact")
             ) | ("herdr:opencode", "opencode", Some("new"))
                 | (
+                    "herdr:pi",
+                    "pi",
+                    Some("startup" | "new" | "resume" | "fork")
+                )
+                | (
                     "herdr:omp",
                     "omp",
                     Some("startup" | "new" | "resume" | "fork")
@@ -1001,6 +1026,9 @@ impl TerminalState {
         let previous_state = self.state;
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let previous_session = self.current_session_identity_for_persistence();
+        if session_replacement_allowed || foreground_takeover_allowed {
+            self.forget_stale_full_lifecycle_hook_session(&source, &agent_label, &session_ref);
+        }
         if let Some(replaced_hook_session) = replaced_hook_session {
             self.remember_stale_full_lifecycle_hook_session(
                 source.clone(),
@@ -1485,6 +1513,175 @@ mod tests {
             );
 
             assert_eq!(terminal.state, AgentState::Working);
+        }
+    }
+
+    #[test]
+    fn pi_session_replacement_reports_reanchor_full_lifecycle_authority() {
+        for reason in ["startup", "new", "resume", "fork"] {
+            let mut terminal = test_terminal();
+            let old_session = test_session_path(&format!("pi-{reason}-old.jsonl"));
+            let new_session = test_session_path(&format!("pi-{reason}-new.jsonl"));
+            terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+            terminal.set_hook_authority_with_session_ref(
+                "herdr:pi".into(),
+                "pi".into(),
+                AgentState::Idle,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::path(old_session),
+                Some(10),
+            );
+
+            let session_report = terminal.set_agent_session_ref_for_session_start(
+                "herdr:pi".into(),
+                "pi".into(),
+                crate::agent_resume::AgentSessionRef::path(new_session.clone()),
+                Some(11),
+                Some(reason.into()),
+            );
+
+            assert!(
+                session_report.is_some(),
+                "{reason} should replace the previous Pi session"
+            );
+            assert!(terminal.hook_authority.is_none());
+
+            let working = terminal.set_hook_authority_with_session_ref(
+                "herdr:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::path(new_session.clone()),
+                Some(12),
+            );
+
+            assert!(
+                working.is_some(),
+                "{reason} should accept working for the replacement session"
+            );
+            assert_eq!(terminal.state, AgentState::Working);
+            assert_eq!(
+                terminal.hook_authority.as_ref().unwrap().session_ref,
+                crate::agent_resume::AgentSessionRef::path(new_session)
+            );
+        }
+    }
+
+    #[test]
+    fn pi_resume_reactivates_a_previously_stale_session() {
+        let mut terminal = test_terminal();
+        let session_a = test_session_path("pi-session-a.jsonl");
+        let session_b = test_session_path("pi-session-b.jsonl");
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        terminal.set_hook_authority_with_session_ref(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Idle,
+            None,
+            None,
+            crate::agent_resume::AgentSessionRef::path(session_a.clone()),
+            Some(10),
+        );
+
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:pi".into(),
+            "pi".into(),
+            crate::agent_resume::AgentSessionRef::path(session_b.clone()),
+            Some(11),
+            Some("new".into()),
+        );
+        terminal.set_hook_authority_with_session_ref(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Idle,
+            None,
+            None,
+            crate::agent_resume::AgentSessionRef::path(session_b.clone()),
+            Some(12),
+        );
+
+        let resumed = terminal.set_agent_session_ref_for_session_start(
+            "herdr:pi".into(),
+            "pi".into(),
+            crate::agent_resume::AgentSessionRef::path(session_a.clone()),
+            Some(13),
+            Some("resume".into()),
+        );
+        let working = terminal.set_hook_authority_with_session_ref(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Working,
+            None,
+            None,
+            crate::agent_resume::AgentSessionRef::path(session_a.clone()),
+            Some(14),
+        );
+
+        assert!(resumed.is_some());
+        assert!(working.is_some());
+        assert_eq!(terminal.state, AgentState::Working);
+        assert_eq!(
+            terminal.hook_authority.as_ref().unwrap().session_ref,
+            crate::agent_resume::AgentSessionRef::path(session_a)
+        );
+
+        let late_session_b = terminal.set_hook_authority_with_session_ref(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Idle,
+            None,
+            None,
+            crate::agent_resume::AgentSessionRef::path(session_b),
+            Some(15),
+        );
+        assert!(late_session_b.is_none());
+        assert_eq!(terminal.state, AgentState::Working);
+    }
+
+    #[test]
+    fn pi_non_replacement_reports_preserve_full_lifecycle_authority() {
+        for reason in [None, Some("reload")] {
+            let mut terminal = test_terminal();
+            let old_session = test_session_path("pi-current.jsonl");
+            let new_session = test_session_path("pi-unexpected.jsonl");
+            terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+            terminal.set_hook_authority_with_session_ref(
+                "herdr:pi".into(),
+                "pi".into(),
+                AgentState::Idle,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::path(old_session.clone()),
+                Some(10),
+            );
+
+            let session_report = terminal.set_agent_session_ref_for_session_start(
+                "herdr:pi".into(),
+                "pi".into(),
+                crate::agent_resume::AgentSessionRef::path(new_session.clone()),
+                Some(11),
+                reason.map(str::to_string),
+            );
+            let working = terminal.set_hook_authority_with_session_ref(
+                "herdr:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::path(new_session),
+                Some(12),
+            );
+
+            assert!(session_report.is_none());
+            assert!(working.is_none());
+            assert_eq!(terminal.state, AgentState::Idle);
+            assert_eq!(
+                terminal.hook_authority.as_ref().unwrap().session_ref,
+                crate::agent_resume::AgentSessionRef::path(old_session),
+                "{reason:?} must not replace the current Pi session"
+            );
         }
     }
 

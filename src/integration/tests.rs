@@ -733,6 +733,36 @@ fn outdated_integrations_treat_missing_version_marker_as_legacy() {
 }
 
 #[test]
+fn outdated_integrations_detect_previous_pi_version() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let ext_dir = home.join(".pi/agent/extensions");
+    fs::create_dir_all(&ext_dir).unwrap();
+    let extension_path = ext_dir.join(PI_EXTENSION_INSTALL_NAME);
+    fs::write(
+        &extension_path,
+        "// HERDR_INTEGRATION_ID=pi\n// HERDR_INTEGRATION_VERSION=4\n",
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+
+    let outdated = outdated_installed_integrations();
+
+    assert_eq!(outdated.len(), 1);
+    assert_eq!(
+        outdated[0].target,
+        crate::api::schema::IntegrationTarget::Pi
+    );
+    assert_eq!(outdated[0].path, extension_path);
+    assert_eq!(outdated[0].installed_version, Some(4));
+    assert_eq!(outdated[0].expected_version, PI_INTEGRATION_VERSION);
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
 fn outdated_integrations_accept_current_version_marker() {
     let _lock = integration_env_lock();
     let base = unique_base();
@@ -2480,6 +2510,48 @@ fn install_hermes_errors_when_config_dir_missing() {
 
     std::env::remove_var("HOME");
     let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn bundled_integration_asset_versions_match_expected_versions() {
+    for (name, asset, expected_version) in [
+        ("pi", PI_EXTENSION_ASSET, PI_INTEGRATION_VERSION),
+        ("omp", OMP_EXTENSION_ASSET, OMP_INTEGRATION_VERSION),
+        ("claude", CLAUDE_HOOK_ASSET, CLAUDE_INTEGRATION_VERSION),
+        ("codex", CODEX_HOOK_ASSET, CODEX_INTEGRATION_VERSION),
+        ("kimi", KIMI_HOOK_ASSET, KIMI_INTEGRATION_VERSION),
+        ("copilot", COPILOT_HOOK_ASSET, COPILOT_INTEGRATION_VERSION),
+        ("devin", DEVIN_HOOK_ASSET, DEVIN_INTEGRATION_VERSION),
+        ("droid", DROID_HOOK_ASSET, DROID_INTEGRATION_VERSION),
+        (
+            "opencode",
+            OPENCODE_PLUGIN_ASSET,
+            OPENCODE_INTEGRATION_VERSION,
+        ),
+        ("kilo", KILO_PLUGIN_ASSET, KILO_INTEGRATION_VERSION),
+        (
+            "hermes",
+            HERMES_PLUGIN_INIT_ASSET,
+            HERMES_INTEGRATION_VERSION,
+        ),
+        (
+            "qodercli",
+            QODERCLI_HOOK_ASSET,
+            QODERCLI_INTEGRATION_VERSION,
+        ),
+        ("cursor", CURSOR_HOOK_ASSET, CURSOR_INTEGRATION_VERSION),
+        (
+            "mastracode",
+            MASTRACODE_HOOK_ASSET,
+            MASTRACODE_INTEGRATION_VERSION,
+        ),
+    ] {
+        assert_eq!(
+            parse_integration_version(asset),
+            Some(expected_version),
+            "{name} asset version must match its integration version constant"
+        );
+    }
 }
 
 #[test]
