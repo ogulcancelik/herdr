@@ -932,11 +932,7 @@ impl TerminalState {
                 "codex",
                 Some("startup" | "clear" | "resume" | "compact")
             ) | ("herdr:opencode", "opencode", Some("new"))
-                | (
-                    "herdr:pi",
-                    "pi",
-                    Some("startup" | "new" | "resume" | "fork")
-                )
+                | ("herdr:pi", "pi", Some("new" | "resume" | "fork"))
                 | (
                     "herdr:omp",
                     "omp",
@@ -1518,7 +1514,7 @@ mod tests {
 
     #[test]
     fn pi_session_replacement_reports_reanchor_full_lifecycle_authority() {
-        for reason in ["startup", "new", "resume", "fork"] {
+        for reason in ["new", "resume", "fork"] {
             let mut terminal = test_terminal();
             let old_session = test_session_path(&format!("pi-{reason}-old.jsonl"));
             let new_session = test_session_path(&format!("pi-{reason}-new.jsonl"));
@@ -1641,8 +1637,41 @@ mod tests {
     }
 
     #[test]
+    fn pi_startup_adopts_persisted_session_without_live_authority() {
+        let mut terminal = test_terminal();
+        let old_session = test_session_path("pi-startup-old.jsonl");
+        let new_session = test_session_path("pi-startup-new.jsonl");
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:pi".into(),
+            agent: "pi".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::path(old_session)
+                .expect("test session path should be valid"),
+        });
+
+        let startup = terminal.set_agent_session_ref_for_session_start(
+            "herdr:pi".into(),
+            "pi".into(),
+            crate::agent_resume::AgentSessionRef::path(new_session.clone()),
+            Some(11),
+            Some("startup".into()),
+        );
+
+        assert!(startup.is_some());
+        assert_eq!(
+            terminal.current_session_identity_for_persistence(),
+            Some((
+                "herdr:pi".into(),
+                "pi".into(),
+                crate::agent_resume::AgentSessionRefKind::Path,
+                new_session,
+            ))
+        );
+    }
+
+    #[test]
     fn pi_non_replacement_reports_preserve_full_lifecycle_authority() {
-        for reason in [None, Some("reload")] {
+        for reason in [None, Some("reload"), Some("startup")] {
             let mut terminal = test_terminal();
             let old_session = test_session_path("pi-current.jsonl");
             let new_session = test_session_path("pi-unexpected.jsonl");
