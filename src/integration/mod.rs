@@ -197,6 +197,24 @@ const MASTRACODE_HOOK_EVENTS: [(&str, &str); 12] = [
     ("Stop", "idle"),
     ("SessionEnd", "release"),
 ];
+/// Official Grok Build (x.ai `grok` CLI). Hooks live under `~/.grok/hooks/*.json`.
+const GROK_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
+const GROK_HOOKS_JSON_INSTALL_NAME: &str = "herdr-agent-state.json";
+const GROK_HOOK_ASSET: &str = include_str!("assets/grok/herdr-agent-state.sh");
+const GROK_INTEGRATION_VERSION: u32 = 1;
+/// Nested Claude-compatible hook groups for official Grok Build discovery.
+const GROK_HOOK_EVENTS: [(&str, &str); 10] = [
+    ("SessionStart", "session"),
+    ("UserPromptSubmit", "working"),
+    ("PreToolUse", "working"),
+    ("PostToolUse", "working"),
+    ("PostToolUseFailure", "working"),
+    ("SubagentStart", "working"),
+    ("PermissionDenied", "blocked"),
+    ("Stop", "idle"),
+    ("StopFailure", "idle"),
+    ("SessionEnd", "release"),
+];
 const INTEGRATION_VERSION_MARKER: &str = "HERDR_INTEGRATION_VERSION=";
 
 pub(crate) const INSTALL_WARNING_PREFIX: &str = "warning:";
