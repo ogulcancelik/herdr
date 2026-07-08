@@ -454,6 +454,7 @@ fn kitty_event_suffix(key: &TerminalKey, flags: u16) -> Option<u8> {
 fn encode_legacy_inner(key: TerminalKey) -> Vec<u8> {
     match key.code {
         KeyCode::Char(ch) => {
+            let ch = key.shifted_codepoint.and_then(char::from_u32).unwrap_or(ch);
             if key.modifiers.contains(KeyModifiers::CONTROL) {
                 let upper = ch.to_ascii_uppercase();
                 match upper {
@@ -1057,5 +1058,16 @@ mod tests {
         let encoded = encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 7 });
         assert!(!encoded.is_empty());
         assert_ne!(encoded, "测".as_bytes());
+    }
+
+    #[test]
+    fn legacy_ctrl_cyrillic_uses_alternate_shifted_codepoint() {
+        let key = TerminalKey::new(KeyCode::Char('ц'), KeyModifiers::CONTROL)
+            .with_shifted_codepoint('w' as u32);
+        assert_eq!(encode_terminal_key(key, KeyboardProtocol::Legacy), vec![23]);
+
+        let key = TerminalKey::new(KeyCode::Char('г'), KeyModifiers::CONTROL)
+            .with_shifted_codepoint('u' as u32);
+        assert_eq!(encode_terminal_key(key, KeyboardProtocol::Legacy), vec![21]);
     }
 }

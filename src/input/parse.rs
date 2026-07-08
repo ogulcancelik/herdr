@@ -25,10 +25,15 @@ fn parse_kitty_key_sequence(data: &str) -> Option<TerminalKey> {
 
     let mut key_fields = key_part.split(':');
     let codepoint = key_fields.next()?.parse::<u32>().ok()?;
-    let shifted_codepoint = key_fields
+    let second_field = key_fields
         .next()
         .filter(|field| !field.is_empty())
         .and_then(|field| field.parse::<u32>().ok());
+    let third_field = key_fields
+        .next()
+        .filter(|field| !field.is_empty())
+        .and_then(|field| field.parse::<u32>().ok());
+    let shifted_codepoint = second_field.or(third_field);
 
     let code = kitty_codepoint_to_keycode(codepoint)?;
     let kind = parse_kitty_event_type(event_type)?;
