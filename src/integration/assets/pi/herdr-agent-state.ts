@@ -337,13 +337,13 @@ export default function (pi) {
     publishState();
   });
 
-  pi.on("session_start", (event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     if (ctx?.hasUI !== true) {
       return;
     }
     rootSession = true;
     updateSessionRef(ctx);
-    void reportSession(event?.reason);
+    await reportSession(event?.reason);
     // A reload can replace this extension mid-run without emitting another agent_start.
     agentActive = ctx?.isIdle?.() === false;
     publishState(true);
