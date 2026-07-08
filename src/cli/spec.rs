@@ -731,8 +731,21 @@ fn integration_target_arg() -> Arg {
         .value_name("TARGET")
         .required(true)
         .value_parser([
-            "pi", "omp", "claude", "codex", "copilot", "devin", "droid", "kimi", "opencode",
-            "kilo", "hermes", "qodercli", "cursor", "grok",
+            "pi",
+            "omp",
+            "claude",
+            "codex",
+            "copilot",
+            "devin",
+            "droid",
+            "kimi",
+            "opencode",
+            "kilo",
+            "hermes",
+            "qodercli",
+            "cursor",
+            "mastracode",
+            "grok",
         ])
 }
 
