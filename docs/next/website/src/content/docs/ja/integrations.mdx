@@ -1,6 +1,6 @@
 ---
 title: インテグレーション
-description: Pi、OMP、Claude Code、Codex、GitHub Copilot CLI、Devin CLI、Droid、Kimi Code CLI、OpenCode、Kilo Code CLI、Hermes Agent、Qoder CLI、Cursor Agent CLI、MastraCode 向けの Herdr インテグレーションをインストールします。
+description: Pi、OMP、Claude Code、Codex、GitHub Copilot CLI、Devin CLI、Droid、Kimi Code CLI、OpenCode、Kilo Code CLI、Hermes Agent、Qoder CLI、Cursor Agent CLI、MastraCode、Grok Build 向けの Herdr インテグレーションをインストールします。
 ---
 
 Herdr は対応エージェントを自動的に検出します。公式インテグレーションは、復元のためのネイティブセッション識別、ライフサイクル状態の報告、またはその両方を追加できます。
@@ -26,6 +26,7 @@ herdr integration install hermes
 herdr integration install mastracode
 herdr integration install qodercli
 herdr integration install cursor
+herdr integration install grok
 ```
 
 ## インテグレーションをアンインストールする
@@ -45,6 +46,7 @@ herdr integration uninstall hermes
 herdr integration uninstall mastracode
 herdr integration uninstall qodercli
 herdr integration uninstall cursor
+herdr integration uninstall grok
 ```
 
 ## Herdr がインテグレーションをどう使うか
@@ -54,13 +56,13 @@ Herdr はインテグレーションを 2 つの異なる方法で使います:
 | インテグレーションの種類 | エージェント | 効果 |
 | --- | --- | --- |
 | ライフサイクル権威 | Pi、OMP、Kimi Code CLI、OpenCode、Kilo Code CLI、Hermes Agent、MastraCode | インストールされ、そのペインについて能動的に報告している間は、フックまたはプラグインのイベントが `idle`、`working`、`blocked` を決定します。同じライフサイクル権威に対して、Herdr はスクリーンマニフェストのフォールバックを併用しません。 |
-| セッション識別 | Claude Code、Codex、GitHub Copilot CLI、Devin CLI、Droid、Qoder CLI、Cursor Agent CLI | インテグレーションは復元用のネイティブセッション参照を報告します。状態は引き続き Herdr のスクリーンマニフェスト検出から得られます。 |
+| セッション識別 | Claude Code、Codex、GitHub Copilot CLI、Devin CLI、Droid、Grok Build、Qoder CLI、Cursor Agent CLI | インテグレーションは復元用のネイティブセッション参照を報告します。状態は引き続き Herdr のスクリーンマニフェスト検出から得られます。 |
 
 カスタムソケットインテグレーションも、ネイティブのターミナル UI では見えない状態を定義する場合に状態を報告できます。
 
-一部のインテグレーションは、エージェントのネイティブセッション参照を報告します。Herdr は公式のセッション参照を使って、`[session] resume_agents_on_restore = false` で無効化されていない限り、Herdr サーバーの再起動後に Claude Code、Codex、Devin CLI、Droid、Kimi Code CLI、Qoder CLI、Cursor Agent CLI、GitHub Copilot CLI、Pi、OMP、Hermes Agent、OpenCode、Kilo Code CLI、MastraCode のペインを resume します。
+一部のインテグレーションは、エージェントのネイティブセッション参照を報告します。Herdr は公式のセッション参照を使って、`[session] resume_agents_on_restore = false` で無効化されていない限り、Herdr サーバーの再起動後に Claude Code、Codex、Devin CLI、Droid、Grok Build、Kimi Code CLI、Qoder CLI、Cursor Agent CLI、GitHub Copilot CLI、Pi、OMP、Hermes Agent、OpenCode、Kilo Code CLI、MastraCode のペインを resume します。
 
-エージェントネイティブのセッション復元には最新の Herdr インテグレーションが必要です: Pi インテグレーションはバージョン `2`、OMP は `3`、Claude Code は `6`、Codex は `5`、GitHub Copilot CLI は `2`、Devin CLI は `2`、Droid は `2`、Kimi Code CLI は `3`、Qoder CLI は `2`、Cursor Agent CLI は `1`、OpenCode は `5`、Kilo Code CLI は `1`、Hermes Agent は `2`、MastraCode は `1` です。インストール済みバージョンは `herdr integration status` で確認してください。
+エージェントネイティブのセッション復元には最新の Herdr インテグレーションが必要です: Pi インテグレーションはバージョン `2`、OMP は `3`、Claude Code は `6`、Codex は `5`、GitHub Copilot CLI は `2`、Devin CLI は `2`、Droid は `2`、Kimi Code CLI は `3`、Qoder CLI は `2`、Cursor Agent CLI は `1`、OpenCode は `5`、Kilo Code CLI は `1`、Hermes Agent は `2`、MastraCode は `1`、Grok Build は `1` です。インストール済みバージョンは `herdr integration status` で確認してください。
 
 ## Pi
 
@@ -255,6 +257,20 @@ herdr integration install mastracode
 Herdr は `~/.mastracode` を使います。インストールは `hooks/herdr-agent-state.sh` を書き込み、`hooks.json` に Herdr のコマンドエントリを追加します。ディレクトリがなければ作成します。アンインストールは一致するフックエントリを削除し、フックスクリプトを削除します。
 
 Herdr は保存された MastraCode スレッドを `mastracode --thread <id>` で resume します。
+
+## Grok Build
+
+Grok Build フックをインストールします:
+
+```bash
+herdr integration install grok
+```
+
+Grok Build フックは、他のインテグレーションと同じローカルソケット API を通じてセッション識別を報告します。Grok Build のフックはすべてのライフサイクル遷移をカバーしていないため、ライフサイクル状態は引き続き Herdr のスクリーンマニフェスト検出から得られます。
+
+Herdr はデフォルトで `~/.grok` を使い、`GROK_HOME` が設定されていればそちらを使います。Grok の設定ディレクトリはあらかじめ存在している必要があります。インストールは `hooks/herdr-agent-state.sh` と、`SessionStart` エントリを持つ Herdr 管理の `hooks/herdr-agent-state.json` フック設定を書き込みます。Grok Build は `hooks/*.json` の各ファイルを個別に読み込むため、共有設定ファイルは編集しません。アンインストールは Herdr の 2 つのファイルだけを削除し、他のフックファイルには触れません。
+
+Grok Build がセッション開始イベントを発行した後、Herdr は報告されたセッション id を使って `grok --resume <id>` でペインを resume できます。
 
 ## カスタムステータスラベル
 

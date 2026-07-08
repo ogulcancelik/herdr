@@ -1691,7 +1691,8 @@
             "hermes",
             "qodercli",
             "cursor",
-            "mastracode"
+            "mastracode",
+            "grok"
           ],
           "type": "string"
         },
@@ -6200,7 +6201,8 @@
             "hermes",
             "qodercli",
             "cursor",
-            "mastracode"
+            "mastracode",
+            "grok"
           ],
           "type": "string"
         },

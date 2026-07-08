@@ -101,6 +101,7 @@ fn clear_integration_path_env() {
     std::env::remove_var("XDG_CONFIG_HOME");
     std::env::remove_var(QODERCLI_CONFIG_DIR_ENV_VAR);
     std::env::remove_var(CURSOR_CONFIG_DIR_ENV_VAR);
+    std::env::remove_var(GROK_HOME_ENV_VAR);
 }
 
 fn kimi_hook_command(hook_path: &Path, action: &str) -> String {
@@ -181,6 +182,7 @@ fn windows_supports_only_cli_hook_integrations() {
     assert!(integration_target_supported(IntegrationTarget::Codex));
     assert!(integration_target_supported(IntegrationTarget::Copilot));
     assert!(integration_target_supported(IntegrationTarget::Droid));
+    assert!(integration_target_supported(IntegrationTarget::Grok));
     assert!(integration_target_supported(IntegrationTarget::Kimi));
     assert!(integration_target_supported(IntegrationTarget::Qodercli));
 }
@@ -2597,6 +2599,23 @@ fn bundled_integration_assets_report_session_refs() {
     assert!(MASTRACODE_HOOK_ASSET.contains("agent_session_id"));
     assert!(MASTRACODE_HOOK_ASSET.contains("pane.report_agent"));
     assert!(MASTRACODE_HOOK_ASSET.contains("pane.release_agent"));
+    assert!(GROK_HOOK_ASSET.contains("HERDR_INTEGRATION_ID=grok"));
+    assert!(GROK_HOOK_ASSET.contains("HERDR_INTEGRATION_VERSION=1"));
+    assert!(GROK_HOOK_ASSET.contains("herdr:grok"));
+    // Grok Build hook payloads are camelCase; the runner-injected
+    // GROK_SESSION_ID env var is the fallback.
+    assert!(GROK_HOOK_ASSET.contains("sessionId"));
+    assert!(GROK_HOOK_ASSET.contains("GROK_SESSION_ID"));
+    assert!(
+        GROK_HOOK_ASSET.contains("agent_session_id")
+            || GROK_HOOK_ASSET.contains("--agent-session-id")
+    );
+    assert!(
+        GROK_HOOK_ASSET.contains("pane.report_agent_session")
+            || GROK_HOOK_ASSET.contains("report-agent-session")
+    );
+    assert!(!GROK_HOOK_ASSET.contains("\"state\":"));
+    assert!(!GROK_HOOK_ASSET.contains("pane.release_agent"));
 }
 
 #[test]
@@ -3305,5 +3324,184 @@ fn uninstall_mastracode_errors_when_event_value_not_array() {
     } else {
         std::env::remove_var("HOME");
     }
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_grok_writes_hook_and_owned_hooks_config() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let grok_dir = home.join(".grok");
+    fs::create_dir_all(&grok_dir).unwrap();
+    std::env::set_var("HOME", &home);
+
+    let installed = install_grok().unwrap();
+
+    assert_eq!(
+        installed.hook_path,
+        grok_dir.join("hooks").join(GROK_HOOK_INSTALL_NAME)
+    );
+    assert_eq!(
+        installed.hooks_config_path,
+        grok_dir.join("hooks").join(GROK_HOOKS_CONFIG_INSTALL_NAME)
+    );
+    assert_eq!(
+        fs::read_to_string(&installed.hook_path).unwrap(),
+        GROK_HOOK_ASSET
+    );
+
+    let hooks_config: Value =
+        serde_json::from_str(&fs::read_to_string(&installed.hooks_config_path).unwrap()).unwrap();
+    // Grok Build treats each hooks/*.json file as a standalone hook config
+    // with a single top-level "hooks" object.
+    assert_eq!(hooks_config.as_object().unwrap().len(), 1);
+    let session_start = hooks_config["hooks"]["SessionStart"].as_array().unwrap();
+    assert_eq!(session_start.len(), 1);
+    // SessionStart is a Grok Build lifecycle event and rejects a matcher.
+    assert!(session_start[0].get("matcher").is_none());
+    let entries = session_start[0]["hooks"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["type"], "command");
+    assert_eq!(entries[0]["timeout"], 10);
+    assert_eq!(
+        entries[0]["command"].as_str().unwrap(),
+        hook_command(&installed.hook_path, Some("session"))
+    );
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_grok_is_idempotent() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let grok_dir = home.join(".grok");
+    fs::create_dir_all(&grok_dir).unwrap();
+    std::env::set_var("HOME", &home);
+
+    let first = install_grok().unwrap();
+    let second = install_grok().unwrap();
+
+    assert_eq!(first.hook_path, second.hook_path);
+    assert_eq!(first.hooks_config_path, second.hooks_config_path);
+    let hooks_config: Value =
+        serde_json::from_str(&fs::read_to_string(&second.hooks_config_path).unwrap()).unwrap();
+    assert_eq!(
+        hooks_config["hooks"]["SessionStart"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        hooks_config["hooks"]["SessionStart"][0]["hooks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_grok_errors_when_config_dir_missing() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    fs::create_dir_all(&home).unwrap();
+    std::env::set_var("HOME", &home);
+
+    let err = install_grok().unwrap_err().to_string();
+
+    assert!(err.contains("grok directory not found"));
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn grok_dir_honors_grok_home_env() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let custom_grok_home = base.join("custom-grok-home");
+    fs::create_dir_all(&custom_grok_home).unwrap();
+    fs::create_dir_all(home.join(".grok")).unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var(GROK_HOME_ENV_VAR, &custom_grok_home);
+
+    let installed = install_grok().unwrap();
+
+    assert_eq!(
+        installed.hook_path,
+        custom_grok_home.join("hooks").join(GROK_HOOK_INSTALL_NAME)
+    );
+    assert!(installed.hook_path.is_file());
+    assert!(!home.join(".grok").join("hooks").exists());
+
+    std::env::remove_var(GROK_HOME_ENV_VAR);
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn uninstall_grok_removes_herdr_files_and_preserves_other_hooks() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let grok_dir = home.join(".grok");
+    fs::create_dir_all(&grok_dir).unwrap();
+    std::env::set_var("HOME", &home);
+
+    let installed = install_grok().unwrap();
+    let user_hook_path = grok_dir.join("hooks").join("user-custom.json");
+    fs::write(
+        &user_hook_path,
+        r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo keep"}]}]}}"#,
+    )
+    .unwrap();
+
+    let result = uninstall_grok().unwrap();
+
+    assert!(result.removed_hook_file);
+    assert!(result.removed_hooks_config);
+    assert!(!installed.hook_path.exists());
+    assert!(!installed.hooks_config_path.exists());
+    assert!(user_hook_path.is_file());
+
+    let repeat = uninstall_grok().unwrap();
+    assert!(!repeat.removed_hook_file);
+    assert!(!repeat.removed_hooks_config);
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn grok_integration_status_reports_current_version() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    fs::create_dir_all(home.join(".grok")).unwrap();
+    std::env::set_var("HOME", &home);
+
+    let installed = install_grok().unwrap();
+    let statuses = installed_integration_statuses();
+    let grok = statuses
+        .iter()
+        .find(|status| status.target == crate::api::schema::IntegrationTarget::Grok)
+        .unwrap();
+
+    assert_eq!(grok.path, installed.hook_path);
+    assert_eq!(grok.installed_version, Some(GROK_INTEGRATION_VERSION));
+    assert_eq!(grok.expected_version, GROK_INTEGRATION_VERSION);
+    assert_eq!(grok.state, IntegrationStatusKind::Current);
+
+    std::env::remove_var("HOME");
     let _ = fs::remove_dir_all(base);
 }

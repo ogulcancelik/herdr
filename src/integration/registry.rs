@@ -22,6 +22,7 @@ pub(crate) fn integration_target_label(
         crate::api::schema::IntegrationTarget::Qodercli => "qodercli",
         crate::api::schema::IntegrationTarget::Cursor => "cursor",
         crate::api::schema::IntegrationTarget::Mastracode => "mastracode",
+        crate::api::schema::IntegrationTarget::Grok => "grok",
     }
 }
 
@@ -49,6 +50,7 @@ pub(crate) fn integration_target_command_names(
         crate::api::schema::IntegrationTarget::Qodercli => qodercli_command_names(),
         crate::api::schema::IntegrationTarget::Cursor => cursor_command_names(),
         crate::api::schema::IntegrationTarget::Mastracode => &["mastracode"],
+        crate::api::schema::IntegrationTarget::Grok => &["grok"],
     }
 }
 
@@ -65,6 +67,7 @@ pub(crate) fn integration_target_supported(target: crate::api::schema::Integrati
                 | crate::api::schema::IntegrationTarget::Codex
                 | crate::api::schema::IntegrationTarget::Copilot
                 | crate::api::schema::IntegrationTarget::Droid
+                | crate::api::schema::IntegrationTarget::Grok
                 | crate::api::schema::IntegrationTarget::Kimi
                 | crate::api::schema::IntegrationTarget::Qodercli
         )
@@ -253,7 +256,7 @@ fn integration_specs() -> [(
     crate::api::schema::IntegrationTarget,
     io::Result<PathBuf>,
     u32,
-); 14] {
+); 15] {
     [
         (
             crate::api::schema::IntegrationTarget::Pi,
@@ -327,6 +330,11 @@ fn integration_specs() -> [(
             crate::api::schema::IntegrationTarget::Mastracode,
             mastracode_dir().map(|dir| dir.join("hooks").join(super::MASTRACODE_HOOK_INSTALL_NAME)),
             super::MASTRACODE_INTEGRATION_VERSION,
+        ),
+        (
+            crate::api::schema::IntegrationTarget::Grok,
+            grok_dir().map(|dir| dir.join("hooks").join(super::GROK_HOOK_INSTALL_NAME)),
+            super::GROK_INTEGRATION_VERSION,
         ),
     ]
 }

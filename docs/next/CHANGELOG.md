@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Added Grok Build integration support with native session restore via `herdr integration install grok`.
+
 ## [0.7.3] - 2026-07-08
 
 ### Fixed

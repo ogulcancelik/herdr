@@ -179,6 +179,18 @@ const QODERCLI_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 12] = [
 const CURSOR_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const CURSOR_HOOK_ASSET: &str = include_str!("assets/cursor/herdr-agent-state.sh");
 const CURSOR_INTEGRATION_VERSION: u32 = 1;
+const GROK_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
+    "herdr-agent-state.ps1"
+} else {
+    "herdr-agent-state.sh"
+};
+const GROK_HOOK_ASSET: &str = if cfg!(windows) {
+    include_str!("assets/grok/herdr-agent-state.ps1")
+} else {
+    include_str!("assets/grok/herdr-agent-state.sh")
+};
+const GROK_HOOKS_CONFIG_INSTALL_NAME: &str = "herdr-agent-state.json";
+const GROK_INTEGRATION_VERSION: u32 = 1;
 const MASTRACODE_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const MASTRACODE_HOOK_ASSET: &str = include_str!("assets/mastracode/herdr-agent-state.sh");
 const MASTRACODE_INTEGRATION_VERSION: u32 = 1;

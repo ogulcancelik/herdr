@@ -86,6 +86,7 @@ pub fn is_reserved_native_state_source(source: &str, agent: &str) -> bool {
             | ("herdr:copilot", "copilot")
             | ("herdr:devin", "devin")
             | ("herdr:droid", "droid")
+            | ("herdr:grok", "grok")
             | ("herdr:qodercli", "qodercli")
             | ("herdr:cursor", "cursor")
     )
@@ -136,6 +137,9 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
         }
         ("herdr:droid", "droid", AgentSessionRefKind::Id) => {
             vec!["droid".into(), "--resume".into(), session_ref.value.clone()]
+        }
+        ("herdr:grok", "grok", AgentSessionRefKind::Id) => {
+            vec!["grok".into(), "--resume".into(), session_ref.value.clone()]
         }
         ("herdr:kimi", "kimi", AgentSessionRefKind::Id) => {
             vec!["kimi".into(), "--session".into(), session_ref.value.clone()]
@@ -211,6 +215,7 @@ fn is_official_agent_source(source: &str, agent: &str) -> bool {
             | ("herdr:copilot", "copilot")
             | ("herdr:devin", "devin")
             | ("herdr:droid", "droid")
+            | ("herdr:grok", "grok")
             | ("herdr:kimi", "kimi")
             | ("herdr:omp", "omp")
             | ("herdr:mastracode", "mastracode")
@@ -251,6 +256,7 @@ mod tests {
         assert!(is_reserved_native_state_source("herdr:claude", "claude"));
         assert!(is_reserved_native_state_source("herdr:codex", "codex"));
         assert!(is_reserved_native_state_source("herdr:devin", "devin"));
+        assert!(is_reserved_native_state_source("herdr:grok", "grok"));
         assert!(!is_reserved_native_state_source("herdr:kimi", "kimi"));
         assert!(!is_reserved_native_state_source(
             "herdr:opencode",
@@ -311,6 +317,16 @@ mod tests {
             .unwrap()
             .argv,
             vec!["droid", "--resume", "droid-session"]
+        );
+        assert_eq!(
+            plan(
+                "herdr:grok",
+                "grok",
+                &AgentSessionRef::id("grok-session").unwrap()
+            )
+            .unwrap()
+            .argv,
+            vec!["grok", "--resume", "grok-session"]
         );
         assert_eq!(
             plan(
@@ -504,6 +520,21 @@ mod tests {
         .is_none());
 
         let session_ref =
+            session_ref_from_report("herdr:grok", "grok", Some("grok-id".into()), None).unwrap();
+        assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
+        assert_eq!(session_ref.value, "grok-id");
+        assert!(session_ref_from_report(
+            "herdr:grok",
+            "grok",
+            None,
+            Some("/tmp/grok-session".into())
+        )
+        .is_none());
+        assert!(
+            session_ref_from_report("custom:grok", "grok", Some("grok-id".into()), None).is_none()
+        );
+
+        let session_ref =
             session_ref_from_report("herdr:kimi", "kimi", Some("kimi-id".into()), None).unwrap();
         assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
         assert_eq!(session_ref.value, "kimi-id");
@@ -589,6 +620,13 @@ mod tests {
         let kilo_session = absolute_test_path("kilo-session");
         let copilot_session = absolute_test_path("copilot-session");
         let devin_session = absolute_test_path("devin-session");
+        let grok_session = absolute_test_path("grok-session");
+        assert!(plan(
+            "herdr:grok",
+            "grok",
+            &AgentSessionRef::path(&grok_session).unwrap()
+        )
+        .is_none());
         assert!(plan(
             "herdr:hermes",
             "hermes",
@@ -661,5 +699,19 @@ mod tests {
             "devin-session"
         )
         .is_some());
+        assert!(session_ref_from_snapshot(
+            "herdr:grok",
+            "grok",
+            AgentSessionRefKind::Id,
+            "grok-session"
+        )
+        .is_some());
+        assert!(session_ref_from_snapshot(
+            "herdr:grok",
+            "grok",
+            AgentSessionRefKind::Path,
+            "/tmp/grok-session"
+        )
+        .is_none());
     }
 }

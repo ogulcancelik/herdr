@@ -1,6 +1,6 @@
 ---
 title: 集成
-description: 为 Pi、OMP、Claude Code、Codex、GitHub Copilot CLI、Devin CLI、Droid、Kimi Code CLI、OpenCode、Kilo Code CLI、Hermes Agent、Qoder CLI、Cursor Agent CLI 和 MastraCode 安装 Herdr 集成。
+description: 为 Pi、OMP、Claude Code、Codex、GitHub Copilot CLI、Devin CLI、Droid、Kimi Code CLI、OpenCode、Kilo Code CLI、Hermes Agent、Qoder CLI、Cursor Agent CLI、MastraCode 和 Grok Build 安装 Herdr 集成。
 ---
 
 Herdr 自动检测受支持的智能体。官方集成可以额外提供用于恢复的原生会话身份、生命周期状态上报,或两者兼有。
@@ -26,6 +26,7 @@ herdr integration install hermes
 herdr integration install mastracode
 herdr integration install qodercli
 herdr integration install cursor
+herdr integration install grok
 ```
 
 ## 卸载集成
@@ -45,6 +46,7 @@ herdr integration uninstall hermes
 herdr integration uninstall mastracode
 herdr integration uninstall qodercli
 herdr integration uninstall cursor
+herdr integration uninstall grok
 ```
 
 ## Herdr 如何使用集成
@@ -54,13 +56,13 @@ Herdr 以两种不同方式使用集成:
 | 集成类型 | 智能体 | 效果 |
 | --- | --- | --- |
 | 生命周期权威 | Pi、OMP、Kimi Code CLI、OpenCode、Kilo Code CLI、Hermes Agent、MastraCode | 已安装且在为该窗格主动上报时,由钩子或插件事件决定 `idle`、`working` 和 `blocked`。对同一个生命周期权威,Herdr 不再使用屏幕清单兜底。 |
-| 会话身份 | Claude Code、Codex、GitHub Copilot CLI、Devin CLI、Droid、Qoder CLI、Cursor Agent CLI | 集成上报用于恢复的原生会话引用。状态仍来自 Herdr 的屏幕清单检测。 |
+| 会话身份 | Claude Code、Codex、GitHub Copilot CLI、Devin CLI、Droid、Grok Build、Qoder CLI、Cursor Agent CLI | 集成上报用于恢复的原生会话引用。状态仍来自 Herdr 的屏幕清单检测。 |
 
 自定义 socket 集成在定义了原生终端 UI 中不可见的状态时,也可以上报状态。
 
-一些集成会上报智能体的原生会话引用。除非被 `[session] resume_agents_on_restore = false` 禁用,Herdr 会在服务器重启后使用官方会话引用恢复 Claude Code、Codex、Devin CLI、Droid、Kimi Code CLI、Qoder CLI、Cursor Agent CLI、GitHub Copilot CLI、Pi、OMP、Hermes Agent、OpenCode、Kilo Code CLI 和 MastraCode 的窗格。
+一些集成会上报智能体的原生会话引用。除非被 `[session] resume_agents_on_restore = false` 禁用,Herdr 会在服务器重启后使用官方会话引用恢复 Claude Code、Codex、Devin CLI、Droid、Grok Build、Kimi Code CLI、Qoder CLI、Cursor Agent CLI、GitHub Copilot CLI、Pi、OMP、Hermes Agent、OpenCode、Kilo Code CLI 和 MastraCode 的窗格。
 
-原生会话恢复需要最新的 Herdr 集成: Pi 集成版本 `2`、OMP 版本 `3`、Claude Code 版本 `6`、Codex 版本 `5`、GitHub Copilot CLI 版本 `2`、Devin CLI 版本 `2`、Droid 版本 `2`、Kimi Code CLI 版本 `3`、Qoder CLI 版本 `2`、Cursor Agent CLI 版本 `1`、OpenCode 版本 `5`、Kilo Code CLI 版本 `1`、Hermes Agent 版本 `2`、MastraCode 版本 `1`。用 `herdr integration status` 查看已安装版本。
+原生会话恢复需要最新的 Herdr 集成: Pi 集成版本 `2`、OMP 版本 `3`、Claude Code 版本 `6`、Codex 版本 `5`、GitHub Copilot CLI 版本 `2`、Devin CLI 版本 `2`、Droid 版本 `2`、Kimi Code CLI 版本 `3`、Qoder CLI 版本 `2`、Cursor Agent CLI 版本 `1`、OpenCode 版本 `5`、Kilo Code CLI 版本 `1`、Hermes Agent 版本 `2`、MastraCode 版本 `1`、Grok Build 版本 `1`。用 `herdr integration status` 查看已安装版本。
 
 ## Pi
 
@@ -255,6 +257,20 @@ herdr integration install mastracode
 Herdr 使用 `~/.mastracode`。安装会写入 `hooks/herdr-agent-state.sh`,并把 Herdr 命令条目添加到 `hooks.json`;目录不存在时会创建。卸载会删除匹配的钩子条目和钩子脚本。
 
 Herdr 用 `mastracode --thread <id>` 恢复保存的 MastraCode 线程。
+
+## Grok Build
+
+安装 Grok Build 钩子:
+
+```bash
+herdr integration install grok
+```
+
+Grok Build 钩子通过与其他集成相同的本地 socket API 上报会话身份。生命周期状态仍来自 Herdr 的屏幕清单检测,因为 Grok Build 钩子没有覆盖所有生命周期转换。
+
+Herdr 默认使用 `~/.grok`,设置了 `GROK_HOME` 时使用后者。Grok 配置目录必须已经存在。安装会写入 `hooks/herdr-agent-state.sh`,以及一个带 `SessionStart` 条目、由 Herdr 管理的 `hooks/herdr-agent-state.json` 钩子配置;Grok Build 会分别加载每个 `hooks/*.json` 文件,因此不会编辑任何共享设置文件。卸载只删除这两个 Herdr 文件,不会触碰其他钩子文件。
+
+在 Grok Build 发出会话启动事件后,Herdr 可以用上报的会话 id 通过 `grok --resume <id>` 恢复该窗格。
 
 ## 自定义状态标签
 
