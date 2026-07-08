@@ -520,23 +520,17 @@ impl RemoteSsh {
     }
 
     fn install_herdr(&self, remote_herdr: &RemoteHerdr, source_path: &Path) -> io::Result<()> {
-        let script = format!(
-            r#"dest="$HOME/{install_suffix}"
-dir="${{dest%/*}}"
-mkdir -p "$dir"
-tmp="${{dest}}.tmp.$$"
-cat > "$tmp"
-chmod 755 "$tmp"
-mv "$tmp" "$dest"
-"#,
-            install_suffix = remote_herdr.install_suffix
-        );
+        let output = self.sh_output(&remote_install_prepare_script(remote_herdr))?;
+        if !output.status.success() {
+            return Err(command_failed("remote install preparation failed", &output));
+        }
+        let (tmp_path, dest_path) = parse_remote_install_paths(&output.stdout)?;
 
         let mut child = self
             .command()
-            .arg(format!("/bin/sh -eu -c {}", shell_quote(&script)))
+            .arg(remote_install_stream_command(&tmp_path))
             .stdin(Stdio::piped())
-            .stdout(Stdio::inherit())
+            .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|err| {
@@ -556,13 +550,65 @@ mv "$tmp" "$dest"
         copy_result?;
 
         if status.success() {
-            Ok(())
+            let output = self.sh_output(&remote_install_commit_script(&tmp_path, &dest_path))?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(command_failed("remote install commit failed", &output))
+            }
         } else {
             Err(io::Error::other(format!(
                 "remote install exited with {status}"
             )))
         }
     }
+}
+
+fn remote_install_prepare_script(remote_herdr: &RemoteHerdr) -> String {
+    format!(
+        r#"set -eu
+dest="$HOME/{install_suffix}"
+dir="${{dest%/*}}"
+mkdir -p "$dir"
+tmp="${{dest}}.tmp.$$"
+printf '%s\0%s\0' "$tmp" "$dest"
+"#,
+        install_suffix = remote_herdr.install_suffix
+    )
+}
+
+fn parse_remote_install_paths(stdout: &[u8]) -> io::Result<(String, String)> {
+    let mut parts = stdout.split(|byte| *byte == 0);
+    let tmp_path = parts.next().unwrap_or_default();
+    let dest_path = parts.next().unwrap_or_default();
+    if tmp_path.is_empty() || dest_path.is_empty() {
+        return Err(io::Error::other(
+            "remote install preparation did not return destination paths",
+        ));
+    }
+    let tmp_path = String::from_utf8(tmp_path.to_vec()).map_err(|err| {
+        io::Error::other(format!(
+            "remote install temporary path is not valid UTF-8: {err}"
+        ))
+    })?;
+    let dest_path = String::from_utf8(dest_path.to_vec()).map_err(|err| {
+        io::Error::other(format!(
+            "remote install destination path is not valid UTF-8: {err}"
+        ))
+    })?;
+    Ok((tmp_path, dest_path))
+}
+
+fn remote_install_stream_command(tmp_path: &str) -> String {
+    format!("tee {}", shell_quote(tmp_path))
+}
+
+fn remote_install_commit_script(tmp_path: &str, dest_path: &str) -> String {
+    format!(
+        "set -eu\nchmod 755 {tmp_path}\nmv {tmp_path} {dest_path}\n",
+        tmp_path = shell_quote(tmp_path),
+        dest_path = shell_quote(dest_path)
+    )
 }
 
 impl Drop for RemoteSsh {
@@ -2114,6 +2160,43 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(args, vec!["-T".to_string(), "example".to_string()]);
+    }
+
+    #[test]
+    fn remote_install_stream_command_avoids_shell_c_wrapper() {
+        let command = remote_install_stream_command("/home/a b/.local/bin/herdr.tmp.123");
+
+        assert_eq!(command, "tee '/home/a b/.local/bin/herdr.tmp.123'");
+    }
+
+    #[test]
+    fn remote_install_prepare_and_commit_scripts_quote_paths() {
+        let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
+            os: "linux",
+            arch: "x86_64",
+        });
+        let prepare = remote_install_prepare_script(&remote_herdr);
+
+        assert!(prepare.contains("mkdir -p \"$dir\""));
+        assert!(prepare.contains("printf '%s\\0%s\\0' \"$tmp\" \"$dest\""));
+        assert_eq!(
+            parse_remote_install_paths(b"/home/a b/herdr.tmp.42\0/home/a b/herdr\0").unwrap(),
+            (
+                "/home/a b/herdr.tmp.42".to_string(),
+                "/home/a b/herdr".to_string()
+            )
+        );
+        assert_eq!(
+            parse_remote_install_paths(b"/home/a b\n/herdr.tmp.42\0/home/a b\n/herdr\0").unwrap(),
+            (
+                "/home/a b\n/herdr.tmp.42".to_string(),
+                "/home/a b\n/herdr".to_string()
+            )
+        );
+        assert_eq!(
+            remote_install_commit_script("/home/a b/herdr.tmp.42", "/home/a b/herdr"),
+            "set -eu\nchmod 755 '/home/a b/herdr.tmp.42'\nmv '/home/a b/herdr.tmp.42' '/home/a b/herdr'\n"
+        );
     }
 
     #[test]

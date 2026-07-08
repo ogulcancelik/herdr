@@ -255,11 +255,21 @@ pub struct IndexedKeybind {
 
 impl IndexedKeybind {
     pub fn matched_index(&self, key: TerminalKey) -> Option<usize> {
-        let KeyCode::Char(c @ '1'..='9') = key.code else {
-            return None;
+        let key_number = match key.code {
+            KeyCode::Char(c @ '1'..='9') => c,
+            KeyCode::Char(c) => {
+                let number = shifted_number_symbol(c)?;
+                if !indexed_shifted_number_matches(key, self.trigger.combo(), number) {
+                    return None;
+                }
+                number
+            }
+            _ => return None,
         };
-        if terminal_key_matches_combo(key, self.trigger.combo()) {
-            Some((c as usize) - ('1' as usize))
+        let legacy_shifted_number =
+            matches!(key.code, KeyCode::Char(c) if shifted_number_symbol(c) == Some(key_number));
+        if terminal_key_matches_combo(key, self.trigger.combo()) || legacy_shifted_number {
+            Some((key_number as usize) - ('1' as usize))
         } else {
             None
         }
@@ -1353,6 +1363,31 @@ fn legacy_shifted_ascii_letter_matches(
         && expected.is_ascii_lowercase()
         && actual.to_ascii_lowercase() == expected
         && actual_modifiers | KeyModifiers::SHIFT == expected_modifiers
+}
+
+const SHIFTED_NUMBER_SYMBOLS: [(char, char); 9] = [
+    ('1', '!'),
+    ('2', '@'),
+    ('3', '#'),
+    ('4', '$'),
+    ('5', '%'),
+    ('6', '^'),
+    ('7', '&'),
+    ('8', '*'),
+    ('9', '('),
+];
+
+fn shifted_number_symbol(ch: char) -> Option<char> {
+    SHIFTED_NUMBER_SYMBOLS
+        .iter()
+        .find_map(|(number, symbol)| (*symbol == ch).then_some(*number))
+}
+
+fn indexed_shifted_number_matches(key: TerminalKey, combo: KeyCombo, number: char) -> bool {
+    let (expected_code, expected_modifiers) = normalize_key_combo(combo);
+    matches!(expected_code, KeyCode::Char(expected) if expected == number)
+        && expected_modifiers.contains(KeyModifiers::SHIFT)
+        && key.modifiers == expected_modifiers.difference(KeyModifiers::SHIFT)
 }
 
 fn shifted_char_matches_expected(

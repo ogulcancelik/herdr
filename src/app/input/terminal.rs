@@ -34,7 +34,8 @@ impl App {
 
         let key_event = key.as_key_event();
 
-        if let Some(action) = super::terminal_direct_navigation_action(&self.state, key) {
+        if let Some(action) = super::terminal_direct_non_indexed_navigation_action(&self.state, key)
+        {
             debug!(
                 code = ?key_event.code,
                 modifiers = ?key_event.modifiers,
@@ -63,6 +64,18 @@ impl App {
                 "intercepted terminal direct custom command before forwarding to pane"
             );
             self.launch_custom_command(binding, super::navigate::ActionContext::Direct);
+            return None;
+        }
+
+        if let Some(action) = super::terminal_direct_indexed_navigation_action(&self.state, key) {
+            debug!(
+                code = ?key_event.code,
+                modifiers = ?key_event.modifiers,
+                kind = ?key_event.kind,
+                action = ?action,
+                "intercepted terminal direct indexed keybinding before forwarding to pane"
+            );
+            self.execute_tui_navigate_action(action, super::navigate::ActionContext::Direct);
             return None;
         }
 

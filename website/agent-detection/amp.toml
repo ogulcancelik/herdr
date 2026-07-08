@@ -1,8 +1,24 @@
 id = "amp"
-version = "2026.06.10.1"
-min_engine_version = 1
-updated_at = "2026-06-10T00:00:00Z"
+version = "2026.07.09.1"
+min_engine_version = 2
+updated_at = "2026-07-09T00:00:00Z"
 aliases = ["amp-local"]
+
+[[rules]]
+id = "osc_title_plugin_confirmation_blocked"
+state = "blocked"
+priority = 1100
+region = "osc_title"
+visible_blocker = true
+contains = ["Plugin confirmation needed"]
+
+[[rules]]
+id = "osc_title_working"
+state = "working"
+priority = 1050
+region = "osc_title"
+visible_working = true
+regex = ['^[\x{2800}-\x{28FF}] ']
 
 [[rules]]
 id = "approval_footer"
@@ -21,9 +37,29 @@ any = [
 ]
 
 [[rules]]
+id = "status_footer_working"
+state = "working"
+priority = 200
+region = "bottom_non_empty_lines(5)"
+visible_working = true
+line_regex = ['(?i)^\s*╰\s+\S+\s+(thinking|streaming|running tools|waiting)\s+─']
+
+[[rules]]
 id = "esc_cancel_working"
 state = "working"
 priority = 100
 region = "whole_recent"
 visible_working = true
 contains = ["esc to cancel"]
+
+[[rules]]
+id = "osc_title_idle"
+state = "idle"
+priority = 50
+region = "osc_title"
+visible_idle = true
+contains = [" - amp - "]
+not = [
+  { regex = ['^[\x{2800}-\x{28FF}] '] },
+  { contains = ["Plugin confirmation needed"] },
+]

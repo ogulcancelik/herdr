@@ -49,7 +49,9 @@ pub(crate) use self::{
         handle_global_menu_key, handle_keybind_help_key, handle_navigator_key,
         insert_navigator_search_text, insert_rename_input_text,
     },
-    navigate::terminal_direct_navigation_action,
+    navigate::{
+        terminal_direct_indexed_navigation_action, terminal_direct_non_indexed_navigation_action,
+    },
     settings::open_settings_at,
 };
 use self::{
