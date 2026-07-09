@@ -199,6 +199,7 @@ automatic detection works out of the box. process name matching plus terminal ou
 | kimi code cli | ✓ | ✓ | ✓ |
 | [github copilot cli](https://github.com/features/copilot) | ✓ | ✓ | ✓ |
 | [qodercli](https://qoder.com/cli) | ✓ | ✓ | ✓ |
+| [maki](https://github.com/tontinton/maki) | ✓ | ✓ | ✓ |
 | [kiro cli](https://kiro.dev/docs/cli/) | ✓ | ✓ | — |
 
 detected but not fully tested: gemini cli, cline.

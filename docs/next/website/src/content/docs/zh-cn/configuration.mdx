@@ -481,7 +481,7 @@ cjk_ime_cursor_shape = "steady_block"
 
 启用后,光标保持在聚焦窗格上报的位置可见。如果窗格没有上报光标位置,锚点回退到窗格左上角,保证始终有稳定的输入法提示位置。
 
-`cjk_ime_agents` 是可选的允许列表。为空时,该显示适用于任何聚焦窗格。非空时,只在聚焦窗格检测到的智能体匹配列表中某个名称时才生效 — 适合只对自绘光标的 AI 智能体 TUI 启用,而不影响普通 shell。接受的名称: `pi`、`claude`、`codex`、`gemini`、`cursor`、`devin`、`agy`、`cline`、`opencode`、`copilot`、`kimi`、`kiro`、`droid`、`amp`、`grok`、`hermes`、`kilo`、`qodercli` 和 `qoder`。未知名称被忽略;如果列表中没有有效名称,该显示不生效。
+`cjk_ime_agents` 是可选的允许列表。为空时,该显示适用于任何聚焦窗格。非空时,只在聚焦窗格检测到的智能体匹配列表中某个名称时才生效 — 适合只对自绘光标的 AI 智能体 TUI 启用,而不影响普通 shell。接受的名称: `pi`、`claude`、`codex`、`gemini`、`cursor`、`devin`、`agy`、`cline`、`opencode`、`copilot`、`kimi`、`kiro`、`droid`、`amp`、`grok`、`hermes`、`kilo`、`qodercli`、`qoder` 和 `maki`。未知名称被忽略;如果列表中没有有效名称,该显示不生效。
 
 `cjk_ime_cursor_shape` 控制为输入法锚点渲染的 DECSCUSR 形状。接受的值: `block`、`steady_block` (默认)、`underline`、`steady_underline`、`bar`、`steady_bar`。
 
