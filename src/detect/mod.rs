@@ -61,10 +61,11 @@ pub enum Agent {
     Hermes,
     Kilo,
     Qodercli,
+    Maki,
 }
 
 impl Agent {
-    pub const SCREEN_MANIFEST_AGENTS: [Self; 18] = [
+    pub const SCREEN_MANIFEST_AGENTS: [Self; 19] = [
         Self::Pi,
         Self::Claude,
         Self::Codex,
@@ -83,6 +84,7 @@ impl Agent {
         Self::Hermes,
         Self::Kilo,
         Self::Qodercli,
+        Self::Maki,
     ];
 }
 
@@ -108,6 +110,7 @@ pub fn agent_label(agent: Agent) -> &'static str {
         Agent::Hermes => "hermes",
         Agent::Kilo => "kilo",
         Agent::Qodercli => "qodercli",
+        Agent::Maki => "maki",
     }
 }
 
@@ -134,6 +137,7 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
         "hermes" | "hermes-agent" => Some(Agent::Hermes),
         "kilo" | "kilo-code" | "kilo code" => Some(Agent::Kilo),
         "qodercli" | "qoderclicn" | "qoder" | "qodercn" => Some(Agent::Qodercli),
+        "maki" => Some(Agent::Maki),
         _ => None,
     }
 }
@@ -164,6 +168,7 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
         "hermes" | "hermes-agent" => Some(Agent::Hermes),
         "kilo" | "kilo-code" | "kilo code" => Some(Agent::Kilo),
         "qodercli" | "qoderclicn" | "qoder" | "qodercn" => Some(Agent::Qodercli),
+        "maki" => Some(Agent::Maki),
         _ => None,
     }
 }
@@ -642,6 +647,7 @@ mod tests {
         assert_eq!(identify_agent("hermes-agent"), Some(Agent::Hermes));
         assert_eq!(identify_agent("kilo"), Some(Agent::Kilo));
         assert_eq!(identify_agent("kilo-code"), Some(Agent::Kilo));
+        assert_eq!(identify_agent("maki"), Some(Agent::Maki));
     }
 
     #[test]
@@ -666,6 +672,7 @@ mod tests {
         assert_eq!(parse_agent_label("kiro-cli"), Some(Agent::Kiro));
         assert_eq!(parse_agent_label("grok-build"), Some(Agent::Grok));
         assert_eq!(parse_agent_label("hermes-agent"), Some(Agent::Hermes));
+        assert_eq!(parse_agent_label("maki"), Some(Agent::Maki));
         assert_eq!(parse_agent_label("kilo-code"), Some(Agent::Kilo));
     }
 
@@ -681,6 +688,7 @@ mod tests {
         assert_eq!(agent_label(Agent::Kiro), "kiro");
         assert_eq!(agent_label(Agent::Grok), "grok");
         assert_eq!(agent_label(Agent::Hermes), "hermes");
+        assert_eq!(agent_label(Agent::Maki), "maki");
         assert_eq!(agent_label(Agent::Kilo), "kilo");
     }
 

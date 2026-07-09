@@ -1,0 +1,68 @@
+id = "maki"
+version = "2026.07.09.2"
+min_engine_version = 1
+updated_at = "2026-07-09T00:00:00Z"
+
+# Maki renders a persistent one-line status bar on the bottom row. It starts
+# with the mode label "[BUILD]", "[PLAN]", or "[BASH]" when idle and gets a
+# leading braille spinner cell while the agent is streaming. Permission
+# requests and the plan-complete form replace the input box above the status
+# bar. Maki does not set OSC title or OSC 9;4 progress.
+
+[[rules]]
+id = "permission_prompt"
+state = "blocked"
+priority = 980
+region = "whole_recent"
+visible_blocker = true
+contains = ["permission required"]
+any = [
+  { contains = ["y allow", "n deny"] },
+  { contains = ["confirm allow"] },
+  { contains = ["confirm deny"] },
+  { contains = ["enter deny", "esc cancel"] },
+]
+
+[[rules]]
+id = "plan_complete_form"
+state = "blocked"
+priority = 970
+region = "whole_recent"
+visible_blocker = true
+contains = ["plan complete", "enter confirm"]
+any = [
+  { contains = ["space toggle parallel"] },
+  { contains = ["edit plan"] },
+]
+
+[[rules]]
+id = "status_bar_spinner_working"
+state = "working"
+priority = 900
+region = "bottom_non_empty_lines(1)"
+visible_working = true
+line_regex = ['^( [\x{2800}-\x{28FF}]){1,2} \[(BUILD|PLAN|BASH)\]']
+
+[[rules]]
+id = "status_bar_idle"
+state = "idle"
+priority = 850
+region = "bottom_non_empty_lines(1)"
+visible_idle = true
+line_regex = ['^ \[(BUILD|PLAN|BASH)\]']
+
+# On narrow panes the right side of the status bar overwrites the mode label,
+# so fall back to the prompt chevron above the input box border. The not-gates
+# keep this from matching the streaming placeholder or a status bar that still
+# shows the spinner.
+[[rules]]
+id = "prompt_box_idle"
+state = "idle"
+priority = 840
+region = "bottom_non_empty_lines(3)"
+visible_idle = true
+line_regex = ['^❯ ']
+not = [
+  { contains = ["queue another prompt"] },
+  { line_regex = ['^( [\x{2800}-\x{28FF}]){1,2} '] },
+]
