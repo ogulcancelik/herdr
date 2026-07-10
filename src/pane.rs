@@ -1501,6 +1501,28 @@ impl PaneRuntime {
 
     pub fn apply_host_terminal_theme(&self, theme: crate::terminal_theme::TerminalTheme) {
         self.terminal.apply_host_terminal_theme(theme);
+
+        // Push OSC 10/11 color notifications to the child process stdin so
+        // apps like Claude Code can react to host theme changes dynamically
+        // without needing to re-query the terminal themselves.
+        let mut notification = String::new();
+        if let Some(fg) = theme.foreground {
+            notification.push_str(&crate::terminal_theme::osc_set_default_color_sequence(
+                crate::terminal_theme::DefaultColorKind::Foreground,
+                fg,
+            ));
+        }
+        if let Some(bg) = theme.background {
+            notification.push_str(&crate::terminal_theme::osc_set_default_color_sequence(
+                crate::terminal_theme::DefaultColorKind::Background,
+                bg,
+            ));
+        }
+        if !notification.is_empty() {
+            if let Err(err) = self.try_send_bytes(Bytes::from(notification)) {
+                warn!(err = %err, "failed to push host terminal theme notification to child process");
+            }
+        }
     }
 
     pub fn spawn(
