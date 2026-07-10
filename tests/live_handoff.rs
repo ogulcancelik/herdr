@@ -1576,3 +1576,101 @@ fn live_handoff_import_failure_rolls_back_old_server_at(failure_point: &str) {
 fn live_handoff_after_restored_failure_rolls_back_old_server() {
     live_handoff_import_failure_rolls_back_old_server_at("after_restored");
 }
+
+fn pane_output_revision(socket_path: &Path, pane_id: &str) -> u64 {
+    let response = request(
+        socket_path,
+        serde_json::json!({
+            "id": "test:pane:read-revision",
+            "method": "pane.read",
+            "params": {
+                "pane_id": pane_id,
+                "source": "visible",
+                "lines": 1,
+                "format": "text",
+                "strip_ansi": true
+            }
+        }),
+    );
+    response["result"]["read"]["revision"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("pane.read missing revision: {response}"))
+}
+
+#[test]
+fn live_handoff_preserves_pane_output_revision() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    let server_pid = spawned
+        .child
+        .process_id()
+        .expect("test server should expose pid");
+
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:seed",
+            "method": "pane.send_input",
+            "params": {"pane_id": pane_id, "text": "echo revision-seed", "keys": ["Enter"]}
+        }),
+    ));
+    wait_for_output(&api_socket, &pane_id, "revision-seed");
+    let before = pane_output_revision(&api_socket, &pane_id);
+    assert!(before > 0, "expected live output to bump revision");
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    let _replacement_pid =
+        wait_for_replacement_server_pid(&runtime_dir, server_pid, Duration::from_secs(10));
+    wait_for_api(&api_socket, Duration::from_secs(10));
+
+    let after = pane_output_revision(&api_socket, &pane_id);
+    assert!(
+        after >= before,
+        "revision regressed across handoff: before={before} after={after}"
+    );
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:post-handoff",
+            "method": "pane.send_input",
+            "params": {"pane_id": pane_id, "text": "echo revision-after", "keys": ["Enter"]}
+        }),
+    ));
+    wait_for_output(&api_socket, &pane_id, "revision-after");
+    let grown = pane_output_revision(&api_socket, &pane_id);
+    assert!(
+        grown > before,
+        "revision must keep growing after handoff: before={before} grown={grown}"
+    );
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    drop(spawned);
+    cleanup_test_base(&base);
+}

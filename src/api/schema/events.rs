@@ -74,6 +74,12 @@ pub enum Subscription {
     },
     #[serde(rename = "pane.scroll_changed")]
     PaneScrollChanged { pane_id: String },
+    #[serde(rename = "pane.output_changed")]
+    PaneOutputChanged {
+        pane_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_revision: Option<u64>,
+    },
     #[serde(rename = "layout.updated")]
     LayoutUpdated {},
 }
@@ -354,6 +360,8 @@ pub enum SubscriptionEventKind {
     PaneAgentStatusChanged,
     #[serde(rename = "pane.scroll_changed")]
     ScrollChanged,
+    #[serde(rename = "pane.output_changed")]
+    PaneOutputChanged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -368,6 +376,14 @@ pub enum SubscriptionEventData {
     PaneOutputMatched(PaneOutputMatchedEvent),
     PaneAgentStatusChanged(PaneAgentStatusChangedEvent),
     ScrollChanged(PaneScrollChangedEvent),
+    PaneOutputChanged(PaneOutputChangedEvent),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneOutputChangedEvent {
+    pub pane_id: String,
+    pub workspace_id: String,
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

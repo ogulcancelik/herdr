@@ -77,6 +77,7 @@ impl TerminalRuntime {
         .map(Self)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         pane_id: PaneId,
         rows: u16,
@@ -86,6 +87,7 @@ impl TerminalRuntime {
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         shell_config: crate::pane::PaneShellConfig<'_>,
         launch_env: &crate::pane::PaneLaunchEnv,
+        initial_output_revision: u64,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
@@ -99,6 +101,7 @@ impl TerminalRuntime {
             host_terminal_theme,
             shell_config,
             launch_env,
+            initial_output_revision,
             events,
             render_notify,
             render_dirty,
@@ -118,6 +121,7 @@ impl TerminalRuntime {
         shell_config: crate::pane::PaneShellConfig<'_>,
         launch_env: &crate::pane::PaneLaunchEnv,
         initial_history_ansi: Option<&str>,
+        initial_output_revision: u64,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
@@ -132,6 +136,7 @@ impl TerminalRuntime {
             shell_config,
             launch_env,
             initial_history_ansi,
+            initial_output_revision,
             events,
             render_notify,
             render_dirty,
@@ -211,11 +216,23 @@ impl TerminalRuntime {
         self.0.reset_agent_detection();
     }
 
+    /// Live monotonic output revision for this pane's runtime
+    /// (docs/plans/2026-07-10-pane-output-revisions.md).
+    pub fn output_revision(&self) -> u64 {
+        self.0.output_revision()
+    }
+
     #[cfg(test)]
     pub(crate) fn agent_detection_reset_notify_for_test(
         &self,
     ) -> std::sync::Arc<tokio::sync::Notify> {
         self.0.agent_detection_reset_notify_for_test()
+    }
+
+    /// Test-only: simulate `n` applied nonempty PTY output chunks.
+    #[cfg(test)]
+    pub(crate) fn test_bump_output_revision(&self, n: u64) {
+        self.0.test_bump_output_revision(n);
     }
 
     pub fn set_full_lifecycle_authority_active(&self, active: bool) {

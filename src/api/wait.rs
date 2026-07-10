@@ -186,11 +186,19 @@ fn event_match_subscription(
             pane_id,
             agent_status: Some(agent_status),
         }),
+        EventMatch::PaneOutputChanged {
+            pane_id,
+            min_revision,
+        } => Ok(Subscription::PaneOutputChanged {
+            pane_id,
+            min_revision,
+        }),
         _ => Err(ErrorResponse {
             id: request_id.into(),
             error: ErrorBody {
                 code: "unsupported_event_wait_match".into(),
-                message: "events.wait currently supports pane agent status matches".into(),
+                message: "events.wait currently supports pane agent status and pane output matches"
+                    .into(),
             },
         }),
     }
@@ -208,34 +216,45 @@ fn wait_matched_response(request_id: &str, event: serde_json::Value) -> String {
         .unwrap();
     };
 
-    let SubscriptionEventData::PaneAgentStatusChanged(data) = event.data else {
-        return serde_json::to_string(&ErrorResponse {
-            id: request_id.into(),
-            error: ErrorBody {
-                code: "unsupported_event_wait_match".into(),
-                message: "events.wait currently supports pane agent status matches".into(),
+    let event = match event.data {
+        SubscriptionEventData::PaneAgentStatusChanged(data) => EventEnvelope {
+            event: EventKind::PaneAgentStatusChanged,
+            data: EventData::PaneAgentStatusChanged {
+                pane_id: data.pane_id,
+                workspace_id: data.workspace_id,
+                agent_status: data.agent_status,
+                agent: data.agent,
+                title: data.title,
+                display_agent: data.display_agent,
+                custom_status: data.custom_status,
+                state_labels: data.state_labels,
             },
-        })
-        .unwrap();
+        },
+        SubscriptionEventData::PaneOutputChanged(data) => EventEnvelope {
+            event: EventKind::PaneOutputChanged,
+            data: EventData::PaneOutputChanged {
+                pane_id: data.pane_id,
+                workspace_id: data.workspace_id,
+                revision: data.revision,
+            },
+        },
+        _ => {
+            return serde_json::to_string(&ErrorResponse {
+                id: request_id.into(),
+                error: ErrorBody {
+                    code: "unsupported_event_wait_match".into(),
+                    message:
+                        "events.wait currently supports pane agent status and pane output matches"
+                            .into(),
+                },
+            })
+            .unwrap();
+        }
     };
 
     serde_json::to_string(&SuccessResponse {
         id: request_id.into(),
-        result: ResponseResult::WaitMatched {
-            event: EventEnvelope {
-                event: EventKind::PaneAgentStatusChanged,
-                data: EventData::PaneAgentStatusChanged {
-                    pane_id: data.pane_id,
-                    workspace_id: data.workspace_id,
-                    agent_status: data.agent_status,
-                    agent: data.agent,
-                    title: data.title,
-                    display_agent: data.display_agent,
-                    custom_status: data.custom_status,
-                    state_labels: data.state_labels,
-                },
-            },
-        },
+        result: ResponseResult::WaitMatched { event },
     })
     .unwrap()
 }

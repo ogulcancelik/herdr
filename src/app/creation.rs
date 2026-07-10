@@ -389,6 +389,14 @@ impl App {
             && ws
                 .focused_pane_id()
                 .is_some_and(|focused| focused == pane_id);
+        // Prefer the live runtime counter; runtime-less panes (session restore
+        // before spawn, exited panes) fall back to the mirrored
+        // `TerminalState.revision`.
+        let revision = self
+            .state
+            .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
+            .map(|runtime| runtime.output_revision())
+            .unwrap_or(terminal.revision);
         let presentation = terminal.effective_presentation();
         Some(crate::api::schema::PaneInfo {
             pane_id: self.public_pane_id(ws_idx, pane_id)?,
@@ -411,7 +419,7 @@ impl App {
             state_labels: presentation.state_labels,
             agent_session: terminal_agent_session_info(terminal),
             scroll,
-            revision: terminal.revision,
+            revision,
         })
     }
 

@@ -1068,8 +1068,14 @@ impl App {
             match event {
                 LoopEvent::Timer => {}
                 LoopEvent::Internal(ev) => {
+                    // Output-change ticks are subscriber-facing; PTY output already marks
+                    // render_dirty, so they must not force an extra render pass.
+                    let suppress_render =
+                        matches!(ev, crate::events::AppEvent::PaneOutputChanged { .. });
                     self.handle_internal_event_with_prefix_sync(ev);
-                    needs_render = true;
+                    if !suppress_render {
+                        needs_render = true;
+                    }
                 }
                 LoopEvent::Api(msg) => {
                     if self.handle_api_request_message(*msg) {

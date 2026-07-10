@@ -2268,3 +2268,114 @@ fn metadata_status_subscription_filter_and_ttl_expiry_are_observable() {
 
     cleanup_spawned_herdr(child, base);
 }
+
+/// End-to-end harvest shape (tnodes TASK-101): read revision `n`, wait for
+/// `pane.output_changed` with `min_revision: n+1`, then read again and observe
+/// a live (non-zero, monotonically advanced) revision alongside the new text.
+#[test]
+fn pane_read_wait_min_revision_read_harvest_round_trip() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let child = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_hv_1","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    assert!(created["result"]["workspace"]["workspace_id"].is_string());
+
+    let panes = send_request(
+        &socket_path,
+        r#"{"id":"req_hv_2","method":"pane.list","params":{}}"#,
+    );
+    let pane_id = panes["result"]["panes"][0]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Step 1: read the current revision `n`.
+    let read = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_hv_3","method":"pane.read","params":{{"pane_id":"{}","source":"recent","lines":40}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(read["result"]["type"], "pane_read");
+    let baseline = read["result"]["read"]["revision"].as_u64().unwrap();
+
+    // Step 2: park a waiter on `min_revision: n+1` before producing output.
+    let mut waiter = JsonLineReader::connect(&socket_path);
+    waiter.send_line(&format!(
+        r#"{{"id":"wait_hv","method":"events.wait","params":{{"match_event":{{"event":"pane_output_changed","pane_id":"{}","min_revision":{}}},"timeout_ms":8000}}}}"#,
+        pane_id,
+        baseline + 1
+    ));
+
+    let send_text = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_hv_4","method":"pane.send_text","params":{{"pane_id":"{}","text":"echo revision harvest done"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(send_text["result"]["type"], "ok");
+    let send_enter = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_hv_5","method":"pane.send_keys","params":{{"pane_id":"{}","keys":["Enter"]}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(send_enter["result"]["type"], "ok");
+
+    let matched = waiter.read_json_line(Duration::from_secs(8));
+    assert_eq!(matched["id"], "wait_hv");
+    assert_eq!(matched["result"]["type"], "wait_matched");
+    assert_eq!(matched["result"]["event"]["event"], "pane_output_changed");
+    assert_eq!(matched["result"]["event"]["data"]["pane_id"], pane_id);
+    let event_revision = matched["result"]["event"]["data"]["revision"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        event_revision > baseline,
+        "event revision {event_revision} did not advance past baseline {baseline}"
+    );
+
+    // Step 3: read again — revision must be live, monotonic, and at least the
+    // notified revision once the marker text has landed.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let read = send_request(
+            &socket_path,
+            &format!(
+                r#"{{"id":"req_hv_6","method":"pane.read","params":{{"pane_id":"{}","source":"recent","lines":40}}}}"#,
+                pane_id
+            ),
+        );
+        let revision = read["result"]["read"]["revision"].as_u64().unwrap();
+        assert!(
+            revision >= event_revision,
+            "read revision {revision} regressed below notified revision {event_revision}"
+        );
+        let text = read["result"]["read"]["text"].as_str().unwrap();
+        if text.contains("revision harvest done") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "marker text never appeared; last revision {revision}"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    cleanup_spawned_herdr(child, base);
+}

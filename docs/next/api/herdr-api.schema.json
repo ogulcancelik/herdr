@@ -3407,6 +3407,30 @@
             },
             {
               "properties": {
+                "min_revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "pane_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "pane.output_changed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "type": {
                   "const": "layout.updated",
                   "type": "string"
@@ -5084,6 +5108,27 @@
           ],
           "type": "object"
         },
+        "PaneOutputChangedEvent": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "workspace_id",
+            "revision"
+          ],
+          "type": "object"
+        },
         "PaneOutputMatchedEvent": {
           "properties": {
             "matched_line": {
@@ -5214,6 +5259,9 @@
             },
             {
               "$ref": "#/schemas/subscription_event/$defs/PaneScrollChangedEvent"
+            },
+            {
+              "$ref": "#/schemas/subscription_event/$defs/PaneOutputChangedEvent"
             }
           ]
         },
@@ -5221,7 +5269,8 @@
           "enum": [
             "pane.output_matched",
             "pane.agent_status_changed",
-            "pane.scroll_changed"
+            "pane.scroll_changed",
+            "pane.output_changed"
           ],
           "type": "string"
         }

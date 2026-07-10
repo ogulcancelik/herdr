@@ -2100,6 +2100,13 @@ impl HeadlessServer {
 
                 true
             }
+            AppEvent::PaneOutputChanged { .. } => {
+                // Fan out to API subscribers via handle_internal_event's emit_event path.
+                // PTY output already drives rendering through render_dirty; suppress the
+                // extra render pass here.
+                self.app.handle_internal_event(ev);
+                false
+            }
             _ => {
                 self.app.handle_internal_event(ev);
                 true

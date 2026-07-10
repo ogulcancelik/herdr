@@ -5,6 +5,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering},
     Arc, Mutex,
 };
+use std::time::Duration;
 
 use bytes::Bytes;
 use portable_pty::CommandBuilder;
@@ -912,12 +913,16 @@ pub struct PaneRuntime {
     child_wait_completed: Option<Arc<AtomicBool>>,
     kitty_keyboard_flags: Arc<AtomicU16>,
     detection_content_seq: Arc<AtomicU64>,
+    /// Monotonic count of applied nonempty PTY output chunks, seeded at spawn
+    /// (docs/plans/2026-07-10-pane-output-revisions.md §1).
+    output_revision: Arc<AtomicU64>,
     full_lifecycle_authority_active: Arc<AtomicBool>,
     detect_reset_notify: Arc<Notify>,
     pending_release: Arc<Mutex<Option<PendingAgentRelease>>>,
     preserve_processes_on_drop: bool,
     // Task handles for deterministic shutdown
     detect_handle: tokio::task::AbortHandle,
+    output_changed_handle: tokio::task::AbortHandle,
 }
 
 enum PaneRuntimeIo {
@@ -1057,11 +1062,60 @@ pub enum WheelRouting {
     AlternateScroll,
 }
 
+/// Bump the pane output revision after a nonempty PTY chunk has been applied by
+/// the terminal. Empty reads must not increment
+/// (docs/plans/2026-07-10-pane-output-revisions.md §1).
+fn observe_output_revision(bytes: &[u8], output_revision: &AtomicU64, output_changed: &Notify) {
+    if !bytes.is_empty() {
+        output_revision.fetch_add(1, Ordering::Release);
+        output_changed.notify_one();
+    }
+}
+
+/// Coalescing window for `AppEvent::PaneOutputChanged` emission
+/// (docs/plans/2026-07-10-pane-output-revisions.md §3).
+const OUTPUT_CHANGED_COALESCE_WINDOW: Duration = Duration::from_millis(25);
+
+/// Spawn the per-pane output-changed coalescer: wait for a revision bump,
+/// sleep one coalescing window, then send a single `PaneOutputChanged`
+/// carrying the newest revision (awaited send — never dropped under
+/// backpressure). A bump landing mid-send stores a `Notify` permit, so the
+/// trailing event is never lost.
+fn spawn_output_changed_coalescer(
+    pane_id: PaneId,
+    output_revision: Arc<AtomicU64>,
+    output_changed: Arc<Notify>,
+    events: mpsc::Sender<AppEvent>,
+) -> tokio::task::AbortHandle {
+    tokio::spawn(async move {
+        let mut last_sent = output_revision.load(Ordering::Acquire);
+        loop {
+            output_changed.notified().await;
+            tokio::time::sleep(OUTPUT_CHANGED_COALESCE_WINDOW).await;
+            let revision = output_revision.load(Ordering::Acquire);
+            if revision == last_sent {
+                continue;
+            }
+            if events
+                .send(AppEvent::PaneOutputChanged { pane_id, revision })
+                .await
+                .is_err()
+            {
+                // Main loop is gone; nothing left to notify.
+                return;
+            }
+            last_sent = revision;
+        }
+    })
+    .abort_handle()
+}
+
 impl Drop for PaneRuntime {
     fn drop(&mut self) {
         // Abort detection task immediately and terminate the owned session.
         // The PTY actor shuts down before the process/session policy runs.
         self.detect_handle.abort();
+        self.output_changed_handle.abort();
         self.io.shutdown();
         if !self.preserve_processes_on_drop {
             shutdown_pane_processes(
@@ -1412,6 +1466,7 @@ fn publish_reported_cwd(
 impl PaneRuntime {
     pub fn shutdown(mut self) {
         self.detect_handle.abort();
+        self.output_changed_handle.abort();
         self.io.shutdown();
         shutdown_pane_processes(
             self.pane_id,
@@ -1482,6 +1537,7 @@ impl PaneRuntime {
             keyboard_protocol_ansi: self.terminal.kitty_keyboard_state_ansi(),
             input_state: self.input_state(),
             initial_history_ansi: None,
+            output_revision: self.output_revision.load(Ordering::Acquire),
         }
     }
 
@@ -1503,6 +1559,7 @@ impl PaneRuntime {
         self.terminal.apply_host_terminal_theme(theme);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         pane_id: PaneId,
         rows: u16,
@@ -1512,6 +1569,7 @@ impl PaneRuntime {
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         shell_config: PaneShellConfig<'_>,
         launch_env: &PaneLaunchEnv,
+        initial_output_revision: u64,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
@@ -1526,6 +1584,7 @@ impl PaneRuntime {
             shell_config,
             launch_env,
             None,
+            initial_output_revision,
             events,
             render_notify,
             render_dirty,
@@ -1544,6 +1603,7 @@ impl PaneRuntime {
         shell_config: PaneShellConfig<'_>,
         launch_env: &PaneLaunchEnv,
         initial_history_ansi: Option<&str>,
+        initial_output_revision: u64,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
@@ -1563,6 +1623,7 @@ impl PaneRuntime {
             events,
             render_notify,
             render_dirty,
+            initial_output_revision,
             cmd,
             "failed to spawn shell",
             SpawnInitialState {
@@ -1601,6 +1662,7 @@ impl PaneRuntime {
             events,
             render_notify,
             render_dirty,
+            0,
             cmd,
             "failed to spawn command pane",
             SpawnInitialState::default(),
@@ -1642,6 +1704,7 @@ impl PaneRuntime {
             events,
             render_notify,
             render_dirty,
+            0,
             cmd,
             "failed to spawn argv command pane",
             SpawnInitialState::default(),
@@ -1669,6 +1732,7 @@ impl PaneRuntime {
             keyboard_protocol_ansi,
             input_state,
             initial_history_ansi,
+            output_revision: seed_output_revision,
         } = state;
         let pane_id = PaneId::from_raw(pane_id);
         use std::os::fd::FromRawFd;
@@ -1704,6 +1768,15 @@ impl PaneRuntime {
         let reported_cwd = Arc::new(Mutex::new(None));
         let kitty_keyboard_flags = Arc::new(AtomicU16::new(keyboard_protocol_flags));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
+        // Seed from the pre-handoff revision so subscriber cursors stay monotonic (Phase 5).
+        let output_revision = Arc::new(AtomicU64::new(seed_output_revision));
+        let output_changed_notify = Arc::new(Notify::new());
+        let output_changed_handle = spawn_output_changed_coalescer(
+            pane_id,
+            output_revision.clone(),
+            output_changed_notify.clone(),
+            events.clone(),
+        );
 
         let io = {
             let terminal = terminal.clone();
@@ -1711,6 +1784,8 @@ impl PaneRuntime {
             let render_notify = render_notify.clone();
             let render_dirty = render_dirty.clone();
             let detection_content_seq = detection_content_seq.clone();
+            let output_revision = output_revision.clone();
+            let output_changed_notify = output_changed_notify.clone();
             let child_pid = child_pid.clone();
             let read_events = events.clone();
             let reported_cwd = reported_cwd.clone();
@@ -1721,6 +1796,7 @@ impl PaneRuntime {
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
                 observe_detection_content_change(bytes, &detection_content_seq);
+                observe_output_revision(bytes, &output_revision, &output_changed_notify);
                 if result.request_render && !render_dirty.swap(true, Ordering::AcqRel) {
                     render_notify.notify_one();
                 }
@@ -1784,14 +1860,17 @@ impl PaneRuntime {
             child_wait_completed: None,
             kitty_keyboard_flags,
             detection_content_seq,
+            output_revision,
             full_lifecycle_authority_active,
             detect_reset_notify,
             pending_release,
             preserve_processes_on_drop: true,
             detect_handle,
+            output_changed_handle,
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_command_builder(
         pane_id: PaneId,
         rows: u16,
@@ -1801,6 +1880,7 @@ impl PaneRuntime {
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
+        initial_output_revision: u64,
         cmd: CommandBuilder,
         spawn_error_message: &'static str,
         initial_state: SpawnInitialState<'_>,
@@ -1837,6 +1917,14 @@ impl PaneRuntime {
         let reported_cwd = Arc::new(Mutex::new(None));
         let child_wait_completed = Arc::new(AtomicBool::new(false));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
+        let output_revision = Arc::new(AtomicU64::new(initial_output_revision));
+        let output_changed_notify = Arc::new(Notify::new());
+        let output_changed_handle = spawn_output_changed_coalescer(
+            pane_id,
+            output_revision.clone(),
+            output_changed_notify.clone(),
+            events.clone(),
+        );
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
         {
             let child_pid = child_pid.clone();
@@ -1870,6 +1958,8 @@ impl PaneRuntime {
             let render_notify = render_notify.clone();
             let render_dirty = render_dirty.clone();
             let detection_content_seq = detection_content_seq.clone();
+            let output_revision = output_revision.clone();
+            let output_changed_notify = output_changed_notify.clone();
             let child_pid = child_pid.clone();
             let events = events.clone();
             let reported_cwd = reported_cwd.clone();
@@ -1879,6 +1969,7 @@ impl PaneRuntime {
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
                 observe_detection_content_change(bytes, &detection_content_seq);
+                observe_output_revision(bytes, &output_revision, &output_changed_notify);
                 if result.request_render && !render_dirty.swap(true, Ordering::AcqRel) {
                     render_notify.notify_one();
                 }
@@ -2292,11 +2383,13 @@ impl PaneRuntime {
             child_wait_completed: Some(child_wait_completed),
             kitty_keyboard_flags,
             detection_content_seq,
+            output_revision,
             full_lifecycle_authority_active,
             detect_reset_notify,
             pending_release,
             preserve_processes_on_drop: false,
             detect_handle,
+            output_changed_handle,
         })
     }
 
@@ -2314,9 +2407,23 @@ impl PaneRuntime {
         self.detect_reset_notify.notify_one();
     }
 
+    /// Monotonic output revision: the number of applied nonempty PTY output
+    /// chunks since this runtime's seed (`initial_output_revision`).
+    pub fn output_revision(&self) -> u64 {
+        self.output_revision.load(Ordering::Acquire)
+    }
+
     #[cfg(test)]
     pub(crate) fn agent_detection_reset_notify_for_test(&self) -> Arc<Notify> {
         self.detect_reset_notify.clone()
+    }
+
+    /// Test-only: simulate `n` applied nonempty PTY output chunks. The test
+    /// runtime constructors write bytes straight into the ghostty terminal,
+    /// bypassing the PTY read loop that normally bumps the counter.
+    #[cfg(test)]
+    pub(crate) fn test_bump_output_revision(&self, n: u64) {
+        self.output_revision.fetch_add(n, Ordering::Release);
     }
 
     pub fn set_full_lifecycle_authority_active(&self, active: bool) {
@@ -2732,11 +2839,13 @@ impl PaneRuntime {
                 child_wait_completed: None,
                 kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
                 detection_content_seq: Arc::new(AtomicU64::new(0)),
+                output_revision: Arc::new(AtomicU64::new(0)),
                 full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
                 detect_reset_notify: Arc::new(Notify::new()),
                 pending_release: Arc::new(Mutex::new(None)),
                 preserve_processes_on_drop: true,
                 detect_handle: tokio::spawn(async {}).abort_handle(),
+                output_changed_handle: tokio::spawn(async {}).abort_handle(),
             },
             rx,
         )
@@ -2765,6 +2874,78 @@ mod tests {
     #[test]
     fn shutdown_liveness_treats_missing_process_as_gone() {
         assert!(!process_alive_for_shutdown(43, 42, false, |_| false));
+    }
+
+    #[test]
+    fn output_revision_ignores_empty_chunks() {
+        let rev = AtomicU64::new(0);
+        let notify = Notify::new();
+        observe_output_revision(b"", &rev, &notify);
+        assert_eq!(rev.load(Ordering::Acquire), 0);
+        observe_output_revision(b"hi", &rev, &notify);
+        assert_eq!(rev.load(Ordering::Acquire), 1);
+        observe_output_revision(b"", &rev, &notify);
+        assert_eq!(rev.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn output_revision_increments_from_seed() {
+        let rev = AtomicU64::new(41);
+        let notify = Notify::new();
+        observe_output_revision(b"x", &rev, &notify);
+        assert_eq!(rev.load(Ordering::Acquire), 42);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_respects_initial_output_revision_seed() {
+        let (events, _events_rx) = mpsc::channel(16);
+        let runtime = PaneRuntime::spawn(
+            PaneId::from_raw(0),
+            24,
+            80,
+            std::env::temp_dir(),
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::NonLogin),
+            &PaneLaunchEnv::default(),
+            7,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        // The counter only grows from the seed; it must never start below it.
+        assert!(runtime.output_revision() >= 7);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resize_does_not_bump_output_revision() {
+        let (events, _events_rx) = mpsc::channel(16);
+        let runtime = PaneRuntime::spawn_argv_command(
+            PaneId::from_raw(0),
+            24,
+            80,
+            std::env::temp_dir(),
+            &["sleep".to_string(), "5".to_string()],
+            &PaneLaunchEnv::default(),
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(runtime.output_revision(), 0, "sleep pane must stay silent");
+        runtime.resize(30, 100, 0, 0);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(
+            runtime.output_revision(),
+            0,
+            "resize must not bump the revision"
+        );
     }
 
     #[cfg(unix)]
@@ -3190,11 +3371,13 @@ mod tests {
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             detection_content_seq: Arc::new(AtomicU64::new(0)),
+            output_revision: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
             detect_reset_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
             detect_handle: tokio::spawn(async {}).abort_handle(),
+            output_changed_handle: tokio::spawn(async {}).abort_handle(),
         };
 
         assert!(runtime.try_send_focus_event(crate::ghostty::FocusEvent::Gained));
@@ -3221,11 +3404,13 @@ mod tests {
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             detection_content_seq: Arc::new(AtomicU64::new(0)),
+            output_revision: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
             detect_reset_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
             detect_handle: tokio::spawn(async {}).abort_handle(),
+            output_changed_handle: tokio::spawn(async {}).abort_handle(),
         };
 
         assert!(!runtime.try_send_focus_event(crate::ghostty::FocusEvent::Gained));

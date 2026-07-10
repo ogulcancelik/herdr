@@ -1,9 +1,9 @@
 use regex::Regex;
 
 use crate::api::schema::{
-    ErrorBody, ErrorResponse, Method, PaneAgentStatusChangedEvent, PaneOutputMatchedEvent,
-    PaneScrollChangedEvent, PaneScrollInfo, Request, Subscription, SubscriptionEventData,
-    SubscriptionEventEnvelope, SubscriptionEventKind,
+    ErrorBody, ErrorResponse, Method, PaneAgentStatusChangedEvent, PaneOutputChangedEvent,
+    PaneOutputMatchedEvent, PaneScrollChangedEvent, PaneScrollInfo, Request, Subscription,
+    SubscriptionEventData, SubscriptionEventEnvelope, SubscriptionEventKind,
 };
 use crate::api::server::{dispatch_to_app_with_timeout, APP_RESPONSE_TIMEOUT};
 use crate::api::{ApiRequestSender, EventHub};
@@ -62,6 +62,18 @@ pub(super) struct ActiveScrollChangedSubscription {
     request_prefix: String,
 }
 
+pub(super) struct ActiveOutputChangedSubscription {
+    pane_id: String,
+    /// Revisions below this threshold never match. Derived from `min_revision`
+    /// when provided, otherwise `probe revision + 1` (baseline semantics: only
+    /// output produced after subscribing matches).
+    threshold: u64,
+    last_emitted: Option<u64>,
+    last_sequence: u64,
+    initial_event: Option<PaneOutputChangedEvent>,
+    request_prefix: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PanePresentationSnapshot {
     title: Option<String>,
@@ -105,6 +117,7 @@ pub(super) enum ActiveSubscription {
     OutputMatched(ActiveOutputMatchedSubscription),
     AgentStatusChanged(Box<ActiveAgentStatusChangedSubscription>),
     ScrollChanged(ActiveScrollChangedSubscription),
+    OutputChanged(ActiveOutputChangedSubscription),
 }
 
 impl ActiveSubscription {
@@ -286,6 +299,29 @@ impl ActiveSubscription {
                     request_prefix: format!("{request_id}:sub:{index}"),
                 }))
             }
+            Subscription::PaneOutputChanged {
+                pane_id,
+                min_revision,
+            } => {
+                let last_sequence = event_hub.current_sequence();
+                let probe = pane_get(format!("{request_id}:sub:{index}:probe"), &pane_id, api_tx)?;
+                let threshold = min_revision.unwrap_or_else(|| probe.revision.saturating_add(1));
+                let initial_event =
+                    (probe.revision >= threshold).then_some(PaneOutputChangedEvent {
+                        pane_id: probe.pane_id.clone(),
+                        workspace_id: probe.workspace_id.clone(),
+                        revision: probe.revision,
+                    });
+
+                Ok(Self::OutputChanged(ActiveOutputChangedSubscription {
+                    pane_id: probe.pane_id,
+                    threshold,
+                    last_emitted: None,
+                    last_sequence,
+                    initial_event,
+                    request_prefix: format!("{request_id}:sub:{index}"),
+                }))
+            }
         }
     }
 
@@ -304,6 +340,9 @@ impl ActiveSubscription {
             }
             Self::ScrollChanged(subscription) => {
                 serde_json::to_value(subscription.poll(api_tx)?).ok()
+            }
+            Self::OutputChanged(subscription) => {
+                serde_json::to_value(subscription.poll(api_tx, event_hub)?).ok()
             }
         }
     }
@@ -515,6 +554,89 @@ impl ActiveScrollChangedSubscription {
                 workspace_id: pane.workspace_id,
                 scroll,
             }),
+        })
+    }
+}
+
+impl ActiveOutputChangedSubscription {
+    fn poll(
+        &mut self,
+        api_tx: &ApiRequestSender,
+        event_hub: &EventHub,
+    ) -> Option<SubscriptionEventEnvelope> {
+        // Drain the hub queue to the newest matching revision (coalesce).
+        let mut newest: Option<PaneOutputChangedEvent> = None;
+        for (sequence, event) in event_hub.events_after(self.last_sequence) {
+            self.last_sequence = sequence;
+            if event.event != crate::api::schema::EventKind::PaneOutputChanged {
+                continue;
+            }
+            let crate::api::schema::EventData::PaneOutputChanged {
+                pane_id,
+                workspace_id,
+                revision,
+            } = event.data
+            else {
+                continue;
+            };
+            if pane_id != self.pane_id {
+                continue;
+            }
+            if newest.as_ref().is_none_or(|seen| revision > seen.revision) {
+                newest = Some(PaneOutputChangedEvent {
+                    pane_id,
+                    workspace_id,
+                    revision,
+                });
+            }
+        }
+
+        if let Some(event) = newest {
+            self.initial_event = None;
+            return self.emit(event);
+        }
+
+        if event_hub.current_sequence() != self.last_sequence {
+            return None;
+        }
+
+        if let Some(event) = self.initial_event.take() {
+            return self.emit(event);
+        }
+
+        // Eviction resilience: re-probe the live counter in case matching hub
+        // events were evicted before this subscription drained them.
+        let before_snapshot_sequence = self.last_sequence;
+        let pane = pane_get(
+            format!("{}:pane", self.request_prefix),
+            &self.pane_id,
+            api_tx,
+        )
+        .ok()?;
+        let after_snapshot_sequence = event_hub.current_sequence();
+        if after_snapshot_sequence != before_snapshot_sequence {
+            return None;
+        }
+
+        self.emit(PaneOutputChangedEvent {
+            pane_id: pane.pane_id,
+            workspace_id: pane.workspace_id,
+            revision: pane.revision,
+        })
+    }
+
+    fn emit(&mut self, event: PaneOutputChangedEvent) -> Option<SubscriptionEventEnvelope> {
+        if event.revision < self.threshold {
+            return None;
+        }
+        if self.last_emitted.is_some_and(|last| event.revision <= last) {
+            return None;
+        }
+        self.last_emitted = Some(event.revision);
+
+        Some(SubscriptionEventEnvelope {
+            event: SubscriptionEventKind::PaneOutputChanged,
+            data: SubscriptionEventData::PaneOutputChanged(event),
         })
     }
 }
@@ -807,5 +929,171 @@ mod tests {
         };
         assert_eq!(data.custom_status.as_deref(), Some("short lived"));
         assert!(subscription.initial_event.is_none());
+    }
+
+    fn output_event(pane_id: &str, revision: u64) -> EventEnvelope {
+        EventEnvelope {
+            event: EventKind::PaneOutputChanged,
+            data: EventData::PaneOutputChanged {
+                pane_id: pane_id.into(),
+                workspace_id: "workspace_1".into(),
+                revision,
+            },
+        }
+    }
+
+    fn output_subscription(
+        event_hub: &EventHub,
+        threshold: u64,
+        initial_event: Option<PaneOutputChangedEvent>,
+    ) -> ActiveOutputChangedSubscription {
+        ActiveOutputChangedSubscription {
+            pane_id: "pane_1".into(),
+            threshold,
+            last_emitted: None,
+            last_sequence: event_hub.current_sequence(),
+            initial_event,
+            request_prefix: "test".into(),
+        }
+    }
+
+    fn dead_api_tx() -> ApiRequestSender {
+        tokio::sync::mpsc::unbounded_channel().0
+    }
+
+    #[test]
+    fn output_changed_subscription_coalesces_hub_events_to_newest_revision() {
+        let event_hub = EventHub::default();
+        let mut subscription = output_subscription(&event_hub, 1, None);
+
+        event_hub.push(output_event("pane_1", 5));
+        event_hub.push(output_event("other_pane", 12));
+        event_hub.push(output_event("pane_1", 6));
+        event_hub.push(output_event("pane_1", 7));
+
+        let event = subscription
+            .poll(&dead_api_tx(), &event_hub)
+            .expect("coalesced event");
+        let SubscriptionEventData::PaneOutputChanged(data) = event.data else {
+            panic!("wrong event data");
+        };
+        assert_eq!(data.pane_id, "pane_1");
+        assert_eq!(data.revision, 7);
+
+        // Queue is drained; the dead api channel makes the eviction re-probe
+        // fail closed, so a quiet hub yields no further events.
+        assert!(subscription.poll(&dead_api_tx(), &event_hub).is_none());
+    }
+
+    #[test]
+    fn output_changed_subscription_replays_initial_event_when_hub_quiet() {
+        let event_hub = EventHub::default();
+        let initial = PaneOutputChangedEvent {
+            pane_id: "pane_1".into(),
+            workspace_id: "workspace_1".into(),
+            revision: 3,
+        };
+        let mut subscription = output_subscription(&event_hub, 3, Some(initial));
+
+        let event = subscription
+            .poll(&dead_api_tx(), &event_hub)
+            .expect("initial baseline event");
+        let SubscriptionEventData::PaneOutputChanged(data) = event.data else {
+            panic!("wrong event data");
+        };
+        assert_eq!(data.revision, 3);
+
+        event_hub.push(output_event("pane_1", 4));
+        let event = subscription
+            .poll(&dead_api_tx(), &event_hub)
+            .expect("follow-up event");
+        let SubscriptionEventData::PaneOutputChanged(data) = event.data else {
+            panic!("wrong event data");
+        };
+        assert_eq!(data.revision, 4);
+    }
+
+    #[test]
+    fn output_changed_subscription_prefers_hub_events_over_initial_snapshot() {
+        let event_hub = EventHub::default();
+        let initial = PaneOutputChangedEvent {
+            pane_id: "pane_1".into(),
+            workspace_id: "workspace_1".into(),
+            revision: 3,
+        };
+        let mut subscription = output_subscription(&event_hub, 3, Some(initial));
+
+        event_hub.push(output_event("pane_1", 5));
+
+        let event = subscription
+            .poll(&dead_api_tx(), &event_hub)
+            .expect("hub event");
+        let SubscriptionEventData::PaneOutputChanged(data) = event.data else {
+            panic!("wrong event data");
+        };
+        assert_eq!(data.revision, 5);
+        assert!(subscription.initial_event.is_none());
+    }
+
+    #[test]
+    fn output_changed_subscription_enforces_threshold_and_monotonic_emission() {
+        let event_hub = EventHub::default();
+        let mut subscription = output_subscription(&event_hub, 10, None);
+
+        // Below threshold: consumed but not emitted.
+        event_hub.push(output_event("pane_1", 9));
+        assert!(subscription.poll(&dead_api_tx(), &event_hub).is_none());
+
+        // Meets threshold.
+        event_hub.push(output_event("pane_1", 10));
+        let event = subscription
+            .poll(&dead_api_tx(), &event_hub)
+            .expect("threshold event");
+        let SubscriptionEventData::PaneOutputChanged(data) = event.data else {
+            panic!("wrong event data");
+        };
+        assert_eq!(data.revision, 10);
+
+        // Duplicate and stale revisions are suppressed.
+        event_hub.push(output_event("pane_1", 10));
+        assert!(subscription.poll(&dead_api_tx(), &event_hub).is_none());
+        event_hub.push(output_event("pane_1", 9));
+        assert!(subscription.poll(&dead_api_tx(), &event_hub).is_none());
+    }
+
+    #[test]
+    fn output_changed_subscription_reprobes_live_revision_when_hub_quiet() {
+        let event_hub = EventHub::default();
+        let mut subscription = output_subscription(&event_hub, 1, None);
+
+        let (api_tx, mut api_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::api::ApiRequestMessage>();
+        let responder = std::thread::spawn(move || {
+            while let Some(message) = api_rx.blocking_recv() {
+                let mut pane = pane_info_with_scroll(None);
+                pane.revision = 9;
+                let response = serde_json::json!({
+                    "id": message.request.id,
+                    "result": { "pane": pane },
+                });
+                let _ = message.respond_to.send(response.to_string());
+            }
+        });
+
+        // Hub is quiet and has no matching events (simulating eviction), so
+        // the subscription falls back to probing the live counter.
+        let event = subscription
+            .poll(&api_tx, &event_hub)
+            .expect("re-probed event");
+        let SubscriptionEventData::PaneOutputChanged(data) = event.data else {
+            panic!("wrong event data");
+        };
+        assert_eq!(data.revision, 9);
+
+        // A second probe returning the same revision stays silent.
+        assert!(subscription.poll(&api_tx, &event_hub).is_none());
+
+        drop(api_tx);
+        responder.join().expect("responder thread");
     }
 }

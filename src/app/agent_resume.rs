@@ -232,6 +232,14 @@ impl App {
             return false;
         };
 
+        // Seed the fresh runtime from the mirrored `TerminalState.revision` so
+        // output revisions stay monotonic across the deferred-resume respawn.
+        let initial_output_revision = self
+            .state
+            .terminals
+            .get(&terminal_id)
+            .map(|terminal| terminal.revision)
+            .unwrap_or(0);
         let runtime = match crate::terminal::TerminalRuntime::spawn(
             pane_id,
             rows,
@@ -241,6 +249,7 @@ impl App {
             host_terminal_theme,
             crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
             &launch_env,
+            initial_output_revision,
             self.event_tx.clone(),
             self.render_notify.clone(),
             self.render_dirty.clone(),

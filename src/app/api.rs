@@ -83,6 +83,24 @@ impl App {
             return;
         }
 
+        if let AppEvent::PaneOutputChanged { pane_id, revision } = &ev {
+            // Coalesced output ticks exist for API subscribers and plugin hooks; PTY output
+            // already drives rendering via render_dirty, so no render is requested here.
+            if let Some((ws_idx, _)) = self.find_pane(*pane_id) {
+                if let Some(public_pane_id) = self.public_pane_id(ws_idx, *pane_id) {
+                    self.emit_event(crate::api::schema::EventEnvelope {
+                        event: crate::api::schema::EventKind::PaneOutputChanged,
+                        data: crate::api::schema::EventData::PaneOutputChanged {
+                            pane_id: public_pane_id,
+                            workspace_id: self.public_workspace_id(ws_idx),
+                            revision: *revision,
+                        },
+                    });
+                }
+            }
+            return;
+        }
+
         if let AppEvent::GitStatusRefreshed {
             results,
             cache_updates,
@@ -150,6 +168,23 @@ impl App {
         }
 
         if let AppEvent::PaneDied { pane_id } = &ev {
+            // Exit-time sync: mirror the outgoing runtime's output revision into
+            // `TerminalState.revision` so runtime-less reads and future respawns
+            // stay monotonic after the runtime is torn down.
+            if let Some(terminal_id) = self
+                .find_pane(*pane_id)
+                .map(|(_, pane_state)| pane_state.attached_terminal_id.clone())
+            {
+                if let Some(revision) = self
+                    .terminal_runtimes
+                    .get(&terminal_id)
+                    .map(|runtime| runtime.output_revision())
+                {
+                    if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
+                        terminal.revision = terminal.revision.max(revision);
+                    }
+                }
+            }
             let previous_toast = self.state.toast.clone();
             if let Some(update) = self.state.publish_pane_process_exit_if_agent(*pane_id) {
                 self.sync_full_lifecycle_authority_detection_pauses();
@@ -503,6 +538,14 @@ impl App {
             .get(&terminal_id)
             .map(|runtime| runtime.current_size())
             .unwrap_or_else(|| self.state.estimate_pane_size());
+        // Seed the respawned runtime so output revisions stay monotonic across
+        // the launch-command exit. Prefer the outgoing runtime's live counter;
+        // fall back to the mirrored `TerminalState.revision`.
+        let initial_output_revision = self
+            .terminal_runtimes
+            .get(&terminal_id)
+            .map(|runtime| runtime.output_revision())
+            .unwrap_or(terminal.revision);
         let Some(launch_env) = self.pane_launch_env(ws_idx, pane_id, Vec::new()) else {
             return false;
         };
@@ -515,6 +558,7 @@ impl App {
             self.state.host_terminal_theme,
             crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
             &launch_env,
+            initial_output_revision,
             self.event_tx.clone(),
             self.render_notify.clone(),
             self.render_dirty.clone(),
@@ -1593,6 +1637,7 @@ mod tests {
             crate::terminal_theme::TerminalTheme::default(),
             crate::pane::PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::NonLogin),
             &crate::pane::PaneLaunchEnv::default(),
+            0,
             events,
             std::sync::Arc::new(tokio::sync::Notify::new()),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1685,6 +1730,7 @@ mod tests {
             crate::terminal_theme::TerminalTheme::default(),
             crate::pane::PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::NonLogin),
             &crate::pane::PaneLaunchEnv::default(),
+            0,
             events,
             std::sync::Arc::new(tokio::sync::Notify::new()),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),

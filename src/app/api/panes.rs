@@ -1182,6 +1182,11 @@ impl App {
             return pane_not_found(id, &params.pane_id);
         };
         let requested_lines = params.lines.unwrap_or(80).min(1000) as usize;
+        // Load the revision before snapshotting text so a caller that reads
+        // `revision` and later waits for `> revision` can never miss output
+        // that was already included in `text`
+        // (docs/plans/2026-07-10-pane-output-revisions.md §2).
+        let revision = pane.output_revision();
         let text = match params.format {
             ReadFormat::Text => match params.source {
                 ReadSource::Visible => pane.visible_text(),
@@ -1207,7 +1212,7 @@ impl App {
                     source: params.source,
                     format: params.format,
                     text,
-                    revision: 0,
+                    revision,
                     truncated: false,
                 },
             },
@@ -3641,5 +3646,79 @@ mod tests {
 
             assert_eq!(metadata_error_code(&response), "invalid_metadata_ttl");
         }
+    }
+
+    fn attached_terminal_id(app: &App, pane_id: PaneId) -> crate::terminal::TerminalId {
+        app.state.workspaces[0]
+            .pane_state(pane_id)
+            .expect("pane state")
+            .attached_terminal_id
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn api_pane_read_returns_live_output_revision() {
+        let (mut app, public_pane_id, pane_id) = app_with_scrollback_runtime();
+        app.state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .expect("runtime")
+            .test_bump_output_revision(3);
+
+        let response = app.handle_pane_read(
+            "req".into(),
+            PaneReadParams {
+                pane_id: public_pane_id,
+                source: ReadSource::Recent,
+                lines: None,
+                format: ReadFormat::Text,
+                strip_ansi: true,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneRead { read } = success.result else {
+            panic!("expected pane read response");
+        };
+        // Loaded from the live runtime counter, before the text snapshot.
+        assert_eq!(read.revision, 3);
+        assert!(read.text.contains("line"));
+    }
+
+    #[tokio::test]
+    async fn pane_info_prefers_live_runtime_revision_over_mirror() {
+        let (mut app, _public_pane_id, pane_id) = app_with_scrollback_runtime();
+        app.state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .expect("runtime")
+            .test_bump_output_revision(3);
+        let terminal_id = attached_terminal_id(&app, pane_id);
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .revision = 99;
+
+        let pane = app.pane_info(0, pane_id).expect("pane info");
+
+        assert_eq!(pane.revision, 3);
+    }
+
+    #[test]
+    fn pane_info_runtime_less_falls_back_to_terminal_state_revision() {
+        let (mut app, _public_pane_id) = app_with_test_workspace();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+        // Fresh pane without a runtime reads 0 by default.
+        assert_eq!(app.pane_info(0, pane_id).expect("pane info").revision, 0);
+
+        // With a mirrored TerminalState revision (e.g. restored session before
+        // spawn), the fallback surfaces that value instead.
+        let terminal_id = attached_terminal_id(&app, pane_id);
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .revision = 5;
+        assert_eq!(app.pane_info(0, pane_id).expect("pane info").revision, 5);
     }
 }

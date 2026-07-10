@@ -4,8 +4,10 @@
 
 ### Added
 - Copy mode now supports literal smart-case search with `/` and `?`, repeating with `n` and `N`, match highlighting, and tmux-style cross-line `w`/`b`/`e` word motions. (#1230)
+- Added `pane_output_changed` socket subscriptions with coalesced per-pane output revisions, and `event.wait` now accepts `min_revision` so protocol clients can wait for output strictly newer than a previously read revision.
 
 ### Fixed
+- `pane.read` and pane socket API responses now report the live per-pane output revision instead of a hardcoded `0`, and revisions stay monotonic across respawn, deferred resume, and handoff.
 - `herdr --remote` now installs remote helper binaries without routing the binary stream through a multiline `/bin/sh -c` command, fixing installs for non-POSIX login shells such as xonsh. (#1203, thanks @nhumrich)
 
 ## [0.7.3] - 2026-07-08

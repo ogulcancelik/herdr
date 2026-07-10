@@ -56,6 +56,10 @@ pub struct WorktreeRemoveResult {
 pub enum AppEvent {
     /// A pane's child process exited.
     PaneDied { pane_id: PaneId },
+    /// Coalesced notification that a pane applied nonempty PTY output
+    /// (docs/plans/2026-07-10-pane-output-revisions.md §3). `revision` is the
+    /// counter value observed after the coalescing window closed.
+    PaneOutputChanged { pane_id: PaneId, revision: u64 },
     /// Fallback detector state changed in a pane.
     StateChanged {
         pane_id: PaneId,

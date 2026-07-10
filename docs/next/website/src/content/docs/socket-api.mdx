@@ -642,10 +642,17 @@ Tab event subscriptions include `tab.created`, `tab.closed`, `tab.focused`,
 that workspace.
 Pane event subscriptions include `pane.created`, `pane.closed`, `pane.focused`,
 `pane.moved`, `pane.exited`, `pane.agent_detected`,
-`pane.output_matched`, `pane.agent_status_changed`, and `pane.scroll_changed`.
+`pane.output_matched`, `pane.agent_status_changed`, `pane.scroll_changed`, and
+`pane.output_changed`.
 `pane.scroll_changed` is scoped to one `pane_id` and emits `pane_id`,
 `workspace_id`, and the current `scroll` metrics whenever Herdr observes a
 changed scroll snapshot.
+`pane.output_changed` is scoped to one `pane_id` and emits `pane_id`,
+`workspace_id`, and the pane's coalesced output `revision` whenever new
+terminal output lands. Events are coalesced, so clients receive the newest
+revision rather than one event per write. The same revision is reported by
+`pane.read` and pane info responses; `events.wait` accepts `min_revision` to
+wait for output strictly newer than a previously read revision.
 Layout event subscriptions include `layout.updated`. The event carries the
 updated `PaneLayoutSnapshot` for one tab. Clients that bootstrap with
 `session.snapshot` should replace the cached layout with the same
