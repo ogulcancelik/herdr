@@ -50,9 +50,28 @@ impl App {
             .cwd_for_pane(pane_id, &self.state.terminals, &self.terminal_runtimes)
     }
 
+    /// CWD used when `terminal.new_cwd = "follow"`.
+    ///
+    /// Prefer the **foreground** process cwd (nested shell after `cd` inside the
+    /// pane) over OSC-7 / cached shell cwd. Without this, follow often anchors on
+    /// the pane launch directory and ignores in-pane `cd` (#1245, #912).
+    pub(super) fn follow_cwd_for_pane_in_workspace(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<PathBuf> {
+        let ws = self.state.workspaces.get(ws_idx)?;
+        let tab_idx = ws.find_tab_index_for_pane(pane_id)?;
+        let tab = ws.tabs.get(tab_idx)?;
+        tab.foreground_cwd_for_pane(pane_id, &self.terminal_runtimes)
+            .or_else(|| {
+                tab.cwd_for_pane(pane_id, &self.state.terminals, &self.terminal_runtimes)
+            })
+    }
+
     pub(super) fn focused_pane_cwd_in_workspace(&self, ws_idx: usize) -> Option<PathBuf> {
         let pane_id = self.state.workspaces.get(ws_idx)?.focused_pane_id()?;
-        self.cwd_for_pane_in_workspace(ws_idx, pane_id)
+        self.follow_cwd_for_pane_in_workspace(ws_idx, pane_id)
     }
 
     pub(super) fn resolve_new_terminal_cwd(&self, follow_cwd: Option<PathBuf>) -> PathBuf {
@@ -77,9 +96,10 @@ impl App {
     /// Create a workspace with a real PTY (needs event_tx).
     #[cfg(test)]
     pub(crate) fn create_workspace(&mut self) {
-        let follow_cwd = self
-            .workspace_creation_source()
-            .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx));
+        let follow_cwd = self.workspace_creation_source().and_then(|ws_idx| {
+            self.focused_pane_cwd_in_workspace(ws_idx)
+                .or_else(|| self.seed_cwd_from_workspace(ws_idx))
+        });
         let initial_cwd = self.resolve_new_terminal_cwd(follow_cwd);
         if let Err(e) = self.create_workspace_with_events(initial_cwd, true) {
             error!(err = %e, "failed to create workspace");
@@ -91,10 +111,10 @@ impl App {
     pub(crate) fn create_tab(&mut self) {
         let custom_name = self.state.requested_new_tab_name.take();
         let active_before = self.state.active;
-        let follow_cwd = self
-            .state
-            .active
-            .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx));
+        let follow_cwd = self.state.active.and_then(|ws_idx| {
+            self.focused_pane_cwd_in_workspace(ws_idx)
+                .or_else(|| self.seed_cwd_from_workspace(ws_idx))
+        });
         let initial_cwd = self.resolve_new_terminal_cwd(follow_cwd);
         match self.create_tab_with_options(initial_cwd, true) {
             Ok(created_idx) => {

@@ -541,7 +541,12 @@ impl AppState {
             .and_then(|i| self.workspaces.get(i))
             .and_then(|ws| {
                 let tab = ws.active_tab()?;
-                tab.cwd_for_pane(tab.layout.focused(), &self.terminals, terminal_runtimes)
+                let pane_id = tab.layout.focused();
+                // Prefer live foreground cwd so in-pane `cd` is followed (#1245).
+                tab.foreground_cwd_for_pane(pane_id, terminal_runtimes)
+                    .or_else(|| {
+                        tab.cwd_for_pane(pane_id, &self.terminals, terminal_runtimes)
+                    })
             });
         let cwd = Some(super::creation::resolve_new_terminal_cwd(
             &self.new_terminal_cwd,
