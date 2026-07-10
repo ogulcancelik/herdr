@@ -49,7 +49,9 @@ impl Tab {
                     .or_else(|| terminal.effective_agent_label())?
                     .to_string();
                 let agent_label = terminal
-                    .effective_display_agent()
+                    .manual_label
+                    .clone()
+                    .or_else(|| terminal.effective_display_agent())
                     .unwrap_or_else(|| fallback_agent_label.clone());
                 let presentation = terminal.effective_presentation();
                 Some(PaneDetail {
