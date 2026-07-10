@@ -1,7 +1,7 @@
 id = "codex"
-version = "2026.06.10.3"
+version = "2026.07.10.1"
 min_engine_version = 2
-updated_at = "2026-06-10T00:00:00Z"
+updated_at = "2026-07-10T00:00:00Z"
 
 [[rules]]
 id = "osc_title_blocked"
@@ -67,3 +67,18 @@ not = [
   { regex = ['^[\x{2800}-\x{28FF}]'] },
   { contains = ["Action Required"] },
 ]
+
+[[rules]]
+# Codex >= ~0.144 active turns show "• Working (33m 09s • esc to interrupt)" in the
+# transcript footer, but the OSC title carries no spinner when the host (herdr
+# itself, or the user's shell) owns the pane title — so osc_title_working never
+# fires and active turns fall through to osc_title_idle (#1281). Detect the
+# working footer from screen content instead. Priority sits below the strong
+# blocker rules (900); Codex replaces this footer with the prompt while
+# blocked, so they never appear together.
+id = "screen_working_footer"
+state = "working"
+priority = 700
+region = "bottom_non_empty_lines(10)"
+visible_working = true
+contains = ["esc to interrupt"]
