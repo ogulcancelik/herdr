@@ -426,6 +426,13 @@ pub struct CellData {
     pub fg: u32,
     /// Background color as a packed u32.
     pub bg: u32,
+    /// Underline color as a packed u32 (same encoding as `fg`/`bg`).
+    ///
+    /// Carries SGR 58/59 underline color independently of the text foreground.
+    /// `0` / `Color::Reset` means default underline color (after SGR 0 or 59).
+    /// Older peers that omit this field deserialize it as `0` via `serde(default)`.
+    #[serde(default)]
+    pub underline: u32,
     /// Bitmask of style modifiers (bold, italic, etc.) plus Herdr extension bits.
     pub modifier: u16,
     /// Whether this cell should be skipped during diff-based rendering.
@@ -521,6 +528,11 @@ impl FrameData {
                     symbol: cell.symbol().to_owned(),
                     fg: color_to_u32(cell.fg),
                     bg: color_to_u32(cell.bg),
+                    underline: color_to_u32(
+                        cell.style()
+                            .underline_color
+                            .unwrap_or(ratatui::style::Color::Reset),
+                    ),
                     modifier: modifier_to_u16(cell.modifier),
                     skip: cell.skip,
                     hyperlink,
@@ -559,6 +571,10 @@ impl FrameData {
                 cell.set_symbol(&cell_data.symbol);
                 cell.fg = u32_to_color(cell_data.fg);
                 cell.bg = u32_to_color(cell_data.bg);
+                let ul = u32_to_color(cell_data.underline);
+                if ul != ratatui::style::Color::Reset {
+                    cell.set_style(cell.style().underline_color(ul));
+                }
                 cell.modifier = u16_to_modifier(cell_data.modifier);
                 cell.skip = cell_data.skip;
             }
@@ -1246,6 +1262,7 @@ mod tests {
                     symbol: "H".into(),
                     fg: color_to_u32(Color::Red),
                     bg: color_to_u32(Color::Black),
+                    underline: 0,
                     modifier: Modifier::BOLD.bits(),
                     skip: false,
                     hyperlink: None,
@@ -1254,6 +1271,7 @@ mod tests {
                     symbol: "i".into(),
                     fg: color_to_u32(Color::Green),
                     bg: color_to_u32(Color::Reset),
+                    underline: 0,
                     modifier: Modifier::ITALIC.bits(),
                     skip: false,
                     hyperlink: None,
@@ -1262,6 +1280,7 @@ mod tests {
                     symbol: "!".into(),
                     fg: color_to_u32(Color::Rgb(255, 128, 0)),
                     bg: color_to_u32(Color::Indexed(220)),
+                    underline: 0,
                     modifier: (Modifier::BOLD | Modifier::UNDERLINED).bits(),
                     skip: false,
                     hyperlink: Some(0),
@@ -1270,6 +1289,7 @@ mod tests {
                     symbol: " ".into(),
                     fg: color_to_u32(Color::Reset),
                     bg: color_to_u32(Color::Reset),
+                    underline: 0,
                     modifier: Modifier::empty().bits(),
                     skip: true,
                     hyperlink: None,
@@ -1278,6 +1298,7 @@ mod tests {
                     symbol: "→".into(), // multi-byte grapheme
                     fg: color_to_u32(Color::Cyan),
                     bg: color_to_u32(Color::Blue),
+                    underline: 0,
                     modifier: Modifier::REVERSED.bits(),
                     skip: false,
                     hyperlink: None,
@@ -1286,6 +1307,7 @@ mod tests {
                     symbol: "🦀".into(), // emoji, wide grapheme cluster
                     fg: color_to_u32(Color::Yellow),
                     bg: color_to_u32(Color::Magenta),
+                    underline: 0,
                     modifier: Modifier::empty().bits(),
                     skip: false,
                     hyperlink: None,
@@ -1459,6 +1481,7 @@ mod tests {
                 },
                 fg: color_to_u32(Color::Rgb((i % 256) as u8, ((i / 256) % 256) as u8, 128)),
                 bg: color_to_u32(Color::Indexed((i % 256) as u8)),
+                underline: 0,
                 modifier: ((i % 16) as u16),
                 skip: i % 100 == 0,
                 hyperlink: None,
@@ -1809,6 +1832,7 @@ mod tests {
                     symbol: "X".into(),
                     fg: 0,
                     bg: 0,
+                    underline: 0,
                     modifier: 0,
                     skip: false,
                     hyperlink: None,
