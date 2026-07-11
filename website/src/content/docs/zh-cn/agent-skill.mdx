@@ -1,65 +1,65 @@
 ---
-title: 智能体技能文件
-description: 为 Claude Code 或其他编程智能体安装 Herdr 使用说明。
+title: "Agent（智能体）技能文件"
+description: 为 Claude Code 或其他编程 Agent 安装 Herdr 使用说明。
 ---
 
-Herdr 提供了一个可复用的智能体技能文件: [`SKILL.md`](https://github.com/ogulcancelik/herdr/blob/master/SKILL.md)。
+Herdr 提供了一个可复用的 Agent 技能文件：[`SKILL.md`](https://github.com/ogulcancelik/herdr/blob/master/SKILL.md)。
 
-把这个文件安装到任何支持可复用技能或自定义指令的编程智能体中。这份技能教智能体如何在 Herdr 窗格内部控制 Herdr。
+把这个文件安装到任何支持可复用技能或自定义指令的编程 Agent 中。这份技能教 Agent 如何在 Herdr Pane 内操作 Herdr。
 
-Herdr 还提供了另一份用途不同的指南: [`herdr.dev/agent-guide.md`](https://herdr.dev/agent-guide.md),用于让智能体帮助人类学习、安装或排查 Herdr。技能是给操作 Herdr 的智能体用的;指南是给教人类的智能体用的。
+Herdr 还提供了另一份用途不同的指南：[`herdr.dev/agent-guide.md`](https://herdr.dev/agent-guide.md)，用于让 Agent 帮助人类学习、安装或排查 Herdr。技能是给操作 Herdr 的 Agent 用的；指南是给教人类的 Agent 用的。
 
 ## 这份技能做什么
 
-这份技能告诉智能体: 当 `HERDR_ENV=1` 已设置时,使用 `herdr` CLI。这意味着智能体运行在 Herdr 管理的窗格内,可以安全地与本地 Herdr socket 通信。
+这份技能告诉 Agent：当 `HERDR_ENV=1` 已设置时，使用 `herdr` CLI。这意味着 Agent 运行在 Herdr 管理的 Pane 内，可以安全地与本地 Herdr socket 通信。
 
-安装技能后,智能体可以:
+安装技能后，Agent 可以：
 
-- 查看工作区、标签页、窗格和相邻的智能体
-- 分割窗格并在不抢占焦点的情况下运行命令
-- 读取窗格输出和最近的日志
-- 等待服务器、测试或另一个智能体完成
-- 在相邻窗格中启动辅助智能体
+- 查看 Workspace、Tab、Pane 和相邻的 Agent
+- 拆分 Pane，运行命令而不抢占焦点
+- 读取 Pane 输出和最近的日志
+- 等待服务器、测试或其他 Agent 完成
+- 在相邻 Pane 中启动辅助 Agent
 
-这份技能不是独立的应用或服务,它只是一份给智能体看的 markdown 指令文件。
+这份技能不是独立的应用或服务，它只是一份给 Agent 用的 Markdown 指令文件。
 
 ## 安装
 
-用 `npx skills` 安装技能:
+用 `npx skills` 安装技能：
 
 ```bash
 npx skills add ogulcancelik/herdr --skill herdr -g
 ```
 
-`-g` 参数为受支持的智能体全局安装。省略 `-g` 则安装到当前项目。
+`-g` 参数为受支持的 Agent 全局安装。省略 `-g` 则安装到当前项目。
 
-以仓库中的副本作为手动兜底和事实来源:
+仓库中的副本可作为手动兜底方案和事实来源：
 
 ```text
 https://github.com/ogulcancelik/herdr/blob/master/SKILL.md
 ```
 
-对于有技能系统的智能体,把这个文件安装为名为 `herdr` 的技能。对于没有技能系统的智能体,把文件内容粘贴到智能体的项目指令或用户指令中。
+如果 Agent 支持技能系统，把这个文件安装为名为 `herdr` 的技能。如果不支持，把文件内容粘贴到该 Agent 的项目指令或用户指令中。
 
-安装完成后,在 Herdr 内启动智能体:
+安装完成后，在 Herdr 内启动 Agent：
 
 ```bash
 herdr
 claude
 ```
 
-也可以在 Herdr 窗格里使用任何其他编程智能体。重点是智能体进程要运行在 Herdr 内部,这样 `HERDR_ENV=1` 才可用。
+也可以在 Herdr Pane 里使用其他任何编程 Agent。关键是 Agent 进程要运行在 Herdr 内部，这样 `HERDR_ENV=1` 才可用。
 
 ## 安全规则
 
-这份技能以一条护栏开头: 如果 `HERDR_ENV=1` 未设置,智能体应当停下来,并说明自己没有运行在 Herdr 管理的窗格内。
+这份技能开头设有一条安全护栏：如果 `HERDR_ENV=1` 未设置，Agent 应当停止操作，并说明自己没有运行在 Herdr 管理的 Pane 内。
 
-这可以防止 Herdr 外部的智能体试图控制一个不属于它的会话。
+这样可以避免 Herdr 外部的 Agent 试图控制不属于它的 Session。
 
-## 面向智能体的参考
+## 面向 Agent 的参考
 
-完整的命令指南就在技能文件本身。它涵盖窗格 ID、`pane split`、`pane run`、`pane read`、`wait output`、`wait agent-status`、工作区和标签页命令,以及协作配方。
+完整的命令指南就在技能文件本身。内容涵盖 Pane ID、`pane split`、`pane run`、`pane read`、`wait output`、`wait agent-status`、Workspace 和 Tab 命令，以及协作方法。
 
-在这里阅读源文件:
+在这里阅读源文件：
 
 [在 GitHub 上打开 `SKILL.md` →](https://github.com/ogulcancelik/herdr/blob/master/SKILL.md)
