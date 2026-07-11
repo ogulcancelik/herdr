@@ -4261,6 +4261,51 @@ mod tests {
     }
 
     #[test]
+    fn xtwinops_size_queries_report_cell_and_window_pixels() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        pane.resize(24, 80, 9, 18);
+        let pane_id = PaneId::from_raw(1);
+
+        let csi_14 = pane.process_pty_bytes(pane_id, 0, b"\x1b[14t", &tx);
+        assert_eq!(
+            csi_14.terminal_responses,
+            vec![Bytes::from_static(b"\x1b[4;432;720t")]
+        );
+
+        let csi_16 = pane.process_pty_bytes(pane_id, 0, b"\x1b[16t", &tx);
+        assert_eq!(
+            csi_16.terminal_responses,
+            vec![Bytes::from_static(b"\x1b[6;18;9t")]
+        );
+
+        let csi_18 = pane.process_pty_bytes(pane_id, 0, b"\x1b[18t", &tx);
+        assert_eq!(
+            csi_18.terminal_responses,
+            vec![Bytes::from_static(b"\x1b[8;24;80t")]
+        );
+    }
+
+    #[test]
+    fn xtwinops_size_queries_are_ignored_when_cell_pixels_unknown() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        pane.resize(24, 80, 0, 0);
+        let pane_id = PaneId::from_raw(1);
+
+        let csi_14 = pane.process_pty_bytes(pane_id, 0, b"\x1b[14t", &tx);
+        assert!(csi_14.terminal_responses.is_empty());
+
+        let csi_16 = pane.process_pty_bytes(pane_id, 0, b"\x1b[16t", &tx);
+        assert!(csi_16.terminal_responses.is_empty());
+
+        let csi_18 = pane.process_pty_bytes(pane_id, 0, b"\x1b[18t", &tx);
+        assert!(csi_18.terminal_responses.is_empty());
+    }
+
+    #[test]
     fn synchronized_output_suppresses_intermediate_render_requests_until_batch_ends() {
         let (tx, _rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();

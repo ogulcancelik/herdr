@@ -444,8 +444,44 @@ impl CellWide {
 
 type WritePtyCallback = dyn FnMut(&[u8]) + Send;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SizeReportGeometry {
+    rows: u16,
+    columns: u16,
+    cell_width: u32,
+    cell_height: u32,
+}
+
+impl SizeReportGeometry {
+    fn is_reportable(self) -> bool {
+        self.rows > 0 && self.columns > 0 && self.cell_width > 0 && self.cell_height > 0
+    }
+}
+
 struct WritePtyCallbackState {
     callback: Box<WritePtyCallback>,
+    size: SizeReportGeometry,
+}
+
+unsafe extern "C" fn size_trampoline(
+    _terminal: ffi::GhosttyTerminal_ptr,
+    userdata: *mut c_void,
+    out_size: *mut ffi::GhosttySizeReportSize,
+) -> bool {
+    if userdata.is_null() || out_size.is_null() {
+        return false;
+    }
+    let state = unsafe { &*(userdata.cast::<WritePtyCallbackState>()) };
+    if !state.size.is_reportable() {
+        return false;
+    }
+    unsafe {
+        (*out_size).rows = state.size.rows;
+        (*out_size).columns = state.size.columns;
+        (*out_size).cell_width = state.size.cell_width;
+        (*out_size).cell_height = state.size.cell_height;
+    }
+    true
 }
 
 unsafe extern "C" fn write_pty_trampoline(
@@ -621,6 +657,16 @@ impl Terminal {
         cell_width_px: u32,
         cell_height_px: u32,
     ) -> Result<(), Error> {
+        if let Some(state) = self.write_pty_callback.as_mut() {
+            state.size = SizeReportGeometry {
+                rows,
+                columns: cols,
+                cell_width: cell_width_px,
+                cell_height: cell_height_px,
+            };
+        }
+        // Ghostty requires non-zero cell pixels for image protocol math; keep
+        // the reportable geometry above as the raw values (0 means unknown).
         let cell_width_px = cell_width_px.max(1);
         let cell_height_px = cell_height_px.max(1);
         // SAFETY: self.raw is valid and sizes are plain values.
@@ -679,8 +725,16 @@ impl Terminal {
     where
         F: FnMut(&[u8]) + Send + 'static,
     {
+        let rows = self.rows().unwrap_or(0);
+        let columns = self.cols().unwrap_or(0);
         let mut state = Box::new(WritePtyCallbackState {
             callback: Box::new(callback),
+            size: SizeReportGeometry {
+                rows,
+                columns,
+                cell_width: 0,
+                cell_height: 0,
+            },
         });
         let userdata = (&mut *state as *mut WritePtyCallbackState).cast::<c_void>();
         unsafe {
@@ -694,6 +748,12 @@ impl Terminal {
                 self.raw,
                 ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_WRITE_PTY,
                 (write_pty_trampoline as *const ()).cast(),
+            )
+            .into_result()?;
+            ffi::ghostty_terminal_set(
+                self.raw,
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_SIZE,
+                (size_trampoline as *const ()).cast(),
             )
             .into_result()?;
         }
