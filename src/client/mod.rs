@@ -1556,6 +1556,15 @@ async fn run_client_loop(
                     forward_clipboard(&data);
                     let _ = io::stdout().flush();
                 }
+                ServerMessage::ClipboardQuery { data } => {
+                    // Child sent an OSC 52 clipboard query; decode and write back
+                    // an OSC 52 query response (`ESC ] 52 ; a ; c ; <base64> BEL`).
+                    if let Some(bytes) = decode_clipboard_payload(&data) {
+                        let sequence = crate::selection::osc52_query_response_sequence(&bytes);
+                        let _ = io::stdout().write_all(sequence.as_bytes());
+                    }
+                    let _ = io::stdout().flush();
+                }
                 ServerMessage::WindowTitle { title } => {
                     write_window_title(title.as_deref());
                     let _ = io::stdout().flush();

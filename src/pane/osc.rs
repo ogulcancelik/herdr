@@ -285,6 +285,15 @@ fn parse_default_color_set_event(body: &[u8]) -> Option<DefaultColorEvent> {
 /// while still bounding memory against stream garbage.
 const OSC52_MAX_PAYLOAD_BYTES: usize = 256 * 1024;
 
+/// Result of parsing an OSC 52 clipboard sequence from child PTY output.
+#[derive(Debug, Clone)]
+pub(super) enum ClipboardWriteOrQuery {
+    /// A clipboard write (data is the decoded base64 payload bytes).
+    Write(Vec<u8>),
+    /// A clipboard query — the child wants the current clipboard content back.
+    Query,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Osc52ForwarderState {
     #[default]
@@ -294,15 +303,17 @@ enum Osc52ForwarderState {
     OscEscape,
 }
 
-/// Reconstructs OSC 52 clipboard-write sequences from raw PTY bytes so the
-/// main loop can re-emit them. `libghostty-vt` drops `.clipboard_contents`,
-/// so child clipboard writes never reach the host terminal unless we forward
-/// them ourselves.
+/// Reconstructs OSC 52 clipboard-write sequences and clipboard-query requests
+/// from child PTY output so the main loop can re-emit writes through herdr's
+/// own clipboard writer and respond to queries with the system clipboard.
+/// `libghostty-vt` drops `.clipboard_contents`, so child clipboard writes
+/// never reach the host terminal unless we forward them ourselves.
 #[derive(Debug, Default)]
 pub(super) struct Osc52Forwarder {
     state: Osc52ForwarderState,
     body: Vec<u8>,
     pending: Vec<Vec<u8>>,
+    pending_queries: usize,
 }
 
 impl Osc52Forwarder {
@@ -352,14 +363,22 @@ impl Osc52Forwarder {
     }
 
     fn finalize(&mut self) {
-        if let Some(content) = parse_osc52_clipboard_write(&self.body) {
-            self.pending.push(content);
+        match parse_osc52_clipboard_message(&self.body) {
+            Some(ClipboardWriteOrQuery::Write(content)) => self.pending.push(content),
+            Some(ClipboardWriteOrQuery::Query) => self.pending_queries += 1,
+            None => {}
         }
         self.body.clear();
     }
 
     pub(super) fn drain_pending(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.pending)
+    }
+
+    pub(super) fn drain_pending_query_count(&mut self) -> usize {
+        let count = self.pending_queries;
+        self.pending_queries = 0;
+        count
     }
 }
 
@@ -771,20 +790,34 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-/// Accepts `52;c;<base64>` and `52;;<base64>`.
-/// Queries (`?`) are rejected because herdr has no reply path.
-/// The payload must decode as base64 before it is forwarded.
-fn parse_osc52_clipboard_write(body: &[u8]) -> Option<Vec<u8>> {
+/// Parses an OSC 52 clipboard body (`52;selector;data`).
+///
+/// Returns `Some(ClipboardWriteOrQuery::Write)` for write sequences
+/// (`52;c;<base64>` or `52;;<base64>`) and `Some(Query)` for query
+/// sequences (`52;c;?` or `52;;?`). Returns `None` for anything else.
+pub(super) fn parse_osc52_clipboard_message(body: &[u8]) -> Option<ClipboardWriteOrQuery> {
     use base64::Engine;
 
     let rest = body.strip_prefix(b"52;")?;
     let sep = rest.iter().position(|b| *b == b';')?;
     let selector = &rest[..sep];
     let data = &rest[sep + 1..];
-    if !(selector.is_empty() || selector == b"c") || data == b"?" {
+
+    // Accept empty or 'c' selector for both writes and queries.
+    if !selector.is_empty() && selector != b"c" {
         return None;
     }
-    base64::engine::general_purpose::STANDARD.decode(data).ok()
+
+    // Clipboard query: `52;c;?` or `52;;?`.
+    if data == b"?" {
+        return Some(ClipboardWriteOrQuery::Query);
+    }
+
+    // Clipboard write: decode the base64 payload.
+    match base64::engine::general_purpose::STANDARD.decode(data).ok() {
+        Some(content) => Some(ClipboardWriteOrQuery::Write(content)),
+        None => None,
+    }
 }
 
 fn foreground_job_is_shell(job: &crate::platform::ForegroundJob, shell_pid: u32) -> bool {
@@ -1469,17 +1502,39 @@ mod tests {
     }
 
     #[test]
-    fn osc52_forwarder_ignores_query() {
+    fn osc52_forwarder_detects_query() {
         let mut fw = Osc52Forwarder::default();
         fw.observe(b"\x1b]52;c;?\x07");
         assert!(fw.drain_pending().is_empty());
+        assert_eq!(fw.drain_pending_query_count(), 1);
     }
 
     #[test]
-    fn osc52_forwarder_ignores_empty_selector_query() {
+    fn osc52_forwarder_detects_empty_selector_query() {
         let mut fw = Osc52Forwarder::default();
         fw.observe(b"\x1b]52;;?\x07");
         assert!(fw.drain_pending().is_empty());
+        assert_eq!(fw.drain_pending_query_count(), 1);
+    }
+
+    #[test]
+    fn osc52_forwarder_detects_multiple_queries() {
+        let mut fw = Osc52Forwarder::default();
+        fw.observe(b"\x1b]52;c;?\x07");
+        fw.observe(b"\x1b]52;;?\x07");
+        assert!(fw.drain_pending().is_empty());
+        assert_eq!(fw.drain_pending_query_count(), 2);
+    }
+
+    #[test]
+    fn osc52_forwarder_detects_mixed_writes_and_queries() {
+        let mut fw = Osc52Forwarder::default();
+        fw.observe(b"\x1b]52;c;?\x07");
+        fw.observe(b"\x1b]52;c;aGVsbG8=\x07");
+        fw.observe(b"\x1b]52;;?\x07");
+        let pending = fw.drain_pending();
+        assert_eq!(pending, vec![b"hello".to_vec()]);
+        assert_eq!(fw.drain_pending_query_count(), 2);
     }
 
     #[test]

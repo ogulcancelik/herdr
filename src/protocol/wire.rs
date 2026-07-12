@@ -642,6 +642,14 @@ pub enum ServerMessage {
         data: String,
     },
 
+    /// OSC 52 clipboard query response forwarded to a TUI client.
+    /// The child requested the system clipboard content; this field holds it
+    /// (base64-encoded), or an empty string if the clipboard is unavailable.
+    ClipboardQuery {
+        /// Base64-encoded clipboard data, or empty string if unavailable.
+        data: String,
+    },
+
     /// Set the foreground client's outer terminal window title.
     WindowTitle {
         /// Sanitized title to write with OSC 0. `None` restores Herdr's default title.

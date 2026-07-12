@@ -1854,6 +1854,16 @@ impl HeadlessServer {
                 }
                 true
             }
+            AppEvent::ClipboardQuery { pane_id: _ } => {
+                // Clipboard queries are client-local responses. Read the system clipboard,
+                // base64-encode it, and send to the foreground client so it can write back
+                // an OSC 52 query response (`ESC ] 52 ; a ; c ; <base64> BEL`) to the child.
+                let data = crate::platform::read_clipboard_text()
+                    .map(|text| base64::engine::general_purpose::STANDARD.encode(text.as_bytes()))
+                    .unwrap_or_default();
+                self.send_to_foreground_client(ServerMessage::ClipboardQuery { data });
+                true
+            }
             AppEvent::PrefixInputSource { active } => {
                 // Input-source switching is a client-local host side effect; forward it to the
                 // foreground client (which owns the real TIS switch + run-loop pump), like clipboard.

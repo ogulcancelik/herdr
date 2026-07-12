@@ -1721,7 +1721,7 @@ impl PaneRuntime {
             let delay_rt = rt.clone();
             let on_read = Box::new(move |bytes: &[u8]| {
                 let shell_pid = child_pid.load(Ordering::Acquire);
-                let result =
+                let mut result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
                 observe_detection_content_change(bytes, &detection_content_seq);
                 if result.request_render && !render_dirty.swap(true, Ordering::AcqRel) {
@@ -1749,8 +1749,16 @@ impl PaneRuntime {
                         );
                     }
                 }
+                // Respond to clipboard queries: inject OSC 52 query-response
+                // sequences into the PTY output so they reach the child process.
+                for _ in 0..result.clipboard_query_count {
+                    if crate::selection::respond_to_clipboard_query() {
+                        result.request_render = true;
+                    }
+                }
                 PtyReadResult {
                     terminal_responses: result.terminal_responses,
+                    clipboard_queries: result.clipboard_query_count,
                 }
             });
             let exit_events = events.clone();
@@ -1907,8 +1915,18 @@ impl PaneRuntime {
                         );
                     }
                 }
+                for _ in 0..result.clipboard_query_count {
+                    if let Err(err) = events.try_send(AppEvent::ClipboardQuery { pane_id }) {
+                        warn!(
+                            pane = pane_id.raw(),
+                            err = %err,
+                            "failed to send OSC 52 clipboard query"
+                        );
+                    }
+                }
                 PtyReadResult {
                     terminal_responses: result.terminal_responses,
+                    clipboard_queries: result.clipboard_query_count,
                 }
             });
             PaneRuntimeIo::Actor(PtyIoActor::spawn(PtyIoActorConfig {

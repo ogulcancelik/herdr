@@ -137,6 +137,7 @@ pub(crate) struct ProcessBytesResult {
     pub request_render: bool,
     pub render_delay: Option<Duration>,
     pub clipboard_writes: Vec<Vec<u8>>,
+    pub clipboard_query_count: usize,
     pub reported_cwd: Option<std::path::PathBuf>,
     pub terminal_responses: Vec<Bytes>,
 }
@@ -1045,6 +1046,7 @@ impl GhosttyPaneTerminal {
                 request_render: false,
                 render_delay: None,
                 clipboard_writes: Vec::new(),
+                clipboard_query_count: 0,
                 reported_cwd: None,
                 terminal_responses: Vec::new(),
             };
@@ -1063,6 +1065,7 @@ impl GhosttyPaneTerminal {
 
         core.osc52_forwarder.observe(bytes);
         let clipboard_writes = core.osc52_forwarder.drain_pending();
+        let clipboard_query_count = core.osc52_forwarder.drain_pending_query_count();
         core.cwd_osc_tracker.observe(bytes);
         let reported_cwd = core.cwd_osc_tracker.drain_latest();
         core.osc_debug_tracker.observe(bytes);
@@ -1167,6 +1170,7 @@ impl GhosttyPaneTerminal {
             request_render,
             render_delay,
             clipboard_writes,
+            clipboard_query_count,
             reported_cwd,
             terminal_responses,
         }

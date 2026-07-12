@@ -269,6 +269,14 @@ fn osc52_sequence(bytes: &[u8]) -> String {
     format!("\x1b]52;c;{encoded}\x07")
 }
 
+/// Build an OSC 52 query-response sequence (`ESC ] 52 ; a ; c ; <base64> BEL`).
+/// The `a` prefix denotes an OSC 52 "answer" sent back to the querying child.
+pub(crate) fn osc52_query_response_sequence(bytes: &[u8]) -> String {
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    format!("\x1b]52;a;c;{encoded}\x07")
+}
+
 fn contains_wsl_marker(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     lower.contains("microsoft") || lower.contains("wsl2") || lower.contains("-wsl")
@@ -333,6 +341,22 @@ pub fn write_osc52_bytes(bytes: &[u8]) {
     let _ = std::io::stdout().flush();
 }
 
+/// Read the system clipboard and write an OSC 52 query-response to stdout.
+/// Returns `true` if a response was emitted (clipboard had content), `false`
+/// if the clipboard was unavailable or empty.
+pub fn respond_to_clipboard_query() -> bool {
+    match crate::platform::read_clipboard_text() {
+        Some(text) => {
+            let bytes = text.into_bytes();
+            let sequence = osc52_query_response_sequence(&bytes);
+            let _ = std::io::stdout().write_all(sequence.as_bytes());
+            let _ = std::io::stdout().flush();
+            true
+        }
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,6 +372,14 @@ mod tests {
     #[test]
     fn osc52_sequence_uses_bel_terminator() {
         assert_eq!(osc52_sequence(b"hello"), "\x1b]52;c;aGVsbG8=\x07");
+    }
+
+    #[test]
+    fn osc52_query_response_uses_answer_selector() {
+        assert_eq!(
+            osc52_query_response_sequence(b"hello"),
+            "\x1b]52;a;c;aGVsbG8=\x07"
+        );
     }
 
     #[test]

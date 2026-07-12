@@ -29,6 +29,8 @@ enum ActorState {
 
 pub(crate) struct PtyReadResult {
     pub terminal_responses: Vec<Bytes>,
+    #[allow(dead_code)] // clipboard_queries is populated from both modes but consumed via events
+    pub clipboard_queries: usize,
 }
 
 impl PtyReadResult {
@@ -36,6 +38,7 @@ impl PtyReadResult {
     pub(crate) fn empty() -> Self {
         Self {
             terminal_responses: Vec::new(),
+            clipboard_queries: 0,
         }
     }
 }
