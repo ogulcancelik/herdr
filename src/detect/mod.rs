@@ -116,7 +116,16 @@ pub fn agent_label(agent: Agent) -> &'static str {
 
 pub fn parse_agent_label(agent: &str) -> Option<Agent> {
     let name = normalized_agent_lookup_name(agent);
-    match name.as_str() {
+    parse_canonical_agent_label(&name).or_else(|| lookup_agent(&name))
+}
+
+pub(crate) fn parse_canonical_agent_label(label: &str) -> Option<Agent> {
+    let agent = lookup_agent(label)?;
+    (agent_label(agent) == label).then_some(agent)
+}
+
+fn lookup_agent(name: &str) -> Option<Agent> {
+    match name {
         "pi" => Some(Agent::Pi),
         "claude" | "claude-code" => Some(Agent::Claude),
         "codex" => Some(Agent::Codex),
@@ -145,32 +154,7 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
 /// Identify which agent is running from the process name.
 /// Returns `None` for plain shells or unrecognized programs.
 pub fn identify_agent(process_name: &str) -> Option<Agent> {
-    let name = normalized_agent_lookup_name(process_name);
-    // Match against known binary names
-    match name.as_str() {
-        "pi" => Some(Agent::Pi),
-        "claude" | "claude-code" => Some(Agent::Claude),
-        "codex" => Some(Agent::Codex),
-        "gemini" => Some(Agent::Gemini),
-        "cursor" | "cursor-agent" => Some(Agent::Cursor),
-        "devin" | "devin-cli" | "devin cli" => Some(Agent::Devin),
-        "agy" | "antigravity" | "antigravity-cli" => Some(Agent::Antigravity),
-        "cline" => Some(Agent::Cline),
-        "omp" => Some(Agent::Omp),
-        "mastracode" | "mastra-code" | "mastra code" => Some(Agent::Mastracode),
-        "opencode" | "open-code" => Some(Agent::OpenCode),
-        "copilot" | "github-copilot" | "ghcs" => Some(Agent::GithubCopilot),
-        "kimi" | "kimi-code" | "kimi code" => Some(Agent::Kimi),
-        "kiro" | "kiro-cli" => Some(Agent::Kiro),
-        "droid" => Some(Agent::Droid),
-        "amp" | "amp-local" => Some(Agent::Amp),
-        "grok" | "grok-build" => Some(Agent::Grok),
-        "hermes" | "hermes-agent" => Some(Agent::Hermes),
-        "kilo" | "kilo-code" | "kilo code" => Some(Agent::Kilo),
-        "qodercli" | "qoderclicn" | "qoder" | "qodercn" => Some(Agent::Qodercli),
-        "maki" => Some(Agent::Maki),
-        _ => None,
-    }
+    parse_agent_label(process_name)
 }
 
 pub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Agent, String)> {
@@ -677,19 +661,44 @@ mod tests {
     }
 
     #[test]
-    fn agent_labels_use_display_names() {
-        assert_eq!(agent_label(Agent::Pi), "pi");
-        assert_eq!(agent_label(Agent::GithubCopilot), "copilot");
-        assert_eq!(agent_label(Agent::OpenCode), "opencode");
-        assert_eq!(agent_label(Agent::Devin), "devin");
-        assert_eq!(agent_label(Agent::Antigravity), "agy");
-        assert_eq!(agent_label(Agent::Omp), "omp");
-        assert_eq!(agent_label(Agent::Mastracode), "mastracode");
-        assert_eq!(agent_label(Agent::Kiro), "kiro");
-        assert_eq!(agent_label(Agent::Grok), "grok");
-        assert_eq!(agent_label(Agent::Hermes), "hermes");
-        assert_eq!(agent_label(Agent::Maki), "maki");
-        assert_eq!(agent_label(Agent::Kilo), "kilo");
+    fn every_agent_label_round_trips_through_canonical_and_alias_parsers() {
+        let agents = [
+            Agent::Pi,
+            Agent::Claude,
+            Agent::Codex,
+            Agent::Gemini,
+            Agent::Cursor,
+            Agent::Devin,
+            Agent::Antigravity,
+            Agent::Cline,
+            Agent::Omp,
+            Agent::Mastracode,
+            Agent::OpenCode,
+            Agent::GithubCopilot,
+            Agent::Kimi,
+            Agent::Kiro,
+            Agent::Droid,
+            Agent::Amp,
+            Agent::Grok,
+            Agent::Hermes,
+            Agent::Kilo,
+            Agent::Qodercli,
+            Agent::Maki,
+        ];
+
+        for agent in agents {
+            let label = agent_label(agent);
+            assert_eq!(parse_canonical_agent_label(label), Some(agent));
+            assert_eq!(parse_agent_label(label), Some(agent));
+        }
+    }
+
+    #[test]
+    fn canonical_agent_labels_are_strict() {
+        assert_eq!(parse_canonical_agent_label("claude-code"), None);
+        assert_eq!(parse_canonical_agent_label("Pi"), None);
+        assert_eq!(parse_canonical_agent_label(" pi "), None);
+        assert_eq!(parse_canonical_agent_label("opencode.exe"), None);
     }
 
     #[test]
