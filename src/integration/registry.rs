@@ -67,6 +67,7 @@ pub(crate) fn integration_target_supported(target: crate::api::schema::Integrati
                 | crate::api::schema::IntegrationTarget::Droid
                 | crate::api::schema::IntegrationTarget::Kimi
                 | crate::api::schema::IntegrationTarget::Qodercli
+                | crate::api::schema::IntegrationTarget::Omp
         )
     }
 

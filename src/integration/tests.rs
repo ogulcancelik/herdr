@@ -169,7 +169,6 @@ fn windows_supports_only_cli_hook_integrations() {
     use crate::api::schema::IntegrationTarget;
 
     assert!(!integration_target_supported(IntegrationTarget::Pi));
-    assert!(!integration_target_supported(IntegrationTarget::Omp));
     assert!(!integration_target_supported(IntegrationTarget::Opencode));
     assert!(!integration_target_supported(IntegrationTarget::Kilo));
     assert!(!integration_target_supported(IntegrationTarget::Hermes));
@@ -177,6 +176,7 @@ fn windows_supports_only_cli_hook_integrations() {
     assert!(!integration_target_supported(IntegrationTarget::Devin));
     assert!(!integration_target_supported(IntegrationTarget::Mastracode));
 
+    assert!(integration_target_supported(IntegrationTarget::Omp));
     assert!(integration_target_supported(IntegrationTarget::Claude));
     assert!(integration_target_supported(IntegrationTarget::Codex));
     assert!(integration_target_supported(IntegrationTarget::Copilot));
@@ -2567,7 +2567,7 @@ fn bundled_integration_assets_report_session_refs() {
     assert!(PI_EXTENSION_ASSET.contains("pi.on(\"session_shutdown\""));
     assert!(OMP_EXTENSION_ASSET.contains("agent_session_path"));
     assert!(OMP_EXTENSION_ASSET.contains("agent_session_id"));
-    assert!(OMP_EXTENSION_ASSET.contains("ctx?.hasUI !== true"));
+    assert!(OMP_EXTENSION_ASSET.contains("ctx.hasUI === false"));
     assert!(OMP_EXTENSION_ASSET.contains("pane.report_agent_session"));
     assert!(OMP_EXTENSION_ASSET.contains("pane.report_agent\""));
     assert!(OMP_EXTENSION_ASSET.contains("pi.on(\"agent_start\""));
@@ -2736,15 +2736,15 @@ fn omp_extension_releases_only_for_quit_session_shutdown() {
 #[test]
 fn omp_extension_refreshes_session_ref_before_agent_start_state() {
     let agent_start = OMP_EXTENSION_ASSET
-        .find("pi.on(\"agent_start\", (_event, ctx)")
+        .find("pi.on(\"agent_start\", async (_event, ctx)")
         .expect("omp extension should receive agent_start context");
     let handler = &OMP_EXTENSION_ASSET[agent_start..];
     let update_session = handler
         .find("updateSessionRef(ctx);")
         .expect("omp extension should refresh the active session on agent_start");
     let report_session = handler
-        .find("void reportSession();")
-        .expect("omp extension should report the refreshed session before state");
+        .find("await reportSession()")
+        .expect("omp extension should await the refreshed session before state");
     let publish_state = handler
         .find("publishState();")
         .expect("omp extension should publish working state after refreshing session");
@@ -2766,29 +2766,29 @@ fn omp_handler(event: &str) -> &'static str {
 }
 
 #[test]
-fn omp_root_activation_requires_ui_context() {
+fn omp_root_activation_accepts_missing_ui_but_rejects_explicit_non_ui_context() {
     let activator = OMP_EXTENSION_ASSET
-        .find("function activateRootSession(ctx: any, sessionStartSource = \"startup\"): boolean")
+        .find("function activateRootSession(ctx: unknown): boolean")
         .expect("omp extension should centralize root session activation");
     let helper = &OMP_EXTENSION_ASSET[activator..];
-    let non_ui_guard = helper
-        .find("ctx?.hasUI !== true")
-        .expect("omp extension checks UI context before activating");
+    let explicit_non_ui_guard = helper
+        .find("ctx.hasUI === false")
+        .expect("omp extension should reject an explicitly non-UI context");
+    let session_manager_guard = helper
+        .find("!isRecord(ctx.sessionManager)")
+        .expect("omp extension should require a session manager");
     let root_session = helper
         .find("rootSession = true;")
-        .expect("omp extension activates root session after UI guard");
-    let session_report = helper
-        .find("void reportSession(sessionStartSource);")
-        .expect("omp extension reports root session");
+        .expect("omp extension activates a valid root session");
 
-    assert!(non_ui_guard < root_session);
-    assert!(root_session < session_report);
+    assert!(explicit_non_ui_guard < root_session);
+    assert!(session_manager_guard < root_session);
 }
 
 #[test]
 fn omp_session_start_and_switch_use_root_activation() {
     let session_start = OMP_EXTENSION_ASSET
-        .find("pi.on(\"session_start\", (_event, ctx)")
+        .find("pi.on(\"session_start\", async (event, ctx)")
         .expect("omp extension registers session_start handler");
     let session_start_handler = &OMP_EXTENSION_ASSET[session_start..];
     session_start_handler
@@ -2796,18 +2796,21 @@ fn omp_session_start_and_switch_use_root_activation() {
         .expect("omp session_start handler should activate root session");
 
     let session_switch = OMP_EXTENSION_ASSET
-        .find("pi.on(\"session_switch\", (event, ctx)")
+        .find("pi.on(\"session_switch\", async (event, ctx)")
         .expect("omp extension registers session_switch handler");
     let session_switch_handler = &OMP_EXTENSION_ASSET[session_switch..];
     session_switch_handler
-        .find("if (!activateRootSession(ctx, event?.reason || \"resume\"))")
-        .expect("omp session_switch handler should activate root session with switch reason");
+        .find("if (!activateRootSession(ctx))")
+        .expect("omp session_switch handler should activate root session");
+    session_switch_handler
+        .find("await reportSession(sessionStartSource)")
+        .expect("omp session_switch should await the replacement session report");
 }
 
 #[test]
 fn omp_session_reports_include_start_source() {
     let report_session = OMP_EXTENSION_ASSET
-        .find("function reportSession(sessionStartSource = \"startup\"): Promise<void>")
+        .find("function reportSession(sessionStartSource = \"startup\"): Promise<boolean>")
         .expect("omp extension should label session reports with a lifecycle source");
     let helper = &OMP_EXTENSION_ASSET[report_session..];
     let session_source = helper
@@ -2821,19 +2824,19 @@ fn omp_session_reports_include_start_source() {
 }
 
 #[test]
-fn omp_socket_requests_are_serialized() {
+fn omp_cli_requests_are_serialized() {
     let queue = OMP_EXTENSION_ASSET
-        .find("let requestQueue = Promise.resolve();")
-        .expect("omp extension should keep socket reports ordered");
+        .find("let requestQueue = Promise.resolve(true);")
+        .expect("omp extension should keep CLI reports ordered");
     let send_request = OMP_EXTENSION_ASSET[queue..]
-        .find("function sendRequest(request: unknown): Promise<void>")
-        .expect("omp extension should wrap socket sends in an ordered queue");
+        .find("function sendRequest(request: unknown): Promise<boolean>")
+        .expect("omp extension should wrap CLI reports in an ordered queue");
     let queued_send = OMP_EXTENSION_ASSET[queue + send_request..]
-        .find("requestQueue = requestQueue.then(")
-        .expect("omp extension should serialize socket requests through the queue");
+        .find("const queued = requestQueue.then(")
+        .expect("omp extension should serialize CLI reports through the queue");
     let raw_send = OMP_EXTENSION_ASSET[queue + send_request..]
         .find("sendRequestNow(request)")
-        .expect("omp extension should enqueue the raw socket send");
+        .expect("omp extension should enqueue the raw CLI report");
 
     assert!(queued_send < raw_send);
 }

@@ -2,10 +2,11 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=omp
-// HERDR_INTEGRATION_VERSION=4
+// HERDR_INTEGRATION_VERSION=9
 // @ts-nocheck
 
-import { createConnection } from "node:net";
+import { spawn } from "node:child_process";
+import { posix, win32 } from "node:path";
 
 const HERDR_ENV = process.env.HERDR_ENV;
 const socketPath = process.env.HERDR_SOCKET_PATH;
@@ -16,38 +17,103 @@ function enabled() {
   return HERDR_ENV === "1" && !!socketPath && !!paneId;
 }
 
-let requestQueue = Promise.resolve();
+let requestQueue = Promise.resolve(true);
 
-function sendRequestNow(request: unknown): Promise<void> {
-  if (!enabled()) {
-    return Promise.resolve();
-  }
-
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      socket.destroy();
-      resolve();
-    };
-
-    const socket = createConnection(socketPath!);
-    socket.on("error", finish);
-    socket.on("connect", () => socket.write(`${JSON.stringify(request)}\n`));
-    socket.on("data", finish);
-    socket.on("end", finish);
-    const timeout = setTimeout(finish, 500);
-    timeout.unref?.();
-  });
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
-function sendRequest(request: unknown): Promise<void> {
-  requestQueue = requestQueue.then(
+function appendCliFlag(args: string[], flag: string, value: unknown): void {
+  if (typeof value === "string" && value.length > 0) {
+    args.push(flag, value);
+  } else if (typeof value === "number") {
+    args.push(flag, String(value));
+  }
+}
+
+function requestCliArgs(request: unknown): string[] | undefined {
+  if (!isRecord(request) || !isRecord(request.params)) {
+    return undefined;
+  }
+  const params = request.params;
+  if (typeof params.pane_id !== "string") {
+    return undefined;
+  }
+
+  if (request.method === "pane.report_agent") {
+    const args = ["pane", "report-agent", params.pane_id];
+    appendCliFlag(args, "--source", params.source);
+    appendCliFlag(args, "--agent", params.agent);
+    appendCliFlag(args, "--state", params.state);
+    appendCliFlag(args, "--message", params.message);
+    appendCliFlag(args, "--seq", params.seq);
+    appendCliFlag(args, "--agent-session-id", params.agent_session_id);
+    appendCliFlag(args, "--agent-session-path", params.agent_session_path);
+    return args;
+  }
+  if (request.method === "pane.report_agent_session") {
+    const args = ["pane", "report-agent-session", params.pane_id];
+    appendCliFlag(args, "--source", params.source);
+    appendCliFlag(args, "--agent", params.agent);
+    appendCliFlag(args, "--seq", params.seq);
+    appendCliFlag(args, "--agent-session-id", params.agent_session_id);
+    appendCliFlag(args, "--agent-session-path", params.agent_session_path);
+    appendCliFlag(args, "--session-start-source", params.session_start_source);
+    return args;
+  }
+  if (request.method === "pane.release_agent") {
+    const args = ["pane", "release-agent", params.pane_id];
+    appendCliFlag(args, "--source", params.source);
+    appendCliFlag(args, "--agent", params.agent);
+    appendCliFlag(args, "--seq", params.seq);
+    return args;
+  }
+  return undefined;
+}
+
+function sendRequestNow(request: unknown): Promise<boolean> {
+  if (!enabled()) {
+    return Promise.resolve(true);
+  }
+  const args = requestCliArgs(request);
+  if (!args) {
+    return Promise.resolve(false);
+  }
+
+  const { promise, resolve } = Promise.withResolvers<boolean>();
+  const reporterScript = process.env.HERDR_OMP_REPORTER_SCRIPT;
+  const reporterArgs = reporterScript ? [reporterScript, ...args] : args;
+  const child = spawn(process.env.HERDR_BIN_PATH || "herdr", reporterArgs, {
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  let settled = false;
+  let timeout: NodeJS.Timeout | undefined;
+  const finish = (delivered: boolean) => {
+    if (settled) return;
+    settled = true;
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+    resolve(delivered);
+  };
+  child.on("error", () => finish(false));
+  child.on("exit", (code) => finish(code === 0));
+  timeout = setTimeout(() => {
+    child.kill();
+    finish(false);
+  }, 2_000);
+  timeout.unref?.();
+  return promise;
+}
+
+function sendRequest(request: unknown): Promise<boolean> {
+  const queued = requestQueue.then(
     () => sendRequestNow(request),
     () => sendRequestNow(request),
   );
-  return requestQueue;
+  requestQueue = queued;
+  return queued;
 }
 
 type AgentState = "working" | "blocked" | "idle";
@@ -56,6 +122,7 @@ type QueuedState = {
   state: AgentState;
   message?: string;
   seq: number;
+  attempts: number;
 };
 
 const idleDebounceMs = parseDurationEnv("HERDR_OMP_IDLE_DEBOUNCE_MS", 250);
@@ -71,17 +138,26 @@ function nextReportSeq(): number {
   return reportSeq;
 }
 
-function updateSessionRef(ctx: any): void {
+function updateSessionRef(ctx: unknown): void {
+  const sessionManager = isRecord(ctx) && isRecord(ctx.sessionManager) ? ctx.sessionManager : undefined;
   try {
-    const file = ctx?.sessionManager?.getSessionFile?.();
+    const file =
+      sessionManager && typeof sessionManager.getSessionFile === "function"
+        ? sessionManager.getSessionFile()
+        : undefined;
     currentAgentSessionPath =
-      typeof file === "string" && file.startsWith("/") ? file : undefined;
+      typeof file === "string" && (posix.isAbsolute(file) || win32.isAbsolute(file))
+        ? file
+        : undefined;
   } catch {
     currentAgentSessionPath = undefined;
   }
 
   try {
-    const id = ctx?.sessionManager?.getSessionId?.();
+    const id =
+      sessionManager && typeof sessionManager.getSessionId === "function"
+        ? sessionManager.getSessionId()
+        : undefined;
     currentAgentSessionId = typeof id === "string" && id.length > 0 ? id : undefined;
   } catch {
     currentAgentSessionId = undefined;
@@ -120,10 +196,10 @@ function currentSessionRef(): Record<string, unknown> | undefined {
   return undefined;
 }
 
-function reportSession(sessionStartSource = "startup"): Promise<void> {
+function reportSession(sessionStartSource = "startup"): Promise<boolean> {
   const sessionRef = currentSessionRef();
   if (!sessionRef) {
-    return Promise.resolve();
+    return Promise.resolve(true);
   }
 
   return sendRequest({
@@ -140,7 +216,7 @@ function reportSession(sessionStartSource = "startup"): Promise<void> {
   });
 }
 
-function sendState(state: AgentState, message?: string, seq = nextReportSeq()): Promise<void> {
+function sendState(state: AgentState, message?: string, seq = nextReportSeq()): Promise<boolean> {
   return sendRequest({
     id: `${source}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
     method: "pane.report_agent",
@@ -155,7 +231,7 @@ function sendState(state: AgentState, message?: string, seq = nextReportSeq()): 
   });
 }
 
-function releaseAgent(): Promise<void> {
+function releaseAgent(): Promise<boolean> {
   return sendRequest({
     id: `${source}:release:${Date.now()}:${Math.random().toString(36).slice(2)}`,
     method: "pane.release_agent",
@@ -168,21 +244,30 @@ function releaseAgent(): Promise<void> {
   });
 }
 
-function shouldReleaseOnSessionShutdown(event: any): boolean {
+function shouldReleaseOnSessionShutdown(event: unknown): boolean {
   // OMP tears down and rebinds extension runtimes for internal lifecycle actions
   // such as /reload, /new, /resume, and /fork. Those do not mean the pane's
   // agent process has exited, and releasing hook authority there can suppress
   // legitimate reports from the replacement runtime. Only a user/process quit
   // should release Herdr's full-lifecycle authority.
-  const reason = event?.reason;
-  return reason === "quit";
+  return isRecord(event) && event.reason === "quit";
 }
 
 let sendInFlight = false;
-let queuedState: QueuedState | undefined;
+const queuedStates: QueuedState[] = [];
+let acknowledgedState: AgentState | undefined;
+let acknowledgedMessage: string | undefined;
 
-function queueState(state: AgentState, message?: string): void {
-  queuedState = { state, message, seq: nextReportSeq() };
+function queueState(state: AgentState, message?: string, force = false): void {
+  const pending = queuedStates.at(-1);
+  if (
+    !force &&
+    ((pending && pending.state === state && pending.message === message) ||
+      (!pending && acknowledgedState === state && acknowledgedMessage === message))
+  ) {
+    return;
+  }
+  queuedStates.push({ state, message, seq: nextReportSeq(), attempts: 0 });
   if (!sendInFlight) {
     void drainStateQueue();
   }
@@ -195,33 +280,44 @@ async function drainStateQueue(): Promise<void> {
 
   sendInFlight = true;
   try {
-    while (queuedState) {
-      const next = queuedState;
-      queuedState = undefined;
-      await sendState(next.state, next.message, next.seq);
+    while (queuedStates.length > 0) {
+      const next = queuedStates[0];
+      if (await sendState(next.state, next.message, next.seq)) {
+        queuedStates.shift();
+        acknowledgedState = next.state;
+        acknowledgedMessage = next.message;
+        continue;
+      }
+
+      next.attempts += 1;
+      const retryDelay = Promise.withResolvers<void>();
+      const backoffMs = Math.min(5_000, 100 * 2 ** Math.min(next.attempts - 1, 6));
+      const timeout = setTimeout(retryDelay.resolve, backoffMs);
+      timeout.unref?.();
+      await retryDelay.promise;
     }
   } finally {
     sendInFlight = false;
-    if (queuedState) {
+    if (queuedStates.length > 0) {
       void drainStateQueue();
     }
   }
 }
 
-function lastAssistantMessage(messages: unknown[]): any | undefined {
+function lastAssistantMessage(messages: unknown[]): Record<string, unknown> | undefined {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i] as any;
-    if (message?.role === "assistant") {
+    const message = messages[i];
+    if (isRecord(message) && message.role === "assistant") {
       return message;
     }
   }
   return undefined;
 }
 
-function retryableErrorMessage(event: any): string | undefined {
-  const messages = Array.isArray(event?.messages) ? event.messages : [];
+function retryableErrorMessage(event: unknown): string | undefined {
+  const messages = isRecord(event) && Array.isArray(event.messages) ? event.messages : [];
   const assistant = lastAssistantMessage(messages);
-  if (assistant?.stopReason !== "error") {
+  if (!assistant || assistant.stopReason !== "error") {
     return undefined;
   }
 
@@ -232,13 +328,14 @@ function retryableErrorMessage(event: any): string | undefined {
   return errorMessage || "retryable provider error";
 }
 
-function askBlockedMessage(args: any): string {
-  const questions = Array.isArray(args?.questions) ? args.questions : [];
-  const firstQuestion = questions.find((question: any) => typeof question?.question === "string");
-  if (firstQuestion?.question) {
-    return firstQuestion.question;
-  }
-  return "waiting for user input";
+function askBlockedMessage(args: unknown): string {
+  const questions = isRecord(args) && Array.isArray(args.questions) ? args.questions : [];
+  const firstQuestion = questions.find(
+    (question: unknown) => isRecord(question) && typeof question.question === "string",
+  );
+  return isRecord(firstQuestion) && typeof firstQuestion.question === "string"
+    ? firstQuestion.question
+    : "waiting for user input";
 }
 
 export default function (pi) {
@@ -252,13 +349,12 @@ export default function (pi) {
   let failureMessage: string | undefined;
   let blockedCount = 0;
   let blockedMessage: string | undefined;
-  let lastState: AgentState | undefined;
-  let lastMessage: string | undefined;
-  let idleTimer: ReturnType<typeof setTimeout> | undefined;
-  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  // Delivery deduplication is based on acknowledged state at module scope.
+  let idleTimer: NodeJS.Timeout | undefined;
+  let retryTimer: NodeJS.Timeout | undefined;
   let rootSession = false;
 
-  function clearTimer(timer: ReturnType<typeof setTimeout> | undefined) {
+  function clearTimer(timer: NodeJS.Timeout | undefined) {
     if (timer) {
       clearTimeout(timer);
     }
@@ -292,12 +388,7 @@ export default function (pi) {
 
   function publishState(force = false) {
     const next = desiredState();
-    if (!force && next.state === lastState && next.message === lastMessage) {
-      return;
-    }
-    lastState = next.state;
-    lastMessage = next.message;
-    queueState(next.state, next.message);
+    queueState(next.state, next.message, force);
   }
 
   function scheduleIdle() {
@@ -326,13 +417,12 @@ export default function (pi) {
     retryTimer.unref?.();
   }
 
-  function activateRootSession(ctx: any, sessionStartSource = "startup"): boolean {
-    if (ctx?.hasUI !== true) {
+  function activateRootSession(ctx: unknown): boolean {
+    if (!isRecord(ctx) || ctx.hasUI === false || !isRecord(ctx.sessionManager)) {
       return false;
     }
     rootSession = true;
     updateSessionRef(ctx);
-    void reportSession(sessionStartSource);
     return true;
   }
 
@@ -371,29 +461,55 @@ export default function (pi) {
     activateBlocked(data.label);
   });
 
-  pi.on("session_start", (_event, ctx) => {
-    if (!activateRootSession(ctx)) {
-      return;
-    }
-    // A reload can replace this extension mid-run without emitting another agent_start.
-    agentActive = ctx?.isIdle?.() === false;
-    publishState(true);
-  });
-
-  pi.on("session_switch", (event, ctx) => {
-    if (!activateRootSession(ctx, event?.reason || "resume")) {
-      return;
-    }
-    resetSessionState();
-    publishState(true);
-  });
-
-  pi.on("agent_start", (_event, ctx) => {
+  pi.on("before_agent_start", async (_event, ctx) => {
     if (!rootSession && !activateRootSession(ctx)) {
       return;
     }
     updateSessionRef(ctx);
-    void reportSession();
+    if (!(await reportSession())) {
+      return;
+    }
+    clearPendingTimers();
+    clearFailureState();
+    agentActive = true;
+    publishState();
+  });
+
+  pi.on("session_start", async (event, ctx) => {
+    if (!activateRootSession(ctx)) {
+      return;
+    }
+    const sessionStartSource = isRecord(event) && typeof event.reason === "string" ? event.reason : "startup";
+    if (!(await reportSession(sessionStartSource))) {
+      return;
+    }
+    const contextIsIdle =
+      isRecord(ctx) && typeof ctx.isIdle === "function" ? ctx.isIdle() : undefined;
+    // A pre-start hook can arrive before a late session_start with stale idle context.
+    agentActive = agentActive || contextIsIdle === false;
+    publishState(true);
+  });
+
+  pi.on("session_switch", async (event, ctx) => {
+    if (!activateRootSession(ctx)) {
+      return;
+    }
+    resetSessionState();
+    const sessionStartSource = isRecord(event) && typeof event.reason === "string" ? event.reason : "resume";
+    if (!(await reportSession(sessionStartSource))) {
+      return;
+    }
+    publishState(true);
+  });
+
+  pi.on("agent_start", async (_event, ctx) => {
+    if (!rootSession && !activateRootSession(ctx)) {
+      return;
+    }
+    updateSessionRef(ctx);
+    if (!(await reportSession())) {
+      return;
+    }
     clearPendingTimers();
     clearFailureState();
     agentActive = true;
