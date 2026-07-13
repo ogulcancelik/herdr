@@ -95,7 +95,7 @@ herdr pane read w1:p2 --source recent --lines 50
 | 服务器 | `ping`、`server.stop`、`server.reload_config`、`server.agent_manifests`、`server.reload_agent_manifests` |
 | 通知 | `notification.show` |
 | 客户端 | `client.window_title.set`、`client.window_title.clear` |
-| 工作区 | `workspace.create`、`workspace.list`、`workspace.get`、`workspace.focus`、`workspace.rename`、`workspace.close` |
+| 工作区 | `workspace.create`、`workspace.list`、`workspace.get`、`workspace.focus`、`workspace.rename`、`workspace.report_metadata`、`workspace.close` |
 | Worktree | `worktree.list`、`worktree.create`、`worktree.open`、`worktree.remove` |
 | 标签页 | `tab.create`、`tab.list`、`tab.get`、`tab.focus`、`tab.rename`、`tab.close` |
 | 窗格 | `pane.split`、`pane.swap`、`pane.move`、`pane.zoom`、`pane.layout`、`pane.process_info`、`pane.neighbor`、`pane.edges`、`pane.focus_direction`、`pane.resize`、`pane.list`、`pane.current`、`pane.get`、`pane.rename`、`pane.send_text`、`pane.send_keys`、`pane.send_input`、`pane.read`、`pane.report_agent`、`pane.report_agent_session`、`pane.report_metadata`、`pane.clear_agent_authority`、`pane.release_agent`、`pane.close`、`pane.wait_for_output` |
@@ -415,15 +415,12 @@ Herdr 在本地 socket 上使用换行分隔的 JSON。在 Unix 上,那个 socke
     "source": "custom:docs",
     "agent": "docs-bot",
     "state": "working",
-    "message": "building docs",
-    "custom_status": "indexing"
+    "message": "building docs"
   }
 }
 ```
 
-`state` 是语义性的。它影响等待、通知和汇总。
-
-`custom_status` 是视觉性的。它可以显示 `indexing` 这类简短的活动标签,而不改变语义行为。
+`state` 是语义性的。它影响等待、通知和汇总。只影响展示的值应通过元数据单独上报。
 
 仅提供会话的官方集成用 `pane.report_agent_session` 上报原生会话引用。上报状态的集成仍然可以在 `pane.report_agent` 中包含原生会话引用。与状态无关的会话上报不影响等待、通知或汇总。
 
@@ -457,6 +454,8 @@ Herdr 存有原生会话引用时,`pane.get`、`pane.list`、`agent.get` 和 `ag
 
 当 Herdr 能解析当前控制窗格 PTY 的进程的 cwd 时,`pane.get`、`pane.list`、`agent.get` 和 `agent.list` 也暴露 `foreground_cwd`。已有的 `cwd` 字段仍然是用于标签、follow-cwd 行为和恢复会话状态的窗格/工作区 cwd。
 
+`PaneInfo` 和 `AgentInfo` 暴露可选的 `terminal_title` 和 `terminal_title_stripped` 字段。`terminal_title` 是经过安全规范化的最新 OSC 0/2 标题。`terminal_title_stripped` 会移除开头一个已识别的活动或旋转指示符字形及其后的空白。这些值归服务器所有,冷重启后不会保留,并且独立于元数据 `title` 和语义智能体状态。
+
 当用户钩子想自定义展示、又不从 Herdr 集成接管生命周期状态时,使用 `pane.report_metadata`。
 
 ```json
@@ -469,26 +468,39 @@ Herdr 存有原生会话引用时,`pane.get`、`pane.list`、`agent.get` 和 `ag
     "agent": "claude",
     "title": "Refactor auth middleware",
     "display_agent": "Claude: auth",
-    "custom_status": "refactor auth",
     "state_labels": {
       "working": "refactoring auth",
       "idle": "ready",
       "done": "review ready"
+    },
+    "tokens": {
+      "summary": "refactor auth",
+      "model": "opus"
     },
     "ttl_ms": 3600000
   }
 }
 ```
 
-元数据上报只影响展示。有效的元数据可以覆盖窗格标题、显示的智能体名称、紧凑的活动标签和可见的状态标签。`working`、`blocked`、`idle`、等待、通知和汇总仍来自语义状态。原生会话恢复来自存储的官方会话引用。`agent` 是对权威智能体标签的可选守卫;`applies_to_source` 是对活动生命周期权威来源的可选守卫。用 `display_agent` 修改可见名称。`state_labels` 的键必须是 `idle`、`working`、`blocked`、`done` 或 `unknown`。用相同 `source` 搭配 `clear_custom_status: true` 这类清除字段,可以移除某一项展示覆盖。
+元数据上报只影响展示。有效的元数据可以覆盖窗格标题、显示的智能体名称、可见的状态标签和任意命名令牌。`working`、`blocked`、`idle`、等待、通知和汇总仍来自语义状态。原生会话恢复来自存储的官方会话引用。`agent` 是展示字段针对权威智能体标签的可选守卫;`applies_to_source` 同样保护展示字段,使其只适用于活动生命周期权威来源。这些守卫不作用于令牌补丁;令牌上报方负责清除和刷新 TTL。用 `display_agent` 修改可见名称。`state_labels` 的键必须是 `idle`、`working`、`blocked`、`done` 或 `unknown`。
 
-展示文本在存储前被规范化。Herdr 去掉首尾空白、移除控制字符、把 `custom_status` 截断到 32 个字符,把 `title`、`display_agent` 和每个状态标签截断到 80 个字符。规范化后为空的值被忽略。
+令牌映射是针对每个资源的补丁。字符串设置键,JSON `null` 清除键,未提及的键保持不变。最后接受的更新生效。可选 TTL 分别应用于该次上报更新的每个令牌键。窗格令牌会在 pane 和 agent 的 get/list 响应中公开,并可在智能体侧边栏行中写成 `$name`。单次上报最多可包含 16 个令牌键,每个窗格或工作区最多保留 32 个键。令牌名称必须由 1–32 个 ASCII 字母、数字、下划线或连字符组成。
+
+工作区令牌使用相同约定:
+
+```json
+{"id":"req_3","method":"workspace.report_metadata","params":{"workspace_id":"w1","source":"user:jj","tokens":{"jj_status":"2 changes","old":null},"ttl_ms":5000}}
+```
+
+workspace 的 get/list 响应会公开生成的 `tokens` 映射,空间侧边栏行可显示 `$jj_status` 这类值。变更和 TTL 到期会发出包含最新工作区快照的 `workspace.metadata_updated`。该元数据事件会发送给 API 订阅者,但不会调用插件事件钩子。
+
+展示文本在存储前被规范化。Herdr 去掉首尾空白、移除控制字符,并把 `title`、`display_agent`、每个状态标签和令牌值截断到 80 个字符。规范化后为空的令牌值会清除该键。
 
 `source` 和 `applies_to_source` 是来源标识符。它们必须不超过 80 个字符,且只能包含 ASCII 字母、数字、冒号、点、下划线和连字符。
 
-短期元数据用 `ttl_ms`。取值必须在 `1` 到 `86400000` 毫秒之间。想让元数据保留到被替换、清除或窗格关闭时,省略 `ttl_ms`。TTL 过期时,Herdr 移除该来源的元数据,并在可见窗格展示发生变化时发出展示变化事件。
+短期元数据用 `ttl_ms`。取值必须在 `1` 到 `86400000` 毫秒之间。想让元数据保留到被替换、清除或窗格或工作区关闭时,省略 `ttl_ms`。展示字段继续按来源过期;该次调用更新的每个令牌都有独立期限。令牌元数据不会在服务器重启后恢复。
 
-钩子可能乱序发送更新时,使用 `seq`。对同一 `source`,序号小于等于最后接受序号的上报会被 API 接受,但被窗格状态忽略。
+钩子可能乱序发送更新时,使用 `seq`。对同一 `source`,序号小于等于最后接受序号的上报会被 API 接受,但被窗格状态忽略。每个窗格或工作区在其生命周期内最多接受来自 32 个不同来源的带序号令牌上报;清除或过期不会释放这些来源名额。
 
 ## 事件订阅
 
@@ -508,8 +520,8 @@ Herdr 存有原生会话引用时,`pane.get`、`pane.list`、`agent.get` 和 `ag
 
 第一个响应确认订阅。之后的行是推送的事件。
 
-工作区事件订阅包括 `workspace.created`、`workspace.updated`、`workspace.renamed`、`workspace.closed` 和 `workspace.focused`。工作区事件描述 Herdr UI/运行时的生命周期。当工作区属于 worktree 组时,`workspace.created` 包含可选的 `workspace.worktree` 来源信息。在移除前 Herdr 仍能识别时,`workspace.closed` 包含最终的 `workspace` 快照。
-窗格事件订阅包括 `pane.created`、`pane.closed`、`pane.focused`、`pane.moved`、`pane.exited`、`pane.agent_detected`、`pane.output_matched` 和 `pane.agent_status_changed`。
+工作区事件订阅包括 `workspace.created`、`workspace.updated`、`workspace.metadata_updated`、`workspace.renamed`、`workspace.closed` 和 `workspace.focused`。`workspace.metadata_updated` 报告令牌变更和 TTL 到期,但不会调用插件事件钩子。其他工作区事件描述 Herdr UI/运行时的生命周期。当工作区属于 worktree 组时,`workspace.created` 包含可选的 `workspace.worktree` 来源信息。在移除前 Herdr 仍能识别时,`workspace.closed` 包含最终的 `workspace` 快照。
+窗格事件订阅包括 `pane.created`、`pane.updated`、`pane.closed`、`pane.focused`、`pane.moved`、`pane.exited`、`pane.agent_detected`、`pane.output_matched` 和 `pane.agent_status_changed`。终端标题变化可能发出 `pane.updated`,但如果原始标题只有旋转指示符发生变化且 `terminal_title_stripped` 不变,则不会发出。
 
 Worktree 事件订阅包括 `worktree.created`、`worktree.opened` 和 `worktree.removed`。Worktree 事件描述 Git 检出的生命周期。`worktree.created` 包含打开的 `workspace` 和创建的 `worktree`。`worktree.opened` 包含目标 `workspace`、打开的 `worktree` 和 `already_open`。`worktree.removed` 包含 `workspace_id`、被移除的 `worktree` 和 `forced`。
 

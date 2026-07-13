@@ -114,17 +114,22 @@ Targets accept terminal IDs, unique agent names, detected or reported agent labe
 
 ## Custom status labels
 
-Integrations can report a visual status label without changing semantic state.
+Integrations report lifecycle state as semantic state only. Add display customization separately with pane metadata tokens.
 
 ```bash
 herdr pane report-agent w1:p1 \
   --source custom:indexer \
   --agent docs-bot \
-  --state working \
-  --custom-status indexing
+  --state working
+
+herdr pane report-metadata w1:p1 \
+  --source custom:indexer-display \
+  --token summary=indexing
 ```
 
-`state` controls waits, notifications, and rollups. `custom-status` is only display text.
+`state` controls waits, notifications, and rollups. The `summary` token is display-only and can be used as `$summary` in an Agent sidebar row.
+
+Agent sidebar rows can also opt into `terminal_title` or `terminal_title_stripped`; neither appears in the default rows. The first shows the latest safety-normalized OSC 0/2 terminal title. The second removes one recognized leading activity or spinner glyph and following whitespace. Herdr owns these values on the server; they are ephemeral across a cold restart and remain independent of metadata titles and semantic agent state. Spinner animation can therefore update the raw title without producing a pane update when the stripped text stays the same.
 
 ## Start agents from the CLI
 

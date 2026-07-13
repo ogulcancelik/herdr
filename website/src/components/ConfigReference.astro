@@ -1,0 +1,195 @@
+---
+import stableReference from '../data/config-reference.json';
+import previewReference from '../data/config-reference-preview.json';
+
+interface Props {
+  placeholder?: string;
+  noMatches?: string;
+  keyCountLabel?: string;
+}
+
+const {
+  placeholder = 'filter keys, e.g. sidebar, prefix, sound…',
+  noMatches = 'No keys match this filter.',
+  keyCountLabel = 'keys',
+} = Astro.props;
+
+const reference = Astro.url.pathname.includes('/docs/preview/')
+  ? previewReference
+  : stableReference;
+const totalKeys = reference.sections.reduce((sum, section) => sum + section.keys.length, 0);
+---
+
+<div class="config-reference" data-count-label={keyCountLabel}>
+  <div class="config-reference-controls">
+    <input
+      type="search"
+      class="config-reference-filter"
+      placeholder={placeholder}
+      autocomplete="off"
+      spellcheck="false"
+      aria-label={placeholder}
+    />
+    <p class="config-reference-meta" aria-live="polite">{totalKeys} {keyCountLabel}</p>
+  </div>
+
+  {reference.sections.map((section) => (
+    <section class="config-reference-section">
+      <h2 class="config-reference-title" id={`ref-${section.id}`}>{section.title}</h2>
+      <ul class="config-reference-list">
+        {section.keys.map((entry) => (
+          <li
+            class="config-reference-row"
+            data-search={`${entry.key} ${entry.description} ${(entry.values ?? []).join(' ')}`.toLowerCase()}
+          >
+            <div class="config-reference-head">
+              <code class="config-reference-key">{entry.key}</code>
+              <span class="config-reference-type">{entry.type}</span>
+              {entry.default && (
+                <span class="config-reference-default">
+                  default <code>{entry.default}</code>
+                </span>
+              )}
+            </div>
+            <p class="config-reference-desc">
+              {entry.description}
+              {entry.values && (
+                <span class="config-reference-values">
+                  {entry.values.map((value) => (
+                    <code>{value}</code>
+                  ))}
+                </span>
+              )}
+            </p>
+          </li>
+        ))}
+      </ul>
+    </section>
+  ))}
+
+  <p class="config-reference-empty" hidden>{noMatches}</p>
+</div>
+
+<style>
+  .config-reference-controls {
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+    margin-top: 1rem;
+  }
+
+  .config-reference-filter {
+    flex: 1;
+    font: inherit;
+    font-family: var(--sl-font-mono);
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-white);
+    background: var(--sl-color-bg-inline-code);
+    border: 1px solid var(--sl-color-hairline-light);
+    border-radius: 0.4rem;
+    padding: 0.5rem 0.75rem;
+  }
+
+  .config-reference-filter:focus {
+    outline: 2px solid var(--sl-color-accent);
+    outline-offset: -1px;
+  }
+
+  .config-reference-meta {
+    margin: 0;
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+    white-space: nowrap;
+  }
+
+  .config-reference-title {
+    margin-top: 2rem;
+  }
+
+  .config-reference-list {
+    list-style: none;
+    padding: 0;
+    margin: 0.75rem 0 0;
+  }
+
+  .config-reference-row {
+    padding: 0.6rem 0;
+    border-bottom: 1px solid var(--sl-color-hairline);
+  }
+
+  .config-reference-row[hidden] {
+    display: none;
+  }
+
+  .config-reference-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.6rem;
+  }
+
+  .config-reference-key {
+    font-weight: 600;
+  }
+
+  .config-reference-type {
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+    border: 1px solid var(--sl-color-hairline-light);
+    border-radius: 0.3rem;
+    padding: 0 0.35rem;
+  }
+
+  .config-reference-default {
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+  }
+
+  .config-reference-desc {
+    margin: 0.25rem 0 0;
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-2);
+  }
+
+  .config-reference-values {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin-inline-start: 0.4rem;
+  }
+
+  .config-reference-empty {
+    margin-top: 1.5rem;
+    color: var(--sl-color-gray-3);
+  }
+</style>
+
+<script>
+  for (const root of document.querySelectorAll('.config-reference')) {
+    const filter = root.querySelector('.config-reference-filter');
+    const meta = root.querySelector('.config-reference-meta');
+    const empty = root.querySelector('.config-reference-empty');
+    const sections = [...root.querySelectorAll('.config-reference-section')];
+    const rows = [...root.querySelectorAll('.config-reference-row')];
+    const countLabel = root.dataset.countLabel;
+
+    filter?.addEventListener('input', () => {
+      const terms = filter.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+      let visible = 0;
+
+      for (const row of rows) {
+        const haystack = row.dataset.search ?? '';
+        const match = terms.every((term) => haystack.includes(term));
+        row.hidden = !match;
+        if (match) visible += 1;
+      }
+
+      for (const section of sections) {
+        section.hidden = !section.querySelector('.config-reference-row:not([hidden])');
+      }
+
+      if (meta) meta.textContent = `${visible} ${countLabel}`;
+      if (empty) empty.hidden = visible > 0;
+    });
+  }
+</script>

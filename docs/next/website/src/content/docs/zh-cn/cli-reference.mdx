@@ -116,6 +116,7 @@ herdr workspace create [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [
 herdr workspace get <workspace_id>
 herdr workspace focus <workspace_id>
 herdr workspace rename <workspace_id> <label>
+herdr workspace report-metadata <workspace_id> --source ID [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]
 herdr workspace close <workspace_id>
 ```
 
@@ -200,7 +201,6 @@ herdr pane report-agent <pane_id> \
   --agent LABEL \
   --state idle|working|blocked|unknown \
   [--message TEXT] \
-  [--custom-status TEXT] \
   [--seq N] \
   [--agent-session-id ID] \
   [--agent-session-path PATH]
@@ -219,18 +219,21 @@ herdr pane report-metadata <pane_id> \
   [--applies-to-source ID] \
   [--title TEXT|--clear-title] \
   [--display-agent TEXT|--clear-display-agent] \
-  [--custom-status TEXT|--clear-custom-status] \
   [--state-label STATUS=TEXT] \
   [--clear-state-labels] \
+  [--token NAME=VALUE] \
+  [--clear-token NAME] \
   [--seq N] \
   [--ttl-ms N]
 ```
 
-`STATUS` 是 `idle`、`working`、`blocked`、`done` 或 `unknown` 之一。`--agent` 是对权威智能体标签的守卫。`--applies-to-source` 是对活动生命周期权威来源的守卫。用 `--display-agent` 修改可见名称。
+`STATUS` 是 `idle`、`working`、`blocked`、`done` 或 `unknown` 之一。`--agent` 和 `--applies-to-source` 只守卫 `--title`、`--display-agent` 和 `--state-label`,不守卫令牌补丁。上报方负责清除令牌或刷新 TTL。用 `--display-agent` 修改可见名称。
 
-元数据文本在存储前会被规范化。Herdr 去掉首尾空白、移除控制字符、把 `--custom-status` 截断到 32 个字符,把 `--title`、`--display-agent` 和每个 `--state-label` 的值截断到 80 个字符。规范化后为空的值被忽略。
+元数据文本在存储前会被规范化。Herdr 去掉首尾空白、移除控制字符,并把 `--title`、`--display-agent`、每个 `--state-label` 和令牌值截断到 80 个字符。规范化后为空的令牌值会清除该键。
 
-`--source` 和 `--applies-to-source` 必须不超过 80 个字符,并且只能包含 ASCII 字母、数字、冒号、点、下划线和连字符。`--ttl-ms` 让元数据自动过期,取值必须在 `1` 到 `86400000` 毫秒之间。想让元数据一直保留到被替换、清除或窗格关闭时,省略它。`--seq` 让 Herdr 忽略来自同一 `--source` 的过期上报;过期上报会被 API 接受,但被窗格状态忽略。
+`--token` 设置一个命名展示值,`--clear-token` 删除一个值。未提及的令牌保持不变。窗格令牌可在智能体侧边栏行中写成 `$name`;工作区令牌可用于空间行。TTL 分别应用于该次调用更新的每个令牌键。
+
+`--source` 和 `--applies-to-source` 必须不超过 80 个字符,并且只能包含 ASCII 字母、数字、冒号、点、下划线和连字符。`--ttl-ms` 让元数据自动过期,取值必须在 `1` 到 `86400000` 毫秒之间。想让元数据一直保留到被替换、清除或窗格或工作区关闭时,省略它。`--seq` 让 Herdr 忽略来自同一 `--source` 的过期上报;过期上报会被 API 接受,但被窗格状态忽略。每个窗格或工作区在其生命周期内最多接受来自 32 个不同来源的带序号令牌上报,清除或过期不会释放这些来源名额。
 
 ## 智能体
 

@@ -62,7 +62,8 @@ impl App {
         msg: crate::api::ApiRequestMessage,
     ) -> bool {
         let previous_mode = self.state.mode;
-        let mut changed = crate::api::request_changes_ui(&msg.request);
+        let mut changed = self.expire_due_metadata(Instant::now());
+        changed |= crate::api::request_changes_ui(&msg.request);
         let skip_default_workspace = matches!(
             &msg.request.method,
             crate::api::schema::Method::ServerStop(_)
@@ -288,18 +289,7 @@ impl App {
             self.start_background_session_save();
         }
 
-        if let Some(deadline) = self
-            .agent_metadata_deadline
-            .filter(|deadline| now >= *deadline)
-        {
-            let previous_toast = self.state.toast.clone();
-            for update in self.state.expire_agent_metadata_at(deadline, now) {
-                self.refresh_new_herdr_toast_context_for_update(&update, &previous_toast);
-                self.emit_pane_state_update(&update);
-            }
-            self.sync_agent_metadata_deadline();
-            changed = true;
-        }
+        changed |= self.expire_due_metadata(now);
 
         if geometry_dirty || resized {
             self.pending_agent_resume_deadline = None;
@@ -335,6 +325,33 @@ impl App {
 
     pub(crate) fn sync_agent_metadata_deadline(&mut self) {
         self.agent_metadata_deadline = self.state.next_agent_metadata_expiry();
+    }
+
+    pub(crate) fn expire_due_metadata(&mut self, now: Instant) -> bool {
+        let Some(deadline) = self
+            .agent_metadata_deadline
+            .filter(|deadline| now >= *deadline)
+        else {
+            return false;
+        };
+        self.expire_metadata_at(deadline, now);
+        true
+    }
+
+    pub(crate) fn expire_metadata_at(&mut self, deadline: Instant, now: Instant) {
+        let previous_toast = self.state.toast.clone();
+        for update in self.state.expire_agent_metadata_at(deadline, now) {
+            self.refresh_new_herdr_toast_context_for_update(&update, &previous_toast);
+            self.emit_pane_state_update(&update);
+        }
+        let (panes, workspaces) = self.state.expire_metadata_tokens(now);
+        for (ws_idx, pane_id) in panes {
+            self.emit_pane_updated(ws_idx, pane_id);
+        }
+        for ws_idx in workspaces {
+            self.emit_workspace_token_updated(ws_idx);
+        }
+        self.sync_agent_metadata_deadline();
     }
 
     pub(crate) fn sync_animation_timer(&mut self, now: Instant) {

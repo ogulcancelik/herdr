@@ -1,4 +1,4 @@
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -18,7 +18,8 @@ use crate::api::wait::{wait_for_event, wait_for_output};
 use crate::api::{request_changes_ui, socket_path, ApiRequestMessage, ApiRequestSender, EventHub};
 use crate::ipc::{
     bind_local_listener, is_connection_closed_error, local_stream_peer_closed,
-    remove_socket_file_if_owned, socket_file_identity, LocalStream, SocketFileIdentity,
+    poll_local_stream_read, remove_socket_file_if_owned, set_local_stream_polling,
+    socket_file_identity, LocalStream, LocalStreamRead, SocketFileIdentity,
 };
 
 const SOCKET_PERMISSION_MODE: u32 = 0o600;
@@ -321,6 +322,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::WorkspaceFocus(_) => "workspace.focus",
         Method::WorkspaceRename(_) => "workspace.rename",
         Method::WorkspaceMove(_) => "workspace.move",
+        Method::WorkspaceReportMetadata(_) => "workspace.report_metadata",
         Method::WorkspaceClose(_) => "workspace.close",
         Method::WorktreeList(_) => "worktree.list",
         Method::WorktreeCreate(_) => "worktree.create",
@@ -405,48 +407,189 @@ fn api_response_outcome(response: &str) -> &'static str {
 }
 
 fn read_initial_request_line(stream: &mut LocalStream) -> std::io::Result<Option<String>> {
-    stream.set_nonblocking(true)?;
-    let deadline = Instant::now() + INITIAL_REQUEST_TIMEOUT;
+    read_initial_request_line_with_timeout(stream, INITIAL_REQUEST_TIMEOUT)
+}
+
+fn read_initial_request_line_with_timeout(
+    stream: &mut LocalStream,
+    timeout: Duration,
+) -> std::io::Result<Option<String>> {
+    read_initial_request_line_with_limits(stream, timeout, MAX_INITIAL_REQUEST_BYTES)
+}
+
+fn read_initial_request_line_with_limits(
+    stream: &mut LocalStream,
+    timeout: Duration,
+    max_bytes: usize,
+) -> std::io::Result<Option<String>> {
+    set_local_stream_polling(stream, true)?;
+    let deadline = Instant::now() + timeout;
     let mut bytes = Vec::new();
     let mut byte = [0u8; 1];
 
-    loop {
-        match stream.read(&mut byte) {
-            Ok(0) => {
-                stream.set_nonblocking(false)?;
-                return Ok(None);
-            }
-            Ok(_) => {
+    let result = loop {
+        let read = match poll_local_stream_read(stream, &mut byte) {
+            Ok(read) => read,
+            Err(err) => break Err(err),
+        };
+        match read {
+            LocalStreamRead::Closed => break Ok(None),
+            LocalStreamRead::Data => {
                 bytes.push(byte[0]);
                 if byte[0] == b'\n' {
-                    stream.set_nonblocking(false)?;
-                    return String::from_utf8(bytes)
+                    break String::from_utf8(bytes)
                         .map(Some)
                         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err));
                 }
-                if bytes.len() > MAX_INITIAL_REQUEST_BYTES {
-                    stream.set_nonblocking(false)?;
-                    return Err(io::Error::new(
+                if bytes.len() > max_bytes {
+                    break Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "api request line is too large",
                     ));
                 }
             }
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+            LocalStreamRead::Pending => {
                 if Instant::now() >= deadline {
-                    stream.set_nonblocking(false)?;
-                    return Err(io::Error::new(
+                    break Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "timed out reading api request",
                     ));
                 }
                 std::thread::sleep(CONNECTION_POLL_INTERVAL);
             }
-            Err(err) => {
-                stream.set_nonblocking(false)?;
-                return Err(err);
-            }
         }
+    };
+    set_local_stream_polling(stream, false)?;
+    result
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use interprocess::local_socket::traits::Listener as _;
+    use std::io::{BufRead, BufReader};
+    use std::sync::mpsc::{self, Receiver};
+
+    fn local_stream_pair(name: &str) -> (LocalStream, LocalStream, PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-api-{name}-{}-{}.sock",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        let listener = crate::ipc::bind_local_listener(&path).unwrap();
+        let client = crate::ipc::connect_local_stream(&path).unwrap();
+        let server = listener.accept().unwrap();
+        (client, server, path)
+    }
+
+    fn spawn_connection(
+        server: LocalStream,
+    ) -> (Receiver<std::io::Result<()>>, std::thread::JoinHandle<()>) {
+        let (done_tx, done_rx) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let (api_tx, _api_rx) = tokio::sync::mpsc::unbounded_channel();
+            let result = handle_connection(
+                server,
+                &api_tx,
+                &EventHub::default(),
+                &Arc::new(AtomicBool::new(true)),
+                None,
+            );
+            done_tx.send(result).unwrap();
+        });
+        (done_rx, thread)
+    }
+
+    #[test]
+    fn windows_delayed_partial_initial_request_returns_pong() {
+        let (mut client, server, path) = local_stream_pair("delayed-request");
+        let (done_rx, server_thread) = spawn_connection(server);
+
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            done_rx.try_recv().is_err(),
+            "idle connected client must not be treated as closed"
+        );
+
+        client
+            .write_all(br#"{"id":"delayed","method":"ping","params":{}}"#)
+            .unwrap();
+        client.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            done_rx.try_recv().is_err(),
+            "partial request must wait for its newline"
+        );
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+
+        let mut response = String::new();
+        BufReader::new(&mut client)
+            .read_line(&mut response)
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["id"], "delayed");
+        assert_eq!(response["result"]["type"], "pong");
+
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        server_thread.join().unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn windows_disconnected_initial_request_returns_promptly() {
+        let (client, server, path) = local_stream_pair("disconnected-request");
+        let (done_rx, server_thread) = spawn_connection(server);
+
+        drop(client);
+
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("disconnected connection handler must finish promptly")
+            .unwrap();
+        server_thread.join().unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn windows_idle_initial_request_honors_timeout() {
+        let (_client, mut server, path) = local_stream_pair("request-timeout");
+
+        let err = read_initial_request_line_with_timeout(&mut server, Duration::from_millis(50))
+            .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn windows_initial_request_enforces_size_limit() {
+        let (mut client, mut server, path) = local_stream_pair("request-size-limit");
+        client.write_all(b"12345").unwrap();
+        client.flush().unwrap();
+
+        let err = read_initial_request_line_with_limits(&mut server, Duration::from_secs(1), 4)
+            .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "api request line is too large");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn windows_initial_request_rejects_invalid_utf8() {
+        let (mut client, mut server, path) = local_stream_pair("request-invalid-utf8");
+        client.write_all(&[0xff, b'\n']).unwrap();
+        client.flush().unwrap();
+
+        let err = read_initial_request_line_with_timeout(&mut server, Duration::from_secs(1))
+            .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -669,10 +812,12 @@ mod tests {
             label: None,
             agent: Some("pi".into()),
             title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
             display_agent: None,
             agent_status,
-            custom_status: None,
             state_labels: HashMap::new(),
+            tokens: HashMap::new(),
             agent_session: None,
             scroll: None,
             revision: 0,

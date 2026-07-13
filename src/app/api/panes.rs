@@ -20,14 +20,13 @@ use crate::app::Mode;
 use crate::layout::{find_in_direction, NavDirection, PaneId};
 
 use super::super::api_helpers::{
-    detect_state_from_api, encode_api_keys, encode_api_text, normalize_custom_status,
-    normalize_reported_agent_label,
+    detect_state_from_api, encode_api_keys, encode_api_text, normalize_metadata_source,
+    normalize_metadata_tokens, normalize_metadata_ttl, normalize_reported_agent_label,
+    MAX_METADATA_TOKEN_KEYS_PER_RESOURCE,
 };
+#[cfg(test)]
+use super::super::api_helpers::{METADATA_SOURCE_MAX_CHARS, METADATA_TTL_MAX_MS};
 use super::responses::{encode_error, encode_success};
-
-const METADATA_SOURCE_MAX_CHARS: usize = 80;
-const METADATA_TTL_MIN_MS: u64 = 1;
-const METADATA_TTL_MAX_MS: u64 = 86_400_000;
 
 impl App {
     pub(super) fn handle_pane_split(&mut self, id: String, params: PaneSplitParams) -> String {
@@ -1237,7 +1236,6 @@ impl App {
             agent_label,
             state: detect_state_from_api(params.state),
             message: params.message,
-            custom_status: normalize_custom_status(params.custom_status),
             seq: params.seq,
         });
 
@@ -1279,7 +1277,7 @@ impl App {
         id: String,
         params: PaneReportMetadataParams,
     ) -> String {
-        let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
         let agent_label = match params.agent.as_deref() {
@@ -1295,15 +1293,21 @@ impl App {
         };
         let raw_title_set = params.title.is_some();
         let raw_display_agent_set = params.display_agent.is_some();
-        let raw_custom_status_set = params.custom_status.is_some();
         let raw_state_labels_set = !params.state_labels.is_empty();
+        let tokens = if params.tokens.is_empty() {
+            None
+        } else {
+            match normalize_metadata_tokens(params.tokens) {
+                Ok(tokens) => Some(tokens),
+                Err(message) => return encode_error(id, "invalid_metadata_token", message),
+            }
+        };
         let ttl = match normalize_metadata_ttl(params.ttl_ms) {
             Ok(ttl) => ttl,
             Err(message) => return encode_error(id, "invalid_metadata_ttl", message),
         };
         let title = normalize_presentation_text(params.title);
         let display_agent = normalize_presentation_text(params.display_agent);
-        let custom_status = normalize_custom_status(params.custom_status);
         let applies_to_source = match params.applies_to_source {
             Some(applies_to_source) => match normalize_metadata_source(applies_to_source) {
                 Ok(applies_to_source) => Some(applies_to_source),
@@ -1323,7 +1327,6 @@ impl App {
         };
         if raw_title_set && params.clear_title
             || raw_display_agent_set && params.clear_display_agent
-            || raw_custom_status_set && params.clear_custom_status
             || raw_state_labels_set && params.clear_state_labels
         {
             return encode_error(
@@ -1334,11 +1337,10 @@ impl App {
         }
         if title.is_none()
             && display_agent.is_none()
-            && custom_status.is_none()
             && state_labels.is_empty()
+            && tokens.is_none()
             && !params.clear_title
             && !params.clear_display_agent
-            && !params.clear_custom_status
             && !params.clear_state_labels
         {
             return encode_error(
@@ -1347,22 +1349,84 @@ impl App {
                 "missing metadata field to set or clear",
             );
         }
-        self.handle_internal_event(crate::events::AppEvent::HookMetadataReported {
-            pane_id,
-            source,
-            agent_label,
-            applies_to_source,
-            title,
-            display_agent,
-            custom_status,
-            state_labels,
-            clear_title: params.clear_title,
-            clear_display_agent: params.clear_display_agent,
-            clear_custom_status: params.clear_custom_status,
-            clear_state_labels: params.clear_state_labels,
-            seq: params.seq,
-            ttl,
+        let presentation_requested = title.is_some()
+            || display_agent.is_some()
+            || !state_labels.is_empty()
+            || params.clear_title
+            || params.clear_display_agent
+            || params.clear_state_labels;
+        let Some(terminal_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.pane_state(pane_id))
+            .map(|pane| pane.attached_terminal_id.clone())
+        else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        if !terminal.metadata_report_sequence_is_fresh(&source, params.seq) {
+            return encode_success(id, ResponseResult::Ok {});
+        }
+        if let Some(tokens) = tokens.as_ref() {
+            if terminal.metadata_tokens.key_count_after_patch(tokens)
+                > MAX_METADATA_TOKEN_KEYS_PER_RESOURCE
+            {
+                return encode_error(
+                    id,
+                    "metadata_token_limit",
+                    format!(
+                        "pane metadata may contain at most {MAX_METADATA_TOKEN_KEYS_PER_RESOURCE} tokens"
+                    ),
+                );
+            }
+        }
+        match terminal.accept_metadata_report(&source, params.seq, tokens.is_some()) {
+            Ok(true) => {}
+            Ok(false) => return encode_success(id, ResponseResult::Ok {}),
+            Err(()) => {
+                return encode_error(
+                    id,
+                    "metadata_sequence_source_limit",
+                    format!(
+                        "pane metadata may track at most {} sequenced sources",
+                        crate::metadata_tokens::MAX_SEQUENCE_SOURCES
+                    ),
+                );
+            }
+        }
+        let token_changed = tokens.is_some_and(|tokens| {
+            let changed = terminal
+                .metadata_tokens
+                .patch(tokens, ttl, std::time::Instant::now());
+            if changed {
+                terminal.revision = terminal.revision.saturating_add(1);
+            }
+            changed
         });
+
+        if presentation_requested {
+            self.handle_internal_event(crate::events::AppEvent::HookMetadataReported {
+                pane_id,
+                source,
+                agent_label,
+                applies_to_source,
+                title,
+                display_agent,
+                state_labels,
+                clear_title: params.clear_title,
+                clear_display_agent: params.clear_display_agent,
+                clear_state_labels: params.clear_state_labels,
+                seq: None,
+                ttl,
+            });
+        }
+        if token_changed {
+            self.sync_agent_metadata_deadline();
+            self.emit_pane_updated(ws_idx, pane_id);
+        }
 
         encode_success(id, ResponseResult::Ok {})
     }
@@ -1549,41 +1613,6 @@ impl App {
 
         encode_success(id, ResponseResult::Ok {})
     }
-}
-
-fn normalize_metadata_source(value: String) -> Result<String, &'static str> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Err("metadata source must not be empty");
-    }
-    if value.chars().count() > METADATA_SOURCE_MAX_CHARS {
-        return Err("metadata source must be 80 characters or fewer");
-    }
-    if !value.chars().all(metadata_source_char_is_valid) {
-        return Err(
-            "metadata source may contain only ASCII letters, digits, colon, dot, underscore, and hyphen",
-        );
-    }
-    Ok(value.to_string())
-}
-
-fn metadata_source_char_is_valid(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || matches!(ch, ':' | '.' | '_' | '-')
-}
-
-fn normalize_metadata_ttl(
-    ttl_ms: Option<u64>,
-) -> Result<Option<std::time::Duration>, &'static str> {
-    let Some(ttl_ms) = ttl_ms else {
-        return Ok(None);
-    };
-    if ttl_ms < METADATA_TTL_MIN_MS {
-        return Err("metadata ttl_ms must be at least 1");
-    }
-    if ttl_ms > METADATA_TTL_MAX_MS {
-        return Err("metadata ttl_ms must be 86400000 or less");
-    }
-    Ok(Some(std::time::Duration::from_millis(ttl_ms)))
 }
 
 fn normalize_presentation_text(value: Option<String>) -> Option<String> {
@@ -1850,6 +1879,7 @@ mod tests {
     use crate::{
         api::schema::{ErrorResponse, SplitDirection, SuccessResponse},
         config::Config,
+        detect::{Agent, AgentState},
         workspace::Workspace,
     };
 
@@ -1902,13 +1932,12 @@ mod tests {
             source: "user:metadata.test-1".into(),
             agent: None,
             applies_to_source: None,
-            title: None,
+            title: Some("activity".into()),
             display_agent: None,
-            custom_status: Some("activity".into()),
             state_labels: std::collections::HashMap::new(),
+            tokens: std::collections::HashMap::new(),
             clear_title: false,
             clear_display_agent: false,
-            clear_custom_status: false,
             clear_state_labels: false,
             seq: None,
             ttl_ms: None,
@@ -3581,6 +3610,116 @@ mod tests {
         assert_eq!(focus.source_pane_id, root_public.clone());
         assert_eq!(focus.focused_pane_id, Some(root_public));
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(root));
+    }
+
+    #[test]
+    fn pane_metadata_tokens_patch_and_clear_through_dispatcher() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        for (tokens, expected) in [
+            (
+                std::collections::HashMap::from([
+                    ("summary".into(), Some("reviewing auth".into())),
+                    ("model".into(), Some("opus".into())),
+                ]),
+                std::collections::HashMap::from([
+                    ("summary".into(), "reviewing auth".into()),
+                    ("model".into(), "opus".into()),
+                ]),
+            ),
+            (
+                std::collections::HashMap::from([
+                    ("summary".into(), Some("done".into())),
+                    ("model".into(), None),
+                ]),
+                std::collections::HashMap::from([("summary".into(), "done".into())]),
+            ),
+        ] {
+            let mut params = metadata_params(pane_id.clone());
+            params.title = None;
+            params.tokens = tokens;
+            let response = app.handle_api_request(crate::api::schema::Request {
+                id: "set".into(),
+                method: crate::api::schema::Method::PaneReportMetadata(params),
+            });
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            assert_eq!(success.result, ResponseResult::Ok {});
+
+            let response = app.handle_api_request(crate::api::schema::Request {
+                id: "get".into(),
+                method: crate::api::schema::Method::PaneGet(PaneTarget {
+                    pane_id: pane_id.clone(),
+                }),
+            });
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            let ResponseResult::PaneInfo { pane } = success.result else {
+                panic!("expected pane info");
+            };
+            assert_eq!(pane.tokens, expected);
+        }
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        assert!(app.state.terminals[&terminal_id].agent_metadata.is_empty());
+    }
+
+    #[test]
+    fn pane_tokens_are_independent_from_presentation_guards() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Working);
+        let mut params = metadata_params(pane_id);
+        params.title = None;
+        params.agent = Some("codex".into());
+        params.tokens =
+            std::collections::HashMap::from([("summary".into(), Some("global".into()))]);
+
+        let response = app.handle_pane_report_metadata("guarded".into(), params);
+
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            app.state.terminals[&terminal_id].metadata_tokens.values(),
+            std::collections::HashMap::from([("summary".into(), "global".into())])
+        );
+    }
+
+    #[test]
+    fn pane_metadata_uses_one_sequence_for_presentation_and_tokens() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let mut presentation = metadata_params(pane_id.clone());
+        presentation.seq = Some(10);
+        let response = app.handle_pane_report_metadata("presentation".into(), presentation);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        let mut stale_token = metadata_params(pane_id.clone());
+        stale_token.title = None;
+        stale_token.tokens =
+            std::collections::HashMap::from([("summary".into(), Some("stale".into()))]);
+        stale_token.seq = Some(9);
+        let response = app.handle_pane_report_metadata("stale".into(), stale_token);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        assert!(app.state.terminals[&terminal_id]
+            .metadata_tokens
+            .values()
+            .is_empty());
     }
 
     #[test]

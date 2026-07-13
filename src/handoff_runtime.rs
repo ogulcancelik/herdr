@@ -17,6 +17,8 @@ pub(crate) struct HandoffRuntimeState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_state: Option<crate::pane::InputState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_history_ansi: Option<String>,
 }
 

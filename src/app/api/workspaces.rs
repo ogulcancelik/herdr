@@ -2,10 +2,11 @@ use std::path::PathBuf;
 
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, ResponseResult, WorkspaceCreateParams,
-    WorkspaceMoveParams, WorkspaceRenameParams, WorkspaceTarget,
+    WorkspaceMoveParams, WorkspaceRenameParams, WorkspaceReportMetadataParams, WorkspaceTarget,
 };
 use crate::app::App;
 
+use super::super::api_helpers::{normalize_metadata_source, normalize_metadata_ttl};
 use super::responses::{encode_error, encode_success};
 
 impl App {
@@ -151,6 +152,76 @@ impl App {
         }
 
         encode_success(id, ResponseResult::WorkspaceList { workspaces })
+    }
+
+    pub(super) fn handle_workspace_report_metadata(
+        &mut self,
+        id: String,
+        params: WorkspaceReportMetadataParams,
+    ) -> String {
+        let Some(index) = self.parse_workspace_id(&params.workspace_id) else {
+            return workspace_not_found(id, &params.workspace_id);
+        };
+        let source = match normalize_metadata_source(params.source) {
+            Ok(source) => source,
+            Err(message) => return encode_error(id, "invalid_metadata_source", message),
+        };
+        let ttl = match normalize_metadata_ttl(params.ttl_ms) {
+            Ok(ttl) => ttl,
+            Err(message) => return encode_error(id, "invalid_metadata_ttl", message),
+        };
+        let tokens = match super::super::api_helpers::normalize_metadata_tokens(params.tokens) {
+            Ok(tokens) => tokens,
+            Err(message) => return encode_error(id, "invalid_metadata_token", message),
+        };
+        let Some(workspace) = self.state.workspaces.get_mut(index) else {
+            return workspace_not_found(id, &params.workspace_id);
+        };
+        if !crate::metadata_tokens::sequence_is_fresh(
+            &workspace.metadata_token_sequences,
+            &source,
+            params.seq,
+        ) {
+            return encode_success(id, ResponseResult::Ok {});
+        }
+        if workspace.metadata_tokens.key_count_after_patch(&tokens)
+            > super::super::api_helpers::MAX_METADATA_TOKEN_KEYS_PER_RESOURCE
+        {
+            return encode_error(
+                id,
+                "metadata_token_limit",
+                format!(
+                    "workspace metadata may contain at most {} tokens",
+                    super::super::api_helpers::MAX_METADATA_TOKEN_KEYS_PER_RESOURCE
+                ),
+            );
+        }
+        match crate::metadata_tokens::accept_sequence(
+            &mut workspace.metadata_token_sequences,
+            &source,
+            params.seq,
+        ) {
+            Ok(true) => {}
+            Ok(false) => return encode_success(id, ResponseResult::Ok {}),
+            Err(()) => {
+                return encode_error(
+                    id,
+                    "metadata_sequence_source_limit",
+                    format!(
+                        "workspace metadata may track at most {} sequenced sources",
+                        crate::metadata_tokens::MAX_SEQUENCE_SOURCES
+                    ),
+                );
+            }
+        }
+        let changed = workspace
+            .metadata_tokens
+            .patch(tokens, ttl, std::time::Instant::now());
+        if changed {
+            self.sync_agent_metadata_deadline();
+            self.emit_workspace_token_updated(index);
+        }
+        encode_success(id, ResponseResult::Ok {})
     }
 
     pub(super) fn handle_workspace_close(&mut self, id: String, target: WorkspaceTarget) -> String {
@@ -361,6 +432,90 @@ mod tests {
                         .is_some_and(|worktree| worktree.is_linked_worktree)
             )
         }));
+    }
+
+    #[test]
+    fn workspace_metadata_tokens_patch_clear_and_emit_snapshot() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        let workspace_id = app.public_workspace_id(0);
+
+        for (tokens, expected) in [
+            (
+                std::collections::HashMap::from([
+                    ("summary".into(), Some("reviewing auth".into())),
+                    ("jj_status".into(), Some("2 changes".into())),
+                ]),
+                std::collections::HashMap::from([
+                    ("summary".into(), "reviewing auth".into()),
+                    ("jj_status".into(), "2 changes".into()),
+                ]),
+            ),
+            (
+                std::collections::HashMap::from([
+                    ("summary".into(), Some("done".into())),
+                    ("jj_status".into(), None),
+                ]),
+                std::collections::HashMap::from([("summary".into(), "done".into())]),
+            ),
+        ] {
+            let response = app.handle_api_request(crate::api::schema::Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorkspaceReportMetadata(
+                    WorkspaceReportMetadataParams {
+                        workspace_id: workspace_id.clone(),
+                        source: "user:test".into(),
+                        tokens,
+                        seq: None,
+                        ttl_ms: None,
+                    },
+                ),
+            });
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            assert_eq!(success.result, ResponseResult::Ok {});
+            assert_eq!(app.workspace_info(0).tokens, expected);
+        }
+
+        assert!(event_hub.events_after(0).iter().any(|(_, event)| matches!(
+            &event.data,
+            EventData::WorkspaceMetadataUpdated { workspace }
+                if workspace.tokens.get("summary").map(String::as_str) == Some("done")
+                    && !workspace.tokens.contains_key("jj_status")
+        )));
+    }
+
+    #[test]
+    fn workspace_token_ttl_expires_through_runtime_and_emits_update() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        let workspace_id = app.public_workspace_id(0);
+        let response = app.handle_workspace_report_metadata(
+            "req".into(),
+            WorkspaceReportMetadataParams {
+                workspace_id,
+                source: "user:test".into(),
+                tokens: std::collections::HashMap::from([(
+                    "summary".into(),
+                    Some("temporary".into()),
+                )]),
+                seq: None,
+                ttl_ms: Some(1),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let deadline = app.agent_metadata_deadline.expect("token deadline");
+
+        app.expire_metadata_at(deadline, deadline);
+
+        assert!(app.workspace_info(0).tokens.is_empty());
+        assert!(event_hub.events_after(0).iter().any(|(_, event)| matches!(
+            &event.data,
+            EventData::WorkspaceMetadataUpdated { workspace } if workspace.tokens.is_empty()
+        )));
     }
 
     #[test]

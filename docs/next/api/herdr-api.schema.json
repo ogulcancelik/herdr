@@ -116,6 +116,22 @@
             {
               "properties": {
                 "type": {
+                  "const": "workspace_metadata_updated",
+                  "type": "string"
+                },
+                "workspace": {
+                  "$ref": "#/schemas/event/$defs/WorkspaceInfo"
+                }
+              },
+              "required": [
+                "type",
+                "workspace"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
                   "const": "workspace_closed",
                   "type": "string"
                 },
@@ -433,6 +449,22 @@
             },
             {
               "properties": {
+                "pane": {
+                  "$ref": "#/schemas/event/$defs/PaneInfo"
+                },
+                "type": {
+                  "const": "pane_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "pane_id": {
                   "type": "string"
                 },
@@ -594,12 +626,6 @@
                 "agent_status": {
                   "$ref": "#/schemas/event/$defs/AgentStatus"
                 },
-                "custom_status": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
                 "display_agent": {
                   "type": [
                     "string",
@@ -659,6 +685,7 @@
           "enum": [
             "workspace_created",
             "workspace_updated",
+            "workspace_metadata_updated",
             "workspace_closed",
             "workspace_renamed",
             "workspace_moved",
@@ -673,6 +700,7 @@
             "tab_focused",
             "pane_created",
             "pane_closed",
+            "pane_updated",
             "pane_focused",
             "pane_moved",
             "pane_output_changed",
@@ -703,12 +731,6 @@
             },
             "agent_status": {
               "$ref": "#/schemas/event/$defs/AgentStatus"
-            },
-            "custom_status": {
-              "type": [
-                "string",
-                "null"
-              ]
             },
             "cwd": {
               "type": [
@@ -767,11 +789,33 @@
             "terminal_id": {
               "type": "string"
             },
+            "terminal_title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "terminal_title_stripped": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "title": {
               "type": [
                 "string",
                 "null"
               ]
+            },
+            "tokens": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "maxProperties": 32,
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9_-]{1,32}$"
+              },
+              "type": "object"
             },
             "workspace_id": {
               "type": "string"
@@ -1006,6 +1050,16 @@
               "format": "uint",
               "minimum": 0,
               "type": "integer"
+            },
+            "tokens": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "maxProperties": 32,
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9_-]{1,32}$"
+              },
+              "type": "object"
             },
             "workspace_id": {
               "type": "string"
@@ -2267,12 +2321,6 @@
                 "null"
               ]
             },
-            "custom_status": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
             "message": {
               "type": [
                 "string",
@@ -2364,10 +2412,6 @@
                 "null"
               ]
             },
-            "clear_custom_status": {
-              "default": false,
-              "type": "boolean"
-            },
             "clear_display_agent": {
               "default": false,
               "type": "boolean"
@@ -2379,12 +2423,6 @@
             "clear_title": {
               "default": false,
               "type": "boolean"
-            },
-            "custom_status": {
-              "type": [
-                "string",
-                "null"
-              ]
             },
             "display_agent": {
               "type": [
@@ -2418,9 +2456,23 @@
                 "null"
               ]
             },
+            "tokens": {
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "maxProperties": 16,
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9_-]{1,32}$"
+              },
+              "type": "object"
+            },
             "ttl_ms": {
               "format": "uint64",
-              "minimum": 0,
+              "maximum": 86400000,
+              "minimum": 1,
               "type": [
                 "integer",
                 "null"
@@ -3114,6 +3166,18 @@
             {
               "properties": {
                 "type": {
+                  "const": "workspace.metadata_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
                   "const": "workspace.renamed",
                   "type": "string"
                 }
@@ -3271,6 +3335,18 @@
               "properties": {
                 "type": {
                   "const": "pane.closed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "pane.updated",
                   "type": "string"
                 }
               },
@@ -3571,6 +3647,52 @@
           "required": [
             "workspace_id",
             "label"
+          ],
+          "type": "object"
+        },
+        "WorkspaceReportMetadataParams": {
+          "properties": {
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "source": {
+              "type": "string"
+            },
+            "tokens": {
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "maxProperties": 16,
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9_-]{1,32}$"
+              },
+              "type": "object"
+            },
+            "ttl_ms": {
+              "format": "uint64",
+              "maximum": 86400000,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "source",
+            "tokens"
           ],
           "type": "object"
         },
@@ -3979,6 +4101,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/WorkspaceMoveParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workspace.report_metadata",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkspaceReportMetadataParams"
             }
           },
           "required": [
@@ -5046,12 +5184,6 @@
             "agent_status": {
               "$ref": "#/schemas/subscription_event/$defs/AgentStatus"
             },
-            "custom_status": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
             "display_agent": {
               "type": [
                 "string",
@@ -5265,12 +5397,6 @@
             "agent_status": {
               "$ref": "#/schemas/success_response/$defs/AgentStatus"
             },
-            "custom_status": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
             "cwd": {
               "type": [
                 "string",
@@ -5321,11 +5447,33 @@
             "terminal_id": {
               "type": "string"
             },
+            "terminal_title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "terminal_title_stripped": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "title": {
               "type": [
                 "string",
                 "null"
               ]
+            },
+            "tokens": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "maxProperties": 32,
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9_-]{1,32}$"
+              },
+              "type": "object"
             },
             "workspace_id": {
               "type": "string"
@@ -5481,6 +5629,22 @@
               "properties": {
                 "type": {
                   "const": "workspace_updated",
+                  "type": "string"
+                },
+                "workspace": {
+                  "$ref": "#/schemas/success_response/$defs/WorkspaceInfo"
+                }
+              },
+              "required": [
+                "type",
+                "workspace"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "workspace_metadata_updated",
                   "type": "string"
                 },
                 "workspace": {
@@ -5813,6 +5977,22 @@
             },
             {
               "properties": {
+                "pane": {
+                  "$ref": "#/schemas/success_response/$defs/PaneInfo"
+                },
+                "type": {
+                  "const": "pane_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "pane_id": {
                   "type": "string"
                 },
@@ -5974,12 +6154,6 @@
                 "agent_status": {
                   "$ref": "#/schemas/success_response/$defs/AgentStatus"
                 },
-                "custom_status": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
                 "display_agent": {
                   "type": [
                     "string",
@@ -6054,6 +6228,7 @@
           "enum": [
             "workspace_created",
             "workspace_updated",
+            "workspace_metadata_updated",
             "workspace_closed",
             "workspace_renamed",
             "workspace_moved",
@@ -6068,6 +6243,7 @@
             "tab_focused",
             "pane_created",
             "pane_closed",
+            "pane_updated",
             "pane_focused",
             "pane_moved",
             "pane_output_changed",
@@ -6435,12 +6611,6 @@
             "agent_status": {
               "$ref": "#/schemas/success_response/$defs/AgentStatus"
             },
-            "custom_status": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
             "cwd": {
               "type": [
                 "string",
@@ -6498,11 +6668,33 @@
             "terminal_id": {
               "type": "string"
             },
+            "terminal_title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "terminal_title_stripped": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "title": {
               "type": [
                 "string",
                 "null"
               ]
+            },
+            "tokens": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "maxProperties": 32,
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9_-]{1,32}$"
+              },
+              "type": "object"
             },
             "workspace_id": {
               "type": "string"
@@ -8757,6 +8949,16 @@
               "format": "uint",
               "minimum": 0,
               "type": "integer"
+            },
+            "tokens": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "maxProperties": 32,
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9_-]{1,32}$"
+              },
+              "type": "object"
             },
             "workspace_id": {
               "type": "string"

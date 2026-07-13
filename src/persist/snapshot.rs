@@ -1076,7 +1076,6 @@ mod tests {
                 "pi".into(),
                 crate::detect::AgentState::Working,
                 None,
-                None,
                 crate::agent_resume::AgentSessionRef::path(session_path.clone()),
                 Some(20),
             );

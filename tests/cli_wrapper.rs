@@ -898,6 +898,61 @@ fn pane_run_sends_one_send_input_request_with_enter_key() {
 }
 
 #[test]
+fn workspace_report_metadata_sends_token_patch() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("herdr.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        reader.read_line(&mut line).unwrap();
+        stream
+            .write_all(br#"{"id":"cli:request","result":{"type":"ok"}}"#)
+            .unwrap();
+        stream.write_all(b"\n").unwrap();
+        stream.flush().unwrap();
+        line
+    });
+
+    let run = run_cli(
+        &socket_path,
+        &[
+            "workspace",
+            "report-metadata",
+            "2",
+            "--source",
+            "user:jj",
+            "--token",
+            "jj_status=2 changes",
+            "--token",
+            "summary=clean",
+            "--clear-token",
+            "old",
+            "--ttl-ms",
+            "5000",
+        ],
+    );
+    assert!(
+        run.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let request: serde_json::Value = serde_json::from_str(&server.join().unwrap()).unwrap();
+    assert_eq!(request["method"], "workspace.report_metadata");
+    assert_eq!(request["params"]["workspace_id"], "2");
+    assert_eq!(request["params"]["tokens"]["jj_status"], "2 changes");
+    assert_eq!(request["params"]["tokens"]["summary"], "clean");
+    assert!(request["params"]["tokens"]["old"].is_null());
+    assert_eq!(request["params"]["ttl_ms"], 5000);
+
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn pane_report_metadata_sends_presentation_request() {
     let base = unique_test_dir();
     fs::create_dir_all(&base).unwrap();
@@ -931,10 +986,14 @@ fn pane_report_metadata_sends_presentation_request() {
             "Refactor auth",
             "--display-agent",
             "Claude auth",
-            "--custom-status",
-            "middleware",
             "--state-label",
             "working=deep in the mines",
+            "--token",
+            "summary=reviewing auth",
+            "--token",
+            "model=opus",
+            "--clear-token",
+            "old",
             "--ttl-ms",
             "3600000",
         ],
@@ -954,11 +1013,13 @@ fn pane_report_metadata_sends_presentation_request() {
     assert!(request["params"]["applies_to_source"].is_null());
     assert_eq!(request["params"]["title"], "Refactor auth");
     assert_eq!(request["params"]["display_agent"], "Claude auth");
-    assert_eq!(request["params"]["custom_status"], "middleware");
     assert_eq!(
         request["params"]["state_labels"]["working"],
         "deep in the mines"
     );
+    assert_eq!(request["params"]["tokens"]["summary"], "reviewing auth");
+    assert_eq!(request["params"]["tokens"]["model"], "opus");
+    assert!(request["params"]["tokens"]["old"].is_null());
     assert_eq!(request["params"]["ttl_ms"], 3_600_000);
 
     cleanup_test_base(&base);
@@ -978,8 +1039,8 @@ fn pane_report_metadata_rejects_blank_source_before_socket_request() {
             "1-1",
             "--source",
             "   ",
-            "--custom-status",
-            "middleware",
+            "--token",
+            "summary=middleware",
         ],
     );
 
@@ -1009,8 +1070,8 @@ fn pane_report_metadata_rejects_blank_applies_to_source_before_socket_request() 
             "user:claude-title",
             "--applies-to-source",
             "   ",
-            "--custom-status",
-            "middleware",
+            "--token",
+            "summary=middleware",
         ],
     );
 
@@ -2402,6 +2463,25 @@ fn config_check_reports_invalid_config_without_server() {
     assert_eq!(checked.status.code(), Some(1));
     assert!(stdout.contains("sidebar_min_width (50)"), "{stdout}");
     assert!(stdout.contains("sidebar_max_width (30)"), "{stdout}");
+
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn config_check_reports_unreadable_config_path() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let config_path = config_home.join(app_dir_name()).join("config.toml");
+    fs::create_dir_all(&config_path).unwrap();
+
+    let checked = run_named_cli(&config_home, &runtime_dir, &["config", "check"]);
+
+    assert_eq!(checked.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&checked.stdout);
+    assert!(stdout.contains("config: issues found"), "{stdout}");
+    assert!(stdout.contains("config read error"), "{stdout}");
+    assert!(stdout.contains("using defaults"), "{stdout}");
 
     cleanup_test_base(&base);
 }

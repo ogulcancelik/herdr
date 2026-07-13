@@ -114,17 +114,22 @@ herdr agent rename reviewer --clear
 
 ## 自定义状态标签
 
-集成可以上报一个视觉状态标签,而不改变语义状态。
+集成只把生命周期状态作为语义状态上报。展示自定义应通过窗格元数据令牌单独添加。
 
 ```bash
 herdr pane report-agent w1:p1 \
   --source custom:indexer \
   --agent docs-bot \
-  --state working \
-  --custom-status indexing
+  --state working
+
+herdr pane report-metadata w1:p1 \
+  --source custom:indexer-display \
+  --token summary=indexing
 ```
 
-`state` 控制等待、通知和汇总。`custom-status` 只是显示文本。
+`state` 控制等待、通知和汇总。`summary` 令牌只影响展示,可在智能体侧边栏行中写成 `$summary`。
+
+智能体侧边栏行也可以选择使用 `terminal_title` 或 `terminal_title_stripped`;两者都不在默认行中。前者显示经过安全规范化的最新 OSC 0/2 终端标题,后者会移除开头一个已识别的活动或旋转指示符字形及其后的空白。这些值由 Herdr 服务器所有,冷重启后不会保留,并且独立于元数据标题和语义智能体状态。因此,如果移除后的文本不变,旋转动画可以改变原始标题而不触发窗格更新。
 
 ## 从 CLI 启动智能体
 

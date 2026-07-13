@@ -1,0 +1,62 @@
+---
+title: Troubleshooting
+description: Diagnose common installation, terminal input, session, keybinding, and remote access problems.
+---
+
+Start with the versions and session status:
+
+```bash
+herdr -V
+herdr status
+```
+
+Also record your operating system, outer terminal name and version, whether the session is local or remote, and whether tmux is involved.
+
+## Enter, Tab, or Backspace fires twice
+
+Older terminal versions can emit the release of Enter, Tab, and Backspace as the same bytes as the press when an application enables Kitty keyboard event reporting. Herdr cannot distinguish those duplicate bytes after the terminal sends them.
+
+Update the outer terminal to a version containing its upstream fix:
+
+| Terminal | Minimum fixed version |
+| --- | --- |
+| kitty | 0.33.0 |
+| foot | 1.20.0 |
+| Alacritty | 0.15.0 |
+
+This is especially common with older terminal packages from long-term-support Linux distributions. See [Herdr issue #1116](https://github.com/ogulcancelik/herdr/issues/1116) for the confirmed boundary captures and upstream references. If the problem remains on a current terminal version, report the exact terminal version and whether it also happens outside Herdr.
+
+## Herdr updated, but the running session is still old
+
+Updating the binary does not always replace a compatible server that is already running. Check `herdr status`. To start the updated server, stop the session and launch Herdr again:
+
+```bash
+herdr server stop
+herdr
+```
+
+Stopping a server exits its pane processes. Named sessions use `herdr session stop <name>`. See [Install Herdr](/docs/install/#update) for updater, package-manager, and live-handoff behavior.
+
+## The `herdr` command is not found
+
+Restart the terminal so it reloads its environment, then confirm the Herdr install directory is on `PATH`. Package-manager installs must be updated and exposed through that package manager. See [Install Herdr](/docs/install/#verify).
+
+## A direct keybinding does nothing
+
+The operating system or outer terminal may consume the chord before Herdr receives it. Free the chord in that layer or choose another binding. See [Keyboard](/docs/keyboard/#going-prefix-free) for known conflicts and safe defaults.
+
+## Remote attach cannot authenticate
+
+First confirm that normal OpenSSH works with `ssh <host>`. For a passphrase-protected key in a non-interactive shell, CI job, or mobile terminal, load the key into `ssh-agent` before starting remote attach. See [Persistence and remote access](/docs/persistence-remote/#remote-attach-over-ssh).
+
+## Find diagnostic logs
+
+Herdr logs live in `~/.config/herdr/` by default:
+
+```text
+herdr.log
+herdr-client.log
+herdr-server.log
+```
+
+Set `HERDR_LOG=herdr=debug` for more detail. Include the current log and rotated siblings when reporting a problem. See [Configuration](/docs/configuration/#logs).

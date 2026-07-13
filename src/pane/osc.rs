@@ -460,6 +460,7 @@ pub(super) struct AgentOscStateTracker {
     state: Osc52ForwarderState,
     body: Vec<u8>,
     latest_title: Option<String>,
+    terminal_title: Option<String>,
     latest_progress: Option<String>,
 }
 
@@ -513,12 +514,14 @@ impl AgentOscStateTracker {
         if let Some((command, payload)) = parse_agent_osc_body(&self.body) {
             match command {
                 b"0" | b"2" => {
-                    if payload.is_empty() {
-                        self.latest_title = None;
+                    let title = if payload.is_empty() {
+                        None
                     } else {
-                        self.latest_title =
-                            Some(sanitize_agent_osc_string(payload, AGENT_OSC_MAX_CHARS));
-                    }
+                        let title = sanitize_agent_osc_string(payload, AGENT_OSC_MAX_CHARS);
+                        (!title.is_empty()).then_some(title)
+                    };
+                    self.latest_title.clone_from(&title);
+                    self.terminal_title = title;
                 }
                 b"9" => {
                     self.latest_progress =
@@ -528,6 +531,15 @@ impl AgentOscStateTracker {
             }
         }
         self.body.clear();
+    }
+
+    pub(super) fn terminal_title(&self) -> Option<&str> {
+        self.terminal_title.as_deref()
+    }
+
+    #[cfg(unix)]
+    pub(super) fn seed_terminal_title(&mut self, title: Option<String>) {
+        self.terminal_title = title;
     }
 
     /// Returns the latest retained OSC title, or `""` if none has been seen or
@@ -1081,6 +1093,7 @@ mod tests {
         let mut t = AgentOscStateTracker::default();
         t.observe("hello\x1b]0;braille title\x07world".as_bytes());
         assert_eq!(t.latest_title(), "braille title");
+        assert_eq!(t.terminal_title(), Some("braille title"));
         assert_eq!(t.latest_progress(), "");
     }
 
@@ -1101,6 +1114,29 @@ mod tests {
         // Then clear it with an empty payload (Codex pattern).
         t.observe(b"\x1b]0;\x07");
         assert_eq!(t.latest_title(), "");
+        assert_eq!(t.terminal_title(), None);
+    }
+
+    #[test]
+    fn clearing_agent_evidence_preserves_the_terminal_title() {
+        let mut tracker = AgentOscStateTracker::default();
+        tracker.observe("\x1b]2;✳ 修复🙂标题\x1b\\".as_bytes());
+
+        tracker.clear_retained();
+
+        assert_eq!(tracker.latest_title(), "");
+        assert_eq!(tracker.terminal_title(), Some("✳ 修复🙂标题"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_seed_does_not_restore_agent_detection_evidence() {
+        let mut tracker = AgentOscStateTracker::default();
+
+        tracker.seed_terminal_title(Some("✳ restored title".into()));
+
+        assert_eq!(tracker.terminal_title(), Some("✳ restored title"));
+        assert_eq!(tracker.latest_title(), "");
     }
 
     #[test]

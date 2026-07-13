@@ -9,6 +9,14 @@ const publicDir = resolve(repoRoot, 'website/public');
 const stableDocsDir = resolve(repoRoot, 'website/src/content/docs');
 const previewDocsSourceDir = resolve(repoRoot, 'docs/next/website/src/content/docs');
 const previewDocsDir = resolve(stableDocsDir, 'preview');
+const previewConfigReferenceSource = resolve(
+  repoRoot,
+  'docs/next/website/src/data/config-reference.json',
+);
+const previewConfigReferenceDestination = resolve(
+  repoRoot,
+  'website/src/data/config-reference-preview.json',
+);
 
 if (process.argv[2] === '--rewrite-preview-doc-fixture') {
   const chunks = [];
@@ -51,6 +59,7 @@ async function preparePublicAssets() {
 async function preparePreviewDocs() {
   await rm(previewDocsDir, { recursive: true, force: true });
   await copyPreviewDocs(previewDocsSourceDir, previewDocsDir);
+  await cp(previewConfigReferenceSource, previewConfigReferenceDestination);
 }
 
 async function copyPreviewDocs(sourceDir, destinationDir) {
@@ -73,7 +82,11 @@ async function copyPreviewDocs(sourceDir, destinationDir) {
 export function rewritePreviewDocContent(content, relativePath = '') {
   const rewritten = content
     .replaceAll('/docs/', '/docs/preview/')
-    .replaceAll('../../../public/', '../../../../public/');
+    .replaceAll('../../../public/', '../../../../public/')
+    // Preview docs live one directory deeper than stable docs, so component
+    // imports need one more parent segment regardless of locale depth. Only
+    // MDX import lines are rewritten; prose mentioning relative paths is not.
+    .replace(/^(import .*from\s+['"])(?=(?:\.\.\/)+components\/)/gm, '$1../');
   return insertPreviewNotice(rewritten, relativePath);
 }
 

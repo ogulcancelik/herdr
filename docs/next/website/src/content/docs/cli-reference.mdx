@@ -120,6 +120,7 @@ herdr workspace create [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [
 herdr workspace get <workspace_id>
 herdr workspace focus <workspace_id>
 herdr workspace rename <workspace_id> <label>
+herdr workspace report-metadata <workspace_id> --source ID [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]
 herdr workspace close <workspace_id>
 ```
 
@@ -214,7 +215,6 @@ herdr pane report-agent <pane_id> \
   --agent LABEL \
   --state idle|working|blocked|unknown \
   [--message TEXT] \
-  [--custom-status TEXT] \
   [--seq N] \
   [--agent-session-id ID] \
   [--agent-session-path PATH]
@@ -235,18 +235,21 @@ herdr pane report-metadata <pane_id> \
   [--applies-to-source ID] \
   [--title TEXT|--clear-title] \
   [--display-agent TEXT|--clear-display-agent] \
-  [--custom-status TEXT|--clear-custom-status] \
   [--state-label STATUS=TEXT] \
   [--clear-state-labels] \
+  [--token NAME=VALUE] \
+  [--clear-token NAME] \
   [--seq N] \
   [--ttl-ms N]
 ```
 
-`STATUS` is one of `idle`, `working`, `blocked`, `done`, or `unknown`. `--agent` is a guard for the authoritative agent label. `--applies-to-source` is a guard for the active lifecycle authority source. Use `--display-agent` to change the visible name.
+`STATUS` is one of `idle`, `working`, `blocked`, `done`, or `unknown`. `--agent` and `--applies-to-source` guard only `--title`, `--display-agent`, and `--state-label`. They do not guard token patches; token reporters own clearing or TTL refresh. Use `--display-agent` to change the visible name.
 
-Metadata text is normalized before storage. Herdr trims surrounding whitespace, removes control characters, caps `--custom-status` at 32 characters, and caps `--title`, `--display-agent`, and each `--state-label` value at 80 characters. Empty normalized values are ignored.
+Metadata text is normalized before storage. Herdr trims surrounding whitespace, removes control characters, and caps `--title`, `--display-agent`, each `--state-label`, and token values at 80 characters. Empty normalized token values clear that key.
 
-`--source` and `--applies-to-source` must be 80 characters or fewer and may contain only ASCII letters, digits, colon, dot, underscore, and hyphen. `--ttl-ms` makes metadata expire automatically and must be between `1` and `86400000` milliseconds. Omit it for metadata that should stay until replaced, cleared, or the pane closes. `--seq` lets Herdr ignore stale reports from the same `--source`; stale reports are accepted by the API but ignored by pane state.
+`--token` patches one named display value; `--clear-token` removes one. Unmentioned tokens remain unchanged. Pane tokens are available to Agent sidebar rows as `$name`; workspace tokens are available to Space rows. TTL applies independently to the token keys updated by that call.
+
+`--source` and `--applies-to-source` must be 80 characters or fewer and may contain only ASCII letters, digits, colon, dot, underscore, and hyphen. `--ttl-ms` makes metadata expire automatically and must be between `1` and `86400000` milliseconds. Omit it for metadata that should stay until replaced, cleared, or the pane closes. `--seq` lets Herdr ignore stale reports from the same `--source`; stale reports are accepted by the API but ignored by pane state. A pane or workspace accepts sequenced token reports from at most 32 distinct sources during its lifetime; clearing or expiry does not release those source slots.
 
 ## Agents
 

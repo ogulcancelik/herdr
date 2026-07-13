@@ -116,6 +116,7 @@ herdr workspace create [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [
 herdr workspace get <workspace_id>
 herdr workspace focus <workspace_id>
 herdr workspace rename <workspace_id> <label>
+herdr workspace report-metadata <workspace_id> --source ID [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]
 herdr workspace close <workspace_id>
 ```
 
@@ -200,7 +201,6 @@ herdr pane report-agent <pane_id> \
   --agent LABEL \
   --state idle|working|blocked|unknown \
   [--message TEXT] \
-  [--custom-status TEXT] \
   [--seq N] \
   [--agent-session-id ID] \
   [--agent-session-path PATH]
@@ -219,18 +219,21 @@ herdr pane report-metadata <pane_id> \
   [--applies-to-source ID] \
   [--title TEXT|--clear-title] \
   [--display-agent TEXT|--clear-display-agent] \
-  [--custom-status TEXT|--clear-custom-status] \
   [--state-label STATUS=TEXT] \
   [--clear-state-labels] \
+  [--token NAME=VALUE] \
+  [--clear-token NAME] \
   [--seq N] \
   [--ttl-ms N]
 ```
 
-`STATUS` は `idle`、`working`、`blocked`、`done`、`unknown` のいずれかです。`--agent` は権威あるエージェントラベルに対するガードです。`--applies-to-source` はアクティブなライフサイクル権威ソースに対するガードです。表示名を変えるには `--display-agent` を使ってください。
+`STATUS` は `idle`、`working`、`blocked`、`done`、`unknown` のいずれかです。`--agent` と `--applies-to-source` は `--title`、`--display-agent`、`--state-label` だけを保護し、トークンパッチは保護しません。トークンのクリアまたは TTL の更新は報告側が管理します。表示名を変えるには `--display-agent` を使ってください。
 
-メタデータのテキストは保存前に正規化されます。Herdr は前後の空白を取り除き、制御文字を除去し、`--custom-status` を 32 文字に、`--title`、`--display-agent`、各 `--state-label` の値を 80 文字に制限します。正規化後に空になった値は無視されます。
+メタデータのテキストは保存前に正規化されます。Herdr は前後の空白を取り除き、制御文字を除去し、`--title`、`--display-agent`、各 `--state-label`、トークンの値を 80 文字に制限します。正規化後に空になったトークン値は、そのキーをクリアします。
 
-`--source` と `--applies-to-source` は 80 文字以下で、ASCII の英字、数字、コロン、ドット、アンダースコア、ハイフンのみを含められます。`--ttl-ms` はメタデータを自動失効させ、`1` から `86400000` ミリ秒の間でなければなりません。置き換え・クリア・ペインのクローズまで残るべきメタデータでは省略してください。`--seq` により、Herdr は同じ `--source` からの古い報告を無視できます。古い報告は API には受理されますが、ペイン状態には無視されます。
+`--token` は名前付き表示値を設定し、`--clear-token` は削除します。指定しなかったトークンは変わりません。ペイントークンはエージェントサイドバー行で `$name` として、ワークスペーストークンはスペース行で使えます。TTL は、その呼び出しで更新した各トークンキーに個別に適用されます。
+
+`--source` と `--applies-to-source` は 80 文字以下で、ASCII の英字、数字、コロン、ドット、アンダースコア、ハイフンのみを含められます。`--ttl-ms` はメタデータを自動失効させ、`1` から `86400000` ミリ秒の間でなければなりません。置き換え・クリア・ペインまたはワークスペースのクローズまで残るべきメタデータでは省略してください。`--seq` により、Herdr は同じ `--source` からの古い報告を無視できます。古い報告は API には受理されますが、ペイン状態には無視されます。ペインまたはワークスペースが存続する間、シーケンス付きトークン報告を送れる異なるソースは最大 32 個で、クリアや失効でもその枠は解放されません。
 
 ## エージェント
 

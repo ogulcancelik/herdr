@@ -1,5 +1,27 @@
 use serde::{Deserialize, Serialize};
 
+pub(super) fn metadata_token_patch_schema(
+    _generator: &mut schemars::SchemaGenerator,
+) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "maxProperties": 16,
+        "propertyNames": { "pattern": "^[A-Za-z0-9_-]{1,32}$" },
+        "additionalProperties": { "type": ["string", "null"] }
+    })
+}
+
+pub(super) fn metadata_token_values_schema(
+    _generator: &mut schemars::SchemaGenerator,
+) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "maxProperties": 32,
+        "propertyNames": { "pattern": "^[A-Za-z0-9_-]{1,32}$" },
+        "additionalProperties": { "type": "string" }
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct EmptyParams {}
 

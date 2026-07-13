@@ -18,6 +18,7 @@ mod runtime_mutations;
 mod session;
 pub mod state;
 mod terminal_targets;
+mod terminal_titles;
 mod theme_sync;
 mod worktrees;
 
@@ -598,6 +599,8 @@ impl App {
             sidebar_collapsed_mode: config.ui.sidebar_collapsed_mode,
             sidebar_section_split,
             agent_panel_sort,
+            sidebar_agents: config.ui.sidebar.agents.clone(),
+            sidebar_spaces: config.ui.sidebar.spaces.clone(),
             next_agent_state_change_seq: 0,
             mouse_capture: config.ui.mouse_capture,
             copy_on_select: config.ui.copy_on_select,
@@ -879,10 +882,17 @@ impl App {
             if self.render_dirty.load(Ordering::Acquire) {
                 needs_render = true;
             }
+            let terminal_title_changed = self.sync_terminal_titles();
+            if terminal_title_changed && self.terminal_title_sidebar_configured() {
+                needs_render = true;
+            }
 
             // Drain a bounded internal-event batch for responsiveness. API handlers
             // perform an exhaustive drain before reading pane/runtime state.
             if self.drain_internal_events() {
+                needs_render = true;
+            }
+            if self.expire_due_metadata(Instant::now()) {
                 needs_render = true;
             }
             if self.drain_api_requests() {
@@ -1390,6 +1400,8 @@ impl App {
                 self.state.hide_tab_bar_when_single_tab = config.ui.hide_tab_bar_when_single_tab;
                 self.state.agent_panel_sort =
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);
+                self.state.sidebar_agents = config.ui.sidebar.agents.clone();
+                self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
                 self.state.agent_panel_scroll = 0;
                 self.state.accent = crate::config::parse_color(&config.ui.accent);
                 if !self.state.local_sound_playback && self.state.sound != config.ui.sound {
@@ -2686,6 +2698,59 @@ mod tests {
     }
 
     #[test]
+    fn reload_config_updates_sidebar_token_rows() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-sidebar-tokens");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+        let mut app = test_app();
+
+        std::fs::write(
+            &path,
+            "[ui.sidebar.agents]\nrows = [[\"state_icon\", \"$summary\"]]\n\n[ui.sidebar.agents.rows_by_agent]\nclaude = [[\"terminal_title_stripped\"]]\n\n[ui.sidebar.spaces]\nrows = [[\"workspace\", \"$jj_status\"]]\n",
+        )
+        .unwrap();
+        app.state.agent_panel_scroll = 5;
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.state.agent_panel_scroll, 0);
+        assert_eq!(
+            app.state.sidebar_agents.rows,
+            vec![vec![
+                crate::config::AgentSidebarToken::StateIcon,
+                crate::config::AgentSidebarToken::Custom("summary".into()),
+            ]]
+        );
+        assert_eq!(
+            app.state.sidebar_agents.rows_by_agent["claude"],
+            vec![vec![
+                crate::config::AgentSidebarToken::TerminalTitleStripped,
+            ]]
+        );
+        assert_eq!(
+            app.state.sidebar_spaces.rows,
+            vec![vec![
+                crate::config::SpaceSidebarToken::Workspace,
+                crate::config::SpaceSidebarToken::Custom("jj_status".into()),
+            ]]
+        );
+
+        let previous_agents = app.state.sidebar_agents.clone();
+        std::fs::write(
+            &path,
+            "[ui.sidebar.agents]\nrows = [[\"agent\"]]\n\n[ui.sidebar.agents.rows_by_agent]\nclaude-code = [[\"terminal_title\"]]\n",
+        )
+        .unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert_eq!(app.state.sidebar_agents, previous_agents);
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn reload_config_updates_sidebar_collapsed_mode() {
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("reload-config-sidebar-collapsed-mode");
@@ -3083,7 +3148,7 @@ mod tests {
             .config_diagnostic
             .as_deref()
             .is_some_and(|message| {
-                message.contains("config.toml:1:6") && message.contains("herdr config check")
+                message == "config.toml invalid; keeping current config; herdr config check"
             }));
         assert!(app.state.toast.is_none());
 

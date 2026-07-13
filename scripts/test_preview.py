@@ -141,6 +141,9 @@ class PreviewNotesTests(unittest.TestCase):
 title: Install Herdr
 ---
 
+import ConfigReference from '../../components/ConfigReference.astro';
+import LocaleWidget from '../../../components/LocaleWidget.astro';
+
 [Install](/docs/install/)
 file: ../../../public/assets/logo.svg
 """
@@ -151,6 +154,8 @@ file: ../../../public/assets/logo.svg
         )
         self.assertIn("[Install](/docs/preview/install/)", output)
         self.assertIn("file: ../../../../public/assets/logo.svg", output)
+        self.assertIn("from '../../../components/ConfigReference.astro'", output)
+        self.assertIn("from '../../../../components/LocaleWidget.astro'", output)
         self.assertIn("Preview docs describe unreleased preview builds", output)
 
 

@@ -91,7 +91,10 @@ report() {
     --source nav-seed \
     --agent "$agent" \
     --state "$state" \
-    --custom-status "$status" \
+    --seq "$seq" >/dev/null
+  run pane report-metadata "$pane" \
+    --source nav-seed-display \
+    --token "summary=$status" \
     --seq "$seq" >/dev/null
 }
 

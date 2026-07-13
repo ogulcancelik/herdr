@@ -3,7 +3,7 @@
 # Run tests
 test:
     cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
-    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_docs_translation_parity scripts.test_preview scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
+    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_preview scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
     just integration-assets-test
     just plugin-marketplace-test
 
@@ -29,7 +29,7 @@ windows-lint:
 
 # Check formatting + run unit tests + Windows target lint + maintenance script tests
 check: ci windows-lint
-    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_docs_translation_parity scripts.test_preview scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
+    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_preview scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
     @echo "docs reminder: if this changes user-facing behavior, make sure the relevant release docs are updated or called out before release."
 
 # Install repo-local git hooks
@@ -62,6 +62,11 @@ build-libghostty-vt:
 # Check that release docs and changelog have been finalized from docs/next before release
 release-docs-check:
     python3 scripts/agent_detection_manifest_check.py --require-website
+    python3 scripts/config_reference_check.py
+    @if ! diff -u website/src/data/config-reference.json docs/next/website/src/data/config-reference.json; then \
+        echo "error: stable config reference differs from docs/next; finalize it before releasing"; \
+        exit 1; \
+    fi
     @for file in README.md CHANGELOG.md; do \
         if ! diff -u "$file" "docs/next/$file"; then \
             echo "error: $file differs from docs/next/$file; finalize release docs before releasing"; \
@@ -75,8 +80,9 @@ release-docs-check:
         fi; \
     done
     @test -d docs/next/website/src/content/docs
-    @for file in website/src/content/docs/*.mdx; do \
-        staged="docs/next/website/src/content/docs/$(basename "$file")"; \
+    @for file in $(find website/src/content/docs -path '*/preview' -prune -o -type f -name '*.mdx' -print); do \
+        relative="${file#website/src/content/docs/}"; \
+        staged="docs/next/website/src/content/docs/$relative"; \
         if [ ! -f "$staged" ]; then \
             echo "error: $staged is missing; docs/next/website/src/content/docs must mirror website/src/content/docs"; \
             exit 1; \
@@ -86,8 +92,9 @@ release-docs-check:
             exit 1; \
         fi; \
     done
-    @for file in docs/next/website/src/content/docs/*.mdx; do \
-        released="website/src/content/docs/$(basename "$file")"; \
+    @for file in $(find docs/next/website/src/content/docs -type f -name '*.mdx' -print); do \
+        relative="${file#docs/next/website/src/content/docs/}"; \
+        released="website/src/content/docs/$relative"; \
         if [ ! -f "$released" ]; then \
             echo "error: $file has no matching released website doc"; \
             exit 1; \

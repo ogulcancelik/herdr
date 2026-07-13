@@ -258,19 +258,16 @@ Herdr 用 `mastracode --thread <id>` 恢复保存的 MastraCode 线程。
 
 ## 自定义状态标签
 
-集成可以上报一个简短的视觉标签,而不改变语义状态。
-
-例如,一个智能体可以在语义上保持 `working`,同时在 UI 中显示 `indexing`。
+集成只把生命周期状态作为语义状态上报。例如,上报智能体为 `working` 时,不在生命周期报告中添加展示字段。
 
 ```bash
 herdr pane report-agent w1:p1 \
   --source custom:docs \
   --agent docs-bot \
-  --state working \
-  --custom-status indexing
+  --state working
 ```
 
-与 Herdr 管理的集成并行运行的用户钩子,应该使用元数据而不是 `report-agent`。元数据只改变展示,不会夺走集成对 `idle`、`working`、`blocked` 或会话恢复的权威。`--agent` 是守卫,使上报只在该权威智能体处于活动状态时生效。`--applies-to-source` 是守卫,使上报只在该生命周期权威来源处于活动状态时生效。`--display-agent` 修改显示名称。
+与 Herdr 管理的集成并行运行的用户钩子,应该使用元数据而不是 `report-agent`。元数据只改变展示,不会夺走集成对 `idle`、`working`、`blocked` 或会话恢复的权威。`--agent` 和 `--applies-to-source` 只守卫展示字段 (`--title`、`--display-agent` 和 `--state-label`)。令牌补丁始终生效;上报方负责清除或刷新 TTL。`--display-agent` 修改显示名称。
 
 ```bash
 herdr pane report-metadata "$HERDR_PANE_ID" \
@@ -278,12 +275,12 @@ herdr pane report-metadata "$HERDR_PANE_ID" \
   --agent claude \
   --title "Refactor auth middleware" \
   --display-agent "Claude: auth" \
-  --custom-status "refactor auth" \
+  --token summary="refactor auth" \
   --state-label working="refactoring auth" \
   --ttl-ms 3600000
 ```
 
-自定义状态和状态标签只影响视觉。等待、通知和工作区汇总仍使用语义状态。
+令牌和状态标签只影响视觉。等待、通知和工作区汇总仍使用语义状态。
 
 ## 调试集成状态
 

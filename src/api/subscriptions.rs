@@ -66,7 +66,6 @@ pub(super) struct ActiveScrollChangedSubscription {
 struct PanePresentationSnapshot {
     title: Option<String>,
     display_agent: Option<String>,
-    custom_status: Option<String>,
     state_labels: std::collections::HashMap<String, String>,
 }
 
@@ -75,7 +74,6 @@ impl PanePresentationSnapshot {
         Self {
             title: pane.title.clone(),
             display_agent: pane.display_agent.clone(),
-            custom_status: pane.custom_status.clone(),
             state_labels: pane.state_labels.clone(),
         }
     }
@@ -83,13 +81,11 @@ impl PanePresentationSnapshot {
     fn from_event(
         title: &Option<String>,
         display_agent: &Option<String>,
-        custom_status: &Option<String>,
         state_labels: &std::collections::HashMap<String, String>,
     ) -> Self {
         Self {
             title: title.clone(),
             display_agent: display_agent.clone(),
-            custom_status: custom_status.clone(),
             state_labels: state_labels.clone(),
         }
     }
@@ -122,6 +118,10 @@ impl ActiveSubscription {
             })),
             Subscription::WorkspaceUpdated {} => Ok(Self::Event(ActiveEventSubscription {
                 event_kind: crate::api::schema::EventKind::WorkspaceUpdated,
+                last_sequence: 0,
+            })),
+            Subscription::WorkspaceMetadataUpdated {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::WorkspaceMetadataUpdated,
                 last_sequence: 0,
             })),
             Subscription::WorkspaceRenamed {} => Ok(Self::Event(ActiveEventSubscription {
@@ -178,6 +178,10 @@ impl ActiveSubscription {
             })),
             Subscription::PaneClosed {} => Ok(Self::Event(ActiveEventSubscription {
                 event_kind: crate::api::schema::EventKind::PaneClosed,
+                last_sequence: 0,
+            })),
+            Subscription::PaneUpdated {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::PaneUpdated,
                 last_sequence: 0,
             })),
             Subscription::PaneFocused {} => Ok(Self::Event(ActiveEventSubscription {
@@ -261,7 +265,6 @@ impl ActiveSubscription {
                         agent: probe.agent,
                         title: probe.title,
                         display_agent: probe.display_agent,
-                        custom_status: probe.custom_status,
                         state_labels: probe.state_labels,
                     });
 
@@ -373,7 +376,6 @@ impl ActiveAgentStatusChangedSubscription {
                 agent,
                 title,
                 display_agent,
-                custom_status,
                 state_labels,
             } = event.data
             else {
@@ -387,12 +389,8 @@ impl ActiveAgentStatusChangedSubscription {
             }
             saw_status_event = true;
 
-            let current_presentation = PanePresentationSnapshot::from_event(
-                &title,
-                &display_agent,
-                &custom_status,
-                &state_labels,
-            );
+            let current_presentation =
+                PanePresentationSnapshot::from_event(&title, &display_agent, &state_labels);
             self.last_status = Some(agent_status);
             self.last_presentation = Some(current_presentation);
             if self
@@ -412,7 +410,6 @@ impl ActiveAgentStatusChangedSubscription {
                     agent,
                     title,
                     display_agent,
-                    custom_status,
                     state_labels,
                 }),
             });
@@ -479,7 +476,6 @@ impl ActiveAgentStatusChangedSubscription {
                 agent: pane.agent,
                 title: pane.title,
                 display_agent: pane.display_agent,
-                custom_status: pane.custom_status,
                 state_labels: pane.state_labels,
             }),
         })
@@ -613,7 +609,7 @@ mod tests {
     use super::*;
     use crate::api::schema::{AgentStatus, EventData, EventEnvelope, EventKind, PaneInfo};
 
-    fn status_event(custom_status: Option<&str>) -> EventEnvelope {
+    fn presentation_event(title: Option<&str>) -> EventEnvelope {
         EventEnvelope {
             event: EventKind::PaneAgentStatusChanged,
             data: EventData::PaneAgentStatusChanged {
@@ -621,9 +617,8 @@ mod tests {
                 workspace_id: "workspace_1".into(),
                 agent_status: AgentStatus::Working,
                 agent: Some("pi".into()),
-                title: None,
+                title: title.map(str::to_string),
                 display_agent: None,
-                custom_status: custom_status.map(str::to_string),
                 state_labels: HashMap::new(),
             },
         }
@@ -641,14 +636,38 @@ mod tests {
             label: None,
             agent: None,
             title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
             display_agent: None,
             agent_status: AgentStatus::Unknown,
-            custom_status: None,
             state_labels: HashMap::new(),
+            tokens: HashMap::new(),
             agent_session: None,
             scroll,
             revision: 0,
         }
+    }
+
+    #[test]
+    fn workspace_metadata_subscription_uses_dedicated_event_kind() {
+        let event_hub = EventHub::default();
+        let (api_tx, _api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let subscription = ActiveSubscription::new(
+            Subscription::WorkspaceMetadataUpdated {},
+            "test",
+            0,
+            &api_tx,
+            &event_hub,
+        )
+        .expect("workspace metadata subscription");
+
+        assert!(matches!(
+            subscription,
+            ActiveSubscription::Event(ActiveEventSubscription {
+                event_kind: EventKind::WorkspaceMetadataUpdated,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -695,7 +714,6 @@ mod tests {
             last_presentation: Some(PanePresentationSnapshot {
                 title: None,
                 display_agent: None,
-                custom_status: None,
                 state_labels: HashMap::new(),
             }),
             last_sequence: event_hub.current_sequence(),
@@ -703,8 +721,8 @@ mod tests {
             request_prefix: "test".into(),
         };
 
-        event_hub.push(status_event(Some("short lived")));
-        event_hub.push(status_event(None));
+        event_hub.push(presentation_event(Some("short lived")));
+        event_hub.push(presentation_event(None));
 
         let set_event = subscription
             .poll(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
@@ -712,7 +730,7 @@ mod tests {
         let SubscriptionEventData::PaneAgentStatusChanged(set_data) = set_event.data else {
             panic!("wrong event data");
         };
-        assert_eq!(set_data.custom_status.as_deref(), Some("short lived"));
+        assert_eq!(set_data.title.as_deref(), Some("short lived"));
 
         let expiry_event = subscription
             .poll(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
@@ -720,7 +738,7 @@ mod tests {
         let SubscriptionEventData::PaneAgentStatusChanged(expiry_data) = expiry_event.data else {
             panic!("wrong event data");
         };
-        assert_eq!(expiry_data.custom_status, None);
+        assert_eq!(expiry_data.title, None);
     }
 
     #[test]
@@ -733,7 +751,6 @@ mod tests {
             last_presentation: Some(PanePresentationSnapshot {
                 title: None,
                 display_agent: None,
-                custom_status: None,
                 state_labels: HashMap::new(),
             }),
             last_sequence: event_hub.current_sequence(),
@@ -744,14 +761,13 @@ mod tests {
                 agent: Some("pi".into()),
                 title: None,
                 display_agent: None,
-                custom_status: None,
                 state_labels: HashMap::new(),
             }),
             request_prefix: "test".into(),
         };
 
-        event_hub.push(status_event(Some("short lived")));
-        event_hub.push(status_event(None));
+        event_hub.push(presentation_event(Some("short lived")));
+        event_hub.push(presentation_event(None));
 
         let set_event = subscription
             .poll(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
@@ -759,7 +775,7 @@ mod tests {
         let SubscriptionEventData::PaneAgentStatusChanged(set_data) = set_event.data else {
             panic!("wrong event data");
         };
-        assert_eq!(set_data.custom_status.as_deref(), Some("short lived"));
+        assert_eq!(set_data.title.as_deref(), Some("short lived"));
 
         let expiry_event = subscription
             .poll(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
@@ -767,7 +783,7 @@ mod tests {
         let SubscriptionEventData::PaneAgentStatusChanged(expiry_data) = expiry_event.data else {
             panic!("wrong event data");
         };
-        assert_eq!(expiry_data.custom_status, None);
+        assert_eq!(expiry_data.title, None);
     }
 
     #[test]
@@ -778,9 +794,8 @@ mod tests {
             status_filter: Some(AgentStatus::Working),
             last_status: Some(AgentStatus::Working),
             last_presentation: Some(PanePresentationSnapshot {
-                title: None,
+                title: Some("short lived".into()),
                 display_agent: None,
-                custom_status: Some("short lived".into()),
                 state_labels: HashMap::new(),
             }),
             last_sequence: event_hub.current_sequence(),
@@ -789,15 +804,14 @@ mod tests {
                 workspace_id: "workspace_1".into(),
                 agent_status: AgentStatus::Working,
                 agent: Some("pi".into()),
-                title: None,
+                title: Some("short lived".into()),
                 display_agent: None,
-                custom_status: Some("short lived".into()),
                 state_labels: HashMap::new(),
             }),
             request_prefix: "test".into(),
         };
 
-        event_hub.push(status_event(Some("short lived")));
+        event_hub.push(presentation_event(Some("short lived")));
 
         let event = subscription
             .poll(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
@@ -805,7 +819,7 @@ mod tests {
         let SubscriptionEventData::PaneAgentStatusChanged(data) = event.data else {
             panic!("wrong event data");
         };
-        assert_eq!(data.custom_status.as_deref(), Some("short lived"));
+        assert_eq!(data.title.as_deref(), Some("short lived"));
         assert!(subscription.initial_event.is_none());
     }
 }

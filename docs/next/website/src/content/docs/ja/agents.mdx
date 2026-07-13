@@ -114,17 +114,22 @@ herdr agent rename reviewer --clear
 
 ## カスタムステータスラベル
 
-インテグレーションは、意味的な状態を変えずに表示用ステータスラベルを報告できます。
+インテグレーションは、ライフサイクル状態を意味的な状態としてのみ報告します。表示のカスタマイズは、ペインメタデータのトークンとして別に追加します。
 
 ```bash
 herdr pane report-agent w1:p1 \
   --source custom:indexer \
   --agent docs-bot \
-  --state working \
-  --custom-status indexing
+  --state working
+
+herdr pane report-metadata w1:p1 \
+  --source custom:indexer-display \
+  --token summary=indexing
 ```
 
-`state` は wait、通知、ロールアップを制御します。`custom-status` は表示テキストだけです。
+`state` は wait、通知、ロールアップを制御します。`summary` トークンは表示専用で、エージェントサイドバー行では `$summary` として使えます。
+
+エージェントサイドバー行では、`terminal_title` または `terminal_title_stripped` も任意で使えます。どちらもデフォルト行には含まれません。前者は安全性のために正規化された最新の OSC 0/2 ターミナルタイトルを表示し、後者は先頭にある認識済みのアクティビティまたはスピナーのグリフ 1 つと、それに続く空白を除去します。これらの値は Herdr サーバーが所有し、コールドリスタートをまたいで保持されません。また、メタデータのタイトルや意味的なエージェント状態から独立しています。そのため、除去後のテキストが同じなら、スピナーのアニメーションで生のタイトルが変わってもペイン更新は発行されません。
 
 ## CLI からエージェントを起動する
 

@@ -23,11 +23,13 @@ use windows_sys::{
                     TH32CS_SNAPPROCESS,
                 },
             },
+            JobObjects::IsProcessInJob,
             Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
             Ole::CF_UNICODETEXT,
             Threading::{
-                GetExitCodeProcess, OpenProcess, TerminateProcess, PROCESS_BASIC_INFORMATION,
-                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+                GetCurrentProcess, GetExitCodeProcess, OpenProcess, TerminateProcess,
+                DETACHED_PROCESS, PROCESS_BASIC_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+                PROCESS_VM_READ,
             },
         },
         UI::Shell::{CommandLineToArgvW, ShellExecuteW},
@@ -127,10 +129,19 @@ fn scrollback_editor_argv_with_env(
     Ok(argv)
 }
 
-pub fn detach_server_daemon_command(_command: &mut std::process::Command) {}
+pub fn detach_server_daemon_command(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+
+    command.creation_flags(DETACHED_PROCESS);
+}
 
 pub fn current_process_is_detached_server_daemon() -> bool {
-    false
+    if !unsafe { GetConsoleWindow() }.is_null() {
+        return false;
+    }
+
+    let mut in_job = 0;
+    unsafe { IsProcessInJob(GetCurrentProcess(), null_mut(), &mut in_job) != 0 && in_job == 0 }
 }
 
 pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
@@ -648,6 +659,47 @@ mod tests {
         thread,
         time::{Duration, Instant},
     };
+
+    use windows_sys::Win32::System::Console::{AllocConsole, FreeConsole, GetConsoleWindow};
+
+    const DETACHED_CONSOLE_TEST_CHILD_ENV: &str = "HERDR_TEST_DETACHED_CONSOLE_CHILD";
+
+    #[test]
+    fn server_daemon_command_does_not_inherit_console() {
+        if std::env::var_os(DETACHED_CONSOLE_TEST_CHILD_ENV).is_some() {
+            assert!(unsafe { GetConsoleWindow() }.is_null());
+            return;
+        }
+
+        let allocated_console = if unsafe { GetConsoleWindow() }.is_null() {
+            assert_ne!(unsafe { AllocConsole() }, 0, "allocate test console");
+            true
+        } else {
+            false
+        };
+
+        let test_exe = std::env::current_exe().expect("resolve test executable");
+        let mut child = Command::new(test_exe);
+        child
+            .arg("server_daemon_command_does_not_inherit_console")
+            .env(DETACHED_CONSOLE_TEST_CHILD_ENV, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        super::detach_server_daemon_command(&mut child);
+
+        let status = child.status().expect("spawn detached test child");
+        if allocated_console {
+            unsafe {
+                FreeConsole();
+            }
+        }
+
+        assert!(
+            status.success(),
+            "detached child inherited the test console"
+        );
+    }
 
     fn argv_strings(argv: &[std::ffi::OsString]) -> Vec<String> {
         argv.into_iter()

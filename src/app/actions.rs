@@ -537,15 +537,13 @@ impl AppState {
                     .and_then(|terminal| terminal.agent_name.as_deref())
                     .or_else(|| terminal.and_then(|terminal| terminal.effective_agent_label()))
             });
-            let custom_status = terminal.and_then(|terminal| terminal.effective_custom_status());
             let state = terminal
                 .map(|terminal| terminal.state)
                 .unwrap_or(AgentState::Unknown);
             let status_label = terminal
                 .map(|terminal| terminal.effective_presentation().state_labels)
                 .and_then(|labels| labels.get(state_label_text(state, pane.seen)).cloned());
-            let status = custom_status
-                .or(status_label)
+            let status = status_label
                 .or_else(|| agent_label.map(|_| state_label_text(state, pane.seen).to_string()));
             let meta = match (agent_label, status.as_deref()) {
                 (Some(agent_label), Some(status)) => format!("{agent_label} · {status}"),
@@ -893,6 +891,16 @@ impl AppState {
         self.terminals
             .values()
             .filter_map(|terminal| terminal.next_agent_metadata_expiry())
+            .chain(
+                self.terminals
+                    .values()
+                    .filter_map(|terminal| terminal.metadata_tokens.next_expiry()),
+            )
+            .chain(
+                self.workspaces
+                    .iter()
+                    .filter_map(|workspace| workspace.metadata_tokens.next_expiry()),
+            )
             .min()
     }
 
@@ -944,6 +952,48 @@ impl AppState {
                 Some(update)
             })
             .collect()
+    }
+
+    pub(crate) fn expire_metadata_tokens(
+        &mut self,
+        now: std::time::Instant,
+    ) -> (Vec<(usize, PaneId)>, Vec<usize>) {
+        let pane_terminals = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .flat_map(|(ws_idx, workspace)| {
+                workspace.tabs.iter().flat_map(move |tab| {
+                    tab.layout
+                        .pane_ids()
+                        .into_iter()
+                        .filter_map(move |pane_id| {
+                            workspace
+                                .pane_state(pane_id)
+                                .map(|pane| (ws_idx, pane_id, pane.attached_terminal_id.clone()))
+                        })
+                })
+            })
+            .collect::<Vec<_>>();
+        let changed_panes = pane_terminals
+            .into_iter()
+            .filter_map(|(ws_idx, pane_id, terminal_id)| {
+                let terminal = self.terminals.get_mut(&terminal_id)?;
+                terminal.metadata_tokens.expire_at(now).then(|| {
+                    terminal.revision = terminal.revision.saturating_add(1);
+                    (ws_idx, pane_id)
+                })
+            })
+            .collect();
+        let changed_workspaces = self
+            .workspaces
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(ws_idx, workspace)| {
+                workspace.metadata_tokens.expire_at(now).then_some(ws_idx)
+            })
+            .collect();
+        (changed_panes, changed_workspaces)
     }
 
     pub(crate) fn pane_is_in_active_tab(&self, ws_idx: usize, pane_id: PaneId) -> bool {
@@ -1341,21 +1391,12 @@ impl AppState {
             self.view.sidebar_rect,
             self.sidebar_section_split,
         );
-        let metrics = crate::ui::agent_panel_scroll_metrics(self, detail_area);
-        let visible = metrics.viewport_rows;
-        if visible == 0 {
-            return;
-        }
-
-        if idx < self.agent_panel_scroll {
-            self.agent_panel_scroll = idx;
-        } else if idx >= self.agent_panel_scroll.saturating_add(visible) {
-            self.agent_panel_scroll = idx.saturating_add(1).saturating_sub(visible);
-        }
-
-        let max_scroll =
-            crate::ui::agent_panel_scroll_metrics(self, detail_area).max_offset_from_bottom;
-        self.agent_panel_scroll = self.agent_panel_scroll.min(max_scroll);
+        self.agent_panel_scroll = crate::ui::agent_panel_scroll_for_target(
+            self,
+            detail_area,
+            self.agent_panel_scroll,
+            idx,
+        );
     }
 
     pub(crate) fn terminal_ids_for_workspace(
@@ -2559,7 +2600,6 @@ impl AppState {
                 agent_label,
                 state,
                 message,
-                custom_status,
                 seq,
                 session_ref,
             } => {
@@ -2576,7 +2616,6 @@ impl AppState {
                             agent_label,
                             state,
                             message,
-                            custom_status,
                             session_ref,
                             seq,
                         )
@@ -2611,11 +2650,9 @@ impl AppState {
                 applies_to_source,
                 title,
                 display_agent,
-                custom_status,
                 state_labels,
                 clear_title,
                 clear_display_agent,
-                clear_custom_status,
                 clear_state_labels,
                 seq,
                 ttl,
@@ -2627,11 +2664,9 @@ impl AppState {
                         applies_to_source,
                         title,
                         display_agent,
-                        custom_status,
                         state_labels,
                         clear_title,
                         clear_display_agent,
-                        clear_custom_status,
                         clear_state_labels,
                         ttl,
                         seq,
@@ -4578,7 +4613,6 @@ mod tests {
             agent_label: "hermes".into(),
             state: AgentState::Blocked,
             message: None,
-            custom_status: None,
             seq: None,
             session_ref: None,
         });
@@ -4617,7 +4651,6 @@ mod tests {
             agent_label: "codex".into(),
             state: AgentState::Working,
             message: None,
-            custom_status: None,
             seq: Some(1),
             session_ref: None,
         });
@@ -4666,7 +4699,6 @@ mod tests {
             agent_label: "claude".into(),
             state: AgentState::Blocked,
             message: None,
-            custom_status: None,
             seq: Some(1),
             session_ref: crate::agent_resume::AgentSessionRef::id("claude-session"),
         });
@@ -4749,7 +4781,6 @@ mod tests {
             agent_label: "devin".into(),
             state: AgentState::Working,
             message: None,
-            custom_status: None,
             seq: Some(1),
             session_ref: crate::agent_resume::AgentSessionRef::id("devin-session"),
         });
@@ -4774,7 +4805,6 @@ mod tests {
             agent_label: "pi".into(),
             state: AgentState::Working,
             message: None,
-            custom_status: None,
             seq: Some(20),
             session_ref: crate::agent_resume::AgentSessionRef::path(first_session),
         });
@@ -4787,7 +4817,6 @@ mod tests {
             agent_label: "pi".into(),
             state: AgentState::Working,
             message: None,
-            custom_status: None,
             seq: Some(21),
             session_ref: crate::agent_resume::AgentSessionRef::path(second_session),
         });

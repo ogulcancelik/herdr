@@ -307,6 +307,10 @@ impl TerminalRuntime {
         self.0.detection_text()
     }
 
+    pub fn terminal_title(&self) -> Option<String> {
+        self.0.terminal_title()
+    }
+
     pub fn agent_osc_title(&self) -> String {
         self.0.agent_osc_title()
     }

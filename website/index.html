@@ -57,7 +57,7 @@
                 document.documentElement.setAttribute("data-palette", saved || system);
             })();
         </script>
-        <link rel="stylesheet" href="/css/style.css?v=42" />
+        <link rel="stylesheet" href="/css/style.css?v=45" />
     </head>
     <body>
         <header class="site-header">
@@ -197,6 +197,7 @@
                         aria-label="Interactive Herdr session mock with workspaces, tabs, agent states, and terminal panes running Claude Code and Codex"
                     >
                         <aside class="mock-sidebar">
+                            <div class="mock-sidebar-half">
                             <div class="mock-sidebar-title">spaces</div>
                             <div class="mock-space active" data-ws="herdr">
                                 <span class="mock-dot dot-working"></span>
@@ -210,12 +211,14 @@
                                 <span class="mock-dot dot-done"></span>
                                 <div><strong>qmp</strong><small>autoresearch/qmp-ra…</small></div>
                             </div>
-                            <div class="mock-sidebar-spacer"></div>
-                            <div class="mock-agent-title"><span>agents</span><span>all</span></div>
-                            <div class="mock-agent working" data-agent="herdr" data-kind="claude" data-ws-link="herdr" data-tab-link="main"><span class="braille-spinner"></span><div><strong>herdr</strong><small>working · claude</small></div></div>
+                            </div>
+                            <div class="mock-sidebar-half mock-sidebar-agents">
+                            <div class="mock-agent-title"><span>agents</span><span>grouped</span></div>
+                            <div class="mock-agent working active" data-agent="herdr" data-kind="claude" data-ws-link="herdr" data-tab-link="main"><span class="braille-spinner"></span><div><strong>herdr</strong><small>working · claude</small></div></div>
                             <div class="mock-agent" data-agent="explore" data-kind="opencode" data-ws-link="herdr" data-tab-link="opencode"><span>✓</span><div><strong>explore</strong><small>idle · opencode</small></div></div>
                             <div class="mock-agent blocked" data-agent="llm-proxy" data-kind="claude" data-ws-link="llm-proxy" data-tab-link="main"><span>◉</span><div><strong>llm-proxy</strong><small>blocked · claude</small></div></div>
                             <div class="mock-agent done" data-agent="qmp" data-kind="codex" data-ws-link="qmp" data-tab-link="main"><span>●</span><div><strong>qmp</strong><small>done · codex</small></div></div>
+                            </div>
                         </aside>
                         <section class="mock-main">
                             <div class="mock-view active" data-view="herdr">
@@ -223,7 +226,7 @@
                                     <span data-tab="opencode">opencode</span><span class="active" data-tab="main">herdr</span><span>+</span>
                                 </div>
                                 <div class="mock-panes active" data-tab="main">
-                                    <div class="mock-pane focused tui">
+                                    <div class="mock-pane focused tui" data-title="claude">
                                         <div class="cc-head"><span class="cc-mark">✻</span> <b>Claude Code</b> <span class="dim">v2.1.168</span></div>
                                         <div class="dim">&nbsp;&nbsp;~/Projects/herdr · master</div>
                                         <br />
@@ -246,7 +249,7 @@
                                             <div class="dim">&gt;&gt; bypass permissions on (shift+tab to cycle)</div>
                                         </div>
                                     </div>
-                                    <div class="mock-pane">
+                                    <div class="mock-pane" data-title="bun">
                                         <div class="mock-prompt"><span>~/Projects/herdr</span> <em>master</em></div>
                                         <div><b>❯</b> <span class="cmd">bun</span> run dev</div>
                                         <div class="dim">$ node scripts/prepare-docs.mjs && astro dev</div>
@@ -1172,6 +1175,20 @@ $ herdr</code></pre>
                 var mock = document.getElementById("herd-mock");
                 if (!mock) return;
 
+                function syncAgents() {
+                    var view = mock.querySelector(".mock-view.active");
+                    var tab = view && view.querySelector(".mock-tabs span.active");
+                    var ws = view && view.getAttribute("data-view");
+                    var tabId = tab && tab.getAttribute("data-tab");
+                    mock.querySelectorAll(".mock-agent").forEach(function (a) {
+                        a.classList.toggle(
+                            "active",
+                            a.getAttribute("data-ws-link") === ws &&
+                                a.getAttribute("data-tab-link") === tabId
+                        );
+                    });
+                }
+
                 function selectTab(tab) {
                     var target = tab.getAttribute("data-tab");
                     if (!target) return;
@@ -1183,6 +1200,7 @@ $ herdr</code></pre>
                     view.querySelectorAll(".mock-panes").forEach(function (panes) {
                         panes.classList.toggle("active", panes.getAttribute("data-tab") === target);
                     });
+                    syncAgents();
                 }
 
                 function activateWorkspace(id, tabId) {
@@ -1197,6 +1215,7 @@ $ herdr</code></pre>
                         var tab = view && view.querySelector('.mock-tabs span[data-tab="' + tabId + '"]');
                         if (tab) selectTab(tab);
                     }
+                    syncAgents();
                 }
 
                 mock.querySelectorAll(".mock-space").forEach(function (ws) {

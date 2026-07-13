@@ -83,11 +83,118 @@ pub(super) fn normalize_reported_agent_label(agent: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-pub(super) fn normalize_custom_status(status: Option<String>) -> Option<String> {
-    let trimmed = status?.trim().to_string();
-    let mut normalized = String::new();
-    for ch in trimmed.chars().filter(|ch| !ch.is_control()).take(32) {
-        normalized.push(ch);
+pub(super) const METADATA_TTL_MAX_MS: u64 = 86_400_000;
+pub(super) const METADATA_SOURCE_MAX_CHARS: usize = 80;
+const METADATA_TTL_MIN_MS: u64 = 1;
+const MAX_METADATA_TOKEN_KEYS_PER_REQUEST: usize = 16;
+pub(super) const MAX_METADATA_TOKEN_KEYS_PER_RESOURCE: usize = 32;
+const MAX_METADATA_TOKEN_KEY_LEN: usize = 32;
+const MAX_METADATA_TOKEN_VALUE_LEN: usize = 80;
+
+pub(super) fn normalize_metadata_source(value: String) -> Result<String, &'static str> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("metadata source must not be empty");
     }
-    (!normalized.trim().is_empty()).then(|| normalized.trim().to_string())
+    if value.chars().count() > METADATA_SOURCE_MAX_CHARS {
+        return Err("metadata source must be 80 characters or fewer");
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ':' | '.' | '_' | '-'))
+    {
+        return Err(
+            "metadata source may contain only ASCII letters, digits, colon, dot, underscore, and hyphen",
+        );
+    }
+    Ok(value.to_string())
+}
+
+pub(super) fn normalize_metadata_ttl(
+    ttl_ms: Option<u64>,
+) -> Result<Option<std::time::Duration>, &'static str> {
+    let Some(ttl_ms) = ttl_ms else {
+        return Ok(None);
+    };
+    if ttl_ms < METADATA_TTL_MIN_MS {
+        return Err("metadata ttl_ms must be at least 1");
+    }
+    if ttl_ms > METADATA_TTL_MAX_MS {
+        return Err("metadata ttl_ms must be 86400000 or less");
+    }
+    Ok(Some(std::time::Duration::from_millis(ttl_ms)))
+}
+
+pub(super) fn normalize_metadata_tokens(
+    tokens: std::collections::HashMap<String, Option<String>>,
+) -> Result<std::collections::HashMap<String, Option<String>>, String> {
+    if tokens.is_empty() {
+        return Err("missing token to set or clear".into());
+    }
+    if tokens.len() > MAX_METADATA_TOKEN_KEYS_PER_REQUEST {
+        return Err(format!(
+            "a metadata report may update at most {MAX_METADATA_TOKEN_KEYS_PER_REQUEST} tokens"
+        ));
+    }
+
+    tokens
+        .into_iter()
+        .map(|(key, value)| {
+            if key.is_empty()
+                || key.len() > MAX_METADATA_TOKEN_KEY_LEN
+                || !key
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+            {
+                return Err(format!("invalid metadata token key: {key}"));
+            }
+            let value = value.and_then(|value| {
+                let normalized = value
+                    .trim()
+                    .chars()
+                    .filter(|ch| !ch.is_control())
+                    .take(MAX_METADATA_TOKEN_VALUE_LEN)
+                    .collect::<String>();
+                (!normalized.trim().is_empty()).then(|| normalized.trim().to_string())
+            });
+            Ok((key, value))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod metadata_token_tests {
+    use super::*;
+
+    #[test]
+    fn token_normalization_sanitizes_values_and_turns_empty_into_clear() {
+        let tokens = normalize_metadata_tokens(std::collections::HashMap::from([
+            ("summary".into(), Some("  review\nready  ".into())),
+            ("empty".into(), Some(" \n ".into())),
+            ("clear".into(), None),
+        ]))
+        .unwrap();
+
+        assert_eq!(tokens["summary"].as_deref(), Some("reviewready"));
+        assert_eq!(tokens["empty"], None);
+        assert_eq!(tokens["clear"], None);
+    }
+
+    #[test]
+    fn token_normalization_rejects_invalid_or_unbounded_keys() {
+        for key in [
+            "bad.name".to_string(),
+            "x".repeat(MAX_METADATA_TOKEN_KEY_LEN + 1),
+        ] {
+            assert!(normalize_metadata_tokens(std::collections::HashMap::from([(
+                key,
+                Some("value".into()),
+            )]))
+            .is_err());
+        }
+        let too_many = (0..=MAX_METADATA_TOKEN_KEYS_PER_REQUEST)
+            .map(|index| (format!("key{index}"), Some("value".into())))
+            .collect();
+        assert!(normalize_metadata_tokens(too_many).is_err());
+    }
 }

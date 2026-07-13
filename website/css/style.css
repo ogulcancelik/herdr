@@ -1278,14 +1278,15 @@ samp {
     border-radius: 50%;
 }
 
-.mock-sidebar-spacer {
-    flex: 1;
-    min-height: 4rem;
+/* Two equal halves, like the TUI's default sidebar_section_split of 0.5. */
+.mock-sidebar-half {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow: hidden;
 }
 
-.herdr-ui-mock .mock-sidebar-spacer {
-    flex: 1 1 0;
-    min-height: 0.5rem;
+.mock-sidebar-agents {
+    border-top: 1px solid var(--term-border);
 }
 
 .mock-sidebar-row,
@@ -1311,6 +1312,10 @@ samp {
     grid-template-columns: auto minmax(0, 1fr);
     gap: 0.4rem;
     padding: 0.38rem 0.7rem;
+}
+
+.mock-agent.active {
+    background: var(--term-active-bg);
 }
 
 .mock-agent > span {
@@ -1370,22 +1375,63 @@ samp {
 .mock-panes {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 0.45rem;
+    gap: 1ch;
     min-height: 0;
-    padding: 0.45rem;
+    padding: 0;
 }
 
 .mock-pane {
+    position: relative;
     min-width: 0;
     overflow: hidden;
-    border: 1px solid var(--term-border);
     background: var(--term-bg);
-    padding: 0.75rem;
+    padding: 1lh 1.4ch;
 }
 
-.mock-pane.focused {
-    border: 2px solid var(--term-tab-active-bg);
-    padding: calc(0.75rem - 1px);
+/* Border line runs through the middle of the edge cell, like a box-drawing glyph. */
+.mock-pane::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    translate: -50% -50%;
+    width: calc(100% - 1ch);
+    height: calc(100% - 1lh);
+    border: 1px solid var(--term-border);
+    pointer-events: none;
+}
+
+.mock-pane.focused::before {
+    border-color: var(--accent);
+}
+
+/* Pane title embedded in the top border, one cell in from the left. */
+.mock-pane[data-title]::after {
+    content: attr(data-title);
+    position: absolute;
+    top: 0.5lh;
+    left: 2ch;
+    translate: 0 -50%;
+    padding: 0 0.6ch;
+    background: var(--term-bg);
+    color: var(--term-muted);
+    line-height: 1.1;
+    pointer-events: none;
+}
+
+.mock-pane.focused[data-title]::after {
+    color: var(--accent);
+    font-weight: 700;
+}
+
+/* Single-pane tabs draw no pane chrome, matching the TUI's multi-pane gate. */
+.mock-panes.single .mock-pane::before,
+.mock-panes.single .mock-pane::after {
+    content: none;
+}
+
+.mock-panes.single .mock-pane {
+    padding: 0.5lh 1.4ch;
 }
 
 .mock-prompt {
@@ -2726,10 +2772,6 @@ td:last-child {
         padding: 0.24rem 0.45rem;
     }
 
-    .herdr-ui-mock .mock-sidebar-spacer {
-        flex: 0 0 0.35rem;
-    }
-
     .mock-tabs {
         height: 1.05rem;
     }
@@ -2742,15 +2784,7 @@ td:last-child {
     .mock-panes {
         grid-template-columns: 1fr;
         gap: 0;
-        padding: 0.35rem;
-    }
-
-    .mock-pane {
-        padding: 0.45rem;
-    }
-
-    .mock-pane.focused {
-        padding: calc(0.45rem - 1px);
+        padding: 0;
     }
 
     .mock-pane:nth-child(2) {
@@ -3420,10 +3454,6 @@ td:last-child {
 .herdr-ui-mock .mock-space small,
 .herdr-ui-mock .mock-agent small {
     margin-top: 0.18em;
-}
-
-.herdr-ui-mock .mock-sidebar-spacer {
-    min-height: 0.2rem;
 }
 
 /* attach: sidebar populates once on load; view switches fade without movement */

@@ -731,10 +731,6 @@ fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
     if let Some(agent_label) = entry.agent_label.as_deref() {
         parts.push(agent_label.to_string());
     }
-    if let Some(custom_status) = entry.custom_status.as_deref() {
-        parts.push(custom_status.to_string());
-    }
-
     format!("  {}", parts.join(" · "))
 }
 
@@ -1140,12 +1136,16 @@ mod tests {
             pane_id: PaneId::from_raw(1),
             primary_label: "herdr".into(),
             primary_tab_label: primary_tab_label.map(str::to_string),
+            pane_label: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
             agent_label: agent_label.map(str::to_string),
+            agent: agent_label.and_then(crate::detect::parse_agent_label),
             state: AgentState::Idle,
             seen: true,
             last_agent_state_change_seq: None,
-            custom_status: None,
             state_labels: std::collections::HashMap::new(),
+            tokens: std::collections::HashMap::new(),
         }
     }
 

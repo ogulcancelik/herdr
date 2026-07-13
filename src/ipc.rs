@@ -1,7 +1,5 @@
 use std::fs;
-use std::io;
-#[cfg(unix)]
-use std::io::Read;
+use std::io::{self, Read};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
@@ -11,6 +9,12 @@ use interprocess::local_socket::traits::Stream as _;
 
 pub(crate) type LocalListener = interprocess::local_socket::Listener;
 pub(crate) type LocalStream = interprocess::local_socket::Stream;
+
+pub(crate) enum LocalStreamRead {
+    Data,
+    Pending,
+    Closed,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SocketFileIdentity {
@@ -108,6 +112,48 @@ pub(crate) fn local_stream_peer_closed(stream: &mut LocalStream) -> io::Result<b
     probe_stream_closed(stream)
 }
 
+pub(crate) fn set_local_stream_polling(stream: &mut LocalStream, enabled: bool) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        stream.set_nonblocking(enabled)
+    }
+
+    #[cfg(windows)]
+    {
+        let _ = (stream, enabled);
+        Ok(())
+    }
+}
+
+pub(crate) fn poll_local_stream_read(
+    stream: &mut LocalStream,
+    buf: &mut [u8],
+) -> io::Result<LocalStreamRead> {
+    #[cfg(unix)]
+    {
+        match stream.read(buf) {
+            Ok(0) => Ok(LocalStreamRead::Closed),
+            Ok(_) => Ok(LocalStreamRead::Data),
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(LocalStreamRead::Pending),
+            Err(err) => Err(err),
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        match windows_named_pipe_available(stream)? {
+            None => Ok(LocalStreamRead::Closed),
+            Some(0) => Ok(LocalStreamRead::Pending),
+            Some(_) => match stream.read(buf) {
+                Ok(0) => Ok(LocalStreamRead::Closed),
+                Ok(_) => Ok(LocalStreamRead::Data),
+                Err(err) if is_connection_closed_error(&err) => Ok(LocalStreamRead::Closed),
+                Err(err) => Err(err),
+            },
+        }
+    }
+}
+
 #[cfg(unix)]
 fn probe_stream_closed(stream: &mut LocalStream) -> io::Result<bool> {
     stream.set_nonblocking(true)?;
@@ -132,26 +178,32 @@ fn probe_stream_closed(stream: &mut LocalStream) -> io::Result<bool> {
 
 #[cfg(windows)]
 fn probe_stream_closed(stream: &mut LocalStream) -> io::Result<bool> {
+    Ok(windows_named_pipe_available(stream)?.is_none())
+}
+
+#[cfg(windows)]
+fn windows_named_pipe_available(stream: &mut LocalStream) -> io::Result<Option<u32>> {
     use std::os::windows::io::{AsHandle, AsRawHandle};
 
     let LocalStream::NamedPipe(pipe) = stream;
+    let mut available = 0;
     let ok = unsafe {
         windows_sys::Win32::System::Pipes::PeekNamedPipe(
             pipe.as_handle().as_raw_handle(),
             std::ptr::null_mut(),
             0,
             std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            &mut available,
             std::ptr::null_mut(),
         )
     };
     if ok != 0 {
-        return Ok(false);
+        return Ok(Some(available));
     }
 
     let err = io::Error::last_os_error();
     if is_connection_closed_error(&err) || windows_named_pipe_closed_error(&err) {
-        return Ok(true);
+        return Ok(None);
     }
     Err(err)
 }

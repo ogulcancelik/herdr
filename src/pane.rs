@@ -1481,6 +1481,7 @@ impl PaneRuntime {
             },
             keyboard_protocol_ansi: self.terminal.kitty_keyboard_state_ansi(),
             input_state: self.input_state(),
+            terminal_title: self.terminal_title(),
             initial_history_ansi: None,
         }
     }
@@ -1668,6 +1669,7 @@ impl PaneRuntime {
             keyboard_protocol_flags,
             keyboard_protocol_ansi,
             input_state,
+            terminal_title,
             initial_history_ansi,
         } = state;
         let pane_id = PaneId::from_raw(pane_id);
@@ -1688,6 +1690,7 @@ impl PaneRuntime {
         }
         let pane_terminal = GhosttyPaneTerminal::new(terminal, response_tx.clone())?;
         pane_terminal.apply_host_terminal_theme(host_terminal_theme);
+        pane_terminal.seed_terminal_title(terminal_title);
         if let Some(input_state) = input_state {
             pane_terminal.seed_handoff_input_state(input_state);
         }
@@ -2450,6 +2453,10 @@ impl PaneRuntime {
         self.terminal.detection_text()
     }
 
+    pub fn terminal_title(&self) -> Option<String> {
+        self.terminal.terminal_title()
+    }
+
     pub fn agent_osc_title(&self) -> String {
         self.terminal.agent_osc_title()
     }
@@ -3121,16 +3128,20 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn handoff_runtime_state_captures_terminal_input_state() {
+    async fn handoff_runtime_state_captures_terminal_input_and_title_state() {
         let runtime = PaneRuntime::test_with_screen_bytes(
             80,
             24,
             b"\x1b[>5u\x1b[>4;2m\x1b[?1h\x1b[?2004h\x1b[?1004h\x1b[?1002h\x1b[?1006h",
         );
 
+        runtime.test_process_pty_bytes("\x1b]2;✳ 修复🙂标题\x1b\\".as_bytes());
+        runtime.terminal.clear_agent_osc_state();
+        assert_eq!(runtime.agent_osc_title(), "");
         let pane = runtime.handoff_runtime_state(12);
 
         assert_eq!(pane.keyboard_protocol_flags, 5);
+        assert_eq!(pane.terminal_title.as_deref(), Some("✳ 修复🙂标题"));
         assert_eq!(
             pane.input_state,
             Some(InputState {

@@ -95,7 +95,7 @@ herdr pane read w1:p2 --source recent --lines 50
 | サーバー | `ping`、`server.stop`、`server.reload_config`、`server.agent_manifests`、`server.reload_agent_manifests` |
 | 通知 | `notification.show` |
 | クライアント | `client.window_title.set`、`client.window_title.clear` |
-| ワークスペース | `workspace.create`、`workspace.list`、`workspace.get`、`workspace.focus`、`workspace.rename`、`workspace.close` |
+| ワークスペース | `workspace.create`、`workspace.list`、`workspace.get`、`workspace.focus`、`workspace.rename`、`workspace.report_metadata`、`workspace.close` |
 | Worktree | `worktree.list`、`worktree.create`、`worktree.open`、`worktree.remove` |
 | タブ | `tab.create`、`tab.list`、`tab.get`、`tab.focus`、`tab.rename`、`tab.close` |
 | ペイン | `pane.split`、`pane.swap`、`pane.move`、`pane.zoom`、`pane.layout`、`pane.process_info`、`pane.neighbor`、`pane.edges`、`pane.focus_direction`、`pane.resize`、`pane.list`、`pane.current`、`pane.get`、`pane.rename`、`pane.send_text`、`pane.send_keys`、`pane.send_input`、`pane.read`、`pane.report_agent`、`pane.report_agent_session`、`pane.report_metadata`、`pane.clear_agent_authority`、`pane.release_agent`、`pane.close`、`pane.wait_for_output` |
@@ -415,15 +415,12 @@ Herdr はローカルソケット上の改行区切り JSON を使います。Un
     "source": "custom:docs",
     "agent": "docs-bot",
     "state": "working",
-    "message": "building docs",
-    "custom_status": "indexing"
+    "message": "building docs"
   }
 }
 ```
 
-`state` は意味的です。wait、通知、ロールアップに影響します。
-
-`custom_status` は表示用です。意味的な挙動を変えずに `indexing` のような短いアクティビティラベルを表示できます。
+`state` は意味的です。wait、通知、ロールアップに影響します。表示専用の値はメタデータで別に報告します。
 
 セッションのみの公式インテグレーションは、`pane.report_agent_session` でネイティブセッション参照を報告します。状態を報告するインテグレーションは、`pane.report_agent` にネイティブセッション参照を含めることもできます。状態に依存しないセッション報告は、wait、通知、ロールアップに影響しません。
 
@@ -457,6 +454,8 @@ Herdr に保存されたネイティブセッション参照があるとき、`p
 
 `pane.get`、`pane.list`、`agent.get`、`agent.list` は、ペインの PTY を現在制御しているプロセスの cwd を解決できるときに `foreground_cwd` も公開します。既存の `cwd` フィールドは、ラベル、follow-cwd 挙動、復元されたセッション状態に使われるペイン/ワークスペースの cwd のままです。
 
+`PaneInfo` と `AgentInfo` は、任意の `terminal_title` と `terminal_title_stripped` フィールドを公開します。`terminal_title` は、安全性のための正規化を行った最新の OSC 0/2 タイトルです。`terminal_title_stripped` は、先頭にある認識済みのアクティビティまたはスピナーのグリフ 1 つと、それに続く空白を除去します。これらはサーバーが所有する値で、コールドリスタートをまたいで保持されず、メタデータの `title` や意味的なエージェント状態から独立しています。
+
 ユーザーフックが Herdr インテグレーションからライフサイクル状態を奪わずに表示をカスタマイズしたいときは `pane.report_metadata` を使ってください。
 
 ```json
@@ -469,26 +468,39 @@ Herdr に保存されたネイティブセッション参照があるとき、`p
     "agent": "claude",
     "title": "Refactor auth middleware",
     "display_agent": "Claude: auth",
-    "custom_status": "refactor auth",
     "state_labels": {
       "working": "refactoring auth",
       "idle": "ready",
       "done": "review ready"
+    },
+    "tokens": {
+      "summary": "refactor auth",
+      "model": "opus"
     },
     "ttl_ms": 3600000
   }
 }
 ```
 
-メタデータ報告は表示専用です。有効なメタデータは、ペインのタイトル、表示されるエージェント名、コンパクトなアクティビティラベル、可視の状態ラベルを上書きできます。`working`、`blocked`、`idle`、wait、通知、ロールアップは引き続き意味的な状態から得られます。エージェントネイティブのセッション復元は、保存された公式セッション参照から得られます。`agent` は権威あるエージェントラベルに対する任意のガードで、`applies_to_source` はアクティブなライフサイクル権威ソースに対する任意のガードです。表示名を変えるには `display_agent` を使います。`state_labels` のキーは `idle`、`working`、`blocked`、`done`、`unknown` のいずれかでなければなりません。ひとつの表示上書きを取り除くには、同じ `source` で `clear_custom_status: true` のようなクリアフィールドを使ってください。
+メタデータ報告は表示専用です。有効なメタデータは、ペインのタイトル、表示されるエージェント名、可視の状態ラベル、任意の名前付きトークンを上書きできます。`working`、`blocked`、`idle`、wait、通知、ロールアップは引き続き意味的な状態から得られます。エージェントネイティブのセッション復元は、保存された公式セッション参照から得られます。`agent` は表示フィールドを権威あるエージェントラベルに対して保護する任意のガードで、`applies_to_source` も表示フィールドをアクティブなライフサイクル権威ソースに対して保護します。これらのガードはトークンパッチには適用されません。トークンのクリアと TTL の更新は報告側が管理します。表示名を変えるには `display_agent` を使います。`state_labels` のキーは `idle`、`working`、`blocked`、`done`、`unknown` のいずれかでなければなりません。
 
-表示テキストは保存前に正規化されます。Herdr は前後の空白を取り除き、制御文字を除去し、`custom_status` を 32 文字に、`title`、`display_agent`、各状態ラベルを 80 文字に制限します。正規化後に空になった値は無視されます。
+トークンマップはリソースごとのパッチです。文字列はキーを設定し、JSON の `null` はクリアし、省略したキーは変わりません。最後に受理された更新が優先されます。任意の TTL は、その報告で更新した各トークンキーに個別に適用されます。ペイントークンは pane と agent の get/list 応答で公開され、エージェントサイドバー行では `$name` として描画できます。1 回の報告で指定できるトークンキーは最大 16 個、ペインまたはワークスペースが保持できるキーは最大 32 個です。トークン名は 1〜32 文字の ASCII 英数字、アンダースコア、ハイフンに限られます。
+
+ワークスペーストークンも同じ規約を使います:
+
+```json
+{"id":"req_3","method":"workspace.report_metadata","params":{"workspace_id":"w1","source":"user:jj","tokens":{"jj_status":"2 changes","old":null},"ttl_ms":5000}}
+```
+
+workspace の get/list 応答は結果の `tokens` マップを公開し、スペースサイドバー行では `$jj_status` のような値を描画できます。変更と TTL の失効は、最新のワークスペーススナップショットを含む `workspace.metadata_updated` を発行します。このメタデータイベントは API 購読者に届きますが、プラグインイベントフックは実行しません。
+
+表示テキストは保存前に正規化されます。Herdr は前後の空白を取り除き、制御文字を除去し、`title`、`display_agent`、各状態ラベル、トークン値を 80 文字に制限します。正規化後に空になったトークン値は、そのキーをクリアします。
 
 `source` と `applies_to_source` はソース識別子です。80 文字以下で、ASCII の英字、数字、コロン、ドット、アンダースコア、ハイフンのみを含められます。
 
-短寿命のメタデータには `ttl_ms` を使ってください。`1` から `86400000` ミリ秒の間でなければなりません。置き換え・クリア・ペインのクローズまで残るべきメタデータでは省略します。TTL が切れると、Herdr はそのソースのメタデータを削除し、可視のペイン表示が変わった場合は表示変更イベントを発行します。
+短寿命のメタデータには `ttl_ms` を使ってください。`1` から `86400000` ミリ秒の間でなければなりません。置き換え・クリア・ペインまたはワークスペースのクローズまで残るべきメタデータでは省略します。表示フィールドは従来どおりソース単位で失効し、呼び出しで更新した各トークンには個別の期限が設定されます。トークンメタデータはサーバー再起動後に復元されません。
 
-フックが順不同で更新を送る可能性がある場合は `seq` を使ってください。同じ `source` について、最後に受理されたシーケンス以下のシーケンス番号を持つ報告は、API には受理されますがペイン状態には無視されます。
+フックが順不同で更新を送る可能性がある場合は `seq` を使ってください。同じ `source` について、最後に受理されたシーケンス以下のシーケンス番号を持つ報告は、API には受理されますがペイン状態には無視されます。ペインまたはワークスペースが存続する間、シーケンス付きトークン報告を送れる異なるソースは最大 32 個です。クリアや失効でもそのソース枠は解放されません。
 
 ## イベント購読
 
@@ -508,8 +520,8 @@ Herdr に保存されたネイティブセッション参照があるとき、`p
 
 最初のレスポンスは購読の確認応答です。以降の行はプッシュされるイベントです。
 
-ワークスペースのイベント購読には `workspace.created`、`workspace.updated`、`workspace.renamed`、`workspace.closed`、`workspace.focused` があります。ワークスペースイベントは Herdr の UI/ランタイムのライフサイクルを記述します。ワークスペースが worktree グループに属している場合、`workspace.created` は任意の `workspace.worktree` 出自情報を含みます。削除前に Herdr がまだ識別できる場合、`workspace.closed` は最終的な `workspace` スナップショットを含みます。
-ペインのイベント購読には `pane.created`、`pane.closed`、`pane.focused`、`pane.moved`、`pane.exited`、`pane.agent_detected`、`pane.output_matched`、`pane.agent_status_changed` があります。
+ワークスペースのイベント購読には `workspace.created`、`workspace.updated`、`workspace.metadata_updated`、`workspace.renamed`、`workspace.closed`、`workspace.focused` があります。`workspace.metadata_updated` はプラグインイベントフックを実行せずにトークン変更と TTL 失効を報告します。その他のワークスペースイベントは Herdr の UI/ランタイムのライフサイクルを記述します。ワークスペースが worktree グループに属している場合、`workspace.created` は任意の `workspace.worktree` 出自情報を含みます。削除前に Herdr がまだ識別できる場合、`workspace.closed` は最終的な `workspace` スナップショットを含みます。
+ペインのイベント購読には `pane.created`、`pane.updated`、`pane.closed`、`pane.focused`、`pane.moved`、`pane.exited`、`pane.agent_detected`、`pane.output_matched`、`pane.agent_status_changed` があります。ターミナルタイトルの変更は `pane.updated` を発行することがありますが、生のタイトルでスピナーだけが変化し、`terminal_title_stripped` が変わらない場合は発行しません。
 
 worktree のイベント購読には `worktree.created`、`worktree.opened`、`worktree.removed` があります。worktree イベントは Git チェックアウトのライフサイクルを記述します。`worktree.created` は開かれた `workspace` と作成された `worktree` を含みます。`worktree.opened` は対象の `workspace`、開かれた `worktree`、`already_open` を含みます。`worktree.removed` は `workspace_id`、削除された `worktree`、`forced` を含みます。
 

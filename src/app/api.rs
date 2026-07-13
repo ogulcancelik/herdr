@@ -579,7 +579,6 @@ impl App {
                     agent: update.agent_label.clone(),
                     title: presentation.title,
                     display_agent: presentation.display_agent,
-                    custom_status: presentation.custom_status,
                     state_labels: presentation.state_labels,
                 },
             });
@@ -745,6 +744,26 @@ impl App {
         self.event_hub.push(event);
     }
 
+    pub(crate) fn emit_pane_updated(&mut self, ws_idx: usize, pane_id: crate::layout::PaneId) {
+        if let Some(pane) = self.pane_info(ws_idx, pane_id) {
+            self.emit_event(crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::PaneUpdated,
+                data: crate::api::schema::EventData::PaneUpdated { pane },
+            });
+        }
+    }
+
+    pub(crate) fn emit_workspace_token_updated(&mut self, ws_idx: usize) {
+        // Token updates bypass plugin hooks so a hook cannot refresh its own
+        // token and recursively trigger workspace.updated.
+        self.event_hub.push(crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::WorkspaceMetadataUpdated,
+            data: crate::api::schema::EventData::WorkspaceMetadataUpdated {
+                workspace: self.workspace_info(ws_idx),
+            },
+        });
+    }
+
     pub(crate) fn sync_focus_events(&mut self) {
         let current_focus = self.state.active.and_then(|idx| {
             self.state
@@ -816,6 +835,7 @@ impl App {
         &mut self,
         request: crate::api::schema::Request,
     ) -> String {
+        self.sync_terminal_titles();
         use crate::api::schema::{
             ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
         };
@@ -907,6 +927,9 @@ impl App {
             }
             Method::WorkspaceMove(params) => {
                 return self.handle_workspace_move(request.id, params);
+            }
+            Method::WorkspaceReportMetadata(params) => {
+                return self.handle_workspace_report_metadata(request.id, params);
             }
             Method::WorkspaceClose(target) => {
                 return self.handle_workspace_close(request.id, target)

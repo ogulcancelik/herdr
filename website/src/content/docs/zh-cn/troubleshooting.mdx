@@ -1,0 +1,62 @@
+---
+title: 故障排除
+description: 诊断常见的安装、终端输入、会话、快捷键和远程连接问题。
+---
+
+先检查版本和会话状态:
+
+```bash
+herdr -V
+herdr status
+```
+
+同时记录操作系统、外层终端名称和版本、会话是本地还是远程，以及是否使用了 tmux。
+
+## Enter、Tab 或 Backspace 触发两次
+
+旧版终端在应用启用 Kitty 键盘事件报告后，可能把 Enter、Tab 和 Backspace 的释放事件发送为与按下事件相同的字节。终端发送后，Herdr 无法区分这些重复字节。
+
+请把外层终端更新到包含上游修复的版本:
+
+| 终端 | 最低修复版本 |
+| --- | --- |
+| kitty | 0.33.0 |
+| foot | 1.20.0 |
+| Alacritty | 0.15.0 |
+
+长期支持版 Linux 发行版中的旧终端软件包尤其容易出现此问题。已确认的边界捕获和上游链接见 [Herdr issue #1116](https://github.com/ogulcancelik/herdr/issues/1116)。如果当前版本仍有问题，请报告准确的终端版本，以及该问题是否也会在 Herdr 外出现。
+
+## Herdr 已更新，但运行中的会话仍是旧版本
+
+更新二进制文件不一定会替换已经运行且兼容的服务器。先检查 `herdr status`。要启动更新后的服务器，请停止会话并重新启动 Herdr:
+
+```bash
+herdr server stop
+herdr
+```
+
+停止服务器会结束窗格进程。命名会话使用 `herdr session stop <name>`。更新器、软件包管理器和实时移交行为见[安装 Herdr](/zh-cn/docs/install/#update)。
+
+## 找不到 `herdr` 命令
+
+重启终端以重新加载环境，然后确认 Herdr 安装目录位于 `PATH` 中。通过软件包管理器安装的 Herdr 必须通过该管理器更新并加入环境。见[安装 Herdr](/zh-cn/docs/install/#verify)。
+
+## 直接快捷键没有反应
+
+操作系统或外层终端可能在 Herdr 收到按键前就拦截了组合键。请在对应层释放该组合键，或改用其他绑定。已知冲突和安全默认值见[键盘](/zh-cn/docs/keyboard/#going-prefix-free)。
+
+## 远程连接无法认证
+
+先用 `ssh <host>` 确认普通 OpenSSH 连接正常。若在非交互 shell、CI 或移动终端中使用带密码的密钥，请在远程连接前把密钥载入 `ssh-agent`。见[持久化和远程访问](/zh-cn/docs/persistence-remote/#remote-attach-over-ssh)。
+
+## 查找诊断日志
+
+Herdr 日志默认位于 `~/.config/herdr/`:
+
+```text
+herdr.log
+herdr-client.log
+herdr-server.log
+```
+
+设置 `HERDR_LOG=herdr=debug` 可获得更多细节。报告问题时请附上当前日志和轮转后的日志。见[配置](/zh-cn/docs/configuration/#logs)。

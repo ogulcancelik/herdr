@@ -5,6 +5,8 @@ description: 配置 Herdr 的按键绑定、主题、侧边栏行为、通知和
 
 Herdr 无需配置文件即可工作。当你想要自定义按键、主题、侧边栏设置、通知或高级行为时再添加。
 
+在找某个具体的键？[配置参考](/zh-cn/docs/config-reference/)列出了所有键的类型、默认值与允许的取值。
+
 ## 配置文件
 
 Herdr 从这里读取配置:
@@ -322,6 +324,29 @@ accent = "cyan"
 `mobile_width_threshold` 控制 Herdr 使用移动端单列布局的终端宽度阈值。默认 64 列;折叠屏、平板或宽屏手机终端可以调大。
 
 智能体面板显示所有空间中的所有智能体。`agent_panel_sort` 可以是 `spaces` 或 `priority`;`workspaces` 作为 `spaces` 的别名被接受。默认是 `spaces`,让智能体按空间顺序分组。`priority` 按关注优先级排序: blocked、done、working、idle,然后是 unknown。同一状态内,最近改变状态的智能体排在前面。
+
+展开侧边栏的行可以配置为有序令牌:
+
+```toml
+[ui.sidebar.agents]
+rows = [["state_icon", "workspace", "tab"], ["agent"]]
+
+[ui.sidebar.agents.rows_by_agent]
+claude = [
+  ["state_icon", "workspace", "tab"],
+  ["terminal_title_stripped"],
+  ["agent"],
+]
+
+[ui.sidebar.spaces]
+rows = [["state_icon", "workspace"], ["branch", "git_status", "$jj_status"]]
+```
+
+`rows` 是智能体的默认布局。`rows_by_agent` 会为匹配的已知智能体完整替换该布局。键必须使用 Herdr 区分大小写的规范智能体 ID,例如 `claude`、`codex` 和 `pi`;不能使用 `claude-code` 等检测别名。没有覆盖项的智能体以及自定义上报的智能体都会使用 `rows`。
+
+每个侧边栏布局最多包含 16 行,每行最多包含 16 个令牌。
+
+智能体内置令牌有 `state_icon`、`state_text`、`workspace`、`tab`、`pane`、`agent`、`terminal_title` 和 `terminal_title_stripped`。两个终端标题令牌都是可选的,不在默认行中。`terminal_title` 是经过安全规范化的最新 OSC 0/2 终端标题。`terminal_title_stripped` 还会移除开头一个已识别的活动或旋转指示符字形及其后的空白。空间内置令牌有 `state_icon`、`state_text`、`workspace`、`branch` 和 `git_status`。以 `$` 开头的名称读取脚本或插件上报的任意展示元数据。缺失值及其分隔符不会显示,空行会折叠。这些设置只影响展开的桌面侧边栏;折叠和移动端视图仍保持紧凑。
 
 `confirm_close` 控制关闭工作区时是否需要确认。`prompt_new_tab_name` 控制新标签页是否先询问名称。
 
