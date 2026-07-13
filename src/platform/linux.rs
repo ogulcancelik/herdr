@@ -108,7 +108,7 @@ fn shell_quote(value: &str) -> String {
 /// Collect the foreground terminal job for a given child PID.
 pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
     let tpgid = foreground_process_group_id(child_pid)?;
-    let members = foreground_process_group_members(tpgid)?;
+    let members = foreground_process_group_members(child_pid, tpgid)?;
     let processes = members
         .into_iter()
         .map(|member| {
@@ -133,7 +133,58 @@ pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
     })
 }
 
-fn foreground_process_group_members(process_group_id: u32) -> Option<Vec<ProcGroupMember>> {
+/// Enumerate `root` and all its descendants via /proc/<pid>/task/*/children
+/// (CONFIG_PROC_CHILDREN, mainline since 4.2). Returns None when the children
+/// files are unavailable so callers can fall back to the full /proc sweep.
+fn descendant_pids(root: u32) -> Option<Vec<u32>> {
+    let probe = format!("/proc/{root}/task/{root}/children");
+    if !std::path::Path::new(&probe).exists() {
+        return None;
+    }
+    let mut out = vec![root];
+    let mut queue = vec![root];
+    while let Some(pid) = queue.pop() {
+        // pathological trees stay bounded; the fallback sweep handles the rest
+        if out.len() > 4096 {
+            break;
+        }
+        let task_dir = format!("/proc/{pid}/task");
+        for task in std::fs::read_dir(&task_dir).into_iter().flatten().flatten() {
+            let Ok(list) = std::fs::read_to_string(task.path().join("children")) else {
+                continue;
+            };
+            for child in list.split_whitespace() {
+                if let Ok(child_pid) = child.parse::<u32>() {
+                    if !out.contains(&child_pid) {
+                        out.push(child_pid);
+                        queue.push(child_pid);
+                    }
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
+fn foreground_process_group_members(
+    child_pid: u32,
+    process_group_id: u32,
+) -> Option<Vec<ProcGroupMember>> {
+    // Scoped fast path: a pane's foreground process group lives inside the
+    // pane child's process subtree in all but exotic cases (setsid escapes).
+    // Walking one subtree is O(session processes); the cached full-/proc
+    // sweep below is O(system processes), which on busy multi-user hosts
+    // (thousands of pids) rebuilt every 250ms pins a core — see issue #1390.
+    if let Some(pids) = descendant_pids(child_pid) {
+        let members: Vec<ProcGroupMember> = pids
+            .into_iter()
+            .filter_map(|pid| live_process_group_member(process_group_id, pid))
+            .collect();
+        if !members.is_empty() {
+            return Some(members);
+        }
+        // group escaped the subtree — fall through to the full sweep
+    }
     let mut cache = FOREGROUND_MEMBERS_CACHE
         .lock()
         .unwrap_or_else(|err| err.into_inner());
@@ -687,6 +738,22 @@ fn process_session_id(pid: u32) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn descendant_walk_finds_spawned_child() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn sleep");
+        let me = std::process::id();
+        if let Some(pids) = descendant_pids(me) {
+            assert!(pids.contains(&me));
+            assert!(pids.contains(&child.id()));
+        } // None = kernel without CONFIG_PROC_CHILDREN: fallback path covers it
+        let _ = child.kill();
+        let _ = child.wait();
+    }
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Mutex, OnceLock};
