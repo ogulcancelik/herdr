@@ -1617,8 +1617,12 @@ impl App {
                         }
                     }
                 }
-                crate::raw_input::RawInputEvent::OuterFocusGained
-                | crate::raw_input::RawInputEvent::OuterFocusLost => {}
+                crate::raw_input::RawInputEvent::OuterFocusGained => {
+                    self.send_outer_focus_event(crate::ghostty::FocusEvent::Gained);
+                }
+                crate::raw_input::RawInputEvent::OuterFocusLost => {
+                    self.send_outer_focus_event(crate::ghostty::FocusEvent::Lost);
+                }
                 crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
                     if apply_host_terminal_theme {
                         self.update_host_terminal_theme(kind, color);
@@ -3260,6 +3264,47 @@ mod tests {
         assert!(handled);
         assert_eq!(app.state.outer_terminal_focus, Some(true));
         assert!(!app.full_redraw_pending);
+    }
+
+    #[tokio::test]
+    async fn monolithic_outer_focus_events_reach_reporting_pane() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("focus-reporting");
+        let pane_id = workspace.tabs[0].root_pane;
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80,
+                24,
+                0,
+                b"\x1b[?1004h",
+                4,
+            );
+        workspace.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        assert!(
+            app.handle_raw_input_event(crate::raw_input::RawInputEvent::OuterFocusGained)
+                .await
+        );
+        assert_eq!(
+            input_rx
+                .recv()
+                .await
+                .expect("forwarded focus gained report"),
+            bytes::Bytes::from_static(b"\x1b[I")
+        );
+
+        assert!(
+            !app.handle_raw_input_event(crate::raw_input::RawInputEvent::OuterFocusLost)
+                .await
+        );
+        assert_eq!(
+            input_rx.recv().await.expect("forwarded focus lost report"),
+            bytes::Bytes::from_static(b"\x1b[O")
+        );
     }
 
     #[tokio::test]

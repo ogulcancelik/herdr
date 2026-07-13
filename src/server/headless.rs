@@ -2414,6 +2414,11 @@ impl HeadlessServer {
         client_id: u64,
         events: Vec<crate::raw_input::RawInputEvent>,
     ) -> bool {
+        let source_was_foreground = self.foreground_client_id == Some(client_id);
+        let source_is_full_app = self
+            .clients
+            .get(&client_id)
+            .is_some_and(ClientConnection::is_full_app_client);
         let host_surface_redraw = crate::raw_input::events_require_host_surface_redraw(
             &events,
             self.app.state.redraw_on_focus_gained,
@@ -2441,6 +2446,7 @@ impl HeadlessServer {
             self.resize_shared_runtime_to_effective_size_before_input();
         }
         let theme_changed = self.update_client_host_theme_from_events(client_id, &events);
+        let events = events_for_app_routing(events, source_was_foreground, source_is_full_app);
         self.app
             .route_client_events(events, self.foreground_client_id == Some(client_id));
         if self.app.take_config_reloaded_from_disk() {
@@ -3817,6 +3823,36 @@ impl HeadlessServer {
         }
         Ok(())
     }
+}
+
+fn events_for_app_routing(
+    events: Vec<crate::raw_input::RawInputEvent>,
+    mut source_is_foreground: bool,
+    source_is_full_app: bool,
+) -> Vec<crate::raw_input::RawInputEvent> {
+    events
+        .into_iter()
+        .filter_map(|event| match event {
+            crate::raw_input::RawInputEvent::OuterFocusGained
+            | crate::raw_input::RawInputEvent::OuterFocusLost
+                if !source_is_full_app =>
+            {
+                None
+            }
+            crate::raw_input::RawInputEvent::OuterFocusGained => {
+                source_is_foreground = true;
+                Some(event)
+            }
+            crate::raw_input::RawInputEvent::OuterFocusLost if !source_is_foreground => None,
+            crate::raw_input::RawInputEvent::Key(_)
+            | crate::raw_input::RawInputEvent::Mouse(_)
+            | crate::raw_input::RawInputEvent::Paste(_) => {
+                source_is_foreground = true;
+                Some(event)
+            }
+            _ => Some(event),
+        })
+        .collect()
 }
 
 impl Drop for HeadlessServer {
@@ -6471,6 +6507,196 @@ next_tab = ""
         assert_eq!(server.foreground_client_id, Some(1));
         assert_eq!(server.clients[&1].outer_terminal_focus, Some(true));
         assert_eq!(server.app.state.outer_terminal_focus, Some(true));
+    }
+
+    #[tokio::test]
+    async fn foreground_focus_gained_reaches_pane_with_focus_reporting() {
+        let mut server = test_headless_server();
+        let mut input_rx = install_focused_test_runtime(&mut server, b"\x1b[?1004h");
+
+        server.clients.insert(1, test_app_client(Some(false), 1));
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"\x1b[I".to_vec(),
+        }));
+        assert_eq!(
+            input_rx.try_recv().expect("forwarded focus gained report"),
+            Bytes::from_static(b"\x1b[I")
+        );
+
+        assert!(!server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"\x1b[O".to_vec(),
+        }));
+        assert_eq!(
+            input_rx.try_recv().expect("forwarded focus lost report"),
+            Bytes::from_static(b"\x1b[O")
+        );
+    }
+
+    #[tokio::test]
+    async fn outer_focus_events_do_not_reach_pane_without_focus_reporting() {
+        let mut server = test_headless_server();
+        let mut input_rx = install_focused_test_runtime(&mut server, b"");
+        server.clients.insert(1, test_app_client(Some(false), 1));
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"\x1b[I".to_vec(),
+        }));
+        assert!(matches!(
+            input_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn background_focus_batch_only_forwards_events_after_promotion() {
+        let mut server = test_headless_server();
+        let mut input_rx = install_focused_test_runtime(&mut server, b"\x1b[?1004h");
+        server.clients.insert(1, test_app_client(Some(true), 1));
+        server.clients.insert(2, test_app_client(Some(false), 2));
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 2,
+            data: b"\x1b[O\x1b[I".to_vec(),
+        }));
+        assert_eq!(server.foreground_client_id, Some(2));
+        assert_eq!(server.app.state.outer_terminal_focus, Some(true));
+        assert_eq!(
+            input_rx
+                .try_recv()
+                .expect("focus gained after client promotion"),
+            Bytes::from_static(b"\x1b[I")
+        );
+        assert!(matches!(
+            input_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn structured_outer_focus_events_reach_reporting_pane() {
+        let mut server = test_headless_server();
+        let mut input_rx = install_focused_test_runtime(&mut server, b"\x1b[?1004h");
+        server.clients.insert(1, test_app_client(Some(true), 1));
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 1,
+            events: vec![
+                crate::protocol::ClientInputEvent::FocusGained,
+                crate::protocol::ClientInputEvent::FocusLost,
+            ],
+        }));
+        assert_eq!(
+            input_rx.try_recv().expect("structured focus gained report"),
+            Bytes::from_static(b"\x1b[I")
+        );
+        assert_eq!(
+            input_rx.try_recv().expect("structured focus lost report"),
+            Bytes::from_static(b"\x1b[O")
+        );
+    }
+
+    #[tokio::test]
+    async fn background_key_makes_later_focus_lost_eligible() {
+        let mut server = test_headless_server();
+        let mut input_rx = install_focused_test_runtime(&mut server, b"\x1b[?1004h");
+        server.clients.insert(1, test_app_client(Some(true), 1));
+        server.clients.insert(2, test_app_client(Some(true), 2));
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 2,
+            events: vec![
+                crate::protocol::ClientInputEvent::Key {
+                    code: crate::protocol::ClientKeyCode::Char('x'),
+                    modifiers: 0,
+                    kind: crate::protocol::ClientKeyKind::Release,
+                },
+                crate::protocol::ClientInputEvent::FocusLost,
+            ],
+        }));
+        assert_eq!(server.foreground_client_id, Some(2));
+        assert_eq!(
+            input_rx.try_recv().expect("focus lost after promotion"),
+            Bytes::from_static(b"\x1b[O")
+        );
+    }
+
+    #[tokio::test]
+    async fn structured_focus_from_non_app_clients_does_not_reach_pane() {
+        let mut server = test_headless_server();
+        let mut input_rx = install_focused_test_runtime(&mut server, b"\x1b[?1004h");
+        server.clients.insert(1, test_app_client(Some(true), 1));
+
+        let mut attached = test_app_client(Some(true), 2);
+        attached.mode = ClientConnectionMode::TerminalAttach {
+            terminal_id: "attached".to_owned(),
+        };
+        server.clients.insert(2, attached);
+
+        let mut pending = test_app_client(Some(true), 3);
+        pending.pending_terminal_attach = true;
+        server.clients.insert(3, pending);
+
+        for client_id in [2, 3] {
+            server.foreground_client_id = Some(1);
+            server.sync_foreground_client_state();
+            assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+                client_id,
+                events: vec![crate::protocol::ClientInputEvent::FocusGained],
+            }));
+        }
+
+        assert!(matches!(
+            input_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    fn install_focused_test_runtime(
+        server: &mut HeadlessServer,
+        terminal_bytes: &[u8],
+    ) -> tokio::sync::mpsc::Receiver<Bytes> {
+        let mut workspace = crate::workspace::Workspace::test_new("focus-reporting");
+        let pane_id = workspace.tabs[0].root_pane;
+        let (runtime, input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80,
+                24,
+                0,
+                terminal_bytes,
+                4,
+            );
+        workspace.insert_test_runtime(pane_id, runtime);
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        input_rx
+    }
+
+    fn test_app_client(outer_terminal_focus: Option<bool>, last_activity: u64) -> ClientConnection {
+        ClientConnection::new(
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            crate::terminal_theme::TerminalTheme::default(),
+            outer_terminal_focus,
+            last_activity,
+            RenderEncoding::SemanticFrame,
+            None,
+        )
     }
 
     #[test]

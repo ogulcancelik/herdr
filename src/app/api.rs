@@ -811,6 +811,18 @@ impl App {
         self.last_focus = current_focus;
     }
 
+    pub(super) fn send_outer_focus_event(&self, event: crate::ghostty::FocusEvent) {
+        let Some((ws_idx, pane_id)) = self.state.active.and_then(|idx| {
+            self.state
+                .workspaces
+                .get(idx)
+                .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
+        }) else {
+            return;
+        };
+        self.send_pane_focus_event(ws_idx, pane_id, event);
+    }
+
     fn send_pane_focus_event(
         &self,
         ws_idx: usize,
