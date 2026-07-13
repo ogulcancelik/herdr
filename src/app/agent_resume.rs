@@ -118,6 +118,72 @@ impl App {
         pending
     }
 
+    /// Choose the resume plan for `terminal`, preferring `claude --continue` over
+    /// the pinned `claude --resume <id>` when the pane is the SOLE Claude session
+    /// in its cwd.
+    ///
+    /// herdr pins a Claude session by id, but a fork (`/branch`, `--fork-session`)
+    /// rotates that id and reports it only as `SessionStart{source:"startup"}`,
+    /// which herdr must refuse (it cannot tell a fork from a nested claude), so the
+    /// pinned id goes stale and restore resumes the abandoned trunk, dropping the
+    /// fork's history. `claude --continue` resumes whichever session is most recent
+    /// in the cwd — the fork.
+    ///
+    /// Used only when no OTHER herdr pane holds a Claude session for the same cwd,
+    /// so `--continue` (which is cwd-global) can't resume a different pane's
+    /// session. Two limits herdr cannot close here, because `--continue` trusts the
+    /// cwd's newest session: a `claude` the user ran in the same dir OUTSIDE herdr,
+    /// or a cwd that has drifted from the session's dir, mis-resumes — but both
+    /// leave the original session intact on disk (recoverable), unlike the silent
+    /// history loss this fixes. Applied at the single launch point
+    /// (`start_pending_agent_resume`) that both resume entry points funnel through,
+    /// so it never runs on the per-render candidate build.
+    fn agent_resume_plan_for_terminal(
+        &self,
+        terminal: &crate::terminal::TerminalState,
+        plan: crate::agent_resume::AgentResumePlan,
+    ) -> crate::agent_resume::AgentResumePlan {
+        let is_claude = terminal
+            .persisted_agent_session
+            .as_ref()
+            .is_some_and(|session| {
+                session.source == "herdr:claude" && session.agent == "claude"
+            });
+        if is_claude {
+            let cwd = crate::worktree::canonical_or_original(&terminal.cwd);
+            if self.claude_sessions_in_cwd(&cwd) <= 1 {
+                if let Some(continue_plan) =
+                    crate::agent_resume::continue_plan("herdr:claude", "claude", &cwd)
+                {
+                    return continue_plan;
+                }
+            }
+        }
+        plan
+    }
+
+    /// Count terminals whose persisted session is a Claude session rooted at the
+    /// (already-canonicalized) `cwd`. Both sides are canonicalized so panes that
+    /// reach the same physical directory via different paths (e.g. `/tmp` vs
+    /// `/private/tmp`, or a symlinked worktree) count as the same cwd — otherwise
+    /// each would see only itself and both would take `--continue` into the same
+    /// directory, the cross-pane collision the sole-session guard exists to prevent.
+    fn claude_sessions_in_cwd(&self, cwd: &std::path::Path) -> usize {
+        self.state
+            .terminals
+            .values()
+            .filter(|terminal| {
+                crate::worktree::canonical_or_original(&terminal.cwd).as_path() == cwd
+                    && terminal
+                        .persisted_agent_session
+                        .as_ref()
+                        .is_some_and(|session| {
+                            session.source == "herdr:claude" && session.agent == "claude"
+                        })
+            })
+            .count()
+    }
+
     fn pending_agent_resume_pane_infos(
         &self,
         ws_idx: usize,
@@ -215,6 +281,17 @@ impl App {
         if host_terminal_theme.is_empty() && !allow_empty_theme {
             return false;
         }
+
+        // Both resume entry points funnel through here, so resolve the pinned
+        // `claude --resume <id>` to `claude --continue` for a lone Claude pane at
+        // this single launch point (see `agent_resume_plan_for_terminal`). Doing it
+        // here rather than in the per-render candidate build keeps the
+        // filesystem-touching sole-session check off the render loop — it runs once
+        // per actual launch, not on every tick during the theme wait.
+        let plan = match self.state.terminals.get(&terminal_id) {
+            Some(terminal) => self.agent_resume_plan_for_terminal(terminal, plan),
+            None => plan,
+        };
 
         let Some(resume_command) = shell_command_from_argv(&plan.argv) else {
             tracing::warn!(
@@ -368,6 +445,130 @@ mod tests {
             "-c".into(),
             "printf '%s' 'restored agent: shell quoted | marker'; sleep 5".into(),
         ]
+    }
+
+    /// Build an app with a single terminal holding `agent`'s persisted session
+    /// `session_id` and its pinned resume plan, rooted at `cwd`.
+    #[cfg(unix)]
+    fn app_with_agent_terminal(
+        source: &str,
+        agent: &str,
+        cwd: &std::path::Path,
+        session_id: &str,
+    ) -> (App, crate::terminal::TerminalId) {
+        let mut app = test_app();
+        let id = crate::terminal::TerminalId::alloc();
+        let session_ref = crate::agent_resume::AgentSessionRef::id(session_id).unwrap();
+        let mut terminal = crate::terminal::TerminalState::new(id.clone(), cwd.to_path_buf());
+        terminal.persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
+            source: source.into(),
+            agent: agent.into(),
+            session_ref: session_ref.clone(),
+        });
+        terminal.pending_agent_resume_plan = crate::agent_resume::plan(source, agent, &session_ref);
+        app.state.terminals.insert(id.clone(), terminal);
+        (app, id)
+    }
+
+    /// Insert a second, pane-less Claude terminal rooted at `cwd` — enough to make
+    /// `claude_sessions_in_cwd` see more than one Claude session in that directory.
+    #[cfg(unix)]
+    fn insert_paneless_claude_terminal(app: &mut App, cwd: &std::path::Path, session_id: &str) {
+        let other_id = crate::terminal::TerminalId::alloc();
+        let mut other = crate::terminal::TerminalState::new(other_id.clone(), cwd.to_path_buf());
+        other.persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id(session_id).unwrap(),
+        });
+        app.state.terminals.insert(other_id, other);
+    }
+
+    /// The launch argv herdr would actually use for terminal `id` — the pinned plan
+    /// after `agent_resume_plan_for_terminal` resolves it, which is exactly what
+    /// `start_pending_agent_resume` (the single launch point) runs.
+    #[cfg(unix)]
+    fn resolved_resume_argv(app: &App, id: &crate::terminal::TerminalId) -> Vec<String> {
+        let terminal = app.state.terminals.get(id).expect("terminal exists");
+        let plan = terminal
+            .pending_agent_resume_plan
+            .clone()
+            .expect("terminal has a pending resume plan");
+        app.agent_resume_plan_for_terminal(terminal, plan).argv
+    }
+
+    /// Removes a temp directory tree on drop so a panicking test can't leak it.
+    #[cfg(unix)]
+    struct TempDirGuard(std::path::PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lone_claude_terminal_resolves_to_continue_but_shared_cwd_keeps_pinned_id() {
+        let cwd = std::path::PathBuf::from("/tmp/lone-claude-cwd");
+        let (mut app, id) = app_with_agent_terminal("herdr:claude", "claude", &cwd, "trunk-session");
+
+        // Sole Claude session in its cwd: resume with `--continue` so a fork (whose
+        // rotated id herdr cannot safely adopt at report time) is followed instead
+        // of the stale pinned trunk.
+        assert_eq!(resolved_resume_argv(&app, &id), vec!["claude", "--continue"]);
+
+        // A second Claude session in the same cwd: `--continue` could resume the
+        // other pane's session, so herdr must keep the pinned `--resume <id>`.
+        insert_paneless_claude_terminal(&mut app, &cwd, "other-session");
+        assert_eq!(
+            resolved_resume_argv(&app, &id),
+            vec!["claude", "--resume", "trunk-session"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_continue_guard_canonicalizes_cwd_across_symlinks() {
+        // Two Claude terminals reaching the SAME physical dir via different path
+        // strings (a symlink) must count as one cwd — otherwise each sees only
+        // itself and both take `--continue` into the same dir, the collision the
+        // sole-session guard prevents.
+        let base = std::env::temp_dir().join(format!("herdr-canon-cwd-{}", std::process::id()));
+        let _guard = TempDirGuard(base.clone());
+        std::fs::remove_dir_all(&base).ok();
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let (mut app, id) = app_with_agent_terminal("herdr:claude", "claude", &real, "trunk-session");
+
+        // Sole Claude session in `real` -> `--continue`.
+        assert_eq!(resolved_resume_argv(&app, &id), vec!["claude", "--continue"]);
+
+        // A second Claude whose cwd is the SYMLINK to `real`. Canonicalized they are
+        // the same directory, so the terminal reverts to the pinned `--resume`.
+        insert_paneless_claude_terminal(&mut app, &link, "other-session");
+        assert_eq!(
+            resolved_resume_argv(&app, &id),
+            vec!["claude", "--resume", "trunk-session"],
+            "a symlinked cwd must be recognized as the same directory"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lone_non_claude_terminal_keeps_pinned_resume() {
+        // The `--continue` swap is Claude-only; a lone Codex terminal keeps its
+        // pinned `resume <id>` (Codex self-heals forks via its own startup allowlist).
+        let cwd = std::path::PathBuf::from("/tmp/lone-codex-cwd");
+        let (app, id) = app_with_agent_terminal("herdr:codex", "codex", &cwd, "codex-session");
+        assert_eq!(
+            resolved_resume_argv(&app, &id),
+            vec!["codex", "resume", "codex-session"]
+        );
     }
 
     #[cfg(unix)]

@@ -196,6 +196,35 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
     })
 }
 
+/// Build a plan that resumes the agent's most-recent session in the pane's
+/// working directory instead of a pinned session id.
+///
+/// Herdr normally resumes Claude with `claude --resume <id>`. A fork (`/branch`,
+/// `--fork-session`) starts a NEW session id but reports it only as
+/// `SessionStart{source:"startup"}`, which herdr must refuse: the hook carries no
+/// pid and a fork is indistinguishable from a second/nested `claude` in the pane,
+/// so adopting startup ids would let a throwaway session hijack the pane's pinned
+/// id. The pinned id therefore stays on the pre-fork trunk and a later restore
+/// resumes the abandoned trunk, silently dropping the fork's history.
+///
+/// `claude --continue` sidesteps this by resuming whichever session is most recent
+/// in the cwd — which is the fork. It is only safe when the pane is the sole Claude
+/// session for its cwd (otherwise `--continue` could resume a different pane's
+/// session); the caller enforces that. The `dedupe_key` is keyed on the cwd (there
+/// is no id to key on) so it is unique per pane — though continue plans are built at
+/// launch, after restore-time dedup, so the key is defensive rather than consumed.
+pub fn continue_plan(source: &str, agent: &str, cwd: &Path) -> Option<AgentResumePlan> {
+    let argv = match (source, agent) {
+        ("herdr:claude", "claude") => vec!["claude".into(), "--continue".into()],
+        _ => return None,
+    };
+    Some(AgentResumePlan {
+        agent: agent.to_string(),
+        argv,
+        dedupe_key: format!("{source}\u{0}{agent}\u{0}__continue__\u{0}{}", cwd.display()),
+    })
+}
+
 pub fn dedupe_key(source: &str, agent: &str, session_ref: &AgentSessionRef) -> String {
     format!(
         "{source}\u{0}{agent}\u{0}{:?}\u{0}{}",
@@ -256,6 +285,35 @@ mod tests {
             "herdr:opencode",
             "opencode"
         ));
+    }
+
+    #[test]
+    fn continue_plan_targets_claude_continue_and_keys_on_cwd() {
+        let cwd_a = std::path::Path::new("/tmp/project-a");
+        let cwd_b = std::path::Path::new("/tmp/project-b");
+
+        let plan_a = continue_plan("herdr:claude", "claude", cwd_a).unwrap();
+        assert_eq!(plan_a.argv, vec!["claude", "--continue"]);
+        assert_eq!(plan_a.agent, "claude");
+
+        // A --continue plan has no session id, so its dedupe key is per-cwd:
+        // two lone-Claude panes in different dirs must not collide (which would
+        // drop one from the resume batch), but the same cwd is stable.
+        let plan_b = continue_plan("herdr:claude", "claude", cwd_b).unwrap();
+        assert_ne!(plan_a.dedupe_key, plan_b.dedupe_key);
+        assert_eq!(
+            continue_plan("herdr:claude", "claude", cwd_a)
+                .unwrap()
+                .dedupe_key,
+            plan_a.dedupe_key,
+        );
+
+        // continue_plan is Claude-only: `--continue` is a Claude flag, and Claude
+        // is the agent whose fork rotates the id while reporting only `startup`.
+        // Other agents either self-heal (codex/omp accept startup/fork) or have no
+        // known fork feature, so none fall back to --continue.
+        assert!(continue_plan("herdr:codex", "codex", cwd_a).is_none());
+        assert!(continue_plan("herdr:omp", "omp", cwd_a).is_none());
     }
 
     #[test]
