@@ -665,6 +665,25 @@
           "description": "Hide the tab row when the workspace has one tab."
         },
         {
+          "key": "ui.tab_bar_position",
+          "type": "enum",
+          "default": "top",
+          "description": "Position of the tab bar in the desktop layout.",
+          "values": ["top", "bottom"]
+        },
+        {
+          "key": "ui.show_clock",
+          "type": "boolean",
+          "default": "false",
+          "description": "Show a clock on the right side of the tab bar."
+        },
+        {
+          "key": "ui.prefix_hint",
+          "type": "boolean",
+          "default": "true",
+          "description": "Show the prefix-mode hint bar and dim panes when prefix is active."
+        },
+        {
           "key": "ui.agent_panel_sort",
           "type": "enum",
           "default": "\"spaces\"",
