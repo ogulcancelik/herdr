@@ -1459,6 +1459,10 @@ impl HeadlessServer {
     }
 
     fn paste_client_clipboard_image_path(&mut self, client_id: u64, path: String) -> bool {
+        // Trailing ASCII space matches native Finder/terminal multi-file drops and
+        // keeps consecutive ClipboardImage pastes from concatenating into one token.
+        let path = format!("{path} ");
+
         if let Some(ClientConnection {
             mode: ClientConnectionMode::TerminalAttach { terminal_id },
             ..
@@ -5036,6 +5040,77 @@ next_tab = ""
                     .direct_attach_resize_locks
                     .contains(&terminal_id));
             },
+        );
+    }
+
+    #[test]
+    fn paste_client_clipboard_image_path_appends_trailing_space_for_terminal_attach() {
+        with_terminal_session_test_server(
+            |server, terminal_id, terminal_id_string, public_pane_id| {
+                let (runtime, mut rx) =
+                    crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 4);
+                server
+                    .app
+                    .terminal_runtimes
+                    .insert(terminal_id.clone(), runtime);
+
+                connect_pending_terminal_client(server, 7);
+                assert!(
+                    server.handle_server_event(ServerEvent::ClientControlTerminal {
+                        client_id: 7,
+                        target: public_pane_id,
+                        takeover: false,
+                    })
+                );
+                assert!(matches!(
+                    server.clients.get(&7).map(|client| &client.mode),
+                    Some(ClientConnectionMode::TerminalAttach { terminal_id: attached })
+                        if attached == &terminal_id_string
+                ));
+
+                assert!(server.paste_client_clipboard_image_path(7, "/tmp/a.png".to_owned()));
+                let pasted = rx.try_recv().expect("clipboard image paste bytes");
+                assert_eq!(pasted.as_ref(), b"/tmp/a.png ");
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn paste_client_clipboard_image_path_appends_trailing_space_for_foreground_pane() {
+        let mut server = test_headless_server();
+        let mut workspace = crate::workspace::Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 4);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(true),
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(server.paste_client_clipboard_image_path(1, "/tmp/b.png".to_owned()));
+        let pasted = rx.try_recv().expect("clipboard image paste bytes");
+        // Foreground pane paste uses bracketed paste when the pane enables it;
+        // either form must carry the trailing space after the path.
+        assert!(
+            pasted.as_ref() == b"/tmp/b.png "
+                || pasted.as_ref() == b"\x1b[200~/tmp/b.png \x1b[201~",
+            "unexpected paste payload: {:?}",
+            pasted.as_ref()
         );
     }
 

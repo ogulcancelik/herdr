@@ -1449,18 +1449,20 @@ async fn run_client_loop(
                         "clipboard image paste trigger received, but local clipboard has no image"
                     );
                 }
-                if let Some(image) = read_image_file_from_terminal_drop(&data, is_remote_client) {
-                    info!(
-                        bytes = image.bytes.len(),
-                        extension = image.extension,
-                        "bridging local image file drop to remote server"
-                    );
-                    let msg = ClientMessage::ClipboardImage {
-                        extension: image.extension.to_owned(),
-                        data: image.bytes,
-                    };
-                    if let Err(e) = write_to_server(&mut write_stream, &msg) {
-                        return Err(ClientError::ConnectionLost(e));
+                if let Some(images) = read_image_files_from_terminal_drop(&data, is_remote_client) {
+                    for image in images {
+                        info!(
+                            bytes = image.bytes.len(),
+                            extension = image.extension,
+                            "bridging local image file drop to remote server"
+                        );
+                        let msg = ClientMessage::ClipboardImage {
+                            extension: image.extension.to_owned(),
+                            data: image.bytes,
+                        };
+                        if let Err(e) = write_to_server(&mut write_stream, &msg) {
+                            return Err(ClientError::ConnectionLost(e));
+                        }
                     }
                     continue;
                 }
@@ -1815,39 +1817,50 @@ fn should_bridge_clipboard_image_paste(
     )
 }
 
+/// Cap multi-file Finder/terminal drops bridged as remote clipboard images.
+/// Oversized drops fall through as literal typed text (fail closed).
 #[cfg(unix)]
-fn read_image_file_from_terminal_drop(
+const MAX_TERMINAL_DROP_FILES: usize = 32;
+
+#[cfg(unix)]
+fn read_image_files_from_terminal_drop(
     data: &[u8],
     is_remote_client: bool,
-) -> Option<crate::platform::ClipboardImage> {
-    let (path, extension) = image_path_from_terminal_drop(data, is_remote_client)?;
-    let metadata = std::fs::metadata(&path).ok()?;
-    if !metadata.is_file() {
-        return None;
+) -> Option<Vec<crate::platform::ClipboardImage>> {
+    let paths = image_paths_from_terminal_drop(data, is_remote_client)?;
+
+    let mut images = Vec::with_capacity(paths.len());
+    for (path, extension) in paths {
+        let metadata = std::fs::metadata(&path).ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+
+        let file = std::fs::File::open(&path).ok()?;
+        let bytes =
+            match crate::platform::read_limited_reader(file, MAX_CLIPBOARD_IMAGE_PAYLOAD).ok()? {
+                crate::platform::LimitedRead::Complete(bytes) => bytes,
+                crate::platform::LimitedRead::Empty => return None,
+                crate::platform::LimitedRead::Oversized => {
+                    warn!(
+                        max = MAX_CLIPBOARD_IMAGE_PAYLOAD,
+                        "local image file drop is too large to bridge"
+                    );
+                    return None;
+                }
+            };
+
+        images.push(crate::platform::ClipboardImage { bytes, extension });
     }
 
-    let file = std::fs::File::open(&path).ok()?;
-    let bytes =
-        match crate::platform::read_limited_reader(file, MAX_CLIPBOARD_IMAGE_PAYLOAD).ok()? {
-            crate::platform::LimitedRead::Complete(bytes) => bytes,
-            crate::platform::LimitedRead::Empty => return None,
-            crate::platform::LimitedRead::Oversized => {
-                warn!(
-                    max = MAX_CLIPBOARD_IMAGE_PAYLOAD,
-                    "local image file drop is too large to bridge"
-                );
-                return None;
-            }
-        };
-
-    Some(crate::platform::ClipboardImage { bytes, extension })
+    Some(images)
 }
 
 #[cfg(unix)]
-fn image_path_from_terminal_drop(
+fn image_paths_from_terminal_drop(
     data: &[u8],
     is_remote_client: bool,
-) -> Option<(std::path::PathBuf, &'static str)> {
+) -> Option<Vec<(std::path::PathBuf, &'static str)>> {
     if !is_remote_client {
         return None;
     }
@@ -1859,14 +1872,21 @@ fn image_path_from_terminal_drop(
         return None;
     }
 
-    let text = unescape_terminal_drop_path(strip_matching_path_quotes(text));
-    let path = std::path::PathBuf::from(text);
-    if !path.is_absolute() {
+    let tokens = tokenize_terminal_drop_paths(text);
+    if tokens.is_empty() || tokens.len() > MAX_TERMINAL_DROP_FILES {
         return None;
     }
 
-    let extension = recognized_image_extension(path.extension()?.to_str()?)?;
-    Some((path, extension))
+    let mut paths = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        let path = std::path::PathBuf::from(token);
+        if !path.is_absolute() {
+            return None;
+        }
+        let extension = recognized_image_extension(path.extension()?.to_str()?)?;
+        paths.push((path, extension));
+    }
+    Some(paths)
 }
 
 #[cfg(unix)]
@@ -1876,39 +1896,57 @@ fn bracketed_paste_payload(data: &[u8]) -> Option<&[u8]> {
     data.strip_prefix(START)?.strip_suffix(END)
 }
 
+/// Tokenize a terminal file-drop paste into path strings.
+///
+/// Terminals separate multiple dropped files with unescaped ASCII spaces (and
+/// occasionally tabs). Inside a single path they backslash-escape ASCII spaces
+/// and shell metacharacters. macOS screenshot filenames also embed U+202F
+/// (narrow no-break space) before AM/PM — that must stay inside the token, so
+/// this never splits on unicode whitespace.
+///
+/// Quote rules match shell / Finder / iTerm drops: `'` / `"` open a literal run
+/// until the matching closer; backslash is literal inside quotes.
 #[cfg(unix)]
-fn strip_matching_path_quotes(text: &str) -> &str {
-    if text.len() < 2 {
-        return text;
-    }
-
-    let bytes = text.as_bytes();
-    match (bytes.first(), bytes.last()) {
-        (Some(b'\''), Some(b'\'')) | (Some(b'"'), Some(b'"')) => &text[1..text.len() - 1],
-        _ => text,
-    }
-}
-
-#[cfg(unix)]
-fn unescape_terminal_drop_path(text: &str) -> String {
-    let mut unescaped = String::with_capacity(text.len());
+fn tokenize_terminal_drop_paths(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
     let mut chars = text.chars();
+
     while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            if let Some(escaped) = chars.next() {
-                unescaped.push(escaped);
-            } else {
-                unescaped.push(ch);
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                } else {
+                    current.push(ch);
+                }
             }
-        } else {
-            unescaped.push(ch);
+            None if ch == '\\' => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            None if ch == '\'' || ch == '"' => quote = Some(ch),
+            None if ch == ' ' || ch == '\t' => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            None => current.push(ch),
         }
     }
-    unescaped
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    tokens
 }
 
 #[cfg(unix)]
 fn recognized_image_extension(extension: &str) -> Option<&'static str> {
+    // Keep in sync with server::clipboard_image::sanitize_extension — client
+    // detects; server validates. Defense in depth across the wire boundary.
     if extension.eq_ignore_ascii_case("png") {
         Some("png")
     } else if extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg") {
@@ -2295,10 +2333,11 @@ mod tests {
         let file = TempImageFile::new("PNG", b"image-bytes");
         let input = format!("\x1b[200~{}\x1b[201~", file.path.display());
 
-        let image = read_image_file_from_terminal_drop(input.as_bytes(), true).unwrap();
+        let images = read_image_files_from_terminal_drop(input.as_bytes(), true).unwrap();
 
-        assert_eq!(image.extension, "png");
-        assert_eq!(image.bytes, b"image-bytes");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].extension, "png");
+        assert_eq!(images[0].bytes, b"image-bytes");
     }
 
     #[cfg(unix)]
@@ -2307,10 +2346,11 @@ mod tests {
         let file = TempImageFile::new("jpeg", b"jpeg-bytes");
         let input = format!("'{}'\n", file.path.display());
 
-        let image = read_image_file_from_terminal_drop(input.as_bytes(), true).unwrap();
+        let images = read_image_files_from_terminal_drop(input.as_bytes(), true).unwrap();
 
-        assert_eq!(image.extension, "jpg");
-        assert_eq!(image.bytes, b"jpeg-bytes");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].extension, "jpg");
+        assert_eq!(images[0].bytes, b"jpeg-bytes");
     }
 
     #[cfg(unix)]
@@ -2319,10 +2359,11 @@ mod tests {
         let file = TempImageFile::with_name_fragment("space test", "png", b"image-bytes");
         let escaped_path = file.path.display().to_string().replace(' ', "\\ ");
 
-        let image = read_image_file_from_terminal_drop(escaped_path.as_bytes(), true).unwrap();
+        let images = read_image_files_from_terminal_drop(escaped_path.as_bytes(), true).unwrap();
 
-        assert_eq!(image.extension, "png");
-        assert_eq!(image.bytes, b"image-bytes");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].extension, "png");
+        assert_eq!(images[0].bytes, b"image-bytes");
     }
 
     #[cfg(unix)]
@@ -2331,14 +2372,158 @@ mod tests {
         let file = TempImageFile::new("png", b"image-bytes");
         let path = file.path.display().to_string();
 
-        assert!(read_image_file_from_terminal_drop(path.as_bytes(), false).is_none());
-        assert!(read_image_file_from_terminal_drop(b"relative.png\n", true).is_none());
-        assert!(read_image_file_from_terminal_drop(b"/tmp/file.txt\n", true).is_none());
-        assert!(read_image_file_from_terminal_drop(
+        assert!(read_image_files_from_terminal_drop(path.as_bytes(), false).is_none());
+        assert!(read_image_files_from_terminal_drop(b"relative.png\n", true).is_none());
+        assert!(read_image_files_from_terminal_drop(b"/tmp/file.txt\n", true).is_none());
+        assert!(read_image_files_from_terminal_drop(
             format!("{}\nextra", file.path.display()).as_bytes(),
             true
         )
         .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tokenize_terminal_drop_paths_splits_ascii_space_and_tab_only() {
+        assert_eq!(
+            tokenize_terminal_drop_paths(r"/a/one.png /a/two\ three.jpg"),
+            vec!["/a/one.png".to_owned(), "/a/two three.jpg".to_owned()]
+        );
+        assert_eq!(
+            tokenize_terminal_drop_paths("/a/one.png\t/a/two.jpg"),
+            vec!["/a/one.png".to_owned(), "/a/two.jpg".to_owned()]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tokenize_terminal_drop_paths_preserves_u202f_in_token() {
+        // macOS Screenshot filenames embed U+202F before AM/PM. Terminals escape
+        // ASCII spaces but leave U+202F literal — the tokenizer must not split on it.
+        let path = "/Users/x/Screenshots/Screenshot\\ 2026-07-08\\ at\\ 12.14.03\u{202f}PM.png";
+        assert_eq!(
+            tokenize_terminal_drop_paths(path),
+            vec!["/Users/x/Screenshots/Screenshot 2026-07-08 at 12.14.03\u{202f}PM.png".to_owned()]
+        );
+        let second = "/Users/x/Screenshots/Screenshot\\ 2026-07-08\\ at\\ 12.13.59\u{202f}PM.png";
+        let multi = format!("{path} {second}");
+        assert_eq!(
+            tokenize_terminal_drop_paths(&multi),
+            vec![
+                "/Users/x/Screenshots/Screenshot 2026-07-08 at 12.14.03\u{202f}PM.png".to_owned(),
+                "/Users/x/Screenshots/Screenshot 2026-07-08 at 12.13.59\u{202f}PM.png".to_owned(),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tokenize_terminal_drop_paths_splits_quoted_tokens() {
+        assert_eq!(
+            tokenize_terminal_drop_paths("'/a/one.png' '/a/two.jpg'"),
+            vec!["/a/one.png".to_owned(), "/a/two.jpg".to_owned()]
+        );
+        assert_eq!(
+            tokenize_terminal_drop_paths(r"/Users/O\'Brien/x.png"),
+            vec!["/Users/O'Brien/x.png".to_owned()]
+        );
+        assert_eq!(
+            tokenize_terminal_drop_paths(r"'/Users/O'\''Brien/x.png'"),
+            vec!["/Users/O'Brien/x.png".to_owned()]
+        );
+        assert_eq!(
+            tokenize_terminal_drop_paths(r#""/a/two words.png""#),
+            vec!["/a/two words.png".to_owned()]
+        );
+        assert_eq!(
+            tokenize_terminal_drop_paths(r"/a/back\\slash.png"),
+            vec![r"/a/back\slash.png".to_owned()]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_image_file_drop_bridge_reads_multiple_unquoted_paths_with_escaped_spaces() {
+        let first = TempImageFile::new("png", b"one");
+        let second = TempImageFile::with_name_fragment("space test", "jpg", b"two");
+        let escaped_second = second.path.display().to_string().replace(' ', "\\ ");
+        let input = format!("{} {}\n", first.path.display(), escaped_second);
+
+        let images = read_image_files_from_terminal_drop(input.as_bytes(), true).unwrap();
+
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].extension, "png");
+        assert_eq!(images[0].bytes, b"one");
+        assert_eq!(images[1].extension, "jpg");
+        assert_eq!(images[1].bytes, b"two");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_image_file_drop_bridge_reads_multiple_single_quoted_paths() {
+        let first = TempImageFile::new("png", b"one");
+        let second = TempImageFile::new("webp", b"two");
+        let input = format!("'{}' '{}'\n", first.path.display(), second.path.display());
+
+        let images = read_image_files_from_terminal_drop(input.as_bytes(), true).unwrap();
+
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].extension, "png");
+        assert_eq!(images[0].bytes, b"one");
+        assert_eq!(images[1].extension, "webp");
+        assert_eq!(images[1].bytes, b"two");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_image_file_drop_bridge_fails_closed_when_any_token_is_not_an_image() {
+        let image = TempImageFile::new("png", b"image-bytes");
+        let text = TempImageFile::new("txt", b"not-an-image");
+        let input = format!("{} {}\n", image.path.display(), text.path.display());
+
+        assert!(read_image_files_from_terminal_drop(input.as_bytes(), true).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_image_file_drop_bridge_fails_closed_when_any_token_is_relative() {
+        let image = TempImageFile::new("png", b"image-bytes");
+        let input = format!("{} relative.png\n", image.path.display());
+
+        assert!(read_image_files_from_terminal_drop(input.as_bytes(), true).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_image_file_drop_bridge_fails_closed_when_any_token_missing_on_disk() {
+        let image = TempImageFile::new("png", b"image-bytes");
+        let missing = std::env::temp_dir().join(format!(
+            "herdr-client-drop-missing-{}-{}.jpg",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let input = format!("{} {}\n", image.path.display(), missing.display());
+
+        assert!(read_image_files_from_terminal_drop(input.as_bytes(), true).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_image_file_drop_bridge_fails_closed_over_batch_cap() {
+        let files: Vec<_> = (0..=MAX_TERMINAL_DROP_FILES)
+            .map(|i| TempImageFile::with_name_fragment(&format!("cap{i}"), "png", b"x"))
+            .collect();
+        let input = files
+            .iter()
+            .map(|f| f.path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(files.len() > MAX_TERMINAL_DROP_FILES);
+        assert!(read_image_files_from_terminal_drop(input.as_bytes(), true).is_none());
     }
 
     #[test]

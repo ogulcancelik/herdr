@@ -15,7 +15,12 @@ pub(crate) fn stage(
     extension: &str,
     data: &[u8],
 ) -> io::Result<StagedClipboardImage> {
-    let extension = sanitize_extension(extension);
+    let Some(extension) = sanitize_extension(extension) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unsupported clipboard image extension: {extension}"),
+        ));
+    };
     let dir = ensure_staging_dir()?;
     cleanup_stale(&dir);
 
@@ -55,19 +60,21 @@ pub(crate) fn remove_files(paths: Vec<PathBuf>) {
     }
 }
 
-fn sanitize_extension(extension: &str) -> &'static str {
+fn sanitize_extension(extension: &str) -> Option<&'static str> {
+    // Keep in sync with client::recognized_image_extension — server validates
+    // what the remote client claims over the wire.
     if extension.eq_ignore_ascii_case("png") {
-        "png"
+        Some("png")
     } else if extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg") {
-        "jpg"
+        Some("jpg")
     } else if extension.eq_ignore_ascii_case("gif") {
-        "gif"
+        Some("gif")
     } else if extension.eq_ignore_ascii_case("webp") {
-        "webp"
+        Some("webp")
     } else if extension.eq_ignore_ascii_case("bmp") {
-        "bmp"
+        Some("bmp")
     } else {
-        "png"
+        None
     }
 }
 
@@ -139,9 +146,19 @@ mod tests {
 
     #[test]
     fn sanitize_extension_accepts_known_image_extensions() {
-        assert_eq!(sanitize_extension("PNG"), "png");
-        assert_eq!(sanitize_extension("jpeg"), "jpg");
-        assert_eq!(sanitize_extension("webp"), "webp");
-        assert_eq!(sanitize_extension("sh"), "png");
+        assert_eq!(sanitize_extension("PNG"), Some("png"));
+        assert_eq!(sanitize_extension("jpeg"), Some("jpg"));
+        assert_eq!(sanitize_extension("webp"), Some("webp"));
+        assert_eq!(sanitize_extension("sh"), None);
+        assert_eq!(sanitize_extension("heic"), None);
+    }
+
+    #[test]
+    fn stage_rejects_unrecognized_extension() {
+        let err = match stage(1, "sh", b"not-an-image") {
+            Err(err) => err,
+            Ok(_) => panic!("expected unrecognized extension to fail staging"),
+        };
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 }
