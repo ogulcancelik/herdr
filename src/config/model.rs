@@ -808,6 +808,8 @@ pub struct UiConfig {
     pub show_agent_labels_on_pane_borders: bool,
     /// Hide the tab row when the workspace has one tab. Default: false.
     pub hide_tab_bar_when_single_tab: bool,
+    /// Focus the search box by default when the goto navigator opens. Default: false.
+    pub goto_search_autofocus: bool,
     /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
     pub agent_panel_sort: AgentPanelSortConfig,
     /// Expanded sidebar row composition.
@@ -1004,6 +1006,7 @@ impl Default for UiConfig {
             pane_gaps: true,
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
+            goto_search_autofocus: false,
             agent_panel_sort: AgentPanelSortConfig::Spaces,
             sidebar: SidebarConfig::default(),
             accent: "cyan".into(),
@@ -1248,6 +1251,19 @@ hide_tab_bar_when_single_tab = true
         assert!(config.ui.pane_gaps);
         assert!(config.ui.show_agent_labels_on_pane_borders);
         assert!(config.ui.hide_tab_bar_when_single_tab);
+    }
+
+    #[test]
+    fn goto_search_autofocus_defaults_off_and_parses() {
+        let default_config = Config::default();
+        assert!(!default_config.ui.goto_search_autofocus);
+
+        let toml = r#"
+[ui]
+goto_search_autofocus = true
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.ui.goto_search_autofocus);
     }
 
     #[test]

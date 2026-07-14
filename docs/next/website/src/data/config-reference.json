@@ -659,6 +659,12 @@
           "description": "Hide the tab row when the workspace has one tab."
         },
         {
+          "key": "ui.goto_search_autofocus",
+          "type": "boolean",
+          "default": "false",
+          "description": "Focus the search box by default when the goto navigator opens."
+        },
+        {
           "key": "ui.agent_panel_sort",
           "type": "enum",
           "default": "\"spaces\"",
