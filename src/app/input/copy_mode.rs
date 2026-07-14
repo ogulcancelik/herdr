@@ -598,12 +598,18 @@ impl AppState {
             return;
         };
         let pane_id = copy_mode.pane_id;
+        let cursor_row = copy_mode.cursor_row;
         let Some(info) = self.pane_info_by_id(pane_id) else {
             self.exit_copy_mode(terminal_runtimes, false);
             return;
         };
         let cursor_col = if end {
-            info.inner_rect.width.saturating_sub(1)
+            let Some(text) = self.copy_mode_visible_row_text(terminal_runtimes, cursor_row) else {
+                return;
+            };
+            last_character_col(&text)
+                .unwrap_or(0)
+                .min(info.inner_rect.width.saturating_sub(1))
         } else {
             0
         };
@@ -929,6 +935,19 @@ fn first_non_blank_col(text: &str) -> Option<u16> {
         col = col.saturating_add(char_cell_width(ch));
     }
     None
+}
+
+fn last_character_col(text: &str) -> Option<u16> {
+    let mut col = 0u16;
+    let mut last_col = None;
+    for ch in text.chars() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+        if width > 0 {
+            last_col = Some(col);
+            col = col.saturating_add(width);
+        }
+    }
+    last_col
 }
 
 fn char_cell_width(ch: char) -> u16 {
@@ -1339,6 +1358,68 @@ mod tests {
 
         assert_eq!(app.state.mode, Mode::Copy);
         assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), 0);
+    }
+
+    #[tokio::test]
+    async fn copy_mode_line_end_stops_at_last_character() {
+        let (mut app, _) = app_with_copy_screen(b"hello\r\n");
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        if let Some(copy_mode) = app.state.copy_mode.as_mut() {
+            copy_mode.cursor_row = 0;
+            copy_mode.cursor_col = 0;
+        }
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('$'), KeyModifiers::empty()));
+
+        assert_eq!(
+            app.state.copy_mode.as_ref().expect("copy mode").cursor_col,
+            4
+        );
+
+        if let Some(copy_mode) = app.state.copy_mode.as_mut() {
+            copy_mode.cursor_col = 0;
+        }
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::End, KeyModifiers::empty()));
+        assert_eq!(
+            app.state.copy_mode.as_ref().expect("copy mode").cursor_col,
+            4
+        );
+
+        let (mut empty_app, _) = app_with_copy_screen(b"\r\n");
+        empty_app
+            .state
+            .enter_copy_mode(&empty_app.terminal_runtimes);
+        if let Some(copy_mode) = empty_app.state.copy_mode.as_mut() {
+            copy_mode.cursor_row = 0;
+            copy_mode.cursor_col = 7;
+        }
+        empty_app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('$'), KeyModifiers::empty()));
+        assert_eq!(
+            empty_app
+                .state
+                .copy_mode
+                .as_ref()
+                .expect("copy mode")
+                .cursor_col,
+            0
+        );
+
+        let (mut wide_app, _) = app_with_copy_screen("a界\r\n".as_bytes());
+        wide_app.state.enter_copy_mode(&wide_app.terminal_runtimes);
+        if let Some(copy_mode) = wide_app.state.copy_mode.as_mut() {
+            copy_mode.cursor_row = 0;
+            copy_mode.cursor_col = 0;
+        }
+        wide_app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('$'), KeyModifiers::empty()));
+        assert_eq!(
+            wide_app
+                .state
+                .copy_mode
+                .as_ref()
+                .expect("copy mode")
+                .cursor_col,
+            1
+        );
     }
 
     #[tokio::test]
