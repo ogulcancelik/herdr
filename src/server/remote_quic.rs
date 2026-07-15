@@ -8,8 +8,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use quinn::{Connection, Endpoint, RecvStream, SendStream, VarInt};
-use serde::{de::DeserializeOwned, Serialize};
-use sha2::{Digest, Sha256};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::sync::{mpsc, watch, Notify, Semaphore};
 use tracing::{debug, info, warn};
@@ -22,9 +20,11 @@ use crate::protocol::{
     REMOTE_QUIC_ALPN, REMOTE_QUIC_HASH_BYTES, REMOTE_QUIC_ID_BYTES,
     REMOTE_QUIC_MAX_RESOURCE_INVENTORY, REMOTE_QUIC_MAX_RESOURCE_SIZE, REMOTE_QUIC_TOKEN_BYTES,
 };
+use crate::remote::frame::{hash_bytes, lock, read_async_message, write_async_message};
+
 use crate::server::client_transport::{
-    clamp_terminal_size, parse_client_keybindings, ClientWriter, ServerEvent,
-    MAX_INPUT_EVENT_BATCH, MAX_INPUT_PAYLOAD,
+    clamp_terminal_size, client_message_to_event, parse_client_keybindings, ClientWriter,
+    ServerEvent,
 };
 
 const MAX_TOKENS: usize = 64;
@@ -536,51 +536,7 @@ async fn receive_client_control(
 ) -> Result<(), String> {
     loop {
         let message: ClientMessage = read_async_message(recv, MAX_GRAPHICS_FRAME_SIZE).await?;
-        let event = match message {
-            ClientMessage::Input { data } => {
-                if data.len() > MAX_INPUT_PAYLOAD {
-                    return Err("remote input exceeds size limit".to_owned());
-                }
-                ServerEvent::ClientInput { client_id, data }
-            }
-            ClientMessage::InputEvents { events } => {
-                if events.len() > MAX_INPUT_EVENT_BATCH {
-                    return Err("remote input event batch exceeds size limit".to_owned());
-                }
-                ServerEvent::ClientInputEvents { client_id, events }
-            }
-            ClientMessage::ClipboardImage { extension, data } => {
-                if data.len() > protocol::MAX_CLIPBOARD_IMAGE_PAYLOAD {
-                    return Err("remote clipboard image exceeds size limit".to_owned());
-                }
-                ServerEvent::ClientClipboardImage {
-                    client_id,
-                    extension,
-                    data,
-                }
-            }
-            ClientMessage::Resize {
-                cols,
-                rows,
-                cell_width_px,
-                cell_height_px,
-            } => {
-                let (cols, rows) = clamp_terminal_size(cols, rows);
-                ServerEvent::ClientResize {
-                    client_id,
-                    cols,
-                    rows,
-                    cell_width_px,
-                    cell_height_px,
-                }
-            }
-            ClientMessage::Detach => {
-                server_event_tx
-                    .send(ServerEvent::ClientDetach { client_id })
-                    .await
-                    .map_err(|_| "server event loop stopped".to_owned())?;
-                return Ok(());
-            }
+        let message = match message {
             ClientMessage::RemotePing { nonce } => {
                 let mut framed = Vec::new();
                 protocol::write_message(&mut framed, &ServerMessage::RemotePong { nonce })
@@ -590,47 +546,22 @@ async fn receive_client_control(
                     .map_err(|_| "remote control writer closed".to_owned())?;
                 continue;
             }
-            ClientMessage::SyncRequest => ServerEvent::ClientSyncRequest { client_id },
-            ClientMessage::AttachTerminal {
-                terminal_id,
-                takeover,
-            } => ServerEvent::ClientAttachTerminal {
-                client_id,
-                terminal_id,
-                takeover,
-            },
-            ClientMessage::AttachScroll {
-                source,
-                direction,
-                lines,
-                column,
-                row,
-                modifiers,
-            } => ServerEvent::ClientAttachScroll {
-                client_id,
-                source,
-                direction,
-                lines,
-                column,
-                row,
-                modifiers,
-            },
-            ClientMessage::ObserveTerminal { target } => {
-                ServerEvent::ClientObserveTerminal { client_id, target }
-            }
-            ClientMessage::ControlTerminal { target, takeover } => {
-                ServerEvent::ClientControlTerminal {
-                    client_id,
-                    target,
-                    takeover,
-                }
-            }
             ClientMessage::Hello { .. } | ClientMessage::RemoteBootstrap(_) => continue,
+            message => message,
         };
+        let Some(event) = client_message_to_event(client_id, message)
+            .map_err(|reason| format!("invalid remote client message: {reason}"))?
+        else {
+            continue;
+        };
+        let detached = matches!(event, ServerEvent::ClientDetach { .. });
         server_event_tx
             .send(event)
             .await
             .map_err(|_| "server event loop stopped".to_owned())?;
+        if detached {
+            return Ok(());
+        }
     }
 }
 
@@ -1101,71 +1032,11 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-async fn write_async_message<M: Serialize>(
-    stream: &mut SendStream,
-    message: &M,
-    max: usize,
-) -> Result<(), String> {
-    let payload = bincode::serde::encode_to_vec(message, bincode::config::standard())
-        .map_err(|err| format!("failed to encode QUIC message: {err}"))?;
-    if payload.len() > max || payload.len() > u32::MAX as usize {
-        return Err(format!(
-            "QUIC message size {} exceeds maximum {max}",
-            payload.len()
-        ));
-    }
-    stream
-        .write_all(&(payload.len() as u32).to_le_bytes())
-        .await
-        .map_err(|err| format!("failed to write QUIC message length: {err}"))?;
-    stream
-        .write_all(&payload)
-        .await
-        .map_err(|err| format!("failed to write QUIC message: {err}"))
-}
-
-async fn read_async_message<M: DeserializeOwned>(
-    stream: &mut RecvStream,
-    max: usize,
-) -> Result<M, String> {
-    let mut length = [0u8; 4];
-    stream
-        .read_exact(&mut length)
-        .await
-        .map_err(|err| format!("failed to read QUIC message length: {err}"))?;
-    let length = u32::from_le_bytes(length) as usize;
-    if length > max {
-        return Err(format!("QUIC message size {length} exceeds maximum {max}"));
-    }
-    let mut payload = vec![0u8; length];
-    stream
-        .read_exact(&mut payload)
-        .await
-        .map_err(|err| format!("failed to read QUIC message: {err}"))?;
-    let (message, consumed) =
-        bincode::serde::decode_from_slice(&payload, bincode::config::standard())
-            .map_err(|err| format!("failed to decode QUIC message: {err}"))?;
-    if consumed != length {
-        return Err("QUIC message contains trailing bytes".to_owned());
-    }
-    Ok(message)
-}
-
-fn hash_bytes(bytes: &[u8]) -> [u8; REMOTE_QUIC_HASH_BYTES] {
-    Sha256::digest(bytes).into()
-}
-
 fn unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]

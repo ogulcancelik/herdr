@@ -972,6 +972,16 @@ fn write_terminal_session_output(mut stream: LocalStream) -> io::Result<()> {
                 stdout.write_all(b"\n")?;
                 stdout.flush()?;
             }
+            Ok(ServerMessage::ClientDetached) => {
+                let line = serde_json::json!({
+                    "type": "terminal.closed",
+                    "reason": "detached",
+                });
+                serde_json::to_writer(&mut stdout, &line)?;
+                stdout.write_all(b"\n")?;
+                stdout.flush()?;
+                return Ok(());
+            }
             Ok(ServerMessage::ServerShutdown { reason }) => {
                 let line = serde_json::json!({
                     "type": "terminal.closed",
@@ -1551,6 +1561,11 @@ async fn run_client_loop(
                         let _ = stdout.write_all(&bytes);
                         let _ = stdout.flush();
                     }
+                }
+                ServerMessage::ClientDetached => {
+                    return Err(ClientError::ServerShutdown {
+                        reason: Some("detached".to_owned()),
+                    });
                 }
                 ServerMessage::ServerShutdown { reason } => {
                     return Err(ClientError::ServerShutdown { reason });

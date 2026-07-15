@@ -440,6 +440,117 @@ fn input_events_within_limits(events: &[ClientInputEvent]) -> bool {
     true
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ClientMessageCloseReason {
+    InputPayload { size: usize },
+    InputEvents { count: usize },
+    ClipboardImage { size: usize },
+}
+
+impl std::fmt::Display for ClientMessageCloseReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InputPayload { size } => write!(
+                formatter,
+                "input payload is {size} bytes; maximum is {MAX_INPUT_PAYLOAD}"
+            ),
+            Self::InputEvents { count } => write!(
+                formatter,
+                "input event batch has {count} events or oversized paste data"
+            ),
+            Self::ClipboardImage { size } => write!(
+                formatter,
+                "clipboard image is {size} bytes; maximum is {MAX_CLIPBOARD_IMAGE_PAYLOAD}"
+            ),
+        }
+    }
+}
+
+pub(crate) fn client_message_to_event(
+    client_id: u64,
+    message: ClientMessage,
+) -> Result<Option<ServerEvent>, ClientMessageCloseReason> {
+    let event = match message {
+        ClientMessage::Input { data } => {
+            if data.len() > MAX_INPUT_PAYLOAD {
+                return Err(ClientMessageCloseReason::InputPayload { size: data.len() });
+            }
+            ServerEvent::ClientInput { client_id, data }
+        }
+        ClientMessage::InputEvents { events } => {
+            if !input_events_within_limits(&events) {
+                return Err(ClientMessageCloseReason::InputEvents {
+                    count: events.len(),
+                });
+            }
+            ServerEvent::ClientInputEvents { client_id, events }
+        }
+        ClientMessage::ObserveTerminal { target } => {
+            ServerEvent::ClientObserveTerminal { client_id, target }
+        }
+        ClientMessage::ControlTerminal { target, takeover } => ServerEvent::ClientControlTerminal {
+            client_id,
+            target,
+            takeover,
+        },
+        ClientMessage::ClipboardImage { extension, data } => {
+            if data.len() > MAX_CLIPBOARD_IMAGE_PAYLOAD {
+                return Err(ClientMessageCloseReason::ClipboardImage { size: data.len() });
+            }
+            ServerEvent::ClientClipboardImage {
+                client_id,
+                extension,
+                data,
+            }
+        }
+        ClientMessage::Resize {
+            cols,
+            rows,
+            cell_width_px,
+            cell_height_px,
+        } => {
+            let (cols, rows) = clamp_terminal_size(cols, rows);
+            ServerEvent::ClientResize {
+                client_id,
+                cols,
+                rows,
+                cell_width_px,
+                cell_height_px,
+            }
+        }
+        ClientMessage::Detach => ServerEvent::ClientDetach { client_id },
+        ClientMessage::AttachTerminal {
+            terminal_id,
+            takeover,
+        } => ServerEvent::ClientAttachTerminal {
+            client_id,
+            terminal_id,
+            takeover,
+        },
+        ClientMessage::AttachScroll {
+            source,
+            direction,
+            lines,
+            column,
+            row,
+            modifiers,
+        } => ServerEvent::ClientAttachScroll {
+            client_id,
+            source,
+            direction,
+            lines,
+            column,
+            row,
+            modifiers,
+        },
+        ClientMessage::SyncRequest => ServerEvent::ClientSyncRequest { client_id },
+        ClientMessage::Hello { .. }
+        | ClientMessage::RemoteBootstrap(_)
+        | ClientMessage::RemotePing { .. } => return Ok(None),
+    };
+    Ok(Some(event))
+}
+
 #[cfg(windows)]
 fn set_client_recv_timeout(
     stream: &LocalStream,
@@ -728,116 +839,14 @@ fn client_read_loop(
             }
         };
 
-        let event = match msg {
-            ClientMessage::Input { data } => {
-                // Validate input size.
-                if data.len() > MAX_INPUT_PAYLOAD {
-                    warn!(
-                        client_id,
-                        size = data.len(),
-                        "oversized input from client, closing"
-                    );
-                    let _ = server_event_tx
-                        .blocking_send(ServerEvent::ClientDisconnected { client_id });
-                    break;
-                } else {
-                    ServerEvent::ClientInput { client_id, data }
-                }
-            }
-            ClientMessage::InputEvents { events } => {
-                if !input_events_within_limits(&events) {
-                    warn!(
-                        client_id,
-                        count = events.len(),
-                        "oversized input events from client, closing"
-                    );
-                    let _ = server_event_tx
-                        .blocking_send(ServerEvent::ClientDisconnected { client_id });
-                    break;
-                } else {
-                    ServerEvent::ClientInputEvents { client_id, events }
-                }
-            }
-            ClientMessage::ObserveTerminal { target } => {
-                ServerEvent::ClientObserveTerminal { client_id, target }
-            }
-            ClientMessage::ControlTerminal { target, takeover } => {
-                ServerEvent::ClientControlTerminal {
-                    client_id,
-                    target,
-                    takeover,
-                }
-            }
-            ClientMessage::ClipboardImage { extension, data } => {
-                if data.len() > MAX_CLIPBOARD_IMAGE_PAYLOAD {
-                    warn!(
-                        client_id,
-                        size = data.len(),
-                        "oversized clipboard image from client, closing"
-                    );
-                    let _ = server_event_tx
-                        .blocking_send(ServerEvent::ClientDisconnected { client_id });
-                    break;
-                } else {
-                    ServerEvent::ClientClipboardImage {
-                        client_id,
-                        extension,
-                        data,
-                    }
-                }
-            }
-            ClientMessage::Resize {
-                cols,
-                rows,
-                cell_width_px,
-                cell_height_px,
-            } => {
-                let (clamped_cols, clamped_rows) = clamp_terminal_size(cols, rows);
-                ServerEvent::ClientResize {
-                    client_id,
-                    cols: clamped_cols,
-                    rows: clamped_rows,
-                    cell_width_px,
-                    cell_height_px,
-                }
-            }
-            ClientMessage::Detach => ServerEvent::ClientDetach { client_id },
-            ClientMessage::AttachTerminal {
-                terminal_id,
-                takeover,
-            } => ServerEvent::ClientAttachTerminal {
-                client_id,
-                terminal_id,
-                takeover,
-            },
-            ClientMessage::AttachScroll {
-                source,
-                direction,
-                lines,
-                column,
-                row,
-                modifiers,
-            } => ServerEvent::ClientAttachScroll {
-                client_id,
-                source,
-                direction,
-                lines,
-                column,
-                row,
-                modifiers,
-            },
-            ClientMessage::SyncRequest => ServerEvent::ClientSyncRequest { client_id },
-            ClientMessage::RemoteBootstrap(_) => {
-                // Bootstrap is valid only as the first local-socket message.
-                continue;
-            }
-            ClientMessage::Hello { .. } => {
-                // Duplicate Hello — ignore.
-                continue;
-            }
-            ClientMessage::RemotePing { .. } => {
-                // Heartbeats are valid only on the QUIC control stream.
-                continue;
+        let event = match client_message_to_event(client_id, msg) {
+            Ok(Some(event)) => event,
+            Ok(None) => continue,
+            Err(reason) => {
+                warn!(client_id, %reason, "invalid client message, closing");
+                let _ =
+                    server_event_tx.blocking_send(ServerEvent::ClientDisconnected { client_id });
+                break;
             }
         };
 
@@ -1417,6 +1426,51 @@ new_tab = "ctrl+notakey"
             .join()
             .expect("read thread join")
             .expect("read thread result");
+    }
+
+    #[test]
+    fn shared_message_dispatch_applies_limits_and_transport_specials() {
+        let error = client_message_to_event(
+            7,
+            ClientMessage::InputEvents {
+                events: vec![ClientInputEvent::Paste {
+                    text: "x".repeat(MAX_INPUT_PAYLOAD + 1),
+                }],
+            },
+        )
+        .expect_err("oversized paste must close every transport");
+        assert!(matches!(
+            error,
+            ClientMessageCloseReason::InputEvents { count: 1 }
+        ));
+
+        let event = client_message_to_event(
+            7,
+            ClientMessage::Resize {
+                cols: 0,
+                rows: 0,
+                cell_width_px: 8,
+                cell_height_px: 16,
+            },
+        )
+        .expect("valid resize")
+        .expect("resize event");
+        assert!(matches!(
+            event,
+            ServerEvent::ClientResize {
+                client_id: 7,
+                cols: MIN_CLIENT_COLS,
+                rows: MIN_CLIENT_ROWS,
+                cell_width_px: 8,
+                cell_height_px: 16,
+            }
+        ));
+
+        assert!(
+            client_message_to_event(7, ClientMessage::RemotePing { nonce: 9 })
+                .expect("transport-local message")
+                .is_none()
+        );
     }
 
     #[test]

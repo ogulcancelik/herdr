@@ -2,6 +2,9 @@
 mod benchmark;
 
 #[cfg(unix)]
+pub(crate) mod frame;
+
+#[cfg(unix)]
 mod quic;
 
 #[cfg(unix)]

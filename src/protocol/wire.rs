@@ -801,6 +801,9 @@ pub enum ServerMessage {
         status: RemoteTransportStatus,
         detail: Option<String>,
     },
+
+    /// The server accepted a deliberate detach request for this client.
+    ClientDetached,
 }
 
 // ---------------------------------------------------------------------------
@@ -1458,6 +1461,15 @@ mod tests {
         let msg = ServerMessage::ServerShutdown {
             reason: Some("updating".to_owned()),
         };
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ServerMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn client_detached_roundtrip() {
+        let msg = ServerMessage::ClientDetached;
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ServerMessage, _) =
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();

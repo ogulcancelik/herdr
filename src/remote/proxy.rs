@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::debug;
 
+use super::frame::lock;
+
 use super::quic::{ConnectParams, QuicSession, ResourceCache, SessionExit};
 use super::unix::{
     apply_managed_ssh_options, remote_bridge_command, remote_quic_candidates,
@@ -102,6 +104,18 @@ impl Drop for ResumableRemoteBridge {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LocalClientPhase {
+    AwaitingWelcome,
+    Connected,
+}
+
+impl LocalClientPhase {
+    fn is_connected(self) -> bool {
+        self == Self::Connected
     }
 }
 
@@ -306,7 +320,7 @@ fn bridge_connection(
         .worker_threads(2)
         .thread_name("herdr-remote-quic")
         .build()?;
-    let mut welcome_forwarded = false;
+    let mut client_phase = LocalClientPhase::AwaitingWelcome;
     let mut use_ssh = config.remote_config.transport == RemoteTransportConfig::Ssh;
 
     if !use_ssh {
@@ -315,12 +329,12 @@ fn bridge_connection(
             config,
             Arc::clone(&router),
             output_tx.clone(),
-            &mut welcome_forwarded,
+            &mut client_phase,
         ) {
             QuicOutcome::Detached => {}
             QuicOutcome::Fallback(detail) => {
                 if config.remote_config.ssh_fallback {
-                    if welcome_forwarded {
+                    if client_phase.is_connected() {
                         let _ = output_tx.blocking_send(ServerMessage::TransportStatus {
                             status: RemoteTransportStatus::SshFallbackConnecting,
                             detail: Some(detail),
@@ -328,7 +342,7 @@ fn bridge_connection(
                     }
                     use_ssh = true;
                 } else {
-                    send_proxy_error(&output_tx, &mut welcome_forwarded, detail);
+                    send_proxy_error(&output_tx, &mut client_phase, detail);
                 }
             }
         }
@@ -339,7 +353,7 @@ fn bridge_connection(
             config,
             Arc::clone(&router),
             output_tx.clone(),
-            &mut welcome_forwarded,
+            &mut client_phase,
             should_stop,
         );
     }
@@ -351,9 +365,131 @@ fn bridge_connection(
     Ok(())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum QuicOutcome {
     Detached,
     Fallback(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QuicAttempt {
+    Initial,
+    Fresh,
+    Rebootstrapped,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TransportPhase {
+    QuicConnecting(QuicAttempt),
+    QuicLive,
+    SshRebootstrap,
+    SshFallback(String),
+    Done(QuicOutcome),
+}
+
+#[derive(Debug)]
+enum TransportEvent {
+    QuicConnected,
+    QuicConnectFailed(String),
+    SessionExited(SessionExit),
+    RebootstrapSucceeded,
+    RebootstrapFailed(String),
+    ClientDetached,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TransportAction {
+    ConnectQuic {
+        recovering: bool,
+        detail: Option<String>,
+    },
+    RunQuic {
+        recovering: bool,
+    },
+    Rebootstrap {
+        detail: String,
+    },
+    StartSshFallback,
+    Finish,
+}
+
+fn next_transport_phase(
+    phase: TransportPhase,
+    event: TransportEvent,
+) -> (TransportPhase, TransportAction) {
+    if matches!(event, TransportEvent::ClientDetached) {
+        return (
+            TransportPhase::Done(QuicOutcome::Detached),
+            TransportAction::Finish,
+        );
+    }
+
+    match (phase, event) {
+        (TransportPhase::QuicConnecting(attempt), TransportEvent::QuicConnected) => (
+            TransportPhase::QuicLive,
+            TransportAction::RunQuic {
+                recovering: attempt != QuicAttempt::Initial,
+            },
+        ),
+        (
+            TransportPhase::QuicConnecting(QuicAttempt::Initial),
+            TransportEvent::QuicConnectFailed(detail),
+        )
+        | (
+            TransportPhase::QuicConnecting(QuicAttempt::Rebootstrapped),
+            TransportEvent::QuicConnectFailed(detail),
+        ) => (
+            TransportPhase::SshFallback(detail),
+            TransportAction::StartSshFallback,
+        ),
+        (
+            TransportPhase::QuicConnecting(QuicAttempt::Fresh),
+            TransportEvent::QuicConnectFailed(detail),
+        ) => (
+            TransportPhase::SshRebootstrap,
+            TransportAction::Rebootstrap { detail },
+        ),
+        (
+            TransportPhase::QuicLive,
+            TransportEvent::SessionExited(SessionExit::RetryFresh(detail)),
+        ) => (
+            TransportPhase::QuicConnecting(QuicAttempt::Fresh),
+            TransportAction::ConnectQuic {
+                recovering: true,
+                detail: Some(detail),
+            },
+        ),
+        (
+            TransportPhase::QuicLive,
+            TransportEvent::SessionExited(SessionExit::Rebootstrap(detail)),
+        ) => (
+            TransportPhase::SshRebootstrap,
+            TransportAction::Rebootstrap { detail },
+        ),
+        (TransportPhase::QuicLive, TransportEvent::SessionExited(SessionExit::Detached)) => (
+            TransportPhase::Done(QuicOutcome::Detached),
+            TransportAction::Finish,
+        ),
+        (TransportPhase::SshRebootstrap, TransportEvent::RebootstrapSucceeded) => (
+            TransportPhase::QuicConnecting(QuicAttempt::Rebootstrapped),
+            TransportAction::ConnectQuic {
+                recovering: true,
+                detail: None,
+            },
+        ),
+        (TransportPhase::SshRebootstrap, TransportEvent::RebootstrapFailed(detail)) => (
+            TransportPhase::SshFallback(detail),
+            TransportAction::StartSshFallback,
+        ),
+        (phase, event) => {
+            let detail =
+                format!("invalid remote transport transition: phase={phase:?}, event={event:?}");
+            (
+                TransportPhase::Done(QuicOutcome::Fallback(detail)),
+                TransportAction::Finish,
+            )
+        }
+    }
 }
 
 fn run_quic(
@@ -361,7 +497,7 @@ fn run_quic(
     config: &BridgeConfig,
     router: Arc<InputRouter>,
     output: mpsc::Sender<ServerMessage>,
-    welcome_forwarded: &mut bool,
+    client_phase: &mut LocalClientPhase,
 ) -> QuicOutcome {
     let Some(mut bootstrap) = config.bootstrap.clone() else {
         return QuicOutcome::Fallback(
@@ -374,61 +510,93 @@ fn run_quic(
     let Some(hostname) = config.ssh_hostname.as_deref() else {
         return QuicOutcome::Fallback("SSH target hostname could not be resolved".to_owned());
     };
+
     let resource_cache = Arc::new(Mutex::new(ResourceCache::default()));
     let mut connection_generation = 0u64;
-    let mut reconnecting = false;
-    let mut fresh_attempted = false;
-    let mut rebootstrapped = false;
+    let mut connected_session = None;
+    let mut phase = TransportPhase::QuicConnecting(QuicAttempt::Initial);
+    let mut action = TransportAction::ConnectQuic {
+        recovering: false,
+        detail: None,
+    };
 
     loop {
-        if router.is_detached() {
-            return QuicOutcome::Detached;
+        if router.is_detached() && !matches!(&action, TransportAction::Finish) {
+            (phase, action) = next_transport_phase(phase, TransportEvent::ClientDetached);
         }
-        let candidates = match remote_quic_candidates(hostname, bootstrap.port) {
-            Ok(candidates) => candidates,
-            Err(error) => return QuicOutcome::Fallback(error.to_string()),
-        };
-        connection_generation = connection_generation.saturating_add(1);
-        if reconnecting
-            && output
-                .blocking_send(ServerMessage::TransportStatus {
-                    status: RemoteTransportStatus::FreshQuicConnecting,
-                    detail: None,
-                })
-                .is_err()
-        {
-            return QuicOutcome::Detached;
-        }
-        let hello = router.hello();
-        let connect = runtime.block_on(QuicSession::connect(
-            ConnectParams {
-                bootstrap: bootstrap.clone(),
-                candidates,
-                logical_client_id: config.logical_client_id,
-                connection_generation,
-                cols: hello.cols,
-                rows: hello.rows,
-                cell_width_px: hello.cell_width_px,
-                cell_height_px: hello.cell_height_px,
-                keybindings: hello.keybindings,
-            },
-            Arc::clone(&resource_cache),
-        ));
-        let (session, welcome) = match connect {
-            Ok(connected) => connected,
-            Err(error) if !*welcome_forwarded => return QuicOutcome::Fallback(error),
-            Err(error) if !fresh_attempted => {
-                fresh_attempted = true;
-                reconnecting = true;
-                debug!(%error, "fresh remote QUIC connection failed");
-                continue;
+
+        let event = match action {
+            TransportAction::ConnectQuic { recovering, detail } => {
+                if let Some(detail) = detail {
+                    debug!(%detail, "remote QUIC connection lost; trying fresh QUIC");
+                }
+                if recovering
+                    && output
+                        .blocking_send(ServerMessage::TransportStatus {
+                            status: RemoteTransportStatus::FreshQuicConnecting,
+                            detail: None,
+                        })
+                        .is_err()
+                {
+                    return QuicOutcome::Detached;
+                }
+
+                let candidates = match remote_quic_candidates(hostname, bootstrap.port) {
+                    Ok(candidates) => candidates,
+                    Err(error) => {
+                        (phase, action) = next_transport_phase(
+                            phase,
+                            TransportEvent::QuicConnectFailed(error.to_string()),
+                        );
+                        continue;
+                    }
+                };
+                connection_generation = connection_generation.saturating_add(1);
+                let hello = router.hello();
+                match runtime.block_on(QuicSession::connect(
+                    ConnectParams {
+                        bootstrap: bootstrap.clone(),
+                        candidates,
+                        logical_client_id: config.logical_client_id,
+                        connection_generation,
+                        cols: hello.cols,
+                        rows: hello.rows,
+                        cell_width_px: hello.cell_width_px,
+                        cell_height_px: hello.cell_height_px,
+                        keybindings: hello.keybindings,
+                    },
+                    Arc::clone(&resource_cache),
+                )) {
+                    Ok(connected) => {
+                        connected_session = Some(connected);
+                        TransportEvent::QuicConnected
+                    }
+                    Err(error) => TransportEvent::QuicConnectFailed(error),
+                }
             }
-            Err(error) if !rebootstrapped => {
-                rebootstrapped = true;
+            TransportAction::RunQuic { recovering } => {
+                let Some((session, welcome)) = connected_session.take() else {
+                    return QuicOutcome::Fallback(
+                        "remote transport entered QUIC live state without a connection".to_owned(),
+                    );
+                };
+                if *client_phase == LocalClientPhase::AwaitingWelcome {
+                    if output.blocking_send(welcome).is_err() {
+                        return QuicOutcome::Detached;
+                    }
+                    *client_phase = LocalClientPhase::Connected;
+                }
+                let (input_tx, input_rx) = mpsc::channel(INPUT_QUEUE_ITEMS);
+                router.set_active(input_tx);
+                let exit = runtime.block_on(session.run(input_rx, output.clone(), recovering));
+                router.clear_active();
+                TransportEvent::SessionExited(exit)
+            }
+            TransportAction::Rebootstrap { detail } => {
                 if output
                     .blocking_send(ServerMessage::TransportStatus {
                         status: RemoteTransportStatus::SshRebootstrap,
-                        detail: Some(error),
+                        detail: Some(detail),
                     })
                     .is_err()
                 {
@@ -437,67 +605,29 @@ fn run_quic(
                 match rebootstrap(config) {
                     Ok(record) => {
                         bootstrap = record;
-                        continue;
+                        TransportEvent::RebootstrapSucceeded
                     }
-                    Err(error) => return QuicOutcome::Fallback(error.to_string()),
+                    Err(error) => TransportEvent::RebootstrapFailed(error.to_string()),
                 }
             }
-            Err(error) => return QuicOutcome::Fallback(error),
-        };
-
-        fresh_attempted = false;
-        rebootstrapped = false;
-        if !*welcome_forwarded {
-            if output.blocking_send(welcome).is_err() {
-                return QuicOutcome::Detached;
-            }
-            *welcome_forwarded = true;
-        }
-        let (input_tx, input_rx) = mpsc::channel(INPUT_QUEUE_ITEMS);
-        router.set_active(input_tx);
-        let exit = runtime.block_on(session.run(input_rx, output.clone(), reconnecting));
-        router.clear_active();
-        match exit {
-            SessionExit::Detached => return QuicOutcome::Detached,
-            SessionExit::RetryFresh(detail) => {
-                reconnecting = true;
-                if !fresh_attempted {
-                    fresh_attempted = true;
-                    debug!(%detail, "remote QUIC connection lost; trying fresh QUIC");
-                    continue;
-                }
-                if !rebootstrapped {
-                    rebootstrapped = true;
-                    let _ = output.blocking_send(ServerMessage::TransportStatus {
-                        status: RemoteTransportStatus::SshRebootstrap,
-                        detail: Some(detail),
-                    });
-                    match rebootstrap(config) {
-                        Ok(record) => {
-                            bootstrap = record;
-                            continue;
-                        }
-                        Err(error) => return QuicOutcome::Fallback(error.to_string()),
-                    }
-                }
+            TransportAction::StartSshFallback => {
+                let TransportPhase::SshFallback(detail) = phase else {
+                    return QuicOutcome::Fallback(
+                        "remote transport fallback action had no failure detail".to_owned(),
+                    );
+                };
                 return QuicOutcome::Fallback(detail);
             }
-            SessionExit::Rebootstrap(detail) => {
-                reconnecting = true;
-                rebootstrapped = true;
-                let _ = output.blocking_send(ServerMessage::TransportStatus {
-                    status: RemoteTransportStatus::SshRebootstrap,
-                    detail: Some(detail),
-                });
-                match rebootstrap(config) {
-                    Ok(record) => {
-                        bootstrap = record;
-                        fresh_attempted = false;
-                    }
-                    Err(error) => return QuicOutcome::Fallback(error.to_string()),
-                }
+            TransportAction::Finish => {
+                let TransportPhase::Done(outcome) = phase else {
+                    return QuicOutcome::Fallback(
+                        "remote transport finished outside a terminal state".to_owned(),
+                    );
+                };
+                return outcome;
             }
-        }
+        };
+        (phase, action) = next_transport_phase(phase, event);
     }
 }
 
@@ -525,12 +655,11 @@ fn run_ssh_reconnect_loop(
     config: &BridgeConfig,
     router: Arc<InputRouter>,
     output: mpsc::Sender<ServerMessage>,
-    welcome_forwarded: &mut bool,
+    client_phase: &mut LocalClientPhase,
     should_stop: &AtomicBool,
 ) {
-    let mut reconnecting = *welcome_forwarded;
     while !router.is_detached() && !should_stop.load(Ordering::Acquire) {
-        if reconnecting
+        if client_phase.is_connected()
             && output
                 .blocking_send(ServerMessage::TransportStatus {
                     status: RemoteTransportStatus::SshFallbackConnecting,
@@ -540,15 +669,14 @@ fn run_ssh_reconnect_loop(
         {
             return;
         }
-        match run_one_ssh_session(config, Arc::clone(&router), &output, welcome_forwarded) {
+        match run_one_ssh_session(config, Arc::clone(&router), &output, client_phase) {
             SshExit::Detached => return,
             SshExit::Reconnect(detail) => {
-                reconnecting = true;
                 debug!(%detail, "remote SSH bridge disconnected; reconnecting");
                 thread::sleep(SSH_RECONNECT_DELAY);
             }
             SshExit::Fatal(detail) => {
-                send_proxy_error(&output, welcome_forwarded, detail);
+                send_proxy_error(&output, client_phase, detail);
                 return;
             }
         }
@@ -565,7 +693,7 @@ fn run_one_ssh_session(
     config: &BridgeConfig,
     router: Arc<InputRouter>,
     output: &mpsc::Sender<ServerMessage>,
-    welcome_forwarded: &mut bool,
+    client_phase: &mut LocalClientPhase,
 ) -> SshExit {
     let mut command = Command::new("ssh");
     apply_managed_ssh_options(&mut command, config.ssh_options.as_ref());
@@ -615,12 +743,12 @@ fn run_one_ssh_session(
                 return SshExit::Reconnect(format!("failed to read SSH bridge welcome: {error}"));
             }
         };
-    if !*welcome_forwarded {
+    if *client_phase == LocalClientPhase::AwaitingWelcome {
         if output.blocking_send(welcome).is_err() {
             let _ = child.kill();
             return SshExit::Detached;
         }
-        *welcome_forwarded = true;
+        *client_phase = LocalClientPhase::Connected;
     }
 
     let (input_tx, mut input_rx) = mpsc::channel::<ClientMessage>(INPUT_QUEUE_ITEMS);
@@ -641,6 +769,10 @@ fn run_one_ssh_session(
             &mut child_stdout,
             MAX_GRAPHICS_FRAME_SIZE,
         ) {
+            Ok(ServerMessage::ClientDetached) => {
+                let _ = output.blocking_send(ServerMessage::ClientDetached);
+                break SshExit::Detached;
+            }
             Ok(ServerMessage::ServerShutdown { reason }) if !router.is_detached() => {
                 break SshExit::Reconnect(
                     reason.unwrap_or_else(|| "remote server restarted".to_owned()),
@@ -668,15 +800,15 @@ fn run_one_ssh_session(
 
 fn send_proxy_error(
     output: &mpsc::Sender<ServerMessage>,
-    welcome_forwarded: &mut bool,
+    client_phase: &mut LocalClientPhase,
     detail: String,
 ) {
-    let message = if *welcome_forwarded {
+    let message = if client_phase.is_connected() {
         ServerMessage::ServerShutdown {
             reason: Some(detail),
         }
     } else {
-        *welcome_forwarded = true;
+        *client_phase = LocalClientPhase::Connected;
         ServerMessage::Welcome {
             version: PROTOCOL_VERSION,
             encoding: RenderEncoding::TerminalAnsi,
@@ -684,12 +816,6 @@ fn send_proxy_error(
         }
     };
     let _ = output.blocking_send(message);
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
@@ -728,5 +854,94 @@ mod tests {
         let router = InputRouter::new(hello());
         router.route(ClientMessage::Detach);
         assert!(router.is_detached());
+    }
+    #[test]
+    fn transport_machine_uses_one_ordered_recovery_ladder() {
+        let (phase, action) = next_transport_phase(
+            TransportPhase::QuicConnecting(QuicAttempt::Initial),
+            TransportEvent::QuicConnected,
+        );
+        assert_eq!(phase, TransportPhase::QuicLive);
+        assert_eq!(action, TransportAction::RunQuic { recovering: false });
+
+        let (phase, action) = next_transport_phase(
+            phase,
+            TransportEvent::SessionExited(SessionExit::RetryFresh("path lost".to_owned())),
+        );
+        assert_eq!(phase, TransportPhase::QuicConnecting(QuicAttempt::Fresh));
+        assert_eq!(
+            action,
+            TransportAction::ConnectQuic {
+                recovering: true,
+                detail: Some("path lost".to_owned()),
+            }
+        );
+
+        let (phase, action) = next_transport_phase(
+            phase,
+            TransportEvent::QuicConnectFailed("fresh failed".to_owned()),
+        );
+        assert_eq!(phase, TransportPhase::SshRebootstrap);
+        assert_eq!(
+            action,
+            TransportAction::Rebootstrap {
+                detail: "fresh failed".to_owned()
+            }
+        );
+
+        let (phase, action) = next_transport_phase(phase, TransportEvent::RebootstrapSucceeded);
+        assert_eq!(
+            phase,
+            TransportPhase::QuicConnecting(QuicAttempt::Rebootstrapped)
+        );
+        assert_eq!(
+            action,
+            TransportAction::ConnectQuic {
+                recovering: true,
+                detail: None,
+            }
+        );
+
+        let (phase, action) = next_transport_phase(
+            phase,
+            TransportEvent::QuicConnectFailed("new endpoint failed".to_owned()),
+        );
+        assert_eq!(
+            phase,
+            TransportPhase::SshFallback("new endpoint failed".to_owned())
+        );
+        assert_eq!(action, TransportAction::StartSshFallback);
+    }
+
+    #[test]
+    fn transport_machine_handles_direct_rebootstrap_and_terminal_states() {
+        let (phase, action) = next_transport_phase(
+            TransportPhase::QuicLive,
+            TransportEvent::SessionExited(SessionExit::Rebootstrap(
+                "server instance changed".to_owned(),
+            )),
+        );
+        assert_eq!(phase, TransportPhase::SshRebootstrap);
+        assert_eq!(
+            action,
+            TransportAction::Rebootstrap {
+                detail: "server instance changed".to_owned()
+            }
+        );
+
+        let (phase, action) = next_transport_phase(
+            phase,
+            TransportEvent::RebootstrapFailed("SSH unavailable".to_owned()),
+        );
+        assert_eq!(
+            phase,
+            TransportPhase::SshFallback("SSH unavailable".to_owned())
+        );
+        assert_eq!(action, TransportAction::StartSshFallback);
+
+        let (phase, action) =
+            next_transport_phase(TransportPhase::QuicLive, TransportEvent::ClientDetached);
+        assert_eq!(phase, TransportPhase::Done(QuicOutcome::Detached));
+        assert_eq!(action, TransportAction::Finish);
     }
 }

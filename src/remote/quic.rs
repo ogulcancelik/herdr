@@ -7,10 +7,10 @@ use std::time::{Duration, Instant};
 
 use quinn::{Connection, Endpoint, RecvStream, SendStream, VarInt};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use serde::{de::DeserializeOwned, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tracing::debug;
+
+use super::frame::{hash_bytes, lock, read_async_message, write_async_message};
 
 use crate::protocol::{
     ClientKeybindings, ClientLaunchMode, ClientMessage, RemoteBootstrapRecord, RemoteQuicHello,
@@ -314,6 +314,9 @@ impl QuicSession {
                                 outstanding_ping = None;
                                 rebound = false;
                             }
+                        }
+                        ControlEvent::Message(ServerMessage::ClientDetached) => {
+                            return SessionExit::Detached;
                         }
                         ControlEvent::Message(ServerMessage::ServerShutdown { reason }) => {
                             let detail = reason.unwrap_or_else(|| "remote server restarted".to_owned());
@@ -743,66 +746,6 @@ fn rebind_endpoint(endpoint: &Endpoint, remote_ip: IpAddr) -> Result<(), String>
         .map_err(|err| format!("failed to migrate QUIC endpoint: {err}"))
 }
 
-async fn write_async_message<M: Serialize>(
-    stream: &mut SendStream,
-    message: &M,
-    max: usize,
-) -> Result<(), String> {
-    let payload = bincode::serde::encode_to_vec(message, bincode::config::standard())
-        .map_err(|err| format!("failed to encode QUIC message: {err}"))?;
-    if payload.len() > max || payload.len() > u32::MAX as usize {
-        return Err(format!(
-            "QUIC message size {} exceeds maximum {max}",
-            payload.len()
-        ));
-    }
-    stream
-        .write_all(&(payload.len() as u32).to_le_bytes())
-        .await
-        .map_err(|err| format!("failed to write QUIC message length: {err}"))?;
-    stream
-        .write_all(&payload)
-        .await
-        .map_err(|err| format!("failed to write QUIC message: {err}"))
-}
-
-async fn read_async_message<M: DeserializeOwned>(
-    stream: &mut RecvStream,
-    max: usize,
-) -> Result<M, String> {
-    let mut length = [0u8; 4];
-    stream
-        .read_exact(&mut length)
-        .await
-        .map_err(|err| format!("failed to read QUIC message length: {err}"))?;
-    let length = u32::from_le_bytes(length) as usize;
-    if length > max {
-        return Err(format!("QUIC message size {length} exceeds maximum {max}"));
-    }
-    let mut payload = vec![0u8; length];
-    stream
-        .read_exact(&mut payload)
-        .await
-        .map_err(|err| format!("failed to read QUIC message: {err}"))?;
-    let (message, consumed) =
-        bincode::serde::decode_from_slice(&payload, bincode::config::standard())
-            .map_err(|err| format!("failed to decode QUIC message: {err}"))?;
-    if consumed != length {
-        return Err("QUIC message contains trailing bytes".to_owned());
-    }
-    Ok(message)
-}
-
-fn hash_bytes(bytes: &[u8]) -> [u8; REMOTE_QUIC_HASH_BYTES] {
-    Sha256::digest(bytes).into()
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -889,7 +832,7 @@ mod tests {
             crate::server::client_transport::ServerEvent::ClientConnected { writer, .. } => writer,
             _ => panic!("expected QUIC client connection event"),
         };
-        let (input_tx, input_rx) = mpsc::channel(4);
+        let (_input_tx, input_rx) = mpsc::channel(4);
         let (output_tx, mut output_rx) = mpsc::channel(4);
         let session_task = tokio::spawn(session.run(input_rx, output_tx, false));
 
@@ -917,10 +860,10 @@ mod tests {
         };
         assert_eq!(frame.bytes, expected);
 
-        input_tx
-            .send(ClientMessage::Detach)
-            .await
-            .expect("send detach");
+        let mut framed = Vec::new();
+        crate::protocol::write_message(&mut framed, &ServerMessage::ClientDetached)
+            .expect("frame server detach");
+        writer.control.send(framed).expect("send server detach");
         assert!(matches!(
             session_task.await.expect("session task"),
             SessionExit::Detached

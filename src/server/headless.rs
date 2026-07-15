@@ -2443,12 +2443,7 @@ impl HeadlessServer {
                     | ClientConnectionMode::TerminalObserve { .. }
             )
         ) {
-            self.send_to_client(
-                client_id,
-                ServerMessage::ServerShutdown {
-                    reason: Some("detached".to_owned()),
-                },
-            );
+            self.send_to_client(client_id, ServerMessage::ClientDetached);
         }
     }
 
@@ -2624,12 +2619,7 @@ impl HeadlessServer {
             info!(client_id, "client detach requested via keybind");
 
             self.send_client_graphics_cleanup(client_id);
-            self.send_to_client(
-                client_id,
-                ServerMessage::ServerShutdown {
-                    reason: Some("detached".to_owned()),
-                },
-            );
+            self.send_to_client(client_id, ServerMessage::ClientDetached);
 
             if let Some(client) = self.clients.get_mut(&client_id) {
                 client.writer = None;
@@ -4822,6 +4812,52 @@ mod tests {
         (server, client_rx, pane_id)
     }
 
+    #[tokio::test]
+    async fn app_detach_request_sends_typed_detach_to_remote_transport() {
+        let mut server = test_headless_server();
+        let mut workspace = crate::workspace::Workspace::test_new("test");
+        let pane_id = workspace.focused_pane_id().expect("focused pane");
+        workspace.insert_test_runtime(
+            pane_id,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"ready"),
+        );
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+
+        let (client_tx, control_rx, _render_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::TerminalAnsi,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        server.app.state.detach_requested = true;
+        assert!(!server.handle_client_input_events(1, Vec::new()));
+
+        let mut messages = Vec::new();
+        while let Ok(bytes) = control_rx.recv_timeout(Duration::from_millis(50)) {
+            messages.push(read_server_message(bytes));
+            if messages.contains(&ServerMessage::ClientDetached) {
+                break;
+            }
+        }
+        assert!(
+            messages.contains(&ServerMessage::ClientDetached),
+            "detach keybind should send a typed detach, got {messages:?}"
+        );
+    }
+
     fn assert_frame_data_eq(actual: &FrameData, expected: &FrameData) {
         assert_eq!(
             (actual.width, actual.height),
@@ -5380,7 +5416,7 @@ next_tab = ""
     }
 
     #[test]
-    fn terminal_control_detach_sends_shutdown_before_removal() {
+    fn terminal_control_detach_sends_typed_detach_before_removal() {
         with_terminal_session_test_server(|server, _terminal_id, terminal_id_string, _| {
             let control_rx = connect_pending_terminal_client_with_control_rx(server, 7);
             assert!(
@@ -5397,8 +5433,10 @@ next_tab = ""
             assert!(!server
                 .terminal_attach_owners
                 .contains_key(&terminal_id_string));
-            let reason = read_server_shutdown_reason(control_rx.recv().expect("shutdown message"));
-            assert_eq!(reason, Some("detached".to_owned()));
+            assert_eq!(
+                read_server_message(control_rx.recv().expect("detach message")),
+                ServerMessage::ClientDetached
+            );
         });
     }
 
