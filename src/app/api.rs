@@ -85,6 +85,19 @@ impl App {
             return;
         }
 
+        if let AppEvent::OpenUrl { url } = ev {
+            // Monolithic path opens locally. Headless keeps `local_input_source_switch`
+            // false so an App-internal drain cannot open a browser on the server host;
+            // HeadlessServer::handle_internal_event_with_forwarding forwards OpenUrl instead.
+            if !self.local_input_source_switch {
+                return;
+            }
+            if let Err(err) = crate::platform::open_url(&url) {
+                tracing::warn!(err = %err, url = %url, "failed to open pane URL");
+            }
+            return;
+        }
+
         if let AppEvent::GitStatusRefreshed {
             results,
             cache_updates,

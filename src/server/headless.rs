@@ -2024,6 +2024,14 @@ impl HeadlessServer {
                 });
                 true
             }
+            AppEvent::OpenUrl { url } => {
+                // Browser open is a client-local host side effect; forward to the foreground
+                // thin client instead of opening a URL on the (often headless) server host.
+                self.send_to_foreground_client(ServerMessage::OpenUrl {
+                    url: url.clone(),
+                });
+                true
+            }
             AppEvent::StateChanged { pane_id, agent, .. } => {
                 // Capture toast before handling.
                 let toast_before = self.app.state.toast.clone();
@@ -2293,6 +2301,8 @@ impl HeadlessServer {
     /// so we:
     /// - Forward `ClipboardWrite` as `ServerMessage::Clipboard` to the
     ///   foreground client only.
+    /// - Forward `OpenUrl` as `ServerMessage::OpenUrl` to the foreground client
+    ///   only (ctrl+click must open the browser on the user's machine).
     /// - Detect when a sound would be played and forward as
     ///   `ServerMessage::Notify { kind: Sound }` to the foreground client.
     /// - Detect when a toast is set on AppState and forward as
@@ -8681,6 +8691,60 @@ next_tab = ""
                 .recv_timeout(Duration::from_millis(50))
                 .is_err(),
             "background client should not receive prefix input-source changes"
+        );
+    }
+
+    #[test]
+    fn open_url_is_forwarded_only_to_foreground_client() {
+        let mut server = test_headless_server();
+        let (background_tx, background_control_rx, _background_rx) = test_client_writer();
+        let (foreground_tx, foreground_control_rx, _foreground_rx) = test_client_writer();
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(background_tx),
+            ),
+        );
+        server.clients.insert(
+            2,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                Some(foreground_tx),
+            ),
+        );
+        server.foreground_client_id = Some(2);
+        server.sync_foreground_client_state();
+
+        let changed = server.handle_internal_event_with_forwarding(AppEvent::OpenUrl {
+            url: "https://herdr.dev/docs".to_owned(),
+        });
+
+        assert!(changed);
+        match read_server_message(
+            foreground_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("foreground open-url message"),
+        ) {
+            ServerMessage::OpenUrl { url } => assert_eq!(url, "https://herdr.dev/docs"),
+            other => panic!("expected open-url message, got {other:?}"),
+        }
+        assert!(
+            background_control_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "background client should not receive open-url messages"
         );
     }
 

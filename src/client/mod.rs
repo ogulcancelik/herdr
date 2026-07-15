@@ -1581,6 +1581,11 @@ async fn run_client_loop(
                     forward_clipboard(&data);
                     let _ = io::stdout().flush();
                 }
+                ServerMessage::OpenUrl { url } => {
+                    if let Err(err) = crate::platform::open_url(&url) {
+                        tracing::warn!(err = %err, url = %url, "failed to open forwarded URL");
+                    }
+                }
                 ServerMessage::WindowTitle { title } => {
                     write_window_title(title.as_deref());
                     let _ = io::stdout().flush();

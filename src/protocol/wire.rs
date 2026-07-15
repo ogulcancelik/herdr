@@ -804,6 +804,13 @@ pub enum ServerMessage {
 
     /// The server accepted a deliberate detach request for this client.
     ClientDetached,
+
+    /// Open a URL in the foreground client's local browser (ctrl+click).
+    /// Appended after `ClientDetached` to preserve existing wire discriminants.
+    OpenUrl {
+        /// Absolute http(s) URL resolved from the clicked pane cell.
+        url: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1499,6 +1506,17 @@ mod tests {
     fn server_clipboard_roundtrip() {
         let msg = ServerMessage::Clipboard {
             data: "dGVzdA==".to_owned(), // base64 "test"
+        };
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ServerMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn server_open_url_roundtrip() {
+        let msg = ServerMessage::OpenUrl {
+            url: "https://herdr.dev".to_owned(),
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ServerMessage, _) =

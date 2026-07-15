@@ -132,6 +132,10 @@ pub enum AppEvent {
     /// restore (`active = false`): the client in server mode (via server forwarding), the
     /// app itself in monolithic mode.
     PrefixInputSource { active: bool },
+    /// Open a URL in the user's local browser. Emitted by ctrl+click on a pane
+    /// hyperlink/plain URL. The foreground process applies it: the thin client in
+    /// server mode (via server forwarding), the app itself in monolithic mode.
+    OpenUrl { url: String },
     /// A pane child reported its shell current directory through terminal
     /// metadata such as OSC 7.
     TerminalCwdReported {

@@ -487,9 +487,12 @@ impl App {
                 tracing::warn!(err = %err, url = %url, "failed to invoke plugin link handler");
             }
         }
-        if let Err(err) = crate::platform::open_url(&url) {
-            tracing::warn!(err = %err, url = %url, "failed to open pane URL");
-        }
+        // Client-local side effect (like ClipboardWrite): emit an event so headless
+        // servers forward OpenUrl to the foreground thin client instead of opening
+        // a browser on the remote host.
+        let _ = self
+            .event_tx
+            .try_send(crate::events::AppEvent::OpenUrl { url });
         true
     }
 
