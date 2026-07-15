@@ -1192,6 +1192,7 @@ fn run_client_with_mode(
         eprintln!("herdr: failed to set up terminal: {err}");
         err
     })?;
+    write_window_title(None);
 
     // Install a panic hook to restore the terminal on panic (same as monolithic).
     let panic_resets_modify_other_keys = terminal_guard.reset_modify_other_keys;
@@ -1945,7 +1946,14 @@ fn forward_clipboard(data: &str) {
 }
 
 fn window_title_osc(title: Option<&str>) -> Vec<u8> {
-    let title = title.unwrap_or("herdr");
+    let title = title.map(str::to_owned).unwrap_or_else(|| {
+        format!(
+            "herdr · {}",
+            crate::session::active_name()
+                .as_deref()
+                .unwrap_or("default")
+        )
+    });
     let safe_title = title
         .chars()
         .filter(|ch| !matches!(*ch, '\u{1b}' | '\u{7}' | '\u{9c}'))
@@ -2942,11 +2950,13 @@ mod tests {
     }
 
     #[test]
-    fn window_title_osc_strips_terminators_and_defaults_to_herdr() {
+    fn window_title_osc_strips_terminators_and_includes_session_name() {
+        let _guard = env_lock().lock().unwrap();
+        let _session_env = EnvVarGuard::set(crate::session::SESSION_ENV_VAR, "work");
         assert_eq!(
             window_title_osc(Some("herdr\x1b api\u{7}\u{9c}")),
             b"\x1b]0;herdr api\x07"
         );
-        assert_eq!(window_title_osc(None), b"\x1b]0;herdr\x07");
+        assert_eq!(window_title_osc(None), b"\x1b]0;herdr \xc2\xb7 work\x07");
     }
 }
