@@ -14,6 +14,24 @@ fn parse_api_key(key: &str) -> Option<crossterm::event::KeyEvent> {
     Some(crossterm::event::KeyEvent::new(code, modifiers))
 }
 
+pub(super) fn parse_api_keys(keys: &[String]) -> Result<Vec<crate::input::TerminalKey>, String> {
+    keys.iter()
+        .map(|key| {
+            parse_api_key(key)
+                .map(Into::into)
+                .ok_or_else(|| key.clone())
+        })
+        .collect()
+}
+
+pub(super) fn encode_api_text_for_mode(text: &str, bracketed_paste: bool) -> Vec<u8> {
+    if bracketed_paste {
+        format!("\x1b[200~{text}\x1b[201~").into_bytes()
+    } else {
+        text.as_bytes().to_vec()
+    }
+}
+
 fn normalize_api_key_alias(key: &str) -> &str {
     match key {
         "C-c" | "c-c" => "ctrl+c",
@@ -27,25 +45,18 @@ pub(super) fn encode_api_text(runtime: &crate::terminal::TerminalRuntime, text: 
         .input_state()
         .map(|state| state.bracketed_paste)
         .unwrap_or(false);
-    if bracketed {
-        format!("\x1b[200~{text}\x1b[201~").into_bytes()
-    } else {
-        text.as_bytes().to_vec()
-    }
+    encode_api_text_for_mode(text, bracketed)
 }
 
 pub(super) fn encode_api_keys(
     runtime: &crate::terminal::TerminalRuntime,
     keys: &[String],
 ) -> Result<Vec<Vec<u8>>, String> {
-    let mut encoded_keys = Vec::with_capacity(keys.len());
-    for key in keys {
-        let Some(key_event) = parse_api_key(key) else {
-            return Err(key.clone());
-        };
-        encoded_keys.push(runtime.encode_terminal_key(key_event.into()));
-    }
-    Ok(encoded_keys)
+    parse_api_keys(keys).map(|keys| {
+        keys.into_iter()
+            .map(|key| runtime.encode_terminal_key(key))
+            .collect()
+    })
 }
 
 pub(super) fn detect_state_from_api(

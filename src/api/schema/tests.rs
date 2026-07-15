@@ -117,6 +117,18 @@ fn generated_protocol_schema_artifact_is_current() {
 }
 
 #[test]
+fn checked_input_revisions_have_schema_minimum_one() {
+    let schema = protocol_schema_document();
+    for pointer in [
+        "/schemas/request/$defs/AgentSendInputCheckedParams/properties/expected_input_revision/minimum",
+        "/schemas/success_response/$defs/AgentCheckedReadResult/properties/input_revision/minimum",
+        "/schemas/success_response/$defs/AgentCheckedInputResult/properties/input_revision/minimum",
+    ] {
+        assert_eq!(schema.pointer(pointer), Some(&serde_json::json!(1)), "{pointer}");
+    }
+}
+
+#[test]
 fn request_round_trips_for_server_stop() {
     let request = Request {
         id: "req_stop".into(),
@@ -181,6 +193,35 @@ fn request_round_trips_for_agent_explain() {
     assert_eq!(json["method"], "agent.explain");
     let restored: Request = serde_json::from_value(json).unwrap();
     assert_eq!(restored, request);
+}
+
+#[test]
+fn checked_agent_requests_round_trip() {
+    let read = Request {
+        id: "req_checked_read".into(),
+        method: Method::AgentReadChecked(AgentReadCheckedParams {
+            terminal_id: "term_1".into(),
+        }),
+    };
+    let json = serde_json::to_value(&read).unwrap();
+    assert_eq!(json["method"], "agent.read_checked");
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), read);
+
+    let send = Request {
+        id: "req_checked_send".into(),
+        method: Method::AgentSendInputChecked(AgentSendInputCheckedParams {
+            terminal_id: "term_1".into(),
+            expected_input_revision: 7,
+            expected_agent: "codex".into(),
+            allowed_statuses: vec![PaneAgentState::Blocked],
+            expected_content_hash: Some("abc".into()),
+            text: "yes".into(),
+            keys: vec!["enter".into()],
+        }),
+    };
+    let json = serde_json::to_value(&send).unwrap();
+    assert_eq!(json["method"], "agent.send_input_checked");
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), send);
 }
 
 #[test]
@@ -525,11 +566,14 @@ fn success_response_round_trips() {
             capabilities: Some(ServerCapabilities {
                 live_handoff: true,
                 detached_server_daemon: true,
+                checked_input_v1: true,
             }),
         },
     };
 
     let json = serde_json::to_string(&response).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["result"]["capabilities"]["checked_input.v1"], true);
     let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
     assert_eq!(restored, response);
 }

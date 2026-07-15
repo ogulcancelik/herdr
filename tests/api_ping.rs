@@ -305,6 +305,7 @@ fn ping_over_socket_returns_version() {
     // Intentionally hardcoded so wire protocol bumps require updating this test.
     // Changing this value means old clients/servers are no longer compatible.
     assert_eq!(value["result"]["protocol"], 16);
+    assert_eq!(value["result"]["capabilities"]["checked_input.v1"], true);
 
     cleanup_spawned_herdr(child, base);
 }
@@ -531,6 +532,77 @@ fn workspace_list_and_create_round_trip() {
         .as_str()
         .unwrap()
         .contains("delta"));
+
+    let report_checked_agent = send_request(
+        &socket_path,
+        &serde_json::json!({
+            "id": "req_checked_report",
+            "method": "pane.report_agent",
+            "params": {
+                "pane_id": pane_id,
+                "source": "custom:socket-test",
+                "agent": "socket-test",
+                "state": "blocked",
+                "seq": 1
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(report_checked_agent["result"]["type"], "ok");
+    let checked_read = send_request(
+        &socket_path,
+        &serde_json::json!({
+            "id": "req_checked_read",
+            "method": "agent.read_checked",
+            "params": { "terminal_id": root_terminal_id }
+        })
+        .to_string(),
+    );
+    let checked = &checked_read["result"]["read"];
+    assert_eq!(checked["terminal_id"], root_terminal_id);
+    assert_eq!(checked["pane_id"], pane_id);
+    assert_eq!(checked["agent"], "socket-test");
+    assert_eq!(checked["status"], "blocked");
+    assert!(checked["input_revision"].as_u64().unwrap() > 0);
+    assert_eq!(checked["content_hash"].as_str().unwrap().len(), 64);
+
+    let checked_send = send_request(
+        &socket_path,
+        &serde_json::json!({
+            "id": "req_checked_send",
+            "method": "agent.send_input_checked",
+            "params": {
+                "terminal_id": root_terminal_id,
+                "expected_input_revision": checked["input_revision"],
+                "expected_agent": "socket-test",
+                "allowed_statuses": ["blocked"],
+                "expected_content_hash": checked["content_hash"],
+                "text": "echo checked_input_v1",
+                "keys": ["enter"]
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(checked_send["result"]["type"], "agent_checked_input");
+    assert_eq!(
+        checked_send["result"]["input"]["terminal_id"],
+        root_terminal_id
+    );
+    assert!(
+        checked_send["result"]["input"]["input_revision"]
+            .as_u64()
+            .unwrap()
+            > checked["input_revision"].as_u64().unwrap()
+    );
+
+    let waited_checked = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_checked_wait","method":"pane.wait_for_output","params":{{"pane_id":"{}","source":"recent","lines":40,"match":{{"type":"substring","value":"checked_input_v1"}},"timeout_ms":2000}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(waited_checked["result"]["type"], "output_matched");
 
     let waited_regex = send_request(
         &socket_path,

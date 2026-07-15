@@ -279,6 +279,38 @@ impl TerminalRuntime {
         self.0.detection_text()
     }
 
+    pub(crate) fn checked_input_snapshot(&self) -> Option<crate::pane::CheckedInputSnapshot> {
+        self.0.checked_input_snapshot()
+    }
+
+    pub(crate) fn bump_checked_input_revision(&self) {
+        self.0.bump_checked_input_revision();
+    }
+
+    pub(crate) fn advance_checked_input_revision_to(&self, revision: u64) {
+        self.0.advance_checked_input_revision_to(revision);
+    }
+
+    pub(crate) fn with_checked_input<R>(
+        &self,
+        f: impl FnOnce(
+            crate::pane::CheckedInputSnapshot,
+            bool,
+            crate::input::KeyboardProtocol,
+            &mut dyn FnMut() -> u64,
+        ) -> R,
+    ) -> Option<R> {
+        self.0.with_checked_input(f)
+    }
+
+    pub(crate) fn encode_terminal_key_with_protocol(
+        &self,
+        key: crate::input::TerminalKey,
+        protocol: crate::input::KeyboardProtocol,
+    ) -> Vec<u8> {
+        self.0.encode_terminal_key_with_protocol(key, protocol)
+    }
+
     pub fn agent_osc_title(&self) -> String {
         self.0.agent_osc_title()
     }
@@ -351,6 +383,13 @@ impl TerminalRuntime {
 
     pub fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         self.0.try_send_bytes(bytes)
+    }
+
+    pub(crate) fn try_send_bytes_untracked(
+        &self,
+        bytes: Bytes,
+    ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        self.0.try_send_bytes_untracked(bytes)
     }
 
     pub async fn send_paste(&self, text: String) -> Result<(), mpsc::error::SendError<Bytes>> {

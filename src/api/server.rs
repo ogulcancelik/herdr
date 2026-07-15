@@ -63,6 +63,7 @@ pub fn start_server(
         Some(ServerCapabilities {
             live_handoff: crate::platform::capabilities().live_handoff,
             detached_server_daemon: crate::platform::current_process_is_detached_server_daemon(),
+            checked_input_v1: true,
         }),
     )
 }
@@ -336,8 +337,10 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::AgentList(_) => "agent.list",
         Method::AgentGet(_) => "agent.get",
         Method::AgentRead(_) => "agent.read",
+        Method::AgentReadChecked(_) => "agent.read_checked",
         Method::AgentExplain(_) => "agent.explain",
         Method::AgentSend(_) => "agent.send",
+        Method::AgentSendInputChecked(_) => "agent.send_input_checked",
         Method::AgentRename(_) => "agent.rename",
         Method::AgentFocus(_) => "agent.focus",
         Method::AgentStart(_) => "agent.start",
@@ -806,6 +809,7 @@ mod tests {
             Some(ServerCapabilities {
                 live_handoff: true,
                 detached_server_daemon: true,
+                checked_input_v1: true,
             }),
         );
 

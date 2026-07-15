@@ -105,10 +105,14 @@ pub enum Method {
     AgentGet(AgentTarget),
     #[serde(rename = "agent.read")]
     AgentRead(AgentReadParams),
+    #[serde(rename = "agent.read_checked")]
+    AgentReadChecked(AgentReadCheckedParams),
     #[serde(rename = "agent.explain")]
     AgentExplain(AgentTarget),
     #[serde(rename = "agent.send")]
     AgentSend(AgentSendParams),
+    #[serde(rename = "agent.send_input_checked")]
+    AgentSendInputChecked(AgentSendInputCheckedParams),
     #[serde(rename = "agent.rename")]
     AgentRename(AgentRenameParams),
     #[serde(rename = "agent.focus")]

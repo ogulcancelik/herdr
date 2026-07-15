@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Added atomic checked agent input APIs with stable terminal targeting, revision/agent/status/content preconditions, one-shot input enqueueing, and the `checked_input.v1` ping capability for safe orchestration clients.
+
 ## [0.7.3] - 2026-07-08
 
 ### Fixed

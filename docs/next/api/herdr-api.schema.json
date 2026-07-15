@@ -1122,6 +1122,17 @@
     },
     "request": {
       "$defs": {
+        "AgentReadCheckedParams": {
+          "properties": {
+            "terminal_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "terminal_id"
+          ],
+          "type": "object"
+        },
         "AgentReadParams": {
           "properties": {
             "format": {
@@ -1167,6 +1178,49 @@
           },
           "required": [
             "target"
+          ],
+          "type": "object"
+        },
+        "AgentSendInputCheckedParams": {
+          "properties": {
+            "allowed_statuses": {
+              "items": {
+                "$ref": "#/schemas/request/$defs/PaneAgentState"
+              },
+              "type": "array"
+            },
+            "expected_agent": {
+              "type": "string"
+            },
+            "expected_content_hash": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "expected_input_revision": {
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "keys": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "terminal_id": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "terminal_id",
+            "expected_input_revision",
+            "expected_agent",
+            "allowed_statuses"
           ],
           "type": "object"
         },
@@ -4230,6 +4284,22 @@
         {
           "properties": {
             "method": {
+              "const": "agent.read_checked",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentReadCheckedParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.explain",
               "type": "string"
             },
@@ -4251,6 +4321,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/AgentSendParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.send_input_checked",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentSendInputCheckedParams"
             }
           },
           "required": [
@@ -5244,6 +5330,70 @@
     },
     "success_response": {
       "$defs": {
+        "AgentCheckedInputResult": {
+          "properties": {
+            "input_revision": {
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "terminal_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "terminal_id",
+            "input_revision"
+          ],
+          "type": "object"
+        },
+        "AgentCheckedReadResult": {
+          "properties": {
+            "agent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_hash": {
+              "type": "string"
+            },
+            "input_revision": {
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/PaneAgentState"
+            },
+            "tab_id": {
+              "type": "string"
+            },
+            "terminal_id": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "terminal_id",
+            "workspace_id",
+            "tab_id",
+            "pane_id",
+            "status",
+            "input_revision",
+            "content_hash",
+            "text"
+          ],
+          "type": "object"
+        },
         "AgentInfo": {
           "properties": {
             "agent": {
@@ -6330,6 +6480,15 @@
             "rate_limited",
             "no_foreground_client",
             "busy"
+          ],
+          "type": "string"
+        },
+        "PaneAgentState": {
+          "enum": [
+            "idle",
+            "working",
+            "blocked",
+            "unknown"
           ],
           "type": "string"
         },
@@ -7901,6 +8060,38 @@
             },
             {
               "properties": {
+                "read": {
+                  "$ref": "#/schemas/success_response/$defs/AgentCheckedReadResult"
+                },
+                "type": {
+                  "const": "agent_checked_read",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "read"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "input": {
+                  "$ref": "#/schemas/success_response/$defs/AgentCheckedInputResult"
+                },
+                "type": {
+                  "const": "agent_checked_input",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "input"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "pane": {
                   "$ref": "#/schemas/success_response/$defs/PaneInfo"
                 },
@@ -8600,6 +8791,10 @@
         },
         "ServerCapabilities": {
           "properties": {
+            "checked_input.v1": {
+              "default": false,
+              "type": "boolean"
+            },
             "detached_server_daemon": {
               "default": false,
               "type": "boolean"

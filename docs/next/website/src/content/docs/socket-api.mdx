@@ -105,7 +105,7 @@ Raw socket method names use dot notation:
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
-| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send`, `agent.rename`, `agent.focus`, `agent.start` |
+| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.read_checked`, `agent.explain`, `agent.send`, `agent.send_input_checked`, `agent.rename`, `agent.focus`, `agent.start` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
 | Plugins | `plugin.link`, `plugin.list`, `plugin.unlink`, `plugin.enable`, `plugin.disable`, `plugin.action.list`, `plugin.action.invoke`, `plugin.log.list`, `plugin.pane.open`, `plugin.pane.focus`, `plugin.pane.close` |
@@ -668,6 +668,78 @@ herdr pane read w1:p1 --source detection
 
 `recent-unwrapped` is useful for logs because it ignores soft wrapping.
 `detection` returns the bottom-buffer snapshot used by agent screen detection.
+
+## Checked agent input
+
+Protocol clients that write prompts based on observed agent state should first
+check `ping.result.capabilities["checked_input.v1"]`. When it is `true`, use
+`agent.read_checked` and `agent.send_input_checked` instead of resolving a
+mutable pane or agent label and writing in separate requests.
+
+`agent.read_checked` accepts only a stable `terminal_id`. It returns the current
+terminal location, semantic agent label and status, normalized detection text,
+the lowercase SHA-256 `content_hash` of those exact text bytes, and a nonzero
+`input_revision`:
+
+```json
+{"id":"checked_read","method":"agent.read_checked","params":{"terminal_id":"term_abc123"}}
+```
+
+The input revision belongs to the live terminal, not its pane location. It
+increases when the semantic agent label or status changes and whenever the
+normalized detection text changes. Moving a live terminal between panes, tabs,
+or workspaces preserves its revision. A restored or handed-off terminal may
+have a new terminal identity and a fresh nonzero revision, so clients must read
+again after reconnecting.
+
+After deciding on input, send all text and keys in one checked request:
+
+```json
+{
+  "id": "checked_send",
+  "method": "agent.send_input_checked",
+  "params": {
+    "terminal_id": "term_abc123",
+    "expected_input_revision": 17,
+    "expected_agent": "codex",
+    "allowed_statuses": ["blocked"],
+    "expected_content_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "text": "Approve this command",
+    "keys": ["enter"]
+  }
+}
+```
+
+`allowed_statuses` uses semantic values: `idle`, `working`, `blocked`, and
+`unknown`. `expected_content_hash` is optional, but recommended when the exact
+prompt text influenced the decision. Herdr validates the terminal identity,
+revision, agent label, status, and optional hash before writing. It validates
+and encodes every key, then enqueues the complete text-and-keys byte sequence
+once. At least one nonempty `text` value or key is required. Key-only requests
+do not emit an empty bracketed-paste sequence. An invalid key or failed
+precondition enqueues nothing and leaves the revision unchanged.
+
+A queue attempt consumes the expected revision exactly once. A successful
+response returns the new revision and means that one complete input sequence
+was queued; it does not mean the agent accepted, processed, or completed the
+request. Legacy or direct terminal input also advances the revision before it
+is queued, so it invalidates any interleaved checked request. If the queue
+rejects a checked send with `checked_input_send_failed`, no bytes from that
+request were queued, but its revision remains consumed. Read a fresh snapshot
+before deciding whether to retry.
+
+Checked-input precondition failures use stable error codes:
+
+| Code | Meaning |
+| --- | --- |
+| `stale_input_revision` | The live terminal revision no longer matches. |
+| `stale_agent` | The semantic agent label no longer matches. |
+| `stale_status` | The semantic status is not in `allowed_statuses`. |
+| `stale_content` | The normalized detection content hash no longer matches. |
+| `unsupported_target` | The supplied id is not a currently live stable terminal id. |
+
+These are raw socket methods in this release; there is no CLI wrapper for the
+read-check-write transaction.
 
 ## Waiting for state
 

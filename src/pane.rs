@@ -39,8 +39,10 @@ use self::agent_detection::{
     DetectionScreenReadInput, PendingIdleConfirmation, ScreenDetectionPublishInput,
     AGENT_PENDING_IDLE_RECHECK, AGENT_STARTUP_GRACE_WINDOW,
 };
+pub(crate) use self::terminal::{
+    CheckedInputSnapshot, TerminalDirtyPatch, TerminalDirtyPatchOutcome,
+};
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
-pub(crate) use self::terminal::{TerminalDirtyPatch, TerminalDirtyPatchOutcome};
 pub use self::{
     state::PaneState,
     terminal::{InputState, ScrollMetrics, TerminalCursorState},
@@ -2419,6 +2421,41 @@ impl PaneRuntime {
         self.terminal.detection_text()
     }
 
+    pub(crate) fn checked_input_snapshot(&self) -> Option<CheckedInputSnapshot> {
+        self.terminal.checked_input_snapshot()
+    }
+
+    pub(crate) fn bump_checked_input_revision(&self) {
+        self.terminal.bump_checked_input_revision();
+    }
+
+    pub(crate) fn advance_checked_input_revision_to(&self, revision: u64) {
+        self.terminal.advance_checked_input_revision_to(revision);
+    }
+
+    pub(crate) fn with_checked_input<R>(
+        &self,
+        f: impl FnOnce(
+            CheckedInputSnapshot,
+            bool,
+            crate::input::KeyboardProtocol,
+            &mut dyn FnMut() -> u64,
+        ) -> R,
+    ) -> Option<R> {
+        let fallback = crate::input::KeyboardProtocol::from_kitty_flags(
+            self.kitty_keyboard_flags.load(Ordering::Relaxed),
+        );
+        self.terminal.with_checked_input(fallback, f)
+    }
+
+    pub(crate) fn encode_terminal_key_with_protocol(
+        &self,
+        key: crate::input::TerminalKey,
+        protocol: crate::input::KeyboardProtocol,
+    ) -> Vec<u8> {
+        self.terminal.encode_terminal_key(key, protocol)
+    }
+
     pub fn agent_osc_title(&self) -> String {
         self.terminal.agent_osc_title()
     }
@@ -2492,10 +2529,19 @@ impl PaneRuntime {
     }
 
     pub async fn send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::SendError<Bytes>> {
+        self.bump_checked_input_revision();
         self.io.send_bytes(bytes).await
     }
 
     pub fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        self.bump_checked_input_revision();
+        self.io.try_send_bytes(bytes)
+    }
+
+    pub(crate) fn try_send_bytes_untracked(
+        &self,
+        bytes: Bytes,
+    ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         self.io.try_send_bytes(bytes)
     }
 

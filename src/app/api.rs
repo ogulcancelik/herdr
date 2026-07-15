@@ -152,6 +152,7 @@ impl App {
         if let AppEvent::PaneDied { pane_id } = &ev {
             let previous_toast = self.state.toast.clone();
             if let Some(update) = self.state.publish_pane_process_exit_if_agent(*pane_id) {
+                self.bump_checked_input_revision_for_update(&update);
                 self.sync_full_lifecycle_authority_detection_pauses();
                 self.refresh_new_herdr_toast_context_for_update(&update, &previous_toast);
                 self.emit_pane_state_update(&update);
@@ -264,6 +265,7 @@ impl App {
             self.render_notify.notify_one();
         }
         for update in &pane_updates {
+            self.bump_checked_input_revision_for_update(update);
             self.refresh_new_herdr_toast_context_for_update(update, &previous_toast);
             self.emit_pane_state_update(update);
         }
@@ -308,6 +310,24 @@ impl App {
 
         self.sync_toast_deadline(previous_toast);
         self.shutdown_detached_terminal_runtimes();
+    }
+
+    fn bump_checked_input_revision_for_update(
+        &self,
+        update: &crate::app::actions::PaneStateUpdate,
+    ) {
+        if update.previous_agent_label == update.agent_label
+            && update.previous_state == update.state
+        {
+            return;
+        }
+        if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
+            &self.terminal_runtimes,
+            update.ws_idx,
+            update.pane_id,
+        ) {
+            runtime.bump_checked_input_revision();
+        }
     }
 
     fn reset_agent_detection_for_agents(&self, agents: &[crate::detect::Agent]) {
@@ -498,6 +518,12 @@ impl App {
         };
 
         let cwd = terminal.cwd.clone();
+        let previous_input_revision = self
+            .terminal_runtimes
+            .get(&terminal_id)
+            .and_then(|runtime| runtime.checked_input_snapshot())
+            .map(|snapshot| snapshot.input_revision)
+            .unwrap_or(1);
         let (rows, cols) = self
             .terminal_runtimes
             .get(&terminal_id)
@@ -530,6 +556,8 @@ impl App {
                 return false;
             }
         };
+
+        runtime.advance_checked_input_revision_to(previous_input_revision.saturating_add(1));
 
         self.terminal_runtimes.insert(terminal_id.clone(), runtime);
         if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
@@ -942,8 +970,14 @@ impl App {
             Method::AgentRename(params) => return self.handle_agent_rename(request.id, params),
             Method::AgentStart(params) => return self.handle_agent_start(request.id, params),
             Method::AgentRead(params) => return self.handle_agent_read(request.id, params),
+            Method::AgentReadChecked(params) => {
+                return self.handle_agent_read_checked(request.id, params)
+            }
             Method::AgentExplain(target) => return self.handle_agent_explain(request.id, target),
             Method::AgentSend(params) => return self.handle_agent_send(request.id, params),
+            Method::AgentSendInputChecked(params) => {
+                return self.handle_agent_send_input_checked(request.id, params)
+            }
             Method::PaneSplit(params) => return self.handle_pane_split(request.id, params),
             Method::PaneSwap(params) => return self.handle_pane_swap(request.id, params),
             Method::PaneMove(params) => return self.handle_pane_move(request.id, params),

@@ -18,4 +18,6 @@ pub struct ServerCapabilities {
     pub live_handoff: bool,
     #[serde(default)]
     pub detached_server_daemon: bool,
+    #[serde(rename = "checked_input.v1", default)]
+    pub checked_input_v1: bool,
 }

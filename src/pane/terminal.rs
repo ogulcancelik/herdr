@@ -6,6 +6,7 @@ use bytes::Bytes;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::{layout::Rect, Frame};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tracing::{debug, error};
 use unicode_width::UnicodeWidthStr;
@@ -68,6 +69,13 @@ pub(crate) enum TerminalDirtyPatchOutcome {
     Clean,
     Patch(TerminalDirtyPatch),
     Fallback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CheckedInputSnapshot {
+    pub(crate) text: String,
+    pub(crate) content_hash: String,
+    pub(crate) input_revision: u64,
 }
 
 fn decscusr_cursor_shape(style: crate::ghostty::CursorVisualStyle, blinking: bool) -> u8 {
@@ -143,6 +151,10 @@ pub(crate) struct GhosttyPaneCore {
     decscusr_tracker: DecscusrTracker,
     cursor_settle_state: CursorPositionSettleState,
     windows_powershell_prompt_cwd_reporting: bool,
+    // Kept under the parser lock so normalized output snapshots and checked
+    // input validation cannot race PTY output processing.
+    checked_input_revision: u64,
+    checked_detection_content_hash: String,
 }
 
 pub(crate) struct PaneTerminal {
@@ -222,6 +234,31 @@ impl PaneTerminal {
 
     pub fn detection_text(&self) -> String {
         self.ghostty.detection_text()
+    }
+
+    pub(crate) fn checked_input_snapshot(&self) -> Option<CheckedInputSnapshot> {
+        self.ghostty.checked_input_snapshot()
+    }
+
+    pub(crate) fn bump_checked_input_revision(&self) {
+        self.ghostty.bump_checked_input_revision();
+    }
+
+    pub(crate) fn advance_checked_input_revision_to(&self, revision: u64) {
+        self.ghostty.advance_checked_input_revision_to(revision);
+    }
+
+    pub(crate) fn with_checked_input<R>(
+        &self,
+        fallback_protocol: crate::input::KeyboardProtocol,
+        f: impl FnOnce(
+            CheckedInputSnapshot,
+            bool,
+            crate::input::KeyboardProtocol,
+            &mut dyn FnMut() -> u64,
+        ) -> R,
+    ) -> Option<R> {
+        self.ghostty.with_checked_input(fallback_protocol, f)
     }
 
     pub fn recent_text(&self, lines: usize) -> String {
@@ -404,6 +441,8 @@ impl GhosttyPaneTerminal {
                 decscusr_tracker: DecscusrTracker::default(),
                 cursor_settle_state: CursorPositionSettleState::default(),
                 windows_powershell_prompt_cwd_reporting: false,
+                checked_input_revision: 1,
+                checked_detection_content_hash: detection_content_hash(""),
             }),
             key_encoder: Mutex::new(key_encoder),
             pending_pty_responses,
@@ -495,6 +534,62 @@ impl GhosttyPaneTerminal {
         if let Ok(mut core) = self.core.lock() {
             core.agent_osc_state.clear_retained();
         }
+    }
+
+    pub(crate) fn checked_input_snapshot(&self) -> Option<CheckedInputSnapshot> {
+        self.core
+            .lock()
+            .map(|mut core| refresh_checked_detection_input(&mut core))
+            .ok()
+    }
+
+    pub(crate) fn bump_checked_input_revision(&self) {
+        if let Ok(mut core) = self.core.lock() {
+            bump_checked_input_revision(&mut core);
+        }
+    }
+
+    pub(crate) fn advance_checked_input_revision_to(&self, revision: u64) {
+        if let Ok(mut core) = self.core.lock() {
+            core.checked_input_revision = core.checked_input_revision.max(revision.max(1));
+        }
+    }
+
+    pub(crate) fn with_checked_input<R>(
+        &self,
+        fallback_protocol: crate::input::KeyboardProtocol,
+        f: impl FnOnce(
+            CheckedInputSnapshot,
+            bool,
+            crate::input::KeyboardProtocol,
+            &mut dyn FnMut() -> u64,
+        ) -> R,
+    ) -> Option<R> {
+        // The caller validates and enqueues inside this closure. Holding the
+        // terminal core lock throughout prevents detection content changes
+        // between the checked snapshot and the single queue operation.
+        let mut core = self.core.lock().ok()?;
+        let snapshot = refresh_checked_detection_input(&mut core);
+        let bracketed_paste = core
+            .terminal
+            .mode_get(crate::ghostty::MODE_BRACKETED_PASTE)
+            .unwrap_or(false);
+        let protocol = core
+            .terminal
+            .kitty_keyboard_flags()
+            .ok()
+            .map(|flags| crate::input::KeyboardProtocol::from_kitty_flags(flags as u16))
+            .unwrap_or(fallback_protocol);
+        let mut consume_revision = || {
+            bump_checked_input_revision(&mut core);
+            core.checked_input_revision
+        };
+        Some(f(
+            snapshot,
+            bracketed_paste,
+            protocol,
+            &mut consume_revision,
+        ))
     }
 
     pub fn process_pty_bytes(
@@ -595,6 +690,8 @@ impl GhosttyPaneTerminal {
         if let Ok(mut key_encoder) = self.key_encoder.lock() {
             key_encoder.set_from_terminal(&core.terminal);
         }
+        // Compare the fully normalized detection buffer, not the raw PTY chunk.
+        refresh_checked_detection_input(&mut core);
         let synchronized_output = core
             .terminal
             .mode_get(crate::ghostty::MODE_SYNCHRONIZED_OUTPUT)
@@ -707,6 +804,7 @@ impl GhosttyPaneTerminal {
         if let Ok(mut key_encoder) = self.key_encoder.lock() {
             key_encoder.set_from_terminal(&core.terminal);
         }
+        refresh_checked_detection_input(&mut core);
     }
 
     #[cfg(unix)]
@@ -865,6 +963,7 @@ impl GhosttyPaneTerminal {
                     remaining -= 1;
                 }
             }
+            refresh_checked_detection_input(&mut core);
             terminal_responses
         } else {
             Vec::new()
@@ -1652,6 +1751,35 @@ fn ghostty_detection_text(core: &GhosttyPaneCore) -> Result<String, crate::ghost
         .map(|rows| usize::from(rows).max(1))
         .unwrap_or(DEFAULT_DETECTION_ROWS);
     ghostty_recent_text(core, lines)
+}
+
+fn detection_content_hash(text: &str) -> String {
+    let digest = Sha256::digest(text.as_bytes());
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
+fn bump_checked_input_revision(core: &mut GhosttyPaneCore) {
+    core.checked_input_revision = core.checked_input_revision.saturating_add(1);
+}
+
+fn refresh_checked_detection_input(core: &mut GhosttyPaneCore) -> CheckedInputSnapshot {
+    let text = ghostty_detection_text(core).unwrap_or_default();
+    let content_hash = detection_content_hash(&text);
+    if content_hash != core.checked_detection_content_hash {
+        core.checked_detection_content_hash
+            .clone_from(&content_hash);
+        bump_checked_input_revision(core);
+    }
+    CheckedInputSnapshot {
+        text,
+        content_hash,
+        input_revision: core.checked_input_revision,
+    }
 }
 
 #[cfg(windows)]
