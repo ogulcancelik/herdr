@@ -36,7 +36,7 @@ serde = { version = "1", features = ["derive"] }
 serde_ignored = "0.1.14"
 serde_json = "1"
 sha2 = "0.10"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net"] }
 toml = "0.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
@@ -45,6 +45,13 @@ schemars = { version = "1.2.1", features = ["derive"] }
 
 [patch.crates-io]
 portable-pty = { path = "vendor/portable-pty" }
+
+[target.'cfg(unix)'.dependencies]
+getrandom = "0.3"
+quinn = { version = "0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rcgen = { version = "0.14.4", default-features = false, features = ["crypto", "ring"] }
+rustls = { version = "0.23.35", default-features = false, features = ["ring", "std"] }
+socket2 = "0.6"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [

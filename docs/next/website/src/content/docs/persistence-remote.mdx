@@ -46,6 +46,10 @@ herdr --remote ssh://you@server:2222
 
 In this mode your local Herdr is a thin client. It connects over SSH, starts or attaches to the remote Herdr server, and streams the UI back to your local terminal. Because the client runs locally, Herdr can bridge local desktop features such as image clipboard paste into the remote session by copying the image to a remote temp file and pasting that path.
 
+The default `auto` transport uses SSH to authenticate, start the remote server, and obtain a short-lived capability plus a pinned certificate fingerprint. It then streams control and terminal updates over QUIC. The remote server opens its UDP listener lazily only after this authenticated bootstrap. Allow inbound UDP ports `48000-48100` on the remote host, or set a different inclusive range with `remote.quic_port_range`.
+
+If the UDP path stalls, Herdr keeps the remote pane processes running, shows a recovery screen locally, discards pane input while the display is stale, and tries QUIC path recovery, a fresh QUIC connection, and SSH rebootstrap in order. With the default `remote.ssh_fallback = true`, an unreachable UDP endpoint falls back to the SSH stdio bridge without requiring a manual reattach. A recovered transport always starts with a complete redraw; interrupted Kitty graphics resources are content-addressed and reconstructed before the frame becomes visible.
+
 By default, `herdr --remote` uses your local Herdr keybindings for that attach. This keeps local muscle memory even when the remote server has different config. The local keybindings are a snapshot from attach time; detach and reattach after editing local keybindings. Use `--remote-keybindings server` when you want the remote server config instead. Local custom command keybindings are not sent, because those commands would run on the remote host.
 
 For repeat targets, use your SSH config:
@@ -68,6 +72,19 @@ Remote attach supports Linux and macOS hosts on x86_64 and aarch64. Herdr checks
 Native Windows `herdr --remote` is not part of the Windows beta. From Windows, SSH into the server and run `herdr` there.
 
 By default, `herdr --remote` runs remote setup and the bridge through a temporary SSH config that includes your SSH config first, then adds fallback keepalive settings and a private per-attach control socket for connection reuse. Existing user keepalive settings win. Set `[remote].manage_ssh_config = false` to use plain `ssh` without Herdr's generated config or control socket.
+
+Choose the transport in `config.toml`:
+
+```toml
+[remote]
+transport = "auto"              # auto, quic, or ssh
+quic_port_range = "48000-48100"
+quic_idle_timeout_seconds = 86400
+ssh_fallback = true
+manage_ssh_config = true
+```
+
+Use `transport = "ssh"` when the remote host cannot accept UDP. Use `transport = "quic"` with `ssh_fallback = false` when QUIC is required and failure should be explicit instead of falling back.
 
 Remote attach uses your normal OpenSSH authentication. If the target uses a passphrase-protected key in a non-interactive shell, script, CI job, or mobile terminal that cannot show the passphrase prompt, load the key into ssh-agent first:
 

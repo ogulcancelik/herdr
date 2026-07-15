@@ -38,9 +38,9 @@ const MIN_CLIENT_ROWS: u16 = 1;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// Maximum input payload size (bytes) for a single `ClientMessage::Input`.
-const MAX_INPUT_PAYLOAD: usize = 1024 * 1024; // 1 MB
+pub(crate) const MAX_INPUT_PAYLOAD: usize = 1024 * 1024; // 1 MB
 /// Maximum structured input events accepted in one client message.
-const MAX_INPUT_EVENT_BATCH: usize = 4096;
+pub(crate) const MAX_INPUT_EVENT_BATCH: usize = 4096;
 
 /// Channels owned by the server side of a client writer thread.
 #[derive(Clone, Debug)]
@@ -49,6 +49,23 @@ pub(crate) struct ClientWriter {
     pub(crate) control: ClientControlWriter,
     /// Droppable render messages. Capacity is one so slow clients cannot build lag.
     pub(crate) render: ClientRenderWriter,
+}
+
+impl ClientWriter {
+    #[cfg(unix)]
+    pub(crate) fn quic(
+        control: crate::server::remote_quic::QuicControlSender,
+        render: crate::server::remote_quic::QuicRenderSender,
+    ) -> Self {
+        Self {
+            control: ClientControlWriter {
+                target: ClientControlTarget::Quic(control),
+            },
+            render: ClientRenderWriter {
+                target: ClientRenderTarget::Quic(render),
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -76,6 +93,8 @@ pub(crate) struct ClientControlWriter {
 #[derive(Debug)]
 enum ClientControlTarget {
     Queue(Arc<ClientWriterQueue>),
+    #[cfg(unix)]
+    Quic(crate::server::remote_quic::QuicControlSender),
     #[cfg(test)]
     Channel(std::sync::mpsc::Sender<Vec<u8>>),
 }
@@ -88,6 +107,8 @@ pub(crate) struct ClientRenderWriter {
 #[derive(Debug)]
 enum ClientRenderTarget {
     Queue(Arc<ClientWriterQueue>),
+    #[cfg(unix)]
+    Quic(crate::server::remote_quic::QuicRenderSender),
     #[cfg(test)]
     Channel(std::sync::mpsc::SyncSender<Vec<u8>>),
 }
@@ -101,6 +122,10 @@ impl Clone for ClientControlWriter {
                     target: ClientControlTarget::Queue(queue.clone()),
                 }
             }
+            #[cfg(unix)]
+            ClientControlTarget::Quic(sender) => Self {
+                target: ClientControlTarget::Quic(sender.clone()),
+            },
             #[cfg(test)]
             ClientControlTarget::Channel(sender) => Self {
                 target: ClientControlTarget::Channel(sender.clone()),
@@ -113,6 +138,8 @@ impl Drop for ClientControlWriter {
     fn drop(&mut self) {
         match &self.target {
             ClientControlTarget::Queue(queue) => queue.remove_sender(),
+            #[cfg(unix)]
+            ClientControlTarget::Quic(_) => {}
             #[cfg(test)]
             ClientControlTarget::Channel(_) => {}
         }
@@ -130,6 +157,8 @@ impl ClientControlWriter {
     pub(crate) fn send(&self, data: Vec<u8>) -> Result<(), SendError<Vec<u8>>> {
         match &self.target {
             ClientControlTarget::Queue(queue) => queue.send_control(data),
+            #[cfg(unix)]
+            ClientControlTarget::Quic(sender) => sender.send(data),
             #[cfg(test)]
             ClientControlTarget::Channel(sender) => sender.send(data),
         }
@@ -145,6 +174,10 @@ impl Clone for ClientRenderWriter {
                     target: ClientRenderTarget::Queue(queue.clone()),
                 }
             }
+            #[cfg(unix)]
+            ClientRenderTarget::Quic(sender) => Self {
+                target: ClientRenderTarget::Quic(sender.clone()),
+            },
             #[cfg(test)]
             ClientRenderTarget::Channel(sender) => Self {
                 target: ClientRenderTarget::Channel(sender.clone()),
@@ -157,6 +190,8 @@ impl Drop for ClientRenderWriter {
     fn drop(&mut self) {
         match &self.target {
             ClientRenderTarget::Queue(queue) => queue.remove_sender(),
+            #[cfg(unix)]
+            ClientRenderTarget::Quic(_) => {}
             #[cfg(test)]
             ClientRenderTarget::Channel(_) => {}
         }
@@ -174,8 +209,17 @@ impl ClientRenderWriter {
     pub(crate) fn try_send(&self, data: Vec<u8>) -> Result<(), TrySendError<Vec<u8>>> {
         match &self.target {
             ClientRenderTarget::Queue(queue) => queue.try_send_render(data),
+            #[cfg(unix)]
+            ClientRenderTarget::Quic(sender) => sender.try_send(data),
             #[cfg(test)]
             ClientRenderTarget::Channel(sender) => sender.try_send(data),
+        }
+    }
+
+    pub(crate) fn reset_generation(&self) {
+        #[cfg(unix)]
+        if let ClientRenderTarget::Quic(sender) = &self.target {
+            sender.reset_generation();
         }
     }
 }
@@ -344,6 +388,13 @@ pub(crate) enum ServerEvent {
     ClientDisconnected { client_id: u64 },
     /// A client writer drained its render slot and can accept another render.
     ClientWriterDrained { client_id: u64 },
+    /// An authenticated local helper requested a process-lifetime QUIC capability.
+    RemoteBootstrap {
+        request: crate::protocol::RemoteBootstrapRequest,
+        respond_to: std::sync::mpsc::Sender<Result<crate::protocol::RemoteBootstrapRecord, String>>,
+    },
+    /// A live remote client requested a fresh full render generation.
+    ClientSyncRequest { client_id: u64 },
     /// Ctrl+C or external shutdown signal received.
     QuitSignal,
 }
@@ -354,8 +405,7 @@ pub(crate) fn clamp_terminal_size(cols: u16, rows: u16) -> (u16, u16) {
     let clamped_rows = rows.max(MIN_CLIENT_ROWS);
     (clamped_cols, clamped_rows)
 }
-
-fn parse_client_keybindings(
+pub(crate) fn parse_client_keybindings(
     keybindings: ClientKeybindings,
 ) -> Result<Option<Box<crate::config::LiveKeybindConfig>>, String> {
     match keybindings {
@@ -453,6 +503,38 @@ pub(crate) fn handle_client_handshake(
             debug!(client_id, err = %err, "failed to read client hello");
             return Ok(());
         }
+    };
+
+    let hello = if let ClientMessage::RemoteBootstrap(request) = hello {
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        if server_event_tx
+            .blocking_send(ServerEvent::RemoteBootstrap {
+                request,
+                respond_to,
+            })
+            .is_err()
+        {
+            return Ok(());
+        }
+        let response = match response_rx.recv_timeout(HANDSHAKE_TIMEOUT) {
+            Ok(Ok(record)) => ServerMessage::RemoteBootstrap {
+                record: Some(record),
+                error: None,
+            },
+            Ok(Err(error)) => ServerMessage::RemoteBootstrap {
+                record: None,
+                error: Some(error),
+            },
+            Err(_) => ServerMessage::RemoteBootstrap {
+                record: None,
+                error: Some("remote QUIC bootstrap timed out".to_owned()),
+            },
+        };
+        protocol::write_message(&mut stream, &response)
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        return Ok(());
+    } else {
+        hello
     };
 
     let (
@@ -744,8 +826,17 @@ fn client_read_loop(
                 row,
                 modifiers,
             },
+            ClientMessage::SyncRequest => ServerEvent::ClientSyncRequest { client_id },
+            ClientMessage::RemoteBootstrap(_) => {
+                // Bootstrap is valid only as the first local-socket message.
+                continue;
+            }
             ClientMessage::Hello { .. } => {
                 // Duplicate Hello — ignore.
+                continue;
+            }
+            ClientMessage::RemotePing { .. } => {
+                // Heartbeats are valid only on the QUIC control stream.
                 continue;
             }
         };

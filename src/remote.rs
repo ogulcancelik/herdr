@@ -1,3 +1,12 @@
+#[cfg(all(test, unix))]
+mod benchmark;
+
+#[cfg(unix)]
+mod quic;
+
+#[cfg(unix)]
+mod proxy;
+
 #[cfg(unix)]
 mod unix;
 
@@ -144,6 +153,13 @@ pub(crate) fn run_remote_client_bridge() -> std::io::Result<()> {
     debug_assert!(!crate::platform::capabilities().remote_attach);
     Err(std::io::Error::other(
         "remote client bridge is not supported on Windows yet",
+    ))
+}
+
+#[cfg(windows)]
+pub(crate) fn run_remote_quic_bootstrap(_logical_client_id: Option<&str>) -> std::io::Result<()> {
+    Err(std::io::Error::other(
+        "remote QUIC bootstrap is not supported on Windows yet",
     ))
 }
 

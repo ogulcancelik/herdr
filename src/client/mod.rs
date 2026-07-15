@@ -87,6 +87,8 @@ struct ClientState {
     redraw_on_focus_gained: bool,
     /// Whether this client draws the cursor into frame cells instead of using the host cursor.
     draw_host_cursor: bool,
+    /// True while the remote proxy is reconnecting; pane input is discarded locally.
+    transport_stale: bool,
 }
 
 #[derive(Debug, Default)]
@@ -1300,6 +1302,7 @@ async fn run_client_loop(
         remote_image_paste_key: config.remote_image_paste_key,
         redraw_on_focus_gained: config.redraw_on_focus_gained,
         draw_host_cursor,
+        transport_stale: false,
     };
     debug!(?negotiated_encoding, "client render encoding active");
     let host_mouse_capture_active = Arc::new(AtomicBool::new(state.mouse_capture_active));
@@ -1421,6 +1424,9 @@ async fn run_client_loop(
                     }
                     data
                 };
+                if state.transport_stale {
+                    continue;
+                }
                 if should_bridge_clipboard_image_paste(
                     &data,
                     is_remote_client,
@@ -1591,6 +1597,23 @@ async fn run_client_loop(
                     } else {
                         prefix_input_source.restore();
                     }
+                }
+                ServerMessage::TransportStatus { status, detail } => {
+                    state.transport_stale =
+                        status != crate::protocol::RemoteTransportStatus::Connected;
+                    if state.transport_stale {
+                        write_remote_transport_status(
+                            status,
+                            detail.as_deref(),
+                            state.reported_size.1,
+                        );
+                    }
+                }
+                ServerMessage::RemotePong { .. } => {
+                    debug!("received unexpected remote heartbeat in main loop");
+                }
+                ServerMessage::RemoteBootstrap { .. } => {
+                    debug!("received unexpected remote bootstrap response in main loop");
                 }
                 ServerMessage::Welcome { .. } => {
                     debug!("received unexpected Welcome in main loop");
@@ -1959,6 +1982,40 @@ fn window_title_osc(title: Option<&str>) -> Vec<u8> {
 
 fn write_window_title(title: Option<&str>) {
     let _ = io::stdout().write_all(&window_title_osc(title));
+}
+
+fn write_remote_transport_status(
+    status: crate::protocol::RemoteTransportStatus,
+    detail: Option<&str>,
+    rows: u16,
+) {
+    let label = match status {
+        crate::protocol::RemoteTransportStatus::PathRecovering => "Connection interrupted",
+        crate::protocol::RemoteTransportStatus::FreshQuicConnecting => "Reconnecting over QUIC",
+        crate::protocol::RemoteTransportStatus::SshRebootstrap => "Refreshing remote credentials",
+        crate::protocol::RemoteTransportStatus::SshFallbackConnecting => "Reconnecting over SSH",
+        crate::protocol::RemoteTransportStatus::Connected => return,
+    };
+    let detail = detail
+        .unwrap_or_default()
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(80)
+        .collect::<String>();
+    let message = if detail.is_empty() {
+        label.to_owned()
+    } else {
+        format!("{label}: {detail}")
+    };
+    let mut stdout = io::stdout();
+    let _ = write!(
+        stdout,
+        "\x1b7\x1b[{};1H\x1b[7m {:<width$}\x1b[0m\x1b8",
+        rows.max(1),
+        message,
+        width = 1
+    );
+    let _ = stdout.flush();
 }
 
 // ---------------------------------------------------------------------------

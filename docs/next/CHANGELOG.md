@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- `herdr --remote` now uses SSH-authenticated, certificate-pinned QUIC with bounded render/control queues, resumable path recovery, full-redraw and Kitty graphics reconstruction, automatic SSH rebootstrap, and transparent SSH stdio fallback. Configure the policy with `remote.transport`, `remote.quic_port_range`, `remote.quic_idle_timeout_seconds`, and `remote.ssh_fallback`.
 - Added a live-agent CLI facade with named `start`, atomic `prompt`, logical `send-keys`, and server-owned `wait` workflows. Agent startup targets an existing pane without changing topology, validates the requested interactive agent kind and strict agent name, and accepts native arguments after `--`.
 - Added transient declarative Agent view queries through `agent.view.set/clear`; filtered and sorted views now define sidebar, mobile, mouse, and agent-keybind navigation order.
 - Added one-shot plugin `[[startup]]` hooks for restoring plugin-owned state after server startup and live handoff.

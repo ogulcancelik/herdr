@@ -860,18 +860,39 @@ pub struct AdvancedConfig {
     pub scrollback_limit_bytes: usize,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RemoteTransportConfig {
+    #[default]
+    Auto,
+    Quic,
+    Ssh,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct RemoteConfig {
+    /// Preferred live transport for `herdr --remote`. Default: auto.
+    pub transport: RemoteTransportConfig,
     /// Add keepalive fallbacks and private connection reuse for `herdr --remote`.
     /// Set false to run plain ssh unchanged. Default: true.
     pub manage_ssh_config: bool,
+    /// Inclusive unprivileged UDP port range used by the lazy QUIC listener.
+    pub quic_port_range: String,
+    /// QUIC idle lifetime. Default: 86400 seconds.
+    pub quic_idle_timeout_seconds: u64,
+    /// Fall back to the SSH stdio bridge when QUIC is unavailable.
+    pub ssh_fallback: bool,
 }
 
 impl Default for RemoteConfig {
     fn default() -> Self {
         Self {
+            transport: RemoteTransportConfig::Auto,
             manage_ssh_config: true,
+            quic_port_range: "48000-48100".to_owned(),
+            quic_idle_timeout_seconds: 86_400,
+            ssh_fallback: true,
         }
     }
 }

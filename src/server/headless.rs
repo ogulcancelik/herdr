@@ -249,6 +249,8 @@ pub struct HeadlessServer {
     api_server: Option<api::ServerHandle>,
     #[cfg(unix)]
     client_listener: LocalListener,
+    #[cfg(unix)]
+    remote_quic: Option<crate::server::remote_quic::RemoteQuicServer>,
     client_socket_path: PathBuf,
     client_socket_identity: SocketFileIdentity,
     clients: HashMap<u64, ClientConnection>,
@@ -446,6 +448,8 @@ impl HeadlessServer {
             api_server,
             #[cfg(unix)]
             client_listener: listener,
+            #[cfg(unix)]
+            remote_quic: None,
             client_socket_path: client_path,
             client_socket_identity,
             clients: HashMap::new(),
@@ -2638,6 +2642,14 @@ impl HeadlessServer {
     }
 
     fn handle_server_event(&mut self, ev: ServerEvent) -> bool {
+        if self.handoff_in_progress {
+            if let ServerEvent::RemoteBootstrap { respond_to, .. } = &ev {
+                let _ = respond_to.send(Err(
+                    "live update in progress; retry QUIC bootstrap after handoff".to_owned(),
+                ));
+                return false;
+            }
+        }
         if self.handoff_in_progress && Self::ignore_client_event_during_handoff(&ev) {
             return false;
         }
@@ -2900,6 +2912,50 @@ impl HeadlessServer {
                     return false;
                 };
                 client.take_deferred_render() != DeferredRender::None
+            }
+            ServerEvent::RemoteBootstrap {
+                request,
+                respond_to,
+            } => {
+                #[cfg(unix)]
+                {
+                    let result = if let Some(server) = self.remote_quic.as_ref() {
+                        server.bootstrap(request)
+                    } else {
+                        let remote_config = crate::config::Config::load().config.remote;
+                        match crate::server::remote_quic::RemoteQuicServer::start(
+                            &remote_config,
+                            self.server_event_tx.clone(),
+                        ) {
+                            Ok(server) => {
+                                let result = server.bootstrap(request);
+                                self.remote_quic = Some(server);
+                                result
+                            }
+                            Err(error) => Err(error),
+                        }
+                    };
+                    let _ = respond_to.send(result);
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = request;
+                    let _ = respond_to.send(Err(
+                        "remote QUIC is not supported on this platform".to_owned()
+                    ));
+                }
+                false
+            }
+            ServerEvent::ClientSyncRequest { client_id } => {
+                let Some(client) = self.clients.get_mut(&client_id) else {
+                    return false;
+                };
+                if let Some(writer) = client.writer.as_ref() {
+                    writer.render.reset_generation();
+                }
+                client.request_transport_generation_redraw();
+                client.defer_full_render();
+                true
             }
             ServerEvent::QuitSignal => {
                 // The quit check at the top of the loop handles this.
@@ -4459,6 +4515,8 @@ mod tests {
             api_server: None,
             #[cfg(unix)]
             client_listener: listener,
+            #[cfg(unix)]
+            remote_quic: None,
             client_socket_path: socket_path,
             client_socket_identity,
             clients: HashMap::new(),

@@ -30,6 +30,22 @@ pub const MAX_CLIPBOARD_IMAGE_PAYLOAD: usize = 16 * 1024 * 1024;
 /// Length of the u32 little-endian length prefix in bytes.
 const LENGTH_PREFIX_BYTES: usize = 4;
 
+/// QUIC application protocol negotiated during the TLS handshake.
+#[cfg(unix)]
+pub const REMOTE_QUIC_ALPN: &[u8] = b"herdr/1";
+/// Capability token length in bytes.
+pub const REMOTE_QUIC_TOKEN_BYTES: usize = 32;
+/// Stable process-instance and logical-client identifier length in bytes.
+pub const REMOTE_QUIC_ID_BYTES: usize = 16;
+/// SHA-256 certificate/resource fingerprint length in bytes.
+pub const REMOTE_QUIC_HASH_BYTES: usize = 32;
+/// Maximum cached resource hashes advertised during reconnect.
+#[cfg(unix)]
+pub const REMOTE_QUIC_MAX_RESOURCE_INVENTORY: usize = 256;
+/// Maximum single QUIC graphics resource.
+#[cfg(unix)]
+pub const REMOTE_QUIC_MAX_RESOURCE_SIZE: usize = 32 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Client → Server messages
 // ---------------------------------------------------------------------------
@@ -303,6 +319,103 @@ impl ClientInputEvent {
     }
 }
 
+/// SSH-authenticated request to lazily enable the server's QUIC endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteBootstrapRequest {
+    pub session: String,
+    pub logical_client_id: [u8; REMOTE_QUIC_ID_BYTES],
+}
+
+/// Process-lifetime QUIC authority returned over the authenticated SSH path.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteBootstrapRecord {
+    pub version: u32,
+    pub server_instance_id: [u8; REMOTE_QUIC_ID_BYTES],
+    pub port: u16,
+    pub certificate_fingerprint: [u8; REMOTE_QUIC_HASH_BYTES],
+    pub capability_token: [u8; REMOTE_QUIC_TOKEN_BYTES],
+    pub expires_unix_seconds: u64,
+    pub ssh_fallback_available: bool,
+}
+
+impl std::fmt::Debug for RemoteBootstrapRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RemoteBootstrapRecord")
+            .field("version", &self.version)
+            .field("server_instance_id", &self.server_instance_id)
+            .field("port", &self.port)
+            .field("certificate_fingerprint", &self.certificate_fingerprint)
+            .field("capability_token", &"<redacted>")
+            .field("expires_unix_seconds", &self.expires_unix_seconds)
+            .field("ssh_fallback_available", &self.ssh_fallback_available)
+            .finish()
+    }
+}
+
+/// Authenticated first record on a fresh QUIC control stream.
+#[cfg(unix)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteQuicHello {
+    pub version: u32,
+    pub server_instance_id: [u8; REMOTE_QUIC_ID_BYTES],
+    pub logical_client_id: [u8; REMOTE_QUIC_ID_BYTES],
+    pub capability_token: [u8; REMOTE_QUIC_TOKEN_BYTES],
+    pub connection_generation: u64,
+    pub cols: u16,
+    pub rows: u16,
+    pub cell_width_px: u32,
+    pub cell_height_px: u32,
+    pub keybindings: ClientKeybindings,
+    pub launch_mode: ClientLaunchMode,
+    pub cached_resources: Vec<[u8; REMOTE_QUIC_HASH_BYTES]>,
+}
+
+/// Header written once at the start of every server-initiated QUIC stream.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RemoteQuicStreamHeader {
+    Render {
+        connection_generation: u64,
+        render_generation: u64,
+    },
+    Resource {
+        connection_generation: u64,
+        render_generation: u64,
+        hash: [u8; REMOTE_QUIC_HASH_BYTES],
+        length: u32,
+    },
+}
+
+/// Content-addressed Kitty graphics bytes and their insertion point in stripped frame text.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteQuicResourceRef {
+    pub hash: [u8; REMOTE_QUIC_HASH_BYTES],
+    pub text_offset: u32,
+}
+
+/// A generation-fenced Terminal-ANSI frame carried on the render stream.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteQuicRenderRecord {
+    pub connection_generation: u64,
+    pub render_generation: u64,
+    pub state_revision: u64,
+    pub frame: TerminalFrame,
+    pub resources: Vec<RemoteQuicResourceRef>,
+}
+
+/// Remote-client recovery state rendered by the existing thin client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RemoteTransportStatus {
+    PathRecovering,
+    FreshQuicConnecting,
+    SshRebootstrap,
+    SshFallbackConnecting,
+    Connected,
+}
+
 /// Messages sent from the client to the server over the client protocol socket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientMessage {
@@ -395,6 +508,15 @@ pub enum ClientMessage {
         /// Replace an existing writable controller for this terminal.
         takeover: bool,
     },
+
+    /// Transport heartbeat used only inside an authenticated QUIC control stream.
+    RemotePing { nonce: u64 },
+
+    /// Request a new full render generation after path recovery or a detected gap.
+    SyncRequest,
+
+    /// Private SSH bootstrap request. This is accepted only as the first local-socket message.
+    RemoteBootstrap(RemoteBootstrapRequest),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -663,6 +785,21 @@ pub enum ServerMessage {
     PrefixInputSource {
         /// Whether the ASCII input source should be active.
         active: bool,
+    },
+
+    /// Reply to a transport heartbeat on the authenticated QUIC control stream.
+    RemotePong { nonce: u64 },
+
+    /// Private response to a local SSH bootstrap helper.
+    RemoteBootstrap {
+        record: Option<RemoteBootstrapRecord>,
+        error: Option<String>,
+    },
+
+    /// Local proxy status; remote servers never emit this message directly.
+    TransportStatus {
+        status: RemoteTransportStatus,
+        detail: Option<String>,
     },
 }
 
@@ -2011,6 +2148,22 @@ mod tests {
             let decoded: ClientMessage = read_message(&mut b, MAX_FRAME_SIZE).unwrap();
             assert_eq!(*expected, decoded);
         }
+    }
+
+    #[test]
+    fn bootstrap_debug_redacts_capability_token() {
+        let record = RemoteBootstrapRecord {
+            version: PROTOCOL_VERSION,
+            server_instance_id: [1; REMOTE_QUIC_ID_BYTES],
+            port: 48_000,
+            certificate_fingerprint: [2; REMOTE_QUIC_HASH_BYTES],
+            capability_token: [165; REMOTE_QUIC_TOKEN_BYTES],
+            expires_unix_seconds: 123,
+            ssh_fallback_available: true,
+        };
+        let debug = format!("{record:?}");
+        assert!(debug.contains("capability_token: \"<redacted>\""));
+        assert!(!debug.contains("165, 165"));
     }
 
     // ---- Helper: chunked reader for simulating partial reads ----

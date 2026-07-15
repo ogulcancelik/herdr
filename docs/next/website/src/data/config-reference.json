@@ -1046,6 +1046,35 @@
           "type": "boolean",
           "default": "true",
           "description": "Add keepalive fallbacks and private connection reuse for `herdr --remote`. Set false to run plain ssh unchanged."
+        },
+        {
+          "key": "remote.transport",
+          "type": "string",
+          "default": "\"auto\"",
+          "description": "Preferred live transport for `herdr --remote`. `auto` tries QUIC and falls back according to `ssh_fallback`; `quic` requires the authenticated QUIC path; `ssh` uses the stdio bridge.",
+          "values": [
+            "auto",
+            "quic",
+            "ssh"
+          ]
+        },
+        {
+          "key": "remote.quic_port_range",
+          "type": "string",
+          "default": "\"48000-48100\"",
+          "description": "Inclusive unprivileged UDP port range used by the lazy QUIC listener."
+        },
+        {
+          "key": "remote.quic_idle_timeout_seconds",
+          "type": "integer",
+          "default": "86400",
+          "description": "QUIC idle lifetime in seconds."
+        },
+        {
+          "key": "remote.ssh_fallback",
+          "type": "boolean",
+          "default": "true",
+          "description": "Fall back to the SSH stdio bridge when QUIC cannot connect or recover."
         }
       ]
     },
