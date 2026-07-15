@@ -802,13 +802,26 @@ fn multi_client_effective_size_shrinks_when_smaller_client_joins() {
 
     let mut small = connect_raw_client(&client_socket, 80, 24);
     assert!(wait_for_frame(&mut small, Duration::from_secs(2)));
-    let with_small_size = read_pane_tty_size(&api_socket, &pane_id, Duration::from_secs(5));
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut last_seen_size = None;
+    let mut size_with_small_client = None;
+    while Instant::now() < deadline {
+        if let Some(size) =
+            try_read_pane_tty_size(&api_socket, &pane_id, Duration::from_millis(400))
+        {
+            last_seen_size = Some(size);
+            if size.0 < large_only_size.0 && size.1 < large_only_size.1 {
+                size_with_small_client = Some(size);
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(60));
+    }
 
     assert!(
-        with_small_size.0 < large_only_size.0 && with_small_size.1 < large_only_size.1,
-        "effective pane size should shrink when smaller client joins: before={:?}, after={:?}",
-        large_only_size,
-        with_small_size
+        size_with_small_client.is_some(),
+        "effective pane size should shrink when smaller client joins: before={large_only_size:?}, last_seen={last_seen_size:?}"
     );
 
     cleanup_spawned_herdr(server, base);
