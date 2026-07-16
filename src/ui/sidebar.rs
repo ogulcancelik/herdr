@@ -1136,7 +1136,7 @@ fn render_workspace_list(
         let name_style = if selected || is_active || is_dragged {
             Style::default().fg(p.text).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(p.subtext0)
+            Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
         };
 
         let label = ws.display_name_from(&app.terminals, terminal_runtimes);
@@ -1157,11 +1157,11 @@ fn render_workspace_list(
         let state_text_style = Style::default()
             .fg(state_label_color(display_state, display_seen, p))
             .add_modifier(Modifier::DIM);
-        let branch_style = Style::default().fg(if selected || is_active {
-            p.mauve
+        let branch_style = if selected || is_active {
+            Style::default().fg(p.mauve)
         } else {
-            p.overlay0
-        });
+            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
+        };
         let token_values = ws.metadata_tokens.values();
         let rows = tokens::space_rows(
             &app.sidebar_spaces,
