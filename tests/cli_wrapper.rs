@@ -4458,6 +4458,61 @@ fn wait_agent_status_times_out_when_status_does_not_match() {
 }
 
 #[test]
+fn wait_agent_status_returns_pane_not_found_when_pane_closes_mid_wait() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_cli_close_wait_1","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    let root_pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let mut wait_child = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .args([
+            "wait",
+            "agent-status",
+            "1-1",
+            "--status",
+            "blocked",
+            "--timeout",
+            "5000",
+        ])
+        .env("HERDR_SOCKET_PATH", &socket_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    thread::sleep(Duration::from_millis(150));
+
+    let closed = run_cli(&socket_path, &["pane", "close", &root_pane_id]);
+    assert!(closed.status.success());
+
+    let waited = wait_child.wait_with_output().unwrap();
+    assert_eq!(waited.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&waited.stderr);
+    assert!(stderr.contains(r#""code":"pane_not_found""#), "{stderr}");
+    assert!(
+        !stderr.contains("timed out waiting for agent status change"),
+        "{stderr}"
+    );
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
 fn wait_agent_status_exits_when_done_status_matches() {
     let base = unique_test_dir();
     let config_home = base.join("config");

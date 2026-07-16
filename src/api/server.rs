@@ -1125,6 +1125,57 @@ mod tests {
     }
 
     #[test]
+    fn events_wait_agent_status_returns_pane_not_found_when_pane_disappears() {
+        let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        let responder = std::thread::spawn(move || {
+            let first = api_rx.blocking_recv().expect("initial pane probe");
+            assert!(matches!(first.request.method, Method::PaneGet(_)));
+            first
+                .respond_to
+                .send(
+                    serde_json::to_string(&SuccessResponse {
+                        id: first.request.id,
+                        result: ResponseResult::PaneInfo {
+                            pane: pane_info("pane_1", crate::api::schema::AgentStatus::Unknown),
+                        },
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+
+            let second = api_rx.blocking_recv().expect("poll-time pane probe");
+            assert!(matches!(second.request.method, Method::PaneGet(_)));
+            second
+                .respond_to
+                .send(error_response_json(
+                    second.request.id,
+                    "pane_not_found",
+                    "pane pane_1 not found".into(),
+                ))
+                .unwrap();
+        });
+
+        let (mut client, server, _path) = local_stream_pair("api-wait-missing");
+        client
+            .write_all(br#"{"id":"wait_missing","method":"events.wait","params":{"match_event":{"event":"pane_agent_status_changed","pane_id":"pane_1","agent_status":"blocked"},"timeout_ms":1000}}"#)
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+
+        let running = Arc::new(AtomicBool::new(true));
+        let event_hub = EventHub::default();
+        handle_connection(server, &api_tx, &event_hub, &running, None).unwrap();
+
+        let response: serde_json::Value = serde_json::from_str(&read_line(&mut client)).unwrap();
+        assert_eq!(response["id"], "wait_missing");
+        assert_eq!(response["error"]["code"], "pane_not_found");
+        assert_eq!(response["error"]["message"], "pane pane_1 not found");
+
+        drop(api_tx);
+        responder.join().unwrap();
+    }
+
+    #[test]
     fn wait_for_output_stops_when_client_disconnects() {
         let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
         let (first_read_tx, first_read_rx) = std::sync::mpsc::channel();

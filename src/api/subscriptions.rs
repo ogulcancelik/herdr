@@ -297,17 +297,25 @@ impl ActiveSubscription {
         api_tx: &ApiRequestSender,
         event_hub: &EventHub,
     ) -> Option<serde_json::Value> {
+        self.poll_result(api_tx, event_hub).ok().flatten()
+    }
+
+    pub(super) fn poll_result(
+        &mut self,
+        api_tx: &ApiRequestSender,
+        event_hub: &EventHub,
+    ) -> Result<Option<serde_json::Value>, ErrorResponse> {
         match self {
-            Self::Event(subscription) => subscription.poll(event_hub),
-            Self::OutputMatched(subscription) => {
-                serde_json::to_value(subscription.poll(api_tx)?).ok()
-            }
-            Self::AgentStatusChanged(subscription) => {
-                serde_json::to_value(subscription.poll(api_tx, event_hub)?).ok()
-            }
-            Self::ScrollChanged(subscription) => {
-                serde_json::to_value(subscription.poll(api_tx)?).ok()
-            }
+            Self::Event(subscription) => Ok(subscription.poll(event_hub)),
+            Self::OutputMatched(subscription) => Ok(subscription
+                .poll(api_tx)?
+                .and_then(|event| serde_json::to_value(event).ok())),
+            Self::AgentStatusChanged(subscription) => Ok(subscription
+                .poll_result(api_tx, event_hub)?
+                .and_then(|event| serde_json::to_value(event).ok())),
+            Self::ScrollChanged(subscription) => Ok(subscription
+                .poll_result(api_tx)?
+                .and_then(|event| serde_json::to_value(event).ok())),
         }
     }
 }
@@ -325,7 +333,10 @@ impl ActiveEventSubscription {
 }
 
 impl ActiveOutputMatchedSubscription {
-    fn poll(&mut self, api_tx: &ApiRequestSender) -> Option<SubscriptionEventEnvelope> {
+    fn poll(
+        &mut self,
+        api_tx: &ApiRequestSender,
+    ) -> Result<Option<SubscriptionEventEnvelope>, ErrorResponse> {
         let read = pane_read(
             format!("{}:read", self.request_prefix),
             &self.pane_id,
@@ -334,13 +345,13 @@ impl ActiveOutputMatchedSubscription {
             self.strip_ansi,
             api_tx,
         )
-        .ok()?;
+        ?;
 
         let matched_line = match_output(&read.text, &self.matcher, self.regex.as_ref());
-        match matched_line {
+        Ok(match matched_line {
             Some(matched_line) => {
                 if self.currently_matching {
-                    return None;
+                    return Ok(None);
                 }
                 self.currently_matching = true;
                 Some(SubscriptionEventEnvelope {
@@ -356,16 +367,16 @@ impl ActiveOutputMatchedSubscription {
                 self.currently_matching = false;
                 None
             }
-        }
+        })
     }
 }
 
 impl ActiveAgentStatusChangedSubscription {
-    fn poll(
+    fn poll_result(
         &mut self,
         api_tx: &ApiRequestSender,
         event_hub: &EventHub,
-    ) -> Option<SubscriptionEventEnvelope> {
+    ) -> Result<Option<SubscriptionEventEnvelope>, ErrorResponse> {
         let mut saw_status_event = false;
         for (sequence, event) in event_hub.events_after(self.last_sequence) {
             self.last_sequence = sequence;
@@ -401,7 +412,7 @@ impl ActiveAgentStatusChangedSubscription {
             }
 
             self.initial_event = None;
-            return Some(SubscriptionEventEnvelope {
+            return Ok(Some(SubscriptionEventEnvelope {
                 event: SubscriptionEventKind::PaneAgentStatusChanged,
                 data: SubscriptionEventData::PaneAgentStatusChanged(PaneAgentStatusChangedEvent {
                     pane_id,
@@ -412,18 +423,18 @@ impl ActiveAgentStatusChangedSubscription {
                     display_agent,
                     state_labels,
                 }),
-            });
+            }));
         }
 
         if saw_status_event {
             self.initial_event = None;
         } else if event_hub.current_sequence() != self.last_sequence {
-            return None;
+            return Ok(None);
         } else if let Some(event) = self.initial_event.take() {
-            return Some(SubscriptionEventEnvelope {
+            return Ok(Some(SubscriptionEventEnvelope {
                 event: SubscriptionEventKind::PaneAgentStatusChanged,
                 data: SubscriptionEventData::PaneAgentStatusChanged(event),
-            });
+            }));
         }
 
         let before_snapshot_sequence = self.last_sequence;
@@ -432,17 +443,17 @@ impl ActiveAgentStatusChangedSubscription {
             &self.pane_id,
             api_tx,
         )
-        .ok()?;
+        ?;
         let after_snapshot_sequence = event_hub.current_sequence();
         if after_snapshot_sequence != before_snapshot_sequence {
-            return None;
+            return Ok(None);
         }
 
         let event = self.event_from_snapshot(pane);
         if event.is_some() {
             self.last_sequence = after_snapshot_sequence;
         }
-        event
+        Ok(event)
     }
 
     fn event_from_snapshot(
@@ -483,14 +494,17 @@ impl ActiveAgentStatusChangedSubscription {
 }
 
 impl ActiveScrollChangedSubscription {
-    fn poll(&mut self, api_tx: &ApiRequestSender) -> Option<SubscriptionEventEnvelope> {
+    fn poll_result(
+        &mut self,
+        api_tx: &ApiRequestSender,
+    ) -> Result<Option<SubscriptionEventEnvelope>, ErrorResponse> {
         let pane = pane_get(
             format!("{}:pane", self.request_prefix),
             &self.pane_id,
             api_tx,
         )
-        .ok()?;
-        self.event_from_snapshot(pane)
+        ?;
+        Ok(self.event_from_snapshot(pane))
     }
 
     fn event_from_snapshot(
@@ -545,13 +559,14 @@ fn pane_read(
         },
     })?;
     if value.get("error").is_some() {
-        return serde_json::from_value(value).map_err(|_| ErrorResponse {
+        let error = serde_json::from_value(value).map_err(|_| ErrorResponse {
             id: request_id,
             error: ErrorBody {
                 code: "internal_error".into(),
                 message: "failed to decode pane read error".into(),
             },
-        });
+        })?;
+        return Err(error);
     }
     serde_json::from_value(value["result"]["read"].clone()).map_err(|_| ErrorResponse {
         id: request_id,
@@ -585,13 +600,14 @@ fn pane_get(
         },
     })?;
     if value.get("error").is_some() {
-        return serde_json::from_value(value).map_err(|_| ErrorResponse {
+        let error = serde_json::from_value(value).map_err(|_| ErrorResponse {
             id: request_id,
             error: ErrorBody {
                 code: "internal_error".into(),
                 message: "failed to decode pane get error".into(),
             },
-        });
+        })?;
+        return Err(error);
     }
     serde_json::from_value(value["result"]["pane"].clone()).map_err(|_| ErrorResponse {
         id: request_id,
@@ -725,7 +741,8 @@ mod tests {
         event_hub.push(presentation_event(None));
 
         let set_event = subscription
-            .poll(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
+            .poll_result(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
+            .expect("set event request")
             .expect("set event");
         let SubscriptionEventData::PaneAgentStatusChanged(set_data) = set_event.data else {
             panic!("wrong event data");
@@ -733,7 +750,8 @@ mod tests {
         assert_eq!(set_data.title.as_deref(), Some("short lived"));
 
         let expiry_event = subscription
-            .poll(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
+            .poll_result(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
+            .expect("expiry event request")
             .expect("expiry event");
         let SubscriptionEventData::PaneAgentStatusChanged(expiry_data) = expiry_event.data else {
             panic!("wrong event data");
@@ -770,7 +788,8 @@ mod tests {
         event_hub.push(presentation_event(None));
 
         let set_event = subscription
-            .poll(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
+            .poll_result(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
+            .expect("set event request")
             .expect("set event");
         let SubscriptionEventData::PaneAgentStatusChanged(set_data) = set_event.data else {
             panic!("wrong event data");
@@ -778,7 +797,8 @@ mod tests {
         assert_eq!(set_data.title.as_deref(), Some("short lived"));
 
         let expiry_event = subscription
-            .poll(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
+            .poll_result(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
+            .expect("expiry event request")
             .expect("expiry event");
         let SubscriptionEventData::PaneAgentStatusChanged(expiry_data) = expiry_event.data else {
             panic!("wrong event data");
@@ -814,7 +834,8 @@ mod tests {
         event_hub.push(presentation_event(Some("short lived")));
 
         let event = subscription
-            .poll(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
+            .poll_result(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
+            .expect("setup-window event request")
             .expect("setup-window event");
         let SubscriptionEventData::PaneAgentStatusChanged(data) = event.data else {
             panic!("wrong event data");

@@ -153,8 +153,13 @@ pub(super) fn wait_for_event(
             return Ok(None);
         }
 
-        if let Some(event) = active.poll(api_tx, event_hub) {
-            return Ok(Some(wait_matched_response(&request_id, event)));
+        match active.poll_result(api_tx, event_hub) {
+            Ok(Some(event)) => return Ok(Some(wait_matched_response(&request_id, event))),
+            Ok(None) => {}
+            Err(mut response) => {
+                response.id = request_id.clone();
+                return Ok(Some(serde_json::to_string(&response).unwrap()));
+            }
         }
 
         if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
