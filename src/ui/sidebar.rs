@@ -558,15 +558,17 @@ pub(crate) fn agent_entry_height_in_body(
         .min(body_height)
 }
 
-/// Group key of an agent panel entry for the grouped (Spaces) view. `Some(key)` is the
-/// worktree-space key; `None` means the workspace belongs to no space. All ungrouped
-/// workspaces share the `None` bucket, so loose agents are not individually fenced —
-/// separators appear only on real space boundaries (including space<->ungrouped).
+/// Group key of an agent panel entry for the grouped (Spaces) view. Identity of the
+/// workspace: the worktree-space key when the workspace is a space member, otherwise the
+/// `ws_idx` itself, so each ungrouped workspace is its own group. `None` only when
+/// `ws_idx` is out of range. Agents sharing a `ws_idx` (different tabs/panes of one
+/// workspace) stay together; distinct workspaces are fenced by a separator.
 fn agent_group_key(app: &AppState, entry: &AgentPanelEntry) -> Option<String> {
-    app.workspaces
-        .get(entry.ws_idx)
-        .and_then(|ws| ws.worktree_space())
-        .map(|space| space.key.clone())
+    app.workspaces.get(entry.ws_idx).map(|ws| {
+        ws.worktree_space()
+            .map(|space| space.key.clone())
+            .unwrap_or_else(|| entry.ws_idx.to_string())
+    })
 }
 
 fn agent_group_boundary(app: &AppState, entries: &[AgentPanelEntry], entry_idx: usize) -> bool {
@@ -1700,6 +1702,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         }
         app.sidebar_agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
         assert_eq!(app.sidebar_agents.row_gap, 0);
+        // Pure row_gap packing: use Priority so distinct-workspace group separators
+        // (covered by agent_group_separator_only_on_space_boundaries_in_grouped_mode)
+        // don't inject rows here.
+        app.agent_panel_sort = AgentPanelSort::Priority;
 
         let area = Rect::new(0, 0, 20, 5);
         let metrics = agent_panel_scroll_metrics(&app, area);
@@ -2693,25 +2699,31 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             workspace_with_worktree_space("loose", None, "/repo/loose"),
         ];
         app.sidebar_agents.row_gap = 0;
+        // Layout: alpha/main, alpha/issue, beta/main, solo, solo (second pane), loose.
+        // The two `solo` entries share a ws_idx (different panes of one workspace).
+        let entry_ws_order = [0usize, 1, 2, 3, 3, 4];
         let entries: Vec<AgentPanelEntry> =
-            (0..app.workspaces.len()).map(|i| agent_entry_for_ws(&app, i)).collect();
+            entry_ws_order.iter().map(|&i| agent_entry_for_ws(&app, i)).collect();
 
-        // Grouped mode: boundary only where the space group changes.
+        // Grouped mode: boundary where the workspace identity changes. Different ungrouped
+        // workspaces are fenced too; only same-ws_idx neighbours share a group.
         app.agent_panel_sort = AgentPanelSort::Spaces;
         assert!(!agent_group_boundary(&app, &entries, 0)); // alpha -> alpha (same space)
         assert!(agent_group_boundary(&app, &entries, 1)); // alpha -> beta
-        assert!(agent_group_boundary(&app, &entries, 2)); // beta -> ungrouped
-        assert!(!agent_group_boundary(&app, &entries, 3)); // ungrouped -> ungrouped (shared bucket)
-        assert!(!agent_group_boundary(&app, &entries, 4)); // last entry
+        assert!(agent_group_boundary(&app, &entries, 2)); // beta -> solo (ungrouped)
+        assert!(!agent_group_boundary(&app, &entries, 3)); // solo -> solo (same ws_idx)
+        assert!(agent_group_boundary(&app, &entries, 4)); // solo -> loose (distinct ungrouped)
+        assert!(!agent_group_boundary(&app, &entries, 5)); // last entry
 
         // row_gap == 0, so the gap equals just the separator row on boundaries.
         assert_eq!(agent_entry_gap(&app, &entries, 0), 0);
         assert_eq!(agent_entry_gap(&app, &entries, 1), 1);
         assert_eq!(agent_entry_gap(&app, &entries, 2), 1);
         assert_eq!(agent_entry_gap(&app, &entries, 3), 0);
-        assert_eq!(agent_entry_gap(&app, &entries, 4), 0);
+        assert_eq!(agent_entry_gap(&app, &entries, 4), 1);
+        assert_eq!(agent_entry_gap(&app, &entries, 5), 0);
 
-        // Priority mode: no separators regardless of space keys.
+        // Priority mode: no separators regardless of workspace identity.
         app.agent_panel_sort = AgentPanelSort::Priority;
         for idx in 0..entries.len() {
             assert!(!agent_group_boundary(&app, &entries, idx));

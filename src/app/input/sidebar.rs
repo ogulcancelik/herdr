@@ -712,6 +712,9 @@ mod tests {
                 .unwrap()
                 .detected_agent = Some(agent);
         }
+        // Card-gap / mouse-target geometry only: use Priority so distinct-workspace group
+        // separators (covered in ui::sidebar tests) don't inject rows between the agents.
+        app.state.agent_panel_sort = AgentPanelSort::Priority;
         app.state.sidebar_agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
         app.state.sidebar_agents.rows_by_agent.insert(
             "claude".into(),
