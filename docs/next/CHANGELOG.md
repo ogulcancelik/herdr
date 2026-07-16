@@ -8,6 +8,7 @@
 
 ### Fixed
 - Live handoff now preserves installed plugins and no longer lets the next plugin installation overwrite the existing registry. (#893)
+- `herdr wait agent-status` now returns `pane_not_found` promptly when its target pane closes instead of waiting for the full timeout. (#1439)
 
 ## [0.7.4] - 2026-07-15
 

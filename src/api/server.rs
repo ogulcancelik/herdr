@@ -1125,6 +1125,64 @@ mod tests {
     }
 
     #[test]
+    fn events_wait_agent_status_returns_not_found_when_pane_closes() {
+        let event_hub = EventHub::default();
+        let responder_event_hub = event_hub.clone();
+        let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        let responder = std::thread::spawn(move || {
+            let mut pane_get_count = 0;
+            while let Some(msg) = api_rx.blocking_recv() {
+                let Method::PaneGet(_) = msg.request.method else {
+                    panic!("unexpected request: {:?}", msg.request.method);
+                };
+                pane_get_count += 1;
+                let response = if pane_get_count == 1 {
+                    serde_json::to_string(&SuccessResponse {
+                        id: msg.request.id,
+                        result: ResponseResult::PaneInfo {
+                            pane: pane_info("pane_1", crate::api::schema::AgentStatus::Unknown),
+                        },
+                    })
+                    .unwrap()
+                } else {
+                    if pane_get_count == 2 {
+                        responder_event_hub.push(crate::api::schema::EventEnvelope {
+                            event: crate::api::schema::EventKind::PaneClosed,
+                            data: crate::api::schema::EventData::PaneClosed {
+                                pane_id: "pane_1".into(),
+                                workspace_id: "ws_1".into(),
+                            },
+                        });
+                    }
+                    error_response_json(
+                        msg.request.id,
+                        "pane_not_found",
+                        "pane pane_1 not found".into(),
+                    )
+                };
+                msg.respond_to.send(response).unwrap();
+            }
+        });
+
+        let (mut client, server, _path) = local_stream_pair("api-events-wait-pane-close");
+        client
+            .write_all(br#"{"id":"wait_close","method":"events.wait","params":{"match_event":{"event":"pane_agent_status_changed","pane_id":"pane_1","agent_status":"done"},"timeout_ms":500}}"#)
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+
+        let running = Arc::new(AtomicBool::new(true));
+        handle_connection(server, &api_tx, &event_hub, &running, None).unwrap();
+
+        let response: serde_json::Value = serde_json::from_str(&read_line(&mut client)).unwrap();
+        assert_eq!(response["id"], "wait_close");
+        assert_eq!(response["error"]["code"], "pane_not_found");
+        assert_eq!(response["error"]["message"], "pane pane_1 not found");
+        drop(api_tx);
+        responder.join().unwrap();
+    }
+
+    #[test]
     fn wait_for_output_stops_when_client_disconnects() {
         let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
         let (first_read_tx, first_read_rx) = std::sync::mpsc::channel();

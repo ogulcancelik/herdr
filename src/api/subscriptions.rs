@@ -310,6 +310,19 @@ impl ActiveSubscription {
             }
         }
     }
+
+    pub(super) fn poll_for_wait(
+        &mut self,
+        api_tx: &ApiRequestSender,
+        event_hub: &EventHub,
+    ) -> Result<Option<serde_json::Value>, ErrorResponse> {
+        match self {
+            Self::AgentStatusChanged(subscription) => Ok(subscription
+                .poll_result(api_tx, event_hub)?
+                .and_then(|event| serde_json::to_value(event).ok())),
+            _ => Ok(self.poll(api_tx, event_hub)),
+        }
+    }
 }
 
 impl ActiveEventSubscription {
@@ -366,6 +379,14 @@ impl ActiveAgentStatusChangedSubscription {
         api_tx: &ApiRequestSender,
         event_hub: &EventHub,
     ) -> Option<SubscriptionEventEnvelope> {
+        self.poll_result(api_tx, event_hub).ok().flatten()
+    }
+
+    fn poll_result(
+        &mut self,
+        api_tx: &ApiRequestSender,
+        event_hub: &EventHub,
+    ) -> Result<Option<SubscriptionEventEnvelope>, ErrorResponse> {
         let mut saw_status_event = false;
         for (sequence, event) in event_hub.events_after(self.last_sequence) {
             self.last_sequence = sequence;
@@ -401,7 +422,7 @@ impl ActiveAgentStatusChangedSubscription {
             }
 
             self.initial_event = None;
-            return Some(SubscriptionEventEnvelope {
+            return Ok(Some(SubscriptionEventEnvelope {
                 event: SubscriptionEventKind::PaneAgentStatusChanged,
                 data: SubscriptionEventData::PaneAgentStatusChanged(PaneAgentStatusChangedEvent {
                     pane_id,
@@ -412,18 +433,18 @@ impl ActiveAgentStatusChangedSubscription {
                     display_agent,
                     state_labels,
                 }),
-            });
+            }));
         }
 
         if saw_status_event {
             self.initial_event = None;
         } else if event_hub.current_sequence() != self.last_sequence {
-            return None;
+            return Ok(None);
         } else if let Some(event) = self.initial_event.take() {
-            return Some(SubscriptionEventEnvelope {
+            return Ok(Some(SubscriptionEventEnvelope {
                 event: SubscriptionEventKind::PaneAgentStatusChanged,
                 data: SubscriptionEventData::PaneAgentStatusChanged(event),
-            });
+            }));
         }
 
         let before_snapshot_sequence = self.last_sequence;
@@ -431,18 +452,18 @@ impl ActiveAgentStatusChangedSubscription {
             format!("{}:pane", self.request_prefix),
             &self.pane_id,
             api_tx,
-        )
-        .ok()?;
+        );
         let after_snapshot_sequence = event_hub.current_sequence();
         if after_snapshot_sequence != before_snapshot_sequence {
-            return None;
+            return Ok(None);
         }
+        let pane = pane?;
 
         let event = self.event_from_snapshot(pane);
         if event.is_some() {
             self.last_sequence = after_snapshot_sequence;
         }
-        event
+        Ok(event)
     }
 
     fn event_from_snapshot(
@@ -585,13 +606,15 @@ fn pane_get(
         },
     })?;
     if value.get("error").is_some() {
-        return serde_json::from_value(value).map_err(|_| ErrorResponse {
-            id: request_id,
-            error: ErrorBody {
-                code: "internal_error".into(),
-                message: "failed to decode pane get error".into(),
-            },
-        });
+        let response =
+            serde_json::from_value::<ErrorResponse>(value).map_err(|_| ErrorResponse {
+                id: request_id,
+                error: ErrorBody {
+                    code: "internal_error".into(),
+                    message: "failed to decode pane get error".into(),
+                },
+            })?;
+        return Err(response);
     }
     serde_json::from_value(value["result"]["pane"].clone()).map_err(|_| ErrorResponse {
         id: request_id,

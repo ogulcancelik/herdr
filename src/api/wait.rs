@@ -153,8 +153,16 @@ pub(super) fn wait_for_event(
             return Ok(None);
         }
 
-        if let Some(event) = active.poll(api_tx, event_hub) {
-            return Ok(Some(wait_matched_response(&request_id, event)));
+        match active.poll_for_wait(api_tx, event_hub) {
+            Ok(Some(event)) => return Ok(Some(wait_matched_response(&request_id, event))),
+            Ok(None) => {}
+            Err(mut response) if response.error.code == "pane_not_found" => {
+                response.id = request_id;
+                return serde_json::to_string(&response)
+                    .map(Some)
+                    .map_err(std::io::Error::other);
+            }
+            Err(_) => {}
         }
 
         if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
