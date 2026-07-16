@@ -460,7 +460,7 @@ impl AppState {
             }
             row_y = row_y
                 .saturating_add(height)
-                .saturating_add(crate::ui::agent_entry_gap(self, index, entries.len()))
+                .saturating_add(crate::ui::agent_entry_gap(self, &entries, index))
                 .min(body_bottom);
         }
         None

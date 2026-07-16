@@ -558,9 +558,26 @@ pub(crate) fn agent_entry_height_in_body(
         .min(body_height)
 }
 
-pub(crate) fn agent_entry_gap(app: &AppState, entry_idx: usize, entry_count: usize) -> u16 {
-    if entry_idx + 1 < entry_count {
-        app.sidebar_agents.row_gap
+/// Group key of an agent panel entry for the grouped (Spaces) view. `Some(key)` is the
+/// worktree-space key; `None` means the workspace belongs to no space. All ungrouped
+/// workspaces share the `None` bucket, so loose agents are not individually fenced —
+/// separators appear only on real space boundaries (including space<->ungrouped).
+fn agent_group_key(app: &AppState, entry: &AgentPanelEntry) -> Option<String> {
+    app.workspaces
+        .get(entry.ws_idx)
+        .and_then(|ws| ws.worktree_space())
+        .map(|space| space.key.clone())
+}
+
+fn agent_group_boundary(app: &AppState, entries: &[AgentPanelEntry], entry_idx: usize) -> bool {
+    entry_idx + 1 < entries.len()
+        && matches!(app.agent_panel_sort, AgentPanelSort::Spaces)
+        && agent_group_key(app, &entries[entry_idx]) != agent_group_key(app, &entries[entry_idx + 1])
+}
+
+pub(crate) fn agent_entry_gap(app: &AppState, entries: &[AgentPanelEntry], entry_idx: usize) -> u16 {
+    if entry_idx + 1 < entries.len() {
+        app.sidebar_agents.row_gap + agent_group_boundary(app, entries, entry_idx) as u16
     } else {
         0
     }
@@ -583,7 +600,7 @@ fn agent_panel_visible_count_from(app: &AppState, area: Rect, scroll: usize) -> 
         used_rows = used_rows.saturating_add(height);
         visible += 1;
         used_rows = used_rows
-            .saturating_add(agent_entry_gap(app, index, entries.len()))
+            .saturating_add(agent_entry_gap(app, &entries, index))
             .min(body.height);
     }
     visible
@@ -595,7 +612,7 @@ fn agent_panel_bottom_start(app: &AppState, area: Rect) -> usize {
     let mut used_rows = 0u16;
     let mut start = entries.len();
     for (index, entry) in entries.iter().enumerate().rev() {
-        let gap = agent_entry_gap(app, index, entries.len());
+        let gap = agent_entry_gap(app, &entries, index);
         let needed = agent_entry_height_in_body(app, entry, body.height).saturating_add(gap);
         if used_rows.saturating_add(needed) > body.height {
             break;
@@ -1382,9 +1399,19 @@ fn render_agent_detail(
                 Rect::new(body.x, row_y + row_index as u16, body.width, 1),
             );
         }
+        if agent_group_boundary(app, &details, index) {
+            let sep_y = row_y + height + app.sidebar_agents.row_gap;
+            if sep_y < body_bottom {
+                let sep = "─".repeat(body.width as usize);
+                frame.render_widget(
+                    Paragraph::new(Span::styled(sep, Style::default().fg(p.surface_dim))),
+                    Rect::new(body.x, sep_y, body.width, 1),
+                );
+            }
+        }
         row_y = row_y
             .saturating_add(height)
-            .saturating_add(agent_entry_gap(app, index, details.len()))
+            .saturating_add(agent_entry_gap(app, &details, index))
             .min(body_bottom);
     }
 
@@ -2632,5 +2659,64 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 },
             ]
         );
+    }
+
+    fn agent_entry_for_ws(app: &AppState, ws_idx: usize) -> AgentPanelEntry {
+        let ws = &app.workspaces[ws_idx];
+        AgentPanelEntry {
+            ws_idx,
+            tab_idx: 0,
+            pane_id: ws.tabs[0].root_pane,
+            primary_label: String::new(),
+            primary_tab_label: None,
+            pane_label: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_label: None,
+            agent: None,
+            state: AgentState::Unknown,
+            seen: true,
+            last_agent_state_change_seq: None,
+            state_labels: std::collections::HashMap::new(),
+            tokens: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn agent_group_separator_only_on_space_boundaries_in_grouped_mode() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            workspace_with_worktree_space("main", Some("alpha"), "/repo/alpha"),
+            workspace_with_worktree_space("issue", Some("alpha"), "/repo/alpha-issue"),
+            workspace_with_worktree_space("main", Some("beta"), "/repo/beta"),
+            workspace_with_worktree_space("solo", None, "/repo/solo"),
+            workspace_with_worktree_space("loose", None, "/repo/loose"),
+        ];
+        app.sidebar_agents.row_gap = 0;
+        let entries: Vec<AgentPanelEntry> =
+            (0..app.workspaces.len()).map(|i| agent_entry_for_ws(&app, i)).collect();
+
+        // Grouped mode: boundary only where the space group changes.
+        app.agent_panel_sort = AgentPanelSort::Spaces;
+        assert!(!agent_group_boundary(&app, &entries, 0)); // alpha -> alpha (same space)
+        assert!(agent_group_boundary(&app, &entries, 1)); // alpha -> beta
+        assert!(agent_group_boundary(&app, &entries, 2)); // beta -> ungrouped
+        assert!(!agent_group_boundary(&app, &entries, 3)); // ungrouped -> ungrouped (shared bucket)
+        assert!(!agent_group_boundary(&app, &entries, 4)); // last entry
+
+        // row_gap == 0, so the gap equals just the separator row on boundaries.
+        assert_eq!(agent_entry_gap(&app, &entries, 0), 0);
+        assert_eq!(agent_entry_gap(&app, &entries, 1), 1);
+        assert_eq!(agent_entry_gap(&app, &entries, 2), 1);
+        assert_eq!(agent_entry_gap(&app, &entries, 3), 0);
+        assert_eq!(agent_entry_gap(&app, &entries, 4), 0);
+
+        // Priority mode: no separators regardless of space keys.
+        app.agent_panel_sort = AgentPanelSort::Priority;
+        for idx in 0..entries.len() {
+            assert!(!agent_group_boundary(&app, &entries, idx));
+        }
+        assert_eq!(agent_entry_gap(&app, &entries, 1), 0);
+        assert_eq!(agent_entry_gap(&app, &entries, 2), 0);
     }
 }
