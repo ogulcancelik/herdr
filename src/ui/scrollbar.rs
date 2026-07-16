@@ -75,7 +75,8 @@ pub(crate) fn scrollbar_thumb_grab_offset(
     row: u16,
 ) -> Option<u16> {
     let thumb = scrollbar_thumb(metrics, track)?;
-    (row >= thumb.top && row < thumb.top + thumb.len).then_some(row - thumb.top)
+    let offset = row.checked_sub(thumb.top)?;
+    (offset < thumb.len).then_some(offset)
 }
 
 fn scrollbar_offset_from_thumb_top(
@@ -188,4 +189,21 @@ pub(super) fn render_pane_scrollbar(
         thumb_color,
         thumb_symbol,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thumb_grab_ignores_track_rows_above_thumb() {
+        let metrics = crate::pane::ScrollMetrics {
+            offset_from_bottom: 0,
+            max_offset_from_bottom: 100,
+            viewport_rows: 10,
+        };
+        let track = Rect::new(0, 10, 1, 10);
+
+        assert_eq!(scrollbar_thumb_grab_offset(metrics, track, track.y), None);
+    }
 }

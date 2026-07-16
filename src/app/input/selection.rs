@@ -143,17 +143,14 @@ impl AppState {
         &mut self,
         terminal_runtimes: &TerminalRuntimeRegistry,
         mouse: MouseEvent,
-    ) -> bool {
+    ) -> Option<crate::layout::PaneId> {
         let lines_per_notch = self.mouse_scroll_lines;
 
-        let Some(selection) = self.selection.as_ref() else {
-            return false;
-        };
+        let selection = self.selection.as_ref()?;
         if !selection.is_in_progress() {
-            return false;
+            return None;
         }
         let pane_id = selection.pane_id;
-        self.focus_pane(pane_id);
         match mouse.kind {
             MouseEventKind::ScrollUp => {
                 self.scroll_pane_up(terminal_runtimes, pane_id, lines_per_notch)
@@ -161,10 +158,10 @@ impl AppState {
             MouseEventKind::ScrollDown => {
                 self.scroll_pane_down(terminal_runtimes, pane_id, lines_per_notch)
             }
-            _ => return false,
+            _ => return None,
         }
         self.update_selection_cursor(terminal_runtimes, pane_id, mouse.column, mouse.row);
-        true
+        Some(pane_id)
     }
 }
 

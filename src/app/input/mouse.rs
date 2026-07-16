@@ -66,6 +66,12 @@ enum MobileMouseResult {
     Action(MouseAction),
 }
 
+enum RightClickPassthroughResult {
+    NotHandled,
+    Handled,
+    FocusPane(crate::layout::PaneId),
+}
+
 impl AppState {
     pub(crate) fn handle_pane_mouse_only(
         &mut self,
@@ -187,8 +193,13 @@ impl AppState {
             && mouse.row >= sidebar.y
             && mouse.row < sidebar.y + sidebar.height;
 
-        if self.handle_right_click_passthrough(terminal_runtimes, mouse, in_sidebar) {
-            return None;
+        match self.handle_right_click_passthrough(terminal_runtimes, mouse, in_sidebar) {
+            RightClickPassthroughResult::NotHandled => {}
+            RightClickPassthroughResult::Handled => return None,
+            RightClickPassthroughResult::FocusPane(pane_id) => {
+                let ws_idx = self.active?;
+                return Some(MouseAction::FocusPane { ws_idx, pane_id });
+            }
         }
 
         if self.mode == Mode::OpenExistingWorktree {
@@ -455,7 +466,6 @@ impl AppState {
                     if let Some((pane_id, target)) =
                         self.scrollbar_target_at(terminal_runtimes, mouse.column, mouse.row)
                     {
-                        self.focus_pane(pane_id);
                         match target {
                             ScrollbarClickTarget::Thumb { grab_row_offset } => {
                                 self.drag = Some(DragState {
@@ -476,7 +486,8 @@ impl AppState {
                         if self.mode != Mode::Terminal {
                             self.mode = Mode::Terminal;
                         }
-                        return None;
+                        let ws_idx = self.active?;
+                        return Some(MouseAction::FocusPane { ws_idx, pane_id });
                     }
                 }
 
@@ -934,13 +945,17 @@ impl AppState {
                 }
             }
 
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                if !in_sidebar && self.scroll_selection_with_wheel(terminal_runtimes, mouse) => {}
-
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if !in_sidebar => {
+                if let Some(pane_id) = self.scroll_selection_with_wheel(terminal_runtimes, mouse) {
+                    let ws_idx = self.active?;
+                    return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                }
                 self.selection = None;
                 self.selection_autoscroll = None;
-                self.handle_terminal_wheel(terminal_runtimes, mouse);
+                if let Some(pane_id) = self.handle_terminal_wheel(terminal_runtimes, mouse) {
+                    let ws_idx = self.active?;
+                    return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                }
             }
 
             MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
@@ -1427,10 +1442,6 @@ impl AppState {
         })
     }
 
-    pub(super) fn focus_pane(&mut self, pane_id: crate::layout::PaneId) {
-        let _ = pane_id;
-    }
-
     fn clickable_toast_at(&self, col: u16, row: u16) -> bool {
         self.toast
             .as_ref()
@@ -1502,7 +1513,7 @@ impl AppState {
         terminal_runtimes: &TerminalRuntimeRegistry,
         mouse: MouseEvent,
         in_sidebar: bool,
-    ) -> bool {
+    ) -> RightClickPassthroughResult {
         if let Some(gesture) = self.right_click_passthrough.clone() {
             match mouse.kind {
                 MouseEventKind::Drag(MouseButton::Right)
@@ -1517,7 +1528,7 @@ impl AppState {
                     if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Right)) {
                         self.right_click_passthrough = None;
                     }
-                    return true;
+                    return RightClickPassthroughResult::Handled;
                 }
                 _ => {
                     self.right_click_passthrough = None;
@@ -1529,24 +1540,24 @@ impl AppState {
             || in_sidebar
             || !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Right))
         {
-            return false;
+            return RightClickPassthroughResult::NotHandled;
         }
 
         let Some(modifiers) = self.right_click_passthrough_modifiers else {
-            return false;
+            return RightClickPassthroughResult::NotHandled;
         };
         if mouse.modifiers != modifiers {
-            return false;
+            return RightClickPassthroughResult::NotHandled;
         }
 
         let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() else {
-            return false;
+            return RightClickPassthroughResult::NotHandled;
         };
+        let pane_id = info.id;
 
-        self.focus_pane(info.id);
         let forwarded_mouse = self.strip_right_click_passthrough_modifiers(mouse, modifiers);
         if !self.forward_pane_mouse_button(terminal_runtimes, &info, forwarded_mouse) {
-            return false;
+            return RightClickPassthroughResult::NotHandled;
         }
 
         self.selection = None;
@@ -1559,7 +1570,7 @@ impl AppState {
             pane_info: info,
             modifiers,
         });
-        true
+        RightClickPassthroughResult::FocusPane(pane_id)
     }
 
     fn strip_right_click_passthrough_modifiers(
@@ -1577,13 +1588,12 @@ impl AppState {
         &mut self,
         terminal_runtimes: &TerminalRuntimeRegistry,
         mouse: MouseEvent,
-    ) {
+    ) -> Option<crate::layout::PaneId> {
         let lines_per_notch = self.mouse_scroll_lines;
 
         if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
-            self.focus_pane(info.id);
             if self.forward_pane_wheel(terminal_runtimes, &info, mouse) {
-                return;
+                return Some(info.id);
             }
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
@@ -1594,11 +1604,10 @@ impl AppState {
                 }
                 _ => {}
             }
-            return;
+            return Some(info.id);
         }
 
         if let Some(info) = self.pane_frame_at(mouse.column, mouse.row).cloned() {
-            self.focus_pane(info.id);
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
                     self.scroll_pane_up(terminal_runtimes, info.id, lines_per_notch)
@@ -1608,7 +1617,7 @@ impl AppState {
                 }
                 _ => {}
             }
-            return;
+            return Some(info.id);
         }
 
         if let Some(ws_idx) = self.active {
@@ -1620,6 +1629,7 @@ impl AppState {
                 }
             }
         }
+        None
     }
 
     pub(super) fn forward_pane_mouse_button(
@@ -1912,6 +1922,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_wheel_focuses_the_target_pane_and_frame() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let source = ws.tabs[0].root_pane;
+        let target = ws.test_split(Direction::Horizontal);
+        ws.tabs[0].layout.focus_pane(source);
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.pane_borders = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let target_info = app
+            .state
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == target)
+            .expect("target pane info")
+            .clone();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::ScrollUp,
+            target_info.inner_rect.x,
+            target_info.inner_rect.y,
+        ));
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(target));
+
+        app.state.workspaces[0].tabs[0].layout.focus_pane(source);
+        let (frame_col, frame_row) = (target_info.rect.x..target_info.rect.right())
+            .flat_map(|col| {
+                (target_info.rect.y..target_info.rect.bottom()).map(move |row| (col, row))
+            })
+            .find(|(col, row)| {
+                app.state.pane_at(*col, *row).is_none()
+                    && app
+                        .state
+                        .pane_frame_at(*col, *row)
+                        .is_some_and(|info| info.id == target)
+            })
+            .expect("target pane frame cell");
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, frame_col, frame_row));
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(target));
+    }
+
+    #[tokio::test]
+    async fn pane_scrollbar_click_focuses_the_target_pane() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let source = ws.tabs[0].root_pane;
+        let target = ws.test_split(Direction::Horizontal);
+        ws.tabs[0].layout.focus_pane(source);
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let target_info = pane_infos
+            .iter()
+            .find(|info| info.id == target)
+            .expect("target pane info")
+            .clone();
+        ws.tabs[0].runtimes.insert(
+            target,
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+                target_info.inner_rect.width,
+                target_info.inner_rect.height,
+                16 * 1024,
+                &numbered_lines_bytes(64),
+            ),
+        );
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app.state,
+            &app.terminal_runtimes,
+            Rect::new(0, 0, 106, 20),
+        );
+        let target_info = app
+            .state
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == target)
+            .expect("target pane info")
+            .clone();
+        let track = crate::ui::pane_scrollbar_rect(&target_info).expect("target scrollbar");
+        assert!(app
+            .state
+            .scrollbar_target_at(&app.terminal_runtimes, track.x, track.y)
+            .is_some_and(|(pane_id, _)| pane_id == target));
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            track.x,
+            track.y,
+        ));
+
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(target));
+    }
+
+    #[tokio::test]
     async fn mouse_dispatcher_forwards_horizontal_wheel_to_mouse_reporting_pane() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
@@ -2012,9 +2125,15 @@ mod tests {
     async fn configured_right_click_passthrough_forwards_full_gesture_to_pane() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
-        let pane_id = ws.tabs[0].root_pane;
+        let source = ws.tabs[0].root_pane;
+        let pane_id = ws.test_split(Direction::Horizontal);
+        ws.tabs[0].layout.focus_pane(source);
         let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
-        let info = pane_infos[0].clone();
+        let info = pane_infos
+            .iter()
+            .find(|info| info.id == pane_id)
+            .expect("target pane info")
+            .clone();
         let (runtime, mut input_rx) =
             crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
                 info.inner_rect.width,
@@ -2031,6 +2150,7 @@ mod tests {
         app.state.mode = Mode::Terminal;
         app.state.view.pane_infos = pane_infos;
         app.state.right_click_passthrough_modifiers = Some(KeyModifiers::CONTROL);
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(source));
 
         let col = info.inner_rect.x + 2;
         let row = info.inner_rect.y + 3;
@@ -2047,6 +2167,7 @@ mod tests {
             ..mouse(MouseEventKind::Up(MouseButton::Right), col + 1, row + 1)
         });
 
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(pane_id));
         assert_eq!(app.state.mode, Mode::Terminal);
         assert!(app.state.context_menu.is_none());
         assert!(app.state.right_click_passthrough.is_none());
