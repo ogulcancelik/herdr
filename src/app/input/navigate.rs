@@ -291,6 +291,15 @@ impl App {
                     leave_navigate_mode(&mut self.state);
                 }
             }
+            NavigateAction::NextBlockedAgent => {
+                if let Some((idx, ws_idx, pane_id)) =
+                    self.next_blocked_agent_entry()
+                {
+                    self.focus_pane_internal_via_api(ws_idx, pane_id);
+                    self.state.ensure_agent_panel_entry_visible(idx);
+                    leave_navigate_mode(&mut self.state);
+                }
+            }
             NavigateAction::NewTab => {
                 if self.state.active.is_some() {
                     if self.state.prompt_new_tab_name {
@@ -744,6 +753,36 @@ impl App {
         };
         let target = entries.get(next_idx)?;
         Some((next_idx, target.ws_idx, target.pane_id))
+    }
+
+    fn next_blocked_agent_entry(
+        &self,
+    ) -> Option<(usize, usize, crate::layout::PaneId)> {
+        let entries = crate::ui::agent_panel_entries(&self.state);
+        let blocked: Vec<_> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                e.state == crate::detect::AgentState::Blocked
+            })
+            .collect();
+        if blocked.is_empty() {
+            return None;
+        }
+        let focused = self
+            .state
+            .active
+            .and_then(|idx| self.state.workspaces.get(idx))
+            .and_then(crate::workspace::Workspace::focused_pane_id);
+        let current_pos = blocked
+            .iter()
+            .position(|(_, entry)| Some(entry.pane_id) == focused);
+        let next = match current_pos {
+            Some(pos) => (pos + 1) % blocked.len(),
+            None => 0,
+        };
+        let (panel_idx, entry) = blocked[next];
+        Some((panel_idx, entry.ws_idx, entry.pane_id))
     }
 
     fn pass_through_key_to_focused_pane(&mut self, key: TerminalKey) -> bool {
@@ -1308,6 +1347,7 @@ pub(crate) enum NavigateAction {
     NextWorkspace,
     PreviousAgent,
     NextAgent,
+    NextBlockedAgent,
     NewTab,
     RenameTab,
     PreviousTab,
@@ -1441,6 +1481,7 @@ fn non_indexed_action_for_key(
         (&kb.next_workspace, NavigateAction::NextWorkspace),
         (&kb.previous_agent, NavigateAction::PreviousAgent),
         (&kb.next_agent, NavigateAction::NextAgent),
+        (&kb.next_blocked_agent, NavigateAction::NextBlockedAgent),
         (&kb.new_tab, NavigateAction::NewTab),
         (&kb.rename_tab, NavigateAction::RenameTab),
         (&kb.previous_tab, NavigateAction::PreviousTab),

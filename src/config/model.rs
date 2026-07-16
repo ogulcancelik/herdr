@@ -365,6 +365,8 @@ pub struct KeysConfig {
     pub previous_agent: BindingConfig,
     /// Focus the next agent shown in the agent panel. Unset by default.
     pub next_agent: BindingConfig,
+    /// Focus the next blocked agent in the agent panel. Unset by default.
+    pub next_blocked_agent: BindingConfig,
     /// Focus an agent by index 1-9. Unset by default.
     pub focus_agent: BindingConfig,
     /// Local-client shortcut that sends a clipboard image to a remote Herdr session. Default: "ctrl+v".
@@ -485,6 +487,8 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     next_agent: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    next_blocked_agent: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     focus_agent: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     remote_image_paste: Option<String>,
@@ -589,6 +593,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(next_workspace);
         apply_field!(previous_agent);
         apply_field!(next_agent);
+        apply_field!(next_blocked_agent);
         apply_field!(focus_agent);
         apply_field!(remote_image_paste);
         apply_field!(new_tab);
@@ -687,6 +692,10 @@ impl KeysConfig {
         copy_effective_action_field!(next_workspace, keybinds.next_workspace);
         copy_effective_action_field!(previous_agent, keybinds.previous_agent);
         copy_effective_action_field!(next_agent, keybinds.next_agent);
+        copy_effective_action_field!(
+            next_blocked_agent,
+            keybinds.next_blocked_agent
+        );
         copy_effective_indexed_field!(focus_agent, keybinds.focus_agent);
         copy_user_field!(remote_image_paste);
         copy_effective_action_field!(new_tab, keybinds.new_tab);
@@ -956,6 +965,7 @@ impl Default for KeysConfig {
             next_workspace: BindingConfig::empty(),
             previous_agent: BindingConfig::empty(),
             next_agent: BindingConfig::empty(),
+            next_blocked_agent: BindingConfig::empty(),
             focus_agent: BindingConfig::empty(),
             remote_image_paste: "ctrl+v".into(),
             new_tab: BindingConfig::one("prefix+c"),
