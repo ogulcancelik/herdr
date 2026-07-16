@@ -946,7 +946,8 @@ impl TerminalState {
                 "herdr:codex",
                 "codex",
                 Some("startup" | "clear" | "resume" | "compact")
-            ) | ("herdr:opencode", "opencode", Some("new"))
+            ) | ("herdr:hermes", "hermes", Some("resume"))
+                | ("herdr:opencode", "opencode", Some("new"))
                 | ("herdr:pi", "pi", Some("new" | "resume" | "fork"))
                 | (
                     "herdr:omp",
@@ -3658,6 +3659,38 @@ mod tests {
                 "{session_start_source} should store the replacement session"
             );
         }
+    }
+
+    #[test]
+    fn hermes_resume_session_ref_replaces_existing_session_ref() {
+        let mut terminal = test_terminal();
+        terminal
+            .set_agent_session_ref(
+                "herdr:hermes".into(),
+                "hermes".into(),
+                crate::agent_resume::AgentSessionRef::id("hermes-old"),
+                Some(20),
+            )
+            .expect("initial session should be accepted");
+
+        let mutation = terminal
+            .set_agent_session_ref_for_session_start(
+                "herdr:hermes".into(),
+                "hermes".into(),
+                crate::agent_resume::AgentSessionRef::id("hermes-resumed"),
+                Some(21),
+                Some("resume".into()),
+            )
+            .expect("resume should replace the Hermes session");
+
+        assert!(mutation.session_ref_changed);
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("hermes-resumed")
+        );
     }
 
     #[test]

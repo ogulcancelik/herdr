@@ -2673,6 +2673,8 @@ fn bundled_integration_assets_report_session_refs() {
     assert!(HERMES_PLUGIN_INIT_ASSET.contains("session_id = _session_id(kwargs)"));
     assert!(HERMES_PLUGIN_INIT_ASSET.contains("agent_session_id"));
     assert!(HERMES_PLUGIN_INIT_ASSET.contains("pane.report_agent\","));
+    assert!(HERMES_PLUGIN_INIT_ASSET.contains("pane.report_agent_session"));
+    assert!(HERMES_PLUGIN_INIT_ASSET.contains("on_session_reset"));
     assert!(HERMES_PLUGIN_INIT_ASSET.contains("on_session_end"));
     assert!(!HERMES_PLUGIN_INIT_ASSET.contains("on_session_finalize"));
     assert!(!HERMES_PLUGIN_INIT_ASSET.contains("pane.release_agent"));

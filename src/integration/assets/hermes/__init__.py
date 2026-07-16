@@ -1,7 +1,7 @@
 """Hermes plugin installed by Herdr to report agent lifecycle state."""
 
 # HERDR_INTEGRATION_ID=hermes
-# HERDR_INTEGRATION_VERSION=3
+# HERDR_INTEGRATION_VERSION=4
 
 from __future__ import annotations
 
@@ -71,6 +71,19 @@ def _report(state: str, **kwargs) -> None:
     _send("pane.report_agent", params)
 
 
+def _report_session(session_start_source: str, **kwargs) -> None:
+    session_id = _session_id(kwargs)
+    if not session_id:
+        return
+    _send(
+        "pane.report_agent_session",
+        {
+            "agent_session_id": session_id,
+            "session_start_source": session_start_source,
+        },
+    )
+
+
 def _working(**kwargs) -> None:
     _report("working", **kwargs)
 
@@ -83,8 +96,13 @@ def _idle(**kwargs) -> None:
     _report("idle", **kwargs)
 
 
+def _session_reset(**kwargs) -> None:
+    _report_session("resume", **kwargs)
+
+
 def register(ctx):
     ctx.register_hook("on_session_start", _idle)
+    ctx.register_hook("on_session_reset", _session_reset)
     ctx.register_hook("pre_llm_call", _working)
     ctx.register_hook("pre_api_request", _working)
     ctx.register_hook("pre_tool_call", _working)
