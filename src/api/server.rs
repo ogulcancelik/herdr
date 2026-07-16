@@ -1164,7 +1164,7 @@ mod tests {
             }
         });
 
-        let (mut client, server, _path) = local_stream_pair("api-events-wait-pane-close");
+        let (mut client, server, _path) = local_stream_pair("wait-close");
         client
             .write_all(br#"{"id":"wait_close","method":"events.wait","params":{"match_event":{"event":"pane_agent_status_changed","pane_id":"pane_1","agent_status":"done"},"timeout_ms":500}}"#)
             .unwrap();
