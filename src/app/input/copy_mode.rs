@@ -469,12 +469,19 @@ impl AppState {
             return;
         };
 
-        if col_delta < 0 {
-            cursor_col = cursor_col.saturating_sub(col_delta.unsigned_abs());
-        } else if col_delta > 0 {
-            cursor_col = cursor_col
-                .saturating_add(col_delta as u16)
-                .min(info.inner_rect.width.saturating_sub(1));
+        if col_delta != 0 {
+            // Step by whole glyphs so a single press crosses a full-width (CJK)
+            // character instead of landing on its trailing cell.
+            let row_text = self.copy_mode_visible_row_text(terminal_runtimes, cursor_row);
+            let glyphs = row_cell_glyphs(row_text.as_deref());
+            let max_col = info.inner_rect.width.saturating_sub(1);
+            for _ in 0..col_delta.unsigned_abs() {
+                cursor_col = if col_delta < 0 {
+                    prev_cell_col(&glyphs, cursor_col)
+                } else {
+                    next_cell_col(&glyphs, cursor_col, max_col)
+                };
+            }
         }
 
         if row_delta < 0 {
@@ -954,6 +961,48 @@ fn char_cell_width(ch: char) -> u16 {
     UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16
 }
 
+/// (leading_col, cell_width) for each glyph in a visible row, in column order.
+/// Zero-width combining marks fold into the preceding glyph (they occupy no
+/// cells), keeping columns aligned with the terminal's cell layout, matching
+/// `last_character_col`. Empty when the row text is unavailable, which falls
+/// back to single-cell steps.
+fn row_cell_glyphs(text: Option<&str>) -> Vec<(u16, u16)> {
+    let mut glyphs = Vec::new();
+    let mut col = 0u16;
+    for ch in text.into_iter().flat_map(str::chars) {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+        if width == 0 {
+            continue;
+        }
+        glyphs.push((col, width));
+        col = col.saturating_add(width);
+    }
+    glyphs
+}
+
+fn next_cell_col(glyphs: &[(u16, u16)], cursor_col: u16, max_col: u16) -> u16 {
+    let step = glyphs
+        .iter()
+        .find(|(start, _)| *start == cursor_col)
+        .map_or(1, |(_, width)| *width);
+    // Advancing overshoots the last column only when the current glyph ends at
+    // the right margin (e.g. a full-width glyph in the final two columns); stay
+    // on the leading cell instead of landing on its trailing spacer.
+    let target = cursor_col.saturating_add(step);
+    if target > max_col {
+        cursor_col
+    } else {
+        target
+    }
+}
+
+fn prev_cell_col(glyphs: &[(u16, u16)], cursor_col: u16) -> u16 {
+    glyphs
+        .iter()
+        .find(|(start, width)| start.saturating_add(*width) == cursor_col)
+        .map_or(cursor_col.saturating_sub(1), |(start, _)| *start)
+}
+
 fn copy_mode_page_lines(height: u16, half_page: bool) -> usize {
     if height <= 2 {
         1
@@ -1419,6 +1468,60 @@ mod tests {
                 .expect("copy mode")
                 .cursor_col,
             1
+        );
+    }
+
+    #[test]
+    fn cell_col_steps_handle_wide_glyphs_and_blanks() {
+        // "AXあYb": A@0 X@1 あ@2(w2) Y@4 b@5, blanks from col 6.
+        let glyphs = row_cell_glyphs(Some("AXあYb"));
+        // Rightward crosses the wide glyph in one step, then blanks step by one.
+        assert_eq!(next_cell_col(&glyphs, 2, 19), 4);
+        assert_eq!(next_cell_col(&glyphs, 5, 19), 6);
+        assert_eq!(next_cell_col(&glyphs, 8, 19), 9);
+        // Leftward mirrors it; blanks step by one, not jumping to the last glyph.
+        assert_eq!(prev_cell_col(&glyphs, 4), 2);
+        assert_eq!(prev_cell_col(&glyphs, 2), 1);
+        assert_eq!(prev_cell_col(&glyphs, 9), 8);
+        assert_eq!(prev_cell_col(&glyphs, 0), 0);
+        // No row text falls back to single-cell steps.
+        assert_eq!(next_cell_col(&row_cell_glyphs(None), 3, 19), 4);
+        assert_eq!(prev_cell_col(&row_cell_glyphs(None), 3), 2);
+        // Right-margin edge: a full-width glyph in the final two columns stays on
+        // its leading cell instead of clamping onto the trailing spacer (#1000).
+        assert_eq!(next_cell_col(&[(18, 2)], 18, 19), 18);
+        // A half-width cell at the last column simply stays put.
+        assert_eq!(next_cell_col(&[(19, 1)], 19, 19), 19);
+        // Zero-width combining marks fold into the preceding glyph, keeping the
+        // column map aligned with terminal cells (A@0, あ@1-2, Y@3).
+        let combined = row_cell_glyphs(Some("A\u{0301}あY"));
+        assert_eq!(combined, vec![(0, 1), (1, 2), (3, 1)]);
+        // Moving right from the leading cell of あ crosses the whole glyph.
+        assert_eq!(next_cell_col(&combined, 1, 19), 3);
+    }
+
+    #[tokio::test]
+    async fn copy_mode_horizontal_crosses_full_width_glyph() {
+        // "AXあYb": cols A@0 X@1 あ@2-3 (wide) Y@4 b@5
+        let (mut app, _) = app_with_copy_screen("AXあYb\n".as_bytes());
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        if let Some(copy_mode) = app.state.copy_mode.as_mut() {
+            copy_mode.cursor_row = 0;
+            copy_mode.cursor_col = 2; // leading cell of あ
+        }
+
+        // One `l` press crosses the whole wide glyph onto Y, not its trailing cell.
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('l'), KeyModifiers::empty()));
+        assert_eq!(
+            app.state.copy_mode.as_ref().expect("copy mode").cursor_col,
+            4
+        );
+
+        // One `h` press crosses back onto the leading cell of あ.
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('h'), KeyModifiers::empty()));
+        assert_eq!(
+            app.state.copy_mode.as_ref().expect("copy mode").cursor_col,
+            2
         );
     }
 
