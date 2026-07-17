@@ -1204,10 +1204,36 @@ fn truncate_handoff_history(history: String, max_bytes: usize) -> String {
 }
 
 fn pane_shell(configured_shell: &str) -> String {
-    pane_shell_from(configured_shell, std::env::var("SHELL").ok())
+    pane_shell_from(
+        configured_shell,
+        std::env::var("SHELL").ok(),
+        user_login_shell(),
+        usable_pane_shell_candidate,
+    )
 }
 
-fn pane_shell_from(configured_shell: &str, env_shell: Option<String>) -> String {
+#[cfg(unix)]
+fn user_login_shell() -> Option<String> {
+    crate::platform::user_login_shell()
+}
+
+#[cfg(not(unix))]
+fn user_login_shell() -> Option<String> {
+    None
+}
+
+/// Gate for `$SHELL` and password-database fallback candidates; the
+/// configured shell is exempt so bare names still resolve via PATH.
+fn usable_pane_shell_candidate(shell: &str) -> bool {
+    shell.starts_with('/') && is_executable_file(Path::new(shell))
+}
+
+fn pane_shell_from(
+    configured_shell: &str,
+    env_shell: Option<String>,
+    login_shell: Option<String>,
+    is_usable: impl Fn(&str) -> bool,
+) -> String {
     let configured_shell = configured_shell.trim();
     if !configured_shell.is_empty() {
         return configured_shell.to_string();
@@ -1215,15 +1241,22 @@ fn pane_shell_from(configured_shell: &str, env_shell: Option<String>) -> String 
 
     #[cfg(windows)]
     {
-        let _ = env_shell;
+        let _ = (env_shell, login_shell, is_usable);
         default_pane_shell()
     }
 
     #[cfg(not(windows))]
-    env_shell
-        .map(|shell| shell.trim().to_string())
-        .filter(|shell| !shell.is_empty())
-        .unwrap_or_else(default_pane_shell)
+    {
+        let normalize = |shell: Option<String>| {
+            shell
+                .map(|shell| shell.trim().to_string())
+                .filter(|shell| !shell.is_empty())
+                .filter(|shell| is_usable(shell))
+        };
+        normalize(env_shell)
+            .or_else(|| normalize(login_shell))
+            .unwrap_or_else(default_pane_shell)
+    }
 }
 
 #[cfg(windows)]
@@ -2897,7 +2930,12 @@ mod tests {
     #[test]
     fn pane_shell_prefers_configured_shell() {
         assert_eq!(
-            pane_shell_from("/usr/bin/nu", Some("/bin/bash".to_string())),
+            pane_shell_from(
+                "/usr/bin/nu",
+                Some("/bin/bash".to_string()),
+                Some("/bin/zsh".to_string()),
+                |_| true
+            ),
             "/usr/bin/nu"
         );
     }
@@ -2906,16 +2944,84 @@ mod tests {
     #[test]
     fn pane_shell_falls_back_to_shell_env() {
         assert_eq!(
-            pane_shell_from("", Some("/bin/bash".to_string())),
+            pane_shell_from("", Some("/bin/bash".to_string()), None, |_| true),
             "/bin/bash"
         );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn pane_shell_prefers_shell_env_over_login_shell() {
+        assert_eq!(
+            pane_shell_from(
+                "",
+                Some("/bin/bash".to_string()),
+                Some("/bin/zsh".to_string()),
+                |_| true
+            ),
+            "/bin/bash"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn pane_shell_falls_back_to_login_shell_without_shell_env() {
+        assert_eq!(
+            pane_shell_from("", None, Some("/bin/bash".to_string()), |_| true),
+            "/bin/bash"
+        );
+        assert_eq!(
+            pane_shell_from(
+                "",
+                Some("  ".to_string()),
+                Some("/bin/bash".to_string()),
+                |_| true
+            ),
+            "/bin/bash"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn pane_shell_skips_unusable_candidates() {
+        assert_eq!(
+            pane_shell_from(
+                "",
+                Some("/nonexistent/shell".to_string()),
+                Some("/bin/bash".to_string()),
+                |shell| shell == "/bin/bash"
+            ),
+            "/bin/bash"
+        );
+        assert_eq!(
+            pane_shell_from(
+                "",
+                Some("/nonexistent/shell".to_string()),
+                Some("/also/missing".to_string()),
+                |_| false
+            ),
+            default_pane_shell()
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn usable_pane_shell_candidate_requires_absolute_executable() {
+        assert!(usable_pane_shell_candidate("/bin/sh"));
+        assert!(!usable_pane_shell_candidate("sh"));
+        assert!(!usable_pane_shell_candidate("/nonexistent/shell"));
     }
 
     #[cfg(windows)]
     #[test]
     fn pane_shell_ignores_shell_env_on_windows() {
         assert_eq!(
-            pane_shell_from("", Some("c:\\windows\\system32\\cmd.exe".to_string())),
+            pane_shell_from(
+                "",
+                Some("c:\\windows\\system32\\cmd.exe".to_string()),
+                None,
+                |_| true
+            ),
             default_pane_shell()
         );
     }
@@ -2923,10 +3029,15 @@ mod tests {
     #[test]
     fn pane_shell_ignores_empty_values() {
         assert_eq!(
-            pane_shell_from("   ", Some("  ".to_string())),
+            pane_shell_from("   ", Some("  ".to_string()), Some(" ".to_string()), |_| {
+                true
+            }),
             default_pane_shell()
         );
-        assert_eq!(pane_shell_from("", None), default_pane_shell());
+        assert_eq!(
+            pane_shell_from("", None, None, |_| true),
+            default_pane_shell()
+        );
     }
 
     #[test]

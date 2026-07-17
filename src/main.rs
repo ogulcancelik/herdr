@@ -134,7 +134,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 [terminal]
 # Executable used for new interactive panes.
-# Empty means $SHELL, then /bin/sh.
+# Empty means $SHELL, then the user's login shell, then /bin/sh.
 # default_shell = ""
 
 # Startup mode for new interactive pane shells: "auto", "login", or "non_login".

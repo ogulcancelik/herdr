@@ -59,7 +59,7 @@ herdr server reload-config
 default_shell = "nu"
 ```
 
-未设置或值为空时，Herdr 会依次使用 `$SHELL`、Unix 上的 `/bin/sh` 或 Windows 上的 PowerShell。该值是可执行文件名或路径，而不是 shell 命令行。现有窗格会保留当前 shell，直到重新创建。自定义命令按键绑定中的字符串在 Unix 上通过 `/bin/sh -c` 执行窗格命令，通过 `/bin/sh -lc` 执行分离式命令；在 Windows 上则通过 `cmd.exe /d /c` 执行。
+未设置或值为空时，Herdr 在 Unix 上会依次使用 `$SHELL`、用户的登录 shell、`/bin/sh`；在 Windows 上使用 PowerShell。该值是可执行文件名或路径，而不是 shell 命令行。现有窗格会保留当前 shell，直到重新创建。自定义命令按键绑定中的字符串在 Unix 上通过 `/bin/sh -c` 执行窗格命令，通过 `/bin/sh -lc` 执行分离式命令；在 Windows 上则通过 `cmd.exe /d /c` 执行。
 
 设置 Herdr 如何启动新建交互式窗格的 shell：
 

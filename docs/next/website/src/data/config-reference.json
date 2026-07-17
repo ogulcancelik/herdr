@@ -146,7 +146,7 @@
           "key": "terminal.default_shell",
           "type": "string",
           "default": "\"\"",
-          "description": "Executable used for new interactive panes. Empty means SHELL, then /bin/sh."
+          "description": "Executable used for new interactive panes. Empty means SHELL, then the user's login shell, then /bin/sh."
         },
         {
           "key": "terminal.shell_mode",

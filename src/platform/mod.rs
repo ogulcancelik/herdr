@@ -74,6 +74,43 @@ pub fn current_process_is_detached_server_daemon() -> bool {
     unsafe { libc::getsid(0) == libc::getpid() }
 }
 
+/// Login shell recorded for the current user in the password database.
+#[cfg(unix)]
+pub(crate) fn user_login_shell() -> Option<String> {
+    let mut passwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    let mut buffer = vec![0_u8; 1024];
+
+    loop {
+        let status = unsafe {
+            libc::getpwuid_r(
+                libc::getuid(),
+                &mut passwd,
+                buffer.as_mut_ptr().cast::<libc::c_char>(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if status == libc::ERANGE && buffer.len() < 64 * 1024 {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        if status != 0 || result.is_null() {
+            return None;
+        }
+        break;
+    }
+
+    if passwd.pw_shell.is_null() {
+        return None;
+    }
+    let shell = unsafe { std::ffi::CStr::from_ptr(passwd.pw_shell) }
+        .to_str()
+        .ok()?
+        .trim();
+    (!shell.is_empty()).then(|| shell.to_string())
+}
+
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClipboardCommand {

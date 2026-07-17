@@ -7,6 +7,7 @@
 - Added macOS support for the `HERDR_AGENT=<agent>` foreground-process hint, allowing agents hidden behind host-visible wrappers such as `nono` to use the named agent's screen manifest. (#679)
 
 ### Fixed
+- New interactive panes now fall back to the user's login shell, instead of `/bin/sh`, when `SHELL` is not set.
 - New panes, tabs, layouts, and workspaces using `new_cwd = "follow"` now inherit the foreground process-group leader's working directory instead of an unrelated helper process directory. (#1472)
 - Background update checks, captured plugin commands, and workspace Git probes no longer flash console windows on Windows. (#1468)
 - Live handoff now preserves installed plugins and no longer lets the next plugin installation overwrite the existing registry. (#893)
