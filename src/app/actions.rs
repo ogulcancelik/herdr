@@ -1219,9 +1219,7 @@ impl AppState {
             .iter()
             .position(|idx| *idx == self.selected)
             .unwrap_or(0);
-        let target_pos = current_pos
-            .saturating_add_signed(delta)
-            .min(order.len().saturating_sub(1));
+        let target_pos = (current_pos as isize + delta).rem_euclid(order.len() as isize) as usize;
         if let Some(ws_idx) = order.get(target_pos).copied() {
             self.selected = ws_idx;
             self.ensure_workspace_visible(ws_idx);
