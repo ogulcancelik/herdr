@@ -88,6 +88,7 @@ pub fn is_reserved_native_state_source(source: &str, agent: &str) -> bool {
             | ("herdr:droid", "droid")
             | ("herdr:qodercli", "qodercli")
             | ("herdr:cursor", "cursor")
+            | ("herdr:ocean", "ocean")
     )
 }
 
@@ -183,6 +184,13 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
             vec![
                 "cursor-agent".into(),
                 "--resume".into(),
+                session_ref.value.clone(),
+            ]
+        }
+        ("herdr:ocean", "ocean", AgentSessionRefKind::Id) => {
+            vec![
+                "ocean".into(),
+                "--session".into(),
                 session_ref.value.clone(),
             ]
         }
@@ -401,6 +409,16 @@ mod tests {
             .unwrap()
             .argv,
             vec!["cursor-agent", "--resume", "cursor-session"]
+        );
+        assert_eq!(
+            plan(
+                "herdr:ocean",
+                "ocean",
+                &AgentSessionRef::id("ocean-session").unwrap()
+            )
+            .unwrap()
+            .argv,
+            vec!["ocean", "--session", "ocean-session"]
         );
     }
 

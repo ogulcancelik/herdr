@@ -62,6 +62,7 @@ pub enum Agent {
     Kilo,
     Qodercli,
     Maki,
+    Ocean,
 }
 
 impl Agent {
@@ -111,6 +112,7 @@ pub fn agent_label(agent: Agent) -> &'static str {
         Agent::Kilo => "kilo",
         Agent::Qodercli => "qodercli",
         Agent::Maki => "maki",
+        Agent::Ocean => "ocean",
     }
 }
 
@@ -147,6 +149,7 @@ fn lookup_agent(name: &str) -> Option<Agent> {
         "kilo" | "kilo-code" | "kilo code" => Some(Agent::Kilo),
         "qodercli" | "qoderclicn" | "qoder" | "qodercn" => Some(Agent::Qodercli),
         "maki" => Some(Agent::Maki),
+        "ocean" | "ocean-tui" => Some(Agent::Ocean),
         _ => None,
     }
 }
@@ -632,6 +635,8 @@ mod tests {
         assert_eq!(identify_agent("kilo"), Some(Agent::Kilo));
         assert_eq!(identify_agent("kilo-code"), Some(Agent::Kilo));
         assert_eq!(identify_agent("maki"), Some(Agent::Maki));
+        assert_eq!(identify_agent("ocean"), Some(Agent::Ocean));
+        assert_eq!(identify_agent("ocean-tui"), Some(Agent::Ocean));
     }
 
     #[test]
