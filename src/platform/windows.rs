@@ -1,10 +1,14 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     ffi::c_void,
+    io,
     mem::{size_of, MaybeUninit},
     path::PathBuf,
     ptr::{copy_nonoverlapping, null_mut},
 };
+
+use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+use widestring::U16CString;
 
 use windows_sys::{
     Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation},
@@ -39,6 +43,30 @@ use windows_sys::{
 use super::{ClipboardImage, ForegroundJob, Signal};
 
 const STILL_ACTIVE: u32 = 259;
+
+pub(crate) fn configured_named_pipe_security_descriptor() -> io::Result<Option<SecurityDescriptor>>
+{
+    let Some(sddl) = crate::config::Config::load()
+        .config
+        .advanced
+        .windows_named_pipe_sddl
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+
+    named_pipe_security_descriptor(&sddl).map(Some)
+}
+
+fn named_pipe_security_descriptor(sddl: &str) -> io::Result<SecurityDescriptor> {
+    let sddl = U16CString::from_str(sddl).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("advanced.windows_named_pipe_sddl contains an embedded NUL: {err}"),
+        )
+    })?;
+    SecurityDescriptor::deserialize(&sddl)
+}
 
 pub(crate) fn should_draw_host_cursor_by_default() -> bool {
     true
@@ -672,6 +700,14 @@ mod tests {
 
     const CONSOLE_TEST_CHILD_ENV: &str = "HERDR_TEST_CONSOLE_CHILD_MODE";
     const CONSOLE_TEST_PARENT_PID_ENV: &str = "HERDR_TEST_CONSOLE_PARENT_PID";
+
+    #[test]
+    fn named_pipe_security_descriptor_accepts_a_restricted_dacl() {
+        super::named_pipe_security_descriptor(
+            "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)(A;;GRGW;;;WD)",
+        )
+        .expect("parse named-pipe DACL");
+    }
 
     fn console_process_ids() -> Vec<u32> {
         let mut process_ids = vec![0; 8];

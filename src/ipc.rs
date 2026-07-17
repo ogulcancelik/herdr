@@ -60,13 +60,16 @@ pub(crate) fn bind_local_listener(path: &Path) -> io::Result<LocalListener> {
     #[cfg(windows)]
     {
         use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
+        use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
 
         let name = path.to_string_lossy().to_string();
         let name = name.to_ns_name::<GenericNamespaced>()?;
-        let listener = ListenerOptions::new()
-            .name(name)
-            .reclaim_name(false)
-            .create_sync()?;
+        let options = ListenerOptions::new().name(name).reclaim_name(false);
+        let options = match crate::platform::configured_named_pipe_security_descriptor()? {
+            Some(descriptor) => options.security_descriptor(descriptor),
+            None => options,
+        };
+        let listener = options.create_sync()?;
         fs::write(path, windows_socket_marker())?;
         Ok(listener)
     }

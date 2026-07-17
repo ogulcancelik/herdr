@@ -46,6 +46,7 @@ schemars = { version = "1.2.1", features = ["derive"] }
 portable-pty = { path = "vendor/portable-pty" }
 
 [target.'cfg(windows)'.dependencies]
+widestring = "1.2.1"
 windows-sys = { version = "0.61.2", features = [
     "Wdk_System_Threading",
     "Win32_Foundation",

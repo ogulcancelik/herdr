@@ -856,6 +856,12 @@ pub struct AdvancedConfig {
     /// Maximum scrollback buffer size in bytes retained per pane terminal. Default: 10000000.
     #[serde(alias = "scrollback_lines")]
     pub scrollback_limit_bytes: usize,
+    /// Windows only: an SDDL DACL applied to Herdr's local named pipes.
+    ///
+    /// Leave unset to use Windows' default named-pipe security. This is intended for
+    /// managed hosts that need to grant a restricted local identity access to an
+    /// otherwise user-owned Herdr server.
+    pub windows_named_pipe_sddl: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1097,6 +1103,7 @@ impl Default for AdvancedConfig {
     fn default() -> Self {
         Self {
             scrollback_limit_bytes: DEFAULT_SCROLLBACK_LIMIT_BYTES,
+            windows_named_pipe_sddl: None,
         }
     }
 }
@@ -1104,6 +1111,22 @@ impl Default for AdvancedConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn advanced_config_parses_windows_named_pipe_sddl() {
+        let config: Config = toml::from_str(
+            r#"
+[advanced]
+windows_named_pipe_sddl = "D:P(A;;GRGW;;;WD)"
+"#,
+        )
+        .expect("parse config");
+
+        assert_eq!(
+            config.advanced.windows_named_pipe_sddl.as_deref(),
+            Some("D:P(A;;GRGW;;;WD)")
+        );
+    }
 
     #[test]
     fn update_config_defaults_and_parses() {
