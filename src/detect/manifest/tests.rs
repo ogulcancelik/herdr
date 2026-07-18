@@ -852,6 +852,22 @@ fn codex_screen_working_fallback_ignores_stale_and_prompt_text() {
 }
 
 #[test]
+fn codex_screen_working_fallback_ignores_interrupted_short_terminal() {
+    let screen = "◦ Working (1m 16s • esc to interrupt)\n\
+        ■ Conversation interrupted\n\
+        ›\n";
+    let result = osc_explain(Agent::Codex, screen, "project", "");
+
+    assert_eq!(result.state, AgentState::Idle);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("osc_title_idle")
+    );
+    assert!(result.visible_idle);
+    assert!(!result.visible_working);
+}
+
+#[test]
 fn codex_osc_working_beats_weak_blocker_screen() {
     // A stale [y/n] on screen triggers weak_blocker at priority 600, but an
     // active braille spinner in the OSC title is priority 1050 — OSC wins.

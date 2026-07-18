@@ -63,6 +63,7 @@ priority = 500
 region = "bottom_non_empty_lines(3)"
 visible_working = true
 line_regex = ['^[•◦]\s+Working \([^)]*esc to interrupt\)(?: · .*)?$']
+not = [{ contains = ["■ Conversation interrupted"] }]
 
 [[rules]]
 id = "osc_title_idle"
