@@ -852,14 +852,26 @@ impl Terminal {
             let Some(y) = u32::try_from(y).ok() else {
                 break;
             };
-            let mut grid_ref = self.grid_ref(ghostty_screen_point(0, y))?;
-            let (soft_wrapped, wrap_continuation) = grid_ref_wrap_state(&grid_ref)?;
+            let row_ref = self.grid_ref(ghostty_screen_point(0, y))?;
+            let (soft_wrapped, wrap_continuation) = grid_ref_wrap_state(&row_ref)?;
             let mut cells = Vec::with_capacity(usize::from(cols));
             for x in 0..cols {
-                grid_ref.x = x;
+                // Re-resolve the grid ref for every cell instead of mutating
+                // `x` on a cached snapshot: grid refs are only valid for the
+                // exact position they were resolved at, and libghostty reflows
+                // pages lazily, so a scrollback page's real column count can
+                // be smaller than the terminal's logical width. Writing `x`
+                // directly bypasses PageList.pin()'s page-width guard and
+                // reads out of bounds (heap corruption under ReleaseFast,
+                // where the C shim's bounds asserts are compiled out).
+                let cell_ref = match self.grid_ref(ghostty_screen_point(x, y)) {
+                    Ok(cell_ref) => cell_ref,
+                    // A narrower (not yet reflowed) page ends the row early.
+                    Err(_) => break,
+                };
                 cells.push(ScreenTextCell {
-                    wide: grid_ref_wide(&grid_ref)?,
-                    graphemes: grid_ref_graphemes(&grid_ref)?,
+                    wide: grid_ref_wide(&cell_ref)?,
+                    graphemes: grid_ref_graphemes(&cell_ref)?,
                 });
             }
             rows.push(ScreenTextRow {
