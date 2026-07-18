@@ -2605,7 +2605,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[update]\nversion_check = false\nmanifest_check = false\n[ui]\nagent_panel_scope = \"current\"\nagent_panel_sort = \"priority\"\nredraw_on_focus_gained = false\ncopy_on_select = false\nright_click_passthrough_modifier = \"ctrl\"\nprompt_new_workspace_name = true\n[ui.toast]\ndelivery = \"herdr\"\n[experimental]\nswitch_ascii_input_source_in_prefix = true\n",
+            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[update]\nversion_check = false\nmanifest_check = false\n[ui]\nagent_panel_sort = \"priority\"\nredraw_on_focus_gained = false\ncopy_on_select = false\nright_click_passthrough_modifier = \"ctrl\"\nprompt_new_workspace_name = true\n[ui.toast]\ndelivery = \"herdr\"\n[experimental]\nswitch_ascii_input_source_in_prefix = true\n",
         )
         .unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
@@ -3027,6 +3027,38 @@ mod tests {
             app.state.toast_config.delivery,
             crate::config::ToastDelivery::Terminal
         );
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_config_applies_known_sibling_and_summarizes_unknown_key() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-unknown-key");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        let target_mouse_capture = !app.state.mouse_capture;
+        std::fs::write(
+            &path,
+            format!("[ui]\nmouse_capture = {target_mouse_capture}\nmouse_captur = false\n"),
+        )
+        .unwrap();
+
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert_eq!(
+            report.diagnostics,
+            vec!["unknown config key ui.mouse_captur; ignoring key"]
+        );
+        assert_eq!(app.state.mouse_capture, target_mouse_capture);
+        assert_eq!(
+            app.state.config_diagnostic.as_deref(),
+            Some("config.toml has unknown keys; herdr config check")
+        );
+
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

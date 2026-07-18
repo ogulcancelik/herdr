@@ -600,6 +600,7 @@ dependencies = [
  "regex",
  "schemars",
  "serde",
+ "serde_ignored",
  "serde_json",
  "sha2",
  "tokio",
@@ -1451,6 +1452,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "serde_ignored"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "115dffd5f3853e06e746965a20dcbae6ee747ae30b543d91b0e089668bb07798"
+dependencies = [
+ "serde",
+ "serde_core",
 ]
 
 [[package]]

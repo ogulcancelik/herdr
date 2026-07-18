@@ -2506,6 +2506,61 @@ fn config_check_reports_invalid_config_without_server() {
 }
 
 #[test]
+fn config_check_reports_unknown_keys_without_treating_comments_as_keys() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let config_dir = config_home.join(app_dir_name());
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        r#"made_up_toplevel = 1
+"made.up" = 2
+# commented_out_toplevel = true
+
+[ui]
+mouse_capture = true
+mouse_captur = false
+# commented_out_ui_key = true
+
+[keys]
+new_tabb = "ctrl+t"
+"#,
+    )
+    .unwrap();
+
+    let checked = run_named_cli(&config_home, &runtime_dir, &["config", "check"]);
+
+    assert_eq!(checked.status.code(), Some(1));
+    assert!(
+        checked.stderr.is_empty(),
+        "stderr: {}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&checked.stdout);
+    assert!(stdout.contains("config: issues found"), "{stdout}");
+    assert!(
+        stdout.contains("unknown config key made_up_toplevel; ignoring key"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("unknown config key \"made.up\"; ignoring key"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("unknown config key ui.mouse_captur; ignoring key"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("unknown config key keys.new_tabb; ignoring key"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("commented_out"), "{stdout}");
+
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn config_check_reports_unreadable_config_path() {
     let base = unique_test_dir();
     let config_home = base.join("config");
