@@ -205,7 +205,7 @@ pub fn config_diagnostic_summary(diagnostics: &[String]) -> Option<String> {
         }
     } else if diagnostics
         .iter()
-        .any(|diagnostic| diagnostic.starts_with("unknown config key "))
+        .all(|diagnostic| diagnostic.starts_with("unknown config key "))
     {
         " has unknown keys"
     } else {
@@ -765,6 +765,19 @@ mod tests {
         assert_eq!(
             config_diagnostic_summary(&diagnostics).as_deref(),
             Some("config.toml has unknown keys; herdr config check")
+        );
+    }
+
+    #[test]
+    fn config_diagnostic_summary_keeps_mixed_diagnostics_generic() {
+        let diagnostics = vec![
+            "invalid ui config: invalid type: string; keeping current ui settings".to_string(),
+            "unknown config key keys.new_tabb; ignoring key".to_string(),
+        ];
+
+        assert_eq!(
+            config_diagnostic_summary(&diagnostics).as_deref(),
+            Some("config.toml; herdr config check")
         );
     }
 
