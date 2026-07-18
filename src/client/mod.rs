@@ -1243,6 +1243,8 @@ fn run_client_with_mode(
     // Restore the terminal before printing any final status message.
     drop(terminal_guard);
 
+    crate::windows_terminal_hint::print_scrollbar_hint_once();
+
     if let Err(err) = result {
         eprintln!("herdr: {err}");
         rt.shutdown_timeout(Duration::from_millis(100));

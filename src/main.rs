@@ -98,6 +98,7 @@ mod terminal_notify;
 mod terminal_theme;
 mod ui;
 mod update;
+mod windows_terminal_hint;
 mod workspace;
 mod worktree;
 
@@ -841,6 +842,8 @@ fn main() -> io::Result<()> {
 
     // Shut down runtime immediately — kills lingering PTY reader/writer tasks
     rt.shutdown_timeout(std::time::Duration::from_millis(100));
+
+    windows_terminal_hint::print_scrollbar_hint_once();
 
     logging::shutdown("app");
     result
