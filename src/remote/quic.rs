@@ -315,7 +315,8 @@ impl QuicSession {
                                 rebound = false;
                             }
                         }
-                        ControlEvent::Message(ServerMessage::ClientDetached) => {
+                        ControlEvent::Message(message @ ServerMessage::ClientDetached) => {
+                            let _ = output.send(message).await;
                             return SessionExit::Detached;
                         }
                         ControlEvent::Message(ServerMessage::ServerShutdown { reason }) => {
@@ -864,6 +865,12 @@ mod tests {
         crate::protocol::write_message(&mut framed, &ServerMessage::ClientDetached)
             .expect("frame server detach");
         writer.control.send(framed).expect("send server detach");
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .expect("detach delivery timeout"),
+            Some(ServerMessage::ClientDetached)
+        ));
         assert!(matches!(
             session_task.await.expect("session task"),
             SessionExit::Detached

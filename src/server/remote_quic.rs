@@ -717,7 +717,11 @@ fn control_policy(data: &[u8]) -> ControlPolicy {
             key: Some(ControlKey::ReloadConfig),
             drop_on_overflow: false,
         },
-        Ok(ServerMessage::Notify { .. } | ServerMessage::Clipboard { .. } | ServerMessage::OpenUrl { .. }) => ControlPolicy {
+        Ok(
+            ServerMessage::Notify { .. }
+            | ServerMessage::Clipboard { .. }
+            | ServerMessage::OpenUrl { .. },
+        ) => ControlPolicy {
             key: None,
             drop_on_overflow: true,
         },

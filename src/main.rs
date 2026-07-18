@@ -709,8 +709,12 @@ fn main() -> io::Result<()> {
     }
 
     if let Some(remote_launch) = remote_launch {
+        init_logging();
+        logging::startup("remote");
         let remote_target = remote_launch.target.clone();
-        if let Err(err) = remote::run_remote(remote_launch) {
+        let result = remote::run_remote(remote_launch);
+        logging::shutdown("remote");
+        if let Err(err) = result {
             eprintln!("error: {err}");
             remote::print_remote_error_hint(&err, &remote_target);
             std::process::exit(1);

@@ -11,7 +11,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 use super::frame::lock;
 
@@ -321,6 +321,12 @@ fn bridge_connection(
         .thread_name("herdr-remote-quic")
         .build()?;
     let mut client_phase = LocalClientPhase::AwaitingWelcome;
+    info!(
+        target = %config.target,
+        transport = ?config.remote_config.transport,
+        ssh_fallback = config.remote_config.ssh_fallback,
+        "remote transport bridge started"
+    );
     let mut use_ssh = config.remote_config.transport == RemoteTransportConfig::Ssh;
 
     if !use_ssh {
@@ -334,6 +340,11 @@ fn bridge_connection(
             QuicOutcome::Detached => {}
             QuicOutcome::Fallback(detail) => {
                 if config.remote_config.ssh_fallback {
+                    warn!(
+                        target = %config.target,
+                        reason = %detail,
+                        "remote QUIC unavailable; falling back to SSH"
+                    );
                     if client_phase.is_connected() {
                         let _ = output_tx.blocking_send(ServerMessage::TransportStatus {
                             status: RemoteTransportStatus::SshFallbackConnecting,
@@ -552,6 +563,12 @@ fn run_quic(
                     }
                 };
                 connection_generation = connection_generation.saturating_add(1);
+                info!(
+                    target = %config.target,
+                    generation = connection_generation,
+                    recovering,
+                    "connecting remote QUIC transport"
+                );
                 let hello = router.hello();
                 match runtime.block_on(QuicSession::connect(
                     ConnectParams {
@@ -568,6 +585,11 @@ fn run_quic(
                     Arc::clone(&resource_cache),
                 )) {
                     Ok(connected) => {
+                        info!(
+                            target = %config.target,
+                            generation = connection_generation,
+                            "remote QUIC transport connected"
+                        );
                         connected_session = Some(connected);
                         TransportEvent::QuicConnected
                     }
@@ -589,6 +611,12 @@ fn run_quic(
                 let (input_tx, input_rx) = mpsc::channel(INPUT_QUEUE_ITEMS);
                 router.set_active(input_tx);
                 let exit = runtime.block_on(session.run(input_rx, output.clone(), recovering));
+                warn!(
+                    target = %config.target,
+                    generation = connection_generation,
+                    ?exit,
+                    "remote QUIC session ended"
+                );
                 router.clear_active();
                 TransportEvent::SessionExited(exit)
             }
@@ -658,6 +686,7 @@ fn run_ssh_reconnect_loop(
     client_phase: &mut LocalClientPhase,
     should_stop: &AtomicBool,
 ) {
+    let mut attempt = 0u64;
     while !router.is_detached() && !should_stop.load(Ordering::Acquire) {
         if client_phase.is_connected()
             && output
@@ -669,9 +698,21 @@ fn run_ssh_reconnect_loop(
         {
             return;
         }
+        attempt = attempt.saturating_add(1);
+        info!(
+            target = %config.target,
+            attempt,
+            "connecting remote SSH transport"
+        );
         match run_one_ssh_session(config, Arc::clone(&router), &output, client_phase) {
             SshExit::Detached => return,
             SshExit::Reconnect(detail) => {
+                warn!(
+                    target = %config.target,
+                    attempt,
+                    reason = %detail,
+                    "remote SSH transport disconnected; reconnecting"
+                );
                 debug!(%detail, "remote SSH bridge disconnected; reconnecting");
                 thread::sleep(SSH_RECONNECT_DELAY);
             }
@@ -683,6 +724,7 @@ fn run_ssh_reconnect_loop(
     }
 }
 
+#[derive(Debug)]
 enum SshExit {
     Detached,
     Reconnect(String),
@@ -711,18 +753,32 @@ fn run_one_ssh_session(
         Ok(child) => child,
         Err(error) => return SshExit::Reconnect(format!("failed to start SSH bridge: {error}")),
     };
+    info!(
+        target = %config.target,
+        child_pid = child.id(),
+        "remote SSH bridge process started"
+    );
     let mut child_stdin = match child.stdin.take() {
         Some(stdin) => stdin,
-        None => return SshExit::Fatal("SSH bridge stdin is unavailable".to_owned()),
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return SshExit::Fatal("SSH bridge stdin is unavailable".to_owned());
+        }
     };
     let mut child_stdout = match child.stdout.take() {
         Some(stdout) => stdout,
-        None => return SshExit::Fatal("SSH bridge stdout is unavailable".to_owned()),
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return SshExit::Fatal("SSH bridge stdout is unavailable".to_owned());
+        }
     };
 
     let hello = router.hello();
     if let Err(error) = crate::protocol::write_message(&mut child_stdin, &hello.message()) {
         let _ = child.kill();
+        let _ = child.wait();
         return SshExit::Reconnect(format!("failed to send SSH bridge hello: {error}"));
     }
     let welcome: ServerMessage =
@@ -732,24 +788,33 @@ fn run_one_ssh_session(
                 error: Some(error), ..
             }) => {
                 let _ = child.kill();
+                let _ = child.wait();
                 return SshExit::Fatal(error);
             }
             Ok(_) => {
                 let _ = child.kill();
+                let _ = child.wait();
                 return SshExit::Reconnect("SSH bridge sent an invalid welcome".to_owned());
             }
             Err(error) => {
                 let _ = child.kill();
+                let _ = child.wait();
                 return SshExit::Reconnect(format!("failed to read SSH bridge welcome: {error}"));
             }
         };
     if *client_phase == LocalClientPhase::AwaitingWelcome {
         if output.blocking_send(welcome).is_err() {
             let _ = child.kill();
+            let _ = child.wait();
             return SshExit::Detached;
         }
         *client_phase = LocalClientPhase::Connected;
     }
+    info!(
+        target = %config.target,
+        child_pid = child.id(),
+        "remote SSH transport connected"
+    );
 
     let (input_tx, mut input_rx) = mpsc::channel::<ClientMessage>(INPUT_QUEUE_ITEMS);
     router.set_active(input_tx);
@@ -795,6 +860,12 @@ fn run_one_ssh_session(
     let _ = child.kill();
     let _ = child.wait();
     let _ = writer.join();
+    info!(
+        target = %config.target,
+        child_pid = child.id(),
+        ?result,
+        "remote SSH bridge process stopped"
+    );
     result
 }
 

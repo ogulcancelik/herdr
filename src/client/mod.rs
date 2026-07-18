@@ -1619,6 +1619,11 @@ async fn run_client_loop(
                     }
                 }
                 ServerMessage::TransportStatus { status, detail } => {
+                    info!(
+                        ?status,
+                        detail = detail.as_deref().unwrap_or_default(),
+                        "remote transport status changed"
+                    );
                     state.transport_stale =
                         status != crate::protocol::RemoteTransportStatus::Connected;
                     if state.transport_stale {

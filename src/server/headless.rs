@@ -2027,9 +2027,7 @@ impl HeadlessServer {
             AppEvent::OpenUrl { url } => {
                 // Browser open is a client-local host side effect; forward to the foreground
                 // thin client instead of opening a URL on the (often headless) server host.
-                self.send_to_foreground_client(ServerMessage::OpenUrl {
-                    url: url.clone(),
-                });
+                self.send_to_foreground_client(ServerMessage::OpenUrl { url: url.clone() });
                 true
             }
             AppEvent::StateChanged { pane_id, agent, .. } => {
