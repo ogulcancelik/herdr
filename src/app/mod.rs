@@ -39,6 +39,12 @@ const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const GIT_REMOTE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const PENDING_AGENT_RESUME_THEME_WAIT: Duration = Duration::from_millis(750);
+/// Cap on agent resume spawns per `start_pending_agent_resumes` call, so a
+/// crash-recovery restore of ~100 agent panes doesn't fire every
+/// `<agent> --resume` in a single synchronous burst.
+pub(crate) const AGENT_RESUME_SPAWN_BATCH_LIMIT: usize = 4;
+/// Minimum gap between agent resume spawn batches.
+pub(crate) const AGENT_RESUME_SPAWN_MIN_GAP: Duration = Duration::from_millis(500);
 const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_secs(5);
 const SIDEBAR_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
 const PANE_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
@@ -127,6 +133,7 @@ pub struct App {
     pub(crate) loaded_host_cursor: crate::config::HostCursorModeConfig,
     pub(crate) agent_metadata_deadline: Option<Instant>,
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
+    pub(crate) last_agent_resume_spawn_at: Option<Instant>,
     pub(crate) selection_autoscroll_deadline: Option<Instant>,
     pub(crate) selection_highlight_clear_deadline: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
@@ -737,6 +744,7 @@ impl App {
             loaded_host_cursor: config.ui.host_cursor,
             agent_metadata_deadline: None,
             pending_agent_resume_deadline: None,
+            last_agent_resume_spawn_at: None,
             session_save_deadline: None,
             session_save_thread: None,
             detached_custom_command_children: Vec::new(),

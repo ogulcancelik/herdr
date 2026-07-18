@@ -41,8 +41,23 @@ impl App {
     }
 
     pub(crate) fn start_pending_agent_resumes(&mut self, allow_empty_theme: bool) -> bool {
+        // Stagger resume spawns. A crash-recovery restore can hold ~100 agent
+        // panes; spawning every `<agent> --resume` in one synchronous burst
+        // hammers the host and mass-resumes every agent CLI within the same
+        // second, which agent CLIs do not always tolerate (concurrent resume
+        // of many sessions right after their processes were killed). Spawn at
+        // most a small batch per call with a minimum gap between batches; the
+        // remaining candidates stay pending and are picked up on subsequent
+        // ticks (both the TUI and headless loops call this every iteration).
+        let now = Instant::now();
+        if let Some(last) = self.last_agent_resume_spawn_at {
+            if now.duration_since(last) < super::AGENT_RESUME_SPAWN_MIN_GAP {
+                return false;
+            }
+        }
         let pending = self.pending_agent_resume_candidates();
         let mut changed = false;
+        let mut spawned = 0usize;
         for PendingAgentResumeCandidate {
             pane_id,
             terminal_id,
@@ -52,10 +67,13 @@ impl App {
             cols,
         } in pending
         {
+            if spawned >= super::AGENT_RESUME_SPAWN_BATCH_LIMIT {
+                break;
+            }
             if self.terminal_runtimes.get(&terminal_id).is_some() {
                 continue;
             }
-            changed |= self.start_pending_agent_resume(
+            let started = self.start_pending_agent_resume(
                 pane_id,
                 terminal_id,
                 cwd,
@@ -64,6 +82,13 @@ impl App {
                 cols,
                 allow_empty_theme,
             );
+            if started {
+                spawned += 1;
+            }
+            changed |= started;
+        }
+        if spawned > 0 {
+            self.last_agent_resume_spawn_at = Some(now);
         }
 
         if changed {
