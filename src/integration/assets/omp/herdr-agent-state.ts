@@ -268,6 +268,8 @@ export default function (pi) {
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let rootSession = false;
+  const activeSubagentIds = new Set<string>();
+  let subagentHeartbeatTimer: NodeJS.Timeout | undefined;
 
   function clearTimer(timer: ReturnType<typeof setTimeout> | undefined) {
     if (timer) {
@@ -280,6 +282,27 @@ export default function (pi) {
     clearTimer(retryTimer);
     idleTimer = undefined;
     retryTimer = undefined;
+  }
+
+  function syncSubagentHeartbeat() {
+    if (!rootSession || activeSubagentIds.size === 0) {
+      if (subagentHeartbeatTimer) {
+        clearInterval(subagentHeartbeatTimer);
+        subagentHeartbeatTimer = undefined;
+      }
+      return;
+    }
+    if (subagentHeartbeatTimer) {
+      return;
+    }
+    subagentHeartbeatTimer = setInterval(() => {
+      if (!rootSession || activeSubagentIds.size === 0) {
+        syncSubagentHeartbeat();
+        return;
+      }
+      publishState(true);
+    }, 250);
+    subagentHeartbeatTimer.unref?.();
   }
 
   function clearFailureState() {
@@ -295,7 +318,7 @@ export default function (pi) {
     if (failureBlocked) {
       return { state: "blocked" as const, message: failureMessage };
     }
-    if (agentActive || retryHoldActive) {
+    if (activeSubagentIds.size > 0 || agentActive || retryHoldActive) {
       return { state: "working" as const, message: undefined };
     }
     return { state: "idle" as const, message: undefined };
@@ -351,6 +374,8 @@ export default function (pi) {
     clearPendingTimers();
     clearFailureState();
     agentActive = false;
+    activeSubagentIds.clear();
+    syncSubagentHeartbeat();
     blockedCount = 0;
     blockedMessage = undefined;
   }
@@ -380,6 +405,31 @@ export default function (pi) {
     }
 
     activateBlocked(data.label);
+  });
+
+  pi.events.on("task:subagent:lifecycle", (data) => {
+    if (!rootSession || typeof data?.id !== "string") {
+      return;
+    }
+
+    if (data.status === "started") {
+      clearPendingTimers();
+      activeSubagentIds.add(data.id);
+      syncSubagentHeartbeat();
+      publishState(true);
+      return;
+    }
+
+    if (
+      data.status === "completed" ||
+      data.status === "failed" ||
+      data.status === "aborted"
+    ) {
+      if (activeSubagentIds.delete(data.id)) {
+        syncSubagentHeartbeat();
+        scheduleIdle();
+      }
+    }
   });
 
   pi.on("session_start", (_event, ctx) => {
@@ -465,6 +515,11 @@ export default function (pi) {
       return;
     }
 
+    if (activeSubagentIds.size > 0) {
+      syncSubagentHeartbeat();
+      publishState(true);
+      return;
+    }
     scheduleIdle();
   });
 
@@ -473,6 +528,10 @@ export default function (pi) {
       return;
     }
     clearPendingTimers();
+    if (subagentHeartbeatTimer) {
+      clearInterval(subagentHeartbeatTimer);
+      subagentHeartbeatTimer = undefined;
+    }
     if (shouldReleaseOnSessionShutdown(event)) {
       await releaseAgent();
     }

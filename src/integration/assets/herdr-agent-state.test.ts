@@ -53,14 +53,17 @@ type Handler = (event: unknown, context: unknown) => unknown;
 
 function createExtensionHarness() {
   const handlers = new Map<string, Handler>();
+  const eventHandlers = new Map<string, (event: unknown) => unknown>();
   return {
     handlers,
+    eventHandlers,
     pi: {
       on(event: string, handler: Handler) {
         handlers.set(event, handler);
       },
       events: {
-        on() {
+        on(event: string, handler: (event: unknown) => unknown) {
+          eventHandlers.set(event, handler);
           return () => {};
         },
       },
@@ -147,6 +150,50 @@ for (const integration of integrations) {
     expect(reportedState()).toBe("working");
   });
 }
+
+test("Oh My Pi remains working while a subagent outlives its parent turn", async () => {
+  const requests = await startRecordingServer("omp-subagent");
+  const { handlers, eventHandlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./omp/herdr-agent-state.ts");
+  install(pi);
+
+  const context = {
+    hasUI: true,
+    isIdle: () => false,
+    sessionManager: {
+      getSessionFile: () => undefined,
+      getSessionId: () => undefined,
+    },
+  };
+  handlers.get("session_start")?.({ reason: "startup" }, context);
+  handlers.get("agent_start")?.({}, context);
+  eventHandlers.get("task:subagent:lifecycle")?.({ id: "child", status: "started" });
+  handlers.get("agent_end")?.({ messages: [] }, context);
+
+  const deadline = Date.now() + 1_000;
+  while (
+    Date.now() < deadline &&
+    requests.filter(
+      request =>
+        isRecord(request) &&
+        request.method === "pane.report_agent" &&
+        isRecord(request.params) &&
+        request.params.state === "working",
+    ).length < 2
+  ) {
+    await Bun.sleep(5);
+  }
+
+  expect(
+    requests.filter(
+      request =>
+        isRecord(request) &&
+        request.method === "pane.report_agent" &&
+        isRecord(request.params) &&
+        request.params.state === "working",
+    ).length,
+  ).toBeGreaterThanOrEqual(2);
+});
 
 test("Pi reports the session replacement source", async () => {
   const requests = await startRecordingServer("pi-session-source");
