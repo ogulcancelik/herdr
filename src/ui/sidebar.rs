@@ -730,6 +730,23 @@ pub(crate) fn collapsed_sidebar_sections(area: Rect) -> (Rect, Option<u16>, Rect
     (ws_area, Some(divider_y), detail_area)
 }
 
+/// Paint the sidebar's own surface so it reads as a panel rather than
+/// inheriting the outer terminal background. Content rendered afterwards
+/// patches fg/attrs per-cell, so the fill shows through as row background.
+fn fill_panel_bg(frame: &mut Frame, area: Rect, p: &Palette) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let style = Style::default().bg(p.panel_bg);
+    let buf = frame.buffer_mut();
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            buf[(x, y)].set_symbol(" ");
+            buf[(x, y)].set_style(style);
+        }
+    }
+}
+
 /// Collapsed sidebar: workspace glance on top, compact agent list below.
 pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
@@ -739,6 +756,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
     let is_navigating = matches!(app.mode, Mode::Navigate);
 
     let p = &app.palette;
+    fill_panel_bg(frame, area, p);
     let sep_style = if is_navigating {
         Style::default().fg(p.accent)
     } else {
@@ -872,6 +890,7 @@ pub(super) fn render_sidebar(
     area: Rect,
 ) {
     let p = &app.palette;
+    fill_panel_bg(frame, area, p);
     let is_navigating = matches!(app.mode, Mode::Navigate);
     let sep_style = if is_navigating {
         Style::default().fg(p.accent)
@@ -1575,7 +1594,7 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         assert!(!inactive
             .add_modifier
             .intersects(Modifier::BOLD | Modifier::DIM));
-        assert_eq!(inactive.bg, Some(ratatui::style::Color::Reset));
+        assert_eq!(inactive.bg, Some(app.palette.panel_bg));
     }
 
     #[test]
