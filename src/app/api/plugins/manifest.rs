@@ -163,7 +163,14 @@ pub(crate) fn load_plugin_manifest(
         .into_iter()
         .map(normalize_manifest_event)
         .collect::<Result<Vec<_>, _>>()?;
-    events.sort_by(|a, b| a.on.cmp(&b.on).then_with(|| a.command.cmp(&b.command)));
+    events.sort_by(|a, b| {
+        a.on.cmp(&b.on).then_with(|| {
+            a.command
+                .iter()
+                .map(|arg| arg.trim())
+                .cmp(b.command.iter().map(|arg| arg.trim()))
+        })
+    });
     let mut panes = raw
         .panes
         .into_iter()
@@ -534,10 +541,6 @@ fn platform_name(p: PluginPlatform) -> &'static str {
 }
 
 fn normalize_command(command: Vec<String>) -> Result<Vec<String>, (&'static str, String)> {
-    let command = command
-        .into_iter()
-        .map(|arg| arg.trim().to_string())
-        .collect::<Vec<_>>();
     if command.is_empty() || command.iter().any(|arg| arg.is_empty()) {
         return Err((
             "invalid_plugin_command",

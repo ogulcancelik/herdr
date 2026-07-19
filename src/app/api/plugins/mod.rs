@@ -938,6 +938,101 @@ platforms = ["linux", "macos", "windows"]
     }
 
     #[test]
+    fn plugin_manifest_preserves_whitespace_only_command_arguments() {
+        let root = unique_temp_path("plugin-whitespace-argv");
+        write_manifest_content(
+            &root,
+            r#"
+id = "example.whitespace-argv"
+name = "Whitespace argv"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "cut"
+title = "Cut on tab"
+command = ["awk", "-F", "\t", " {print $1} "]
+"#,
+        );
+
+        let plugin = load_plugin_manifest(&root.display().to_string(), true)
+            .expect("literal whitespace argv elements should be valid");
+        assert_eq!(plugin.panes[0].command, ["awk", "-F", "\t", " {print $1} "]);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn plugin_manifest_rejects_empty_command_elements() {
+        for (name, command) in [("array", "[]"), ("element", r#"["echo", ""]"#)] {
+            let root = unique_temp_path(&format!("plugin-empty-command-{name}"));
+            write_manifest_content(
+                &root,
+                &format!(
+                    r#"
+id = "example.empty-command-{name}"
+name = "Empty command {name}"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "empty"
+title = "Empty command"
+command = {command}
+"#
+                ),
+            );
+
+            let result = load_plugin_manifest(&root.display().to_string(), true);
+            assert!(matches!(result, Err(("invalid_plugin_command", _))));
+
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn plugin_manifest_preserves_legacy_event_order_with_exact_argv() {
+        let root = unique_temp_path("plugin-event-whitespace-order");
+        write_manifest_content(
+            &root,
+            r#"
+id = "example.event-whitespace-order"
+name = "Event whitespace order"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+platforms = ["linux", "macos"]
+
+[[events]]
+on = "workspace.created"
+command = ["echo", "!"]
+
+[[events]]
+on = "workspace.created"
+command = ["echo", " a"]
+
+[[events]]
+on = "workspace.created"
+command = ["echo", "a ", "first"]
+
+[[events]]
+on = "workspace.created"
+command = ["echo", " a", "first "]
+"#,
+        );
+
+        let plugin = load_plugin_manifest(&root.display().to_string(), true)
+            .expect("event commands with whitespace should load");
+        assert_eq!(plugin.events[0].command, ["echo", "!"]);
+        assert_eq!(plugin.events[1].command, ["echo", " a"]);
+        assert_eq!(plugin.events[2].command, ["echo", "a ", "first"]);
+        assert_eq!(plugin.events[3].command, ["echo", " a", "first "]);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn plugin_link_rejects_invalid_github_source_path() {
         let mut app = test_app();
         let root = unique_temp_path("plugin-invalid-source");
