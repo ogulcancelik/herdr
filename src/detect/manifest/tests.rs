@@ -360,6 +360,34 @@ fn devin_manifest_detects_idle_working_and_blocked_states() {
 }
 
 #[test]
+fn kimi_moon_spinner_detects_working_with_status_text() {
+    let moon_alone = explain(Agent::Kimi, "  🌕\n");
+    assert_eq!(moon_alone.state, AgentState::Working);
+    assert_eq!(
+        moon_alone
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("moon_spinner_working")
+    );
+    assert!(moon_alone.visible_working);
+
+    let moon_with_tip = explain(
+        Agent::Kimi,
+        "  🌗 · Tip: Try /dance for a hidden Easter egg\n",
+    );
+    assert_eq!(moon_with_tip.state, AgentState::Working);
+    assert_eq!(
+        moon_with_tip
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("moon_spinner_working")
+    );
+    assert!(moon_with_tip.visible_working);
+}
+
+#[test]
 fn manifest_validation_rejects_unknown_fields_empty_rules_invalid_regions_and_regexes() {
     assert!(parse_manifest(
         r#"
