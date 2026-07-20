@@ -251,13 +251,9 @@ impl InputRouter {
         };
         match sender.try_send(message) {
             Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(
-                ClientMessage::Input { .. }
-                | ClientMessage::InputEvents { .. }
-                | ClientMessage::ClipboardImage { .. },
-            )) => {
-                // Never replay pane input that accumulated behind a degraded path.
-            }
+            // Backpressure while the transport is active: block until the queue
+            // drains so ordered input is never dropped. Input is only discarded
+            // when there is no active sender (connection dead), handled above.
             Err(mpsc::error::TrySendError::Full(message)) => {
                 if sender.blocking_send(message).is_err() {
                     self.clear_active();
@@ -275,6 +271,22 @@ impl InputRouter {
     fn is_detached(&self) -> bool {
         self.detached.load(Ordering::Acquire)
     }
+}
+
+/// Pump client messages from the local socket into the router. On EOF or a
+/// read error without a prior Detach, mark the router closed so the bridge
+/// thread unblocks and SSH child cleanup runs; mark_closed is idempotent.
+fn read_local_input(input_stream: &mut impl io::Read, router: &InputRouter) {
+    while let Ok(message) =
+        crate::protocol::read_message::<_, ClientMessage>(input_stream, MAX_GRAPHICS_FRAME_SIZE)
+    {
+        let detached = matches!(message, ClientMessage::Detach);
+        router.route(message);
+        if detached || router.is_detached() {
+            break;
+        }
+    }
+    router.mark_closed();
 }
 
 fn bridge_connection(
@@ -303,16 +315,7 @@ fn bridge_connection(
     let mut input_stream = stream;
     let input_router = Arc::clone(&router);
     let input_thread = thread::spawn(move || {
-        while let Ok(message) = crate::protocol::read_message::<_, ClientMessage>(
-            &mut input_stream,
-            MAX_GRAPHICS_FRAME_SIZE,
-        ) {
-            let detached = matches!(message, ClientMessage::Detach);
-            input_router.route(message);
-            if detached || input_router.is_detached() {
-                break;
-            }
-        }
+        read_local_input(&mut input_stream, &input_router);
     });
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -802,13 +805,10 @@ fn run_one_ssh_session(
                 return SshExit::Reconnect(format!("failed to read SSH bridge welcome: {error}"));
             }
         };
-    if *client_phase == LocalClientPhase::AwaitingWelcome {
-        if output.blocking_send(welcome).is_err() {
-            let _ = child.kill();
-            let _ = child.wait();
-            return SshExit::Detached;
-        }
-        *client_phase = LocalClientPhase::Connected;
+    if !deliver_ssh_welcome(output, client_phase, welcome) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return SshExit::Detached;
     }
     info!(
         target = %config.target,
@@ -869,6 +869,29 @@ fn run_one_ssh_session(
     result
 }
 
+/// Send the welcome (first connection only) and then, mirroring the QUIC
+/// path, a `Connected` transport status so the local client clears its
+/// transport_stale flag and resumes forwarding stdin after an SSH reconnect.
+/// Returns false when the local client is gone.
+fn deliver_ssh_welcome(
+    output: &mpsc::Sender<ServerMessage>,
+    client_phase: &mut LocalClientPhase,
+    welcome: ServerMessage,
+) -> bool {
+    if *client_phase == LocalClientPhase::AwaitingWelcome {
+        if output.blocking_send(welcome).is_err() {
+            return false;
+        }
+        *client_phase = LocalClientPhase::Connected;
+    }
+    output
+        .blocking_send(ServerMessage::TransportStatus {
+            status: RemoteTransportStatus::Connected,
+            detail: None,
+        })
+        .is_ok()
+}
+
 fn send_proxy_error(
     output: &mpsc::Sender<ServerMessage>,
     client_phase: &mut LocalClientPhase,
@@ -925,6 +948,81 @@ mod tests {
         let router = InputRouter::new(hello());
         router.route(ClientMessage::Detach);
         assert!(router.is_detached());
+    }
+
+    #[test]
+    fn ssh_welcome_announces_connected_after_reconnect() {
+        let (output_tx, mut output_rx) = mpsc::channel::<ServerMessage>(4);
+
+        // First connection: welcome then Connected.
+        let mut phase = LocalClientPhase::AwaitingWelcome;
+        let welcome = ServerMessage::Welcome {
+            version: PROTOCOL_VERSION,
+            encoding: RenderEncoding::TerminalAnsi,
+            error: None,
+        };
+        assert!(deliver_ssh_welcome(&output_tx, &mut phase, welcome.clone()));
+        assert_eq!(phase, LocalClientPhase::Connected);
+        assert!(matches!(
+            output_rx.blocking_recv(),
+            Some(ServerMessage::Welcome { .. })
+        ));
+        assert!(matches!(
+            output_rx.blocking_recv(),
+            Some(ServerMessage::TransportStatus {
+                status: RemoteTransportStatus::Connected,
+                ..
+            })
+        ));
+
+        // Reconnect (already connected): Connected is still emitted so the
+        // client clears transport_stale and resumes forwarding stdin.
+        assert!(deliver_ssh_welcome(&output_tx, &mut phase, welcome));
+        assert!(matches!(
+            output_rx.blocking_recv(),
+            Some(ServerMessage::TransportStatus {
+                status: RemoteTransportStatus::Connected,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn local_socket_eof_marks_router_closed() {
+        let router = InputRouter::new(hello());
+        let mut eof: &[u8] = &[];
+        read_local_input(&mut eof, &router);
+        assert!(router.is_detached());
+        // A prior Detach must not cause trouble on the EOF teardown path.
+        read_local_input(&mut eof, &router);
+        assert!(router.is_detached());
+    }
+
+    #[test]
+    fn active_transport_backpressures_instead_of_dropping_input() {
+        let router = Arc::new(InputRouter::new(hello()));
+        let (tx, mut rx) = mpsc::channel::<ClientMessage>(1);
+        router.set_active(tx); // set_active enqueues a Resize, filling the queue
+
+        let route_router = Arc::clone(&router);
+        let sender = thread::spawn(move || {
+            route_router.route(ClientMessage::Input {
+                data: b"typed while full".to_vec(),
+            });
+        });
+
+        // Drain the queue: the blocked route() must deliver the input.
+        assert!(matches!(
+            rx.blocking_recv(),
+            Some(ClientMessage::Resize { .. })
+        ));
+        assert_eq!(
+            rx.blocking_recv(),
+            Some(ClientMessage::Input {
+                data: b"typed while full".to_vec(),
+            })
+        );
+        sender.join().unwrap();
     }
     #[test]
     fn transport_machine_uses_one_ordered_recovery_ladder() {
