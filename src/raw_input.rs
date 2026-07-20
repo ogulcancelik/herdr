@@ -190,6 +190,7 @@ pub(crate) struct RawInputByteFramer {
     lone_escape_recently_flushed: bool,
     host_color_replies_awaited: u8,
     held_pending_color_esc: bool,
+    held_pending_alt_esc: bool,
     host_color_scheme_change_tracking: bool,
     split_coalesced_escape: bool,
 }
@@ -350,9 +351,15 @@ impl RawInputByteFramer {
                 tracing::trace!("holding lone escape one flush while awaiting host color reply");
                 return chunks;
             }
+            if !self.held_pending_alt_esc {
+                self.held_pending_alt_esc = true;
+                tracing::trace!("holding lone escape one flush while awaiting potential alt chord continuation");
+                return chunks;
+            }
             // No continuation arrived; give up the window so Escape is not delayed again.
             self.host_color_replies_awaited = 0;
             self.held_pending_color_esc = false;
+            self.held_pending_alt_esc = false;
             tracing::warn!(
                 bytes = ?self.buffer,
                 "flushing lone escape after input timeout; if this follows an alt chord or focus switch it may reach the pane as plain esc"
