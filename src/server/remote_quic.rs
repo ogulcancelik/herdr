@@ -296,10 +296,23 @@ fn make_endpoint(server_config: quinn::ServerConfig, socket: UdpSocket) -> io::R
     )
 }
 
+/// Pre-auth admission cap: each accepted handshake spawns unauthenticated work
+/// (TLS handshake, hello decode) and quinn's default allows up to 65,536
+/// concurrent incoming, so without a bound an attacker can exhaust memory/CPU
+/// before ever authenticating. Excess handshakes are refused outright.
+const MAX_PREAUTH_CONNECTIONS: usize = 32;
+
 async fn accept_connections(endpoint: Endpoint, state: Arc<ServerState>) {
+    let admission = Arc::new(Semaphore::new(MAX_PREAUTH_CONNECTIONS));
     while let Some(incoming) = endpoint.accept().await {
+        let Ok(permit) = Arc::clone(&admission).try_acquire_owned() else {
+            debug!(remote = %incoming.remote_address(), "refusing QUIC connection: admission limit reached");
+            incoming.refuse();
+            continue;
+        };
         let state = Arc::clone(&state);
         tokio::spawn(async move {
+            let _permit = permit;
             match incoming.await {
                 Ok(connection) => {
                     if let Err(err) = serve_connection(connection.clone(), state).await {
@@ -1274,5 +1287,20 @@ mod tests {
     fn resource_and_certificate_hashes_are_content_addressed() {
         assert_eq!(hash_bytes(b"same"), hash_bytes(b"same"));
         assert_ne!(hash_bytes(b"same"), hash_bytes(b"different"));
+    }
+
+    #[test]
+    fn admission_semaphore_refuses_beyond_cap_and_recovers() {
+        let admission = Arc::new(Semaphore::new(MAX_PREAUTH_CONNECTIONS));
+        let permits: Vec<_> = (0..MAX_PREAUTH_CONNECTIONS)
+            .map(|_| {
+                Arc::clone(&admission)
+                    .try_acquire_owned()
+                    .expect("permit within cap")
+            })
+            .collect();
+        assert!(Arc::clone(&admission).try_acquire_owned().is_err());
+        drop(permits);
+        assert!(Arc::clone(&admission).try_acquire_owned().is_ok());
     }
 }

@@ -6,7 +6,17 @@ use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::protocol::REMOTE_QUIC_HASH_BYTES;
+use crate::protocol::{MAX_GRAPHICS_FRAME_SIZE, REMOTE_QUIC_HASH_BYTES};
+
+/// Allocation limit for decoding untrusted payloads. The outer frame is already
+/// capped by `max`, but bincode would otherwise trust an attacker-declared
+/// internal String/Vec length and pre-allocate it before auth. bincode 2's
+/// limit is a const generic, so we use the largest frame cap any caller passes
+/// (`MAX_GRAPHICS_FRAME_SIZE`); declared lengths beyond it fail instead of
+/// allocating.
+/// ponytail: a per-call runtime limit isn't expressible with bincode 2's const
+/// generic API; if bincode grows a runtime limit, tie it to `max` directly.
+const DECODE_LIMIT: usize = MAX_GRAPHICS_FRAME_SIZE;
 
 pub(crate) async fn write_async_message<M>(
     stream: &mut (impl AsyncWrite + Unpin),
@@ -55,9 +65,11 @@ where
         .read_exact(&mut payload)
         .await
         .map_err(|err| format!("failed to read QUIC message: {err}"))?;
-    let (message, consumed) =
-        bincode::serde::decode_from_slice(&payload, bincode::config::standard())
-            .map_err(|err| format!("failed to decode QUIC message: {err}"))?;
+    let (message, consumed) = bincode::serde::decode_from_slice(
+        &payload,
+        bincode::config::standard().with_limit::<DECODE_LIMIT>(),
+    )
+    .map_err(|err| format!("failed to decode QUIC message: {err}"))?;
     if consumed != length {
         return Err("QUIC message contains trailing bytes".to_owned());
     }
@@ -112,5 +124,24 @@ mod tests {
             .await
             .expect_err("trailing bytes must fail");
         assert!(error.contains("trailing bytes"));
+    }
+
+    #[tokio::test]
+    async fn decode_rejects_huge_declared_internal_length() {
+        // A tiny frame whose bincode varint declares a multi-GiB string length
+        // must fail decoding instead of pre-allocating that much memory.
+        let (mut writer, mut reader) = tokio::io::duplex(64);
+        // 0xfd marks a u64 varint length in bincode's standard config.
+        let mut payload = vec![0xfdu8];
+        payload.extend_from_slice(&(8u64 * 1024 * 1024 * 1024).to_le_bytes());
+        writer
+            .write_all(&(payload.len() as u32).to_le_bytes())
+            .await
+            .expect("write fixture length");
+        writer.write_all(&payload).await.expect("write fixture");
+        let error = read_async_message::<String>(&mut reader, 64)
+            .await
+            .expect_err("huge declared length must fail");
+        assert!(error.contains("failed to decode"), "{error}");
     }
 }
