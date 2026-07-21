@@ -811,11 +811,14 @@ fi
         script.push_str(
             r#"    emit "/opt/homebrew/bin/herdr"
     emit "/usr/local/bin/herdr"
+    emit "/usr/bin/herdr"
 "#,
         );
     } else if platform.os == "linux" {
         script.push_str(
             r#"    emit "/home/linuxbrew/.linuxbrew/bin/herdr"
+    emit "/usr/local/bin/herdr"
+    emit "/usr/bin/herdr"
 "#,
         );
     }
@@ -836,11 +839,19 @@ emit "/run/current-system/sw/bin/herdr"
     script
 }
 
+fn path_discovery_script() -> &'static str {
+    "command -v herdr"
+}
+
 fn remote_binary_on_path_any(
     ssh: &RemoteSsh,
     remote_herdr: &RemoteHerdr,
 ) -> io::Result<Option<RemoteHerdr>> {
-    let output = ssh.user_shell_output("command -v herdr")?;
+    // Run the discovery through /bin/sh rather than the remote login shell:
+    // `command` is a POSIX builtin in /bin/sh but not in non-POSIX login shells
+    // (xonsh, fish, nushell, ...), where it errors out and the probe misses a
+    // binary that is actually on PATH.
+    let output = ssh.sh_output(path_discovery_script())?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -1423,24 +1434,45 @@ fn version_label(version: Option<&str>) -> &str {
 
 fn warn_if_remote_bin_not_on_path(ssh: &RemoteSsh) -> io::Result<()> {
     let output = ssh.user_shell_output("command -v herdr")?;
-    if output.status.success()
-        && remote_shell_resolves_managed_install(&String::from_utf8_lossy(&output.stdout))
-    {
+    // A non-POSIX login shell (xonsh, fish, nushell, ...) lacks a POSIX
+    // `command` builtin, so the probe errors out or produces no usable path.
+    // That is not evidence the shell resolves `herdr` to the wrong path, so
+    // suppress the warning unless the probe succeeds and clearly resolves to a
+    // path that is not the managed install.
+    if !output.status.success() {
         return Ok(());
     }
-
-    eprintln!(
-        "herdr: installed remote binary to ~/.local/bin/herdr, but the remote shell does not resolve `herdr` to that path"
-    );
-    Ok(())
+    match remote_shell_herdr_resolution(&String::from_utf8_lossy(&output.stdout)) {
+        RemoteShellHerdrResolution::ManagedInstall | RemoteShellHerdrResolution::Unresolved => {
+            Ok(())
+        }
+        RemoteShellHerdrResolution::OtherPath => {
+            eprintln!(
+                "herdr: installed remote binary to ~/.local/bin/herdr, but the remote shell does not resolve `herdr` to that path"
+            );
+            Ok(())
+        }
+    }
 }
 
-fn remote_shell_resolves_managed_install(stdout: &str) -> bool {
-    stdout
-        .lines()
-        .next()
-        .map(str::trim)
-        .is_some_and(|path| path.ends_with("/.local/bin/herdr"))
+#[derive(Debug, PartialEq, Eq)]
+enum RemoteShellHerdrResolution {
+    /// The login shell resolves `herdr` to the managed `~/.local/bin` install.
+    ManagedInstall,
+    /// The login shell resolves `herdr` to a different absolute path.
+    OtherPath,
+    /// No usable path (empty or unparseable output).
+    Unresolved,
+}
+
+fn remote_shell_herdr_resolution(stdout: &str) -> RemoteShellHerdrResolution {
+    match stdout.lines().next().map(str::trim) {
+        Some(path) if path.ends_with("/.local/bin/herdr") => {
+            RemoteShellHerdrResolution::ManagedInstall
+        }
+        Some(path) if path.starts_with('/') => RemoteShellHerdrResolution::OtherPath,
+        _ => RemoteShellHerdrResolution::Unresolved,
+    }
 }
 
 fn download_release_asset(platform: &RemotePlatform) -> io::Result<InstallSource> {
@@ -2530,6 +2562,24 @@ mod tests {
     }
 
     #[test]
+    fn known_remote_binary_candidate_script_includes_system_paths() {
+        let script = known_remote_binary_candidate_script(&RemotePlatform {
+            os: "linux",
+            arch: "x86_64",
+        });
+
+        assert!(script.contains("emit \"/usr/bin/herdr\""));
+        assert!(script.contains("emit \"/usr/local/bin/herdr\""));
+    }
+
+    #[test]
+    fn path_discovery_script_uses_posix_command() {
+        // Locks in that PATH discovery runs `command -v herdr` (executed through
+        // /bin/sh via sh_output), not the remote login shell.
+        assert_eq!(path_discovery_script(), "command -v herdr");
+    }
+
+    #[test]
     fn known_remote_binary_candidate_script_includes_macos_homebrew_paths() {
         let script = known_remote_binary_candidate_script(&RemotePlatform {
             os: "macos",
@@ -2538,6 +2588,7 @@ mod tests {
 
         assert!(script.contains("emit \"/opt/homebrew/bin/herdr\""));
         assert!(script.contains("emit \"/usr/local/bin/herdr\""));
+        assert!(script.contains("emit \"/usr/bin/herdr\""));
         assert!(!script.contains("emit \"/home/linuxbrew/.linuxbrew/bin/herdr\""));
     }
 
@@ -2580,17 +2631,41 @@ mod tests {
     }
 
     #[test]
-    fn remote_shell_path_warning_accepts_managed_install() {
-        assert!(remote_shell_resolves_managed_install(
-            "/home/can/.local/bin/herdr\n"
-        ));
-        assert!(remote_shell_resolves_managed_install(
-            "/Users/can/.local/bin/herdr\n"
-        ));
-        assert!(!remote_shell_resolves_managed_install(
-            "/usr/local/bin/herdr\n"
-        ));
-        assert!(!remote_shell_resolves_managed_install(""));
+    fn remote_shell_herdr_resolution_detects_managed_install() {
+        assert_eq!(
+            remote_shell_herdr_resolution("/home/can/.local/bin/herdr\n"),
+            RemoteShellHerdrResolution::ManagedInstall
+        );
+        assert_eq!(
+            remote_shell_herdr_resolution("/Users/can/.local/bin/herdr\n"),
+            RemoteShellHerdrResolution::ManagedInstall
+        );
+    }
+
+    #[test]
+    fn remote_shell_herdr_resolution_flags_other_absolute_path() {
+        assert_eq!(
+            remote_shell_herdr_resolution("/usr/local/bin/herdr\n"),
+            RemoteShellHerdrResolution::OtherPath
+        );
+        assert_eq!(
+            remote_shell_herdr_resolution("/usr/bin/herdr\n"),
+            RemoteShellHerdrResolution::OtherPath
+        );
+    }
+
+    #[test]
+    fn remote_shell_herdr_resolution_treats_missing_or_shell_error_as_unresolved() {
+        // Empty output, or a non-POSIX login shell erroring on `command`, must
+        // not be reported as resolving `herdr` to the wrong path.
+        assert_eq!(
+            remote_shell_herdr_resolution(""),
+            RemoteShellHerdrResolution::Unresolved
+        );
+        assert_eq!(
+            remote_shell_herdr_resolution("command not found: 'command'\n"),
+            RemoteShellHerdrResolution::Unresolved
+        );
     }
 
     #[test]
