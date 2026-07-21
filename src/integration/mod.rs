@@ -199,6 +199,10 @@ const CURSOR_INTEGRATION_VERSION: u32 = 1;
 const MASTRACODE_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const MASTRACODE_HOOK_ASSET: &str = include_str!("assets/mastracode/herdr-agent-state.sh");
 const MASTRACODE_INTEGRATION_VERSION: u32 = 1;
+const GROK_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
+const GROK_HOOK_ASSET: &str = include_str!("assets/grok/herdr-agent-state.sh");
+const GROK_HOOKS_JSON_INSTALL_NAME: &str = "herdr-agent-state.json";
+const GROK_INTEGRATION_VERSION: u32 = 1;
 const MASTRACODE_HOOK_TIMEOUT_MS: u64 = 10_000;
 const MASTRACODE_HOOK_EVENTS: [(&str, &str); 12] = [
     ("SessionStart", "idle"),

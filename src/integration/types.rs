@@ -166,6 +166,20 @@ pub(crate) struct ClaudeUninstallResult {
 }
 
 #[derive(Debug)]
+pub(crate) struct GrokInstallPaths {
+    pub hook_path: PathBuf,
+    pub hooks_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct GrokUninstallResult {
+    pub hook_path: PathBuf,
+    pub hooks_path: PathBuf,
+    pub removed_hook_file: bool,
+    pub removed_hooks_file: bool,
+}
+
+#[derive(Debug)]
 pub(crate) struct CodexUninstallResult {
     pub hook_path: PathBuf,
     pub hooks_path: PathBuf,
