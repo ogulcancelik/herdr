@@ -879,3 +879,72 @@ fn codex_osc_working_beats_weak_blocker_screen() {
         Some("osc_title_working")
     );
 }
+
+// ---------------------------------------------------------------------------
+// omp manifest tests — omp shares the pi TUI codebase and renders a
+// braille-spinner Loader line while working plus HookSelector dialogs when
+// blocked.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn omp_manifest_detects_working_spinner() {
+    let working = explain(
+        Agent::Omp,
+ "Some assistant text here\n\n ⠋ Working… ⟦esc⟧\nmodel-name  Context: 10k / 200k tokens (5%)",
+    );
+    assert_eq!(working.state, AgentState::Working);
+    assert!(working.visible_working);
+    assert_eq!(
+        working.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("working_spinner")
+    );
+}
+
+#[test]
+fn omp_manifest_detects_working_literal() {
+    let working = explain(
+        Agent::Omp,
+        " ⠼ Reading file… ⟦esc⟧\nWorking… on task\nmodel-name  Context: 10k / 200k",
+    );
+    assert_eq!(working.state, AgentState::Working);
+    assert!(working.visible_working);
+}
+
+#[test]
+fn omp_manifest_detects_blocked_permission_selector() {
+    let blocked = explain(
+        Agent::Omp,
+ "Allow command?\n  bash: rm -rf /tmp/test\n\n❯ 1 Yes, proceed\n  2 No\nup/down navigate  enter select  esc cancel",
+    );
+    assert_eq!(blocked.state, AgentState::Blocked);
+    assert!(blocked.visible_blocker);
+    assert_eq!(
+        blocked.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("permission_selector")
+    );
+}
+
+#[test]
+fn omp_manifest_detects_blocked_weak_blocker() {
+    let blocked = explain(Agent::Omp, "Run this command? [y/n]");
+    assert_eq!(blocked.state, AgentState::Blocked);
+    assert!(blocked.visible_blocker);
+}
+
+#[test]
+fn omp_manifest_idle_when_no_working_or_blocked_pattern() {
+    let idle = explain(
+        Agent::Omp,
+        "Welcome to omp\n❯ Ask me anything\nmodel-name  Context: 0k / 200k tokens (0%)",
+    );
+    assert_eq!(idle.state, AgentState::Idle);
+}
+
+#[test]
+fn omp_manifest_weak_blocker_outranks_spinner() {
+    // A stale [y/n] on screen triggers weak_blocker (priority 600), which
+    // outranks the working spinner (priority 500). Blocked states must win
+    // over working for safety.
+    let result = explain(Agent::Omp, "old prompt [y/n]\n ⠋ Working… ⟦esc⟧");
+    assert_eq!(result.state, AgentState::Blocked);
+}

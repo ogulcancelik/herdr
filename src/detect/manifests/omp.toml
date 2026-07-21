@@ -1,0 +1,52 @@
+id = "omp"
+version = "2026.07.21.1"
+min_engine_version = 1
+updated_at = "2026-07-21T00:00:00Z"
+aliases = ["herdr:omp"]
+
+# omp (Oh My Pi) shares the pi TUI codebase (@oh-my-pi/pi-coding-agent).
+# While working, the status container renders a braille-spinner Loader line
+# above the input area: " <frame> <message>" where <frame> is one of
+# ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ and <message> defaults to "Working… ⟦esc⟧" (Unicode ellipsis,
+# bracket preset varies: ⟦⟧ / [] / ⟨⟩). Tool-specific intents replace the
+# message text, so the spinner is the most reliable working indicator.
+# Permission/ask dialogs render a HookSelector with the controls hint
+# "up/down navigate  enter select  esc cancel".
+
+[[rules]]
+id = "permission_selector"
+state = "blocked"
+priority = 980
+region = "whole_recent"
+visible_blocker = true
+contains = ["enter select", "esc cancel"]
+
+[[rules]]
+id = "weak_blocker"
+state = "blocked"
+priority = 600
+region = "whole_recent"
+visible_blocker = true
+any = [
+  { contains = ["[y/n]"] },
+  { contains = ["yes (y)"] },
+]
+
+[[rules]]
+id = "working_spinner"
+state = "working"
+priority = 500
+region = "bottom_non_empty_lines(3)"
+visible_working = true
+line_regex = ['^ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] ']
+
+[[rules]]
+id = "working_literal"
+state = "working"
+priority = 100
+region = "whole_recent"
+visible_working = true
+any = [
+  { contains = ["Working…"] },
+  { contains = ["Working..."] },
+]

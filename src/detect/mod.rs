@@ -89,8 +89,9 @@ impl Agent {
         Self::Maki,
     ];
 
-    pub const SCREEN_MANIFEST_AGENTS: [Self; 19] = [
+    pub const SCREEN_MANIFEST_AGENTS: [Self; 20] = [
         Self::Pi,
+        Self::Omp,
         Self::Claude,
         Self::Codex,
         Self::Gemini,
@@ -642,7 +643,7 @@ mod tests {
 
     #[test]
     fn moved_agent_detection_routes_through_production_dispatch() {
-        let detection = detect_agent(Some(Agent::Pi), "Working...");
+        let detection = detect_agent(Some(Agent::Pi), "Working…");
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);

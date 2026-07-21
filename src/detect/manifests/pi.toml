@@ -1,8 +1,23 @@
 id = "pi"
-version = "2026.06.10.1"
+version = "2026.07.21.1"
 min_engine_version = 1
-updated_at = "2026-06-10T00:00:00Z"
+updated_at = "2026-07-21T00:00:00Z"
 aliases = ["herdr:pi"]
+
+# pi shares the same TUI codebase as omp (@oh-my-pi/pi-coding-agent).
+# While working, the status container renders a braille-spinner Loader line:
+# " <frame> <message>" where <frame> is one of ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ and <message>
+# defaults to "Working… ⟦esc⟧" (Unicode ellipsis U+2026, not three ASCII dots).
+# Tool-specific intents replace the message text, so the spinner is the most
+# reliable working indicator.
+
+[[rules]]
+id = "working_spinner"
+state = "working"
+priority = 500
+region = "bottom_non_empty_lines(3)"
+visible_working = true
+line_regex = ['^ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] ']
 
 [[rules]]
 id = "working_literal"
@@ -10,4 +25,7 @@ state = "working"
 priority = 100
 region = "whole_recent"
 visible_working = true
-contains = ["Working..."]
+any = [
+  { contains = ["Working…"] },
+  { contains = ["Working..."] },
+]
