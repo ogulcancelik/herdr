@@ -5,15 +5,23 @@
 //! players — no Rust audio dependencies.
 
 use std::io::Write;
+#[cfg(not(any(windows, target_os = "macos")))]
+use std::io::{Read, Result as IoResult};
 use std::path::{Path, PathBuf};
 #[cfg(not(windows))]
 use std::process::Command;
 use std::process::Output;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(any(windows, target_os = "macos")))]
+use std::time::{Duration, Instant};
 
 use tracing::warn;
 
 const DISABLE_SOUND_ENV: &str = "HERDR_DISABLE_SOUND";
+#[cfg(not(any(windows, target_os = "macos")))]
+const AUDIO_PLAYER_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(not(any(windows, target_os = "macos")))]
+const AUDIO_PLAYER_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 static SOUND_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 static SOUND_DONE: &[u8] = include_bytes!("../assets/sounds/done.mp3");
@@ -169,11 +177,98 @@ struct AudioPlayer {
 #[cfg(not(any(windows, target_os = "macos")))]
 impl AudioPlayer {
     fn output(self, path: &Path) -> std::io::Result<Output> {
-        Command::new(self.program)
+        self.output_with_timeout(path, AUDIO_PLAYER_TIMEOUT)
+    }
+
+    fn output_with_timeout(self, path: &Path, timeout: Duration) -> std::io::Result<Output> {
+        let mut child = Command::new(self.program)
             .args(self.args)
             .arg(path)
-            .output()
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        let Some(stdout) = child.stdout.take() else {
+            terminate_and_reap(&mut child)?;
+            return Err(std::io::Error::other("audio player stdout was not piped"));
+        };
+        let Some(stderr) = child.stderr.take() else {
+            terminate_and_reap(&mut child)?;
+            return Err(std::io::Error::other("audio player stderr was not piped"));
+        };
+        let stdout_reader = read_output(stdout);
+        let stderr_reader = read_output(stderr);
+        let deadline = Instant::now() + timeout;
+
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let (stdout, stderr) = finish_output(stdout_reader, stderr_reader)?;
+                    return Ok(Output {
+                        status,
+                        stdout,
+                        stderr,
+                    });
+                }
+                Ok(None) => {}
+                Err(wait_err) => {
+                    let cleanup_result = terminate_and_reap(&mut child);
+                    let _ = finish_output(stdout_reader, stderr_reader);
+                    cleanup_result?;
+                    return Err(wait_err);
+                }
+            }
+
+            let now = Instant::now();
+            if now >= deadline {
+                let cleanup_result = terminate_and_reap(&mut child);
+                let _ = finish_output(stdout_reader, stderr_reader);
+                cleanup_result?;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("{} playback timed out after {timeout:?}", self.program),
+                ));
+            }
+
+            std::thread::sleep((deadline - now).min(AUDIO_PLAYER_POLL_INTERVAL));
+        }
     }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn read_output<R>(mut reader: R) -> std::thread::JoinHandle<IoResult<Vec<u8>>>
+where
+    R: Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut output = Vec::new();
+        reader.read_to_end(&mut output)?;
+        Ok(output)
+    })
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn finish_output(
+    stdout_reader: std::thread::JoinHandle<IoResult<Vec<u8>>>,
+    stderr_reader: std::thread::JoinHandle<IoResult<Vec<u8>>>,
+) -> IoResult<(Vec<u8>, Vec<u8>)> {
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| std::io::Error::other("audio player stdout reader panicked"))??;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| std::io::Error::other("audio player stderr reader panicked"))??;
+    Ok((stdout, stderr))
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn terminate_and_reap(child: &mut std::process::Child) -> std::io::Result<()> {
+    if let Err(kill_err) = child.kill() {
+        if child.try_wait()?.is_none() {
+            return Err(kill_err);
+        }
+    }
+    child.wait().map(|_| ())
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -252,6 +347,59 @@ mod tests {
 
         assert_eq!(programs, ["paplay", "pw-play", "ffplay", "mpg123", "mpv"]);
         assert!(!programs.contains(&"aplay"));
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    #[test]
+    fn linux_audio_player_does_not_wait_forever() {
+        let pid_path = temp_sound_path().with_extension("pid");
+        let player = AudioPlayer {
+            program: "sh",
+            args: &[
+                "-c",
+                "printf '%s' \"$$\" > \"$1\"; exec sleep 2",
+                "herdr-sound-timeout-test",
+            ],
+        };
+        let result = player.output_with_timeout(&pid_path, Duration::from_millis(100));
+        let pid = std::fs::read_to_string(&pid_path)
+            .expect("hanging test player should record its process ID");
+        let _ = std::fs::remove_file(pid_path);
+
+        let err = result.expect_err("hanging audio player should time out");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        let status = Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("test should inspect the timed-out player PID");
+        assert!(
+            !status.success(),
+            "timed-out audio player should be terminated and reaped"
+        );
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    #[test]
+    fn linux_audio_player_preserves_completed_output() {
+        let player = AudioPlayer {
+            program: "sh",
+            args: &[
+                "-c",
+                "i=0; while [ \"$i\" -lt 8192 ]; do printf 0123456789abcdef; i=$((i + 1)); done; i=0; while [ \"$i\" -lt 8192 ]; do printf fedcba9876543210; i=$((i + 1)); done >&2; exit 7",
+                "herdr-sound-output-test",
+            ],
+        };
+
+        let output = player
+            .output_with_timeout(Path::new("unused.mp3"), Duration::from_secs(5))
+            .expect("completed audio player should return its output");
+
+        assert_eq!(output.status.code(), Some(7));
+        assert_eq!(output.stdout.len(), 131_072);
+        assert_eq!(output.stderr.len(), 131_072);
+        assert!(output.stdout.starts_with(b"0123456789abcdef"));
+        assert!(output.stderr.starts_with(b"fedcba9876543210"));
     }
 
     #[test]
