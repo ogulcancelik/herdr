@@ -2,6 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventK
 
 use super::{KeyboardProtocol, MouseProtocolEncoding, TerminalKey};
 
+const KITTY_FLAG_DISAMBIGUATE_ESCAPE_CODES: u16 = 0b0000_0001;
 const KITTY_FLAG_REPORT_EVENT_TYPES: u16 = 0b0000_0010;
 const KITTY_FLAG_REPORT_ALTERNATE_KEYS: u16 = 0b0000_0100;
 const KITTY_FLAG_REPORT_ALL_KEYS: u16 = 0b0000_1000;
@@ -170,7 +171,14 @@ fn try_encode_csi_u(key: &TerminalKey, flags: u16) -> Option<Vec<u8>> {
 
     // Unmodified keys use legacy encoding (more compatible)
     if mods.is_empty() && event_suffix.is_none() && !report_all_keys {
-        return None;
+        // Kitty progressive enhancement 0b1 (disambiguate escape codes): the
+        // Esc key must be reported as CSI u. A bare 0x1b is the escape
+        // introducer, so a child parsing in disambiguate mode treats it as the
+        // start of an unterminated sequence and the keypress is lost.
+        let disambiguate = flags & KITTY_FLAG_DISAMBIGUATE_ESCAPE_CODES != 0;
+        if !(disambiguate && matches!(key.code, KeyCode::Esc)) {
+            return None;
+        }
     }
 
     // Special keys (arrows, F-keys, etc.) have well-established legacy
@@ -650,6 +658,27 @@ mod tests {
         .expect("mouse release should encode");
 
         assert_eq!(encoded, b"\x1b[<0;12;10m");
+    }
+
+    #[test]
+    fn kitty_disambiguate_esc_uses_csi_u() {
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+        assert_eq!(
+            encode_key(key, KeyboardProtocol::Kitty { flags: 1 }),
+            b"\x1b[27;1u"
+        );
+    }
+
+    #[test]
+    fn kitty_disambiguate_enter_stays_legacy() {
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+        assert_eq!(encode_key(key, KeyboardProtocol::Kitty { flags: 1 }), b"\r");
+    }
+
+    #[test]
+    fn legacy_esc_stays_bare() {
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+        assert_eq!(encode_key(key, KeyboardProtocol::Legacy), vec![0x1b]);
     }
 
     #[test]
