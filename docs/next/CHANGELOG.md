@@ -13,6 +13,7 @@
 - Agent commands now accept only a unique live agent name or the pane ID currently hosting that agent. Names are cleared when the occupant exits, is released, or is replaced. The old top-level `wait` commands were replaced by `agent wait` and `pane wait-output`, and `agent send` was replaced by `agent send-keys`.
 
 ### Fixed
+- Oversized bracketed text pastes are now rejected with a client-local notification instead of disconnecting the client. (#1665)
 - Agent prompt waits now report `agent_prompt_stalled` after five seconds without an observed state change instead of waiting indefinitely after an ineffective submission.
 - `herdr config check` now reports unknown config keys with their full paths instead of treating ignored typos as valid configuration. (#1573)
 - Codex panes with customized static terminal titles now fall back to the live working footer instead of remaining idle, while OSC activity remains preferred. (#1563)

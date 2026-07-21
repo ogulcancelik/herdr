@@ -2797,6 +2797,23 @@ impl HeadlessServer {
                     .collect();
                 self.handle_client_input_events(client_id, events)
             }
+            ServerEvent::ClientPasteRejected {
+                client_id,
+                size,
+                max,
+            } => {
+                self.send_to_client(
+                    client_id,
+                    ServerMessage::Notify {
+                        kind: protocol::NotifyKind::Toast,
+                        message: "Paste rejected".to_owned(),
+                        body: Some(format!(
+                            "Input message is {size} bytes; Herdr's limit is {max} bytes"
+                        )),
+                    },
+                );
+                false
+            }
             ServerEvent::ClientClipboardImage {
                 client_id,
                 extension,
@@ -8692,6 +8709,78 @@ next_tab = ""
                 .is_err(),
             "background client should not receive client-local notifications"
         );
+    }
+
+    #[test]
+    fn oversized_paste_rejection_notifies_only_the_sending_client() {
+        let mut server = test_headless_server();
+        let (sender_writer, sender_control_rx, _sender_render_rx) = test_client_writer();
+        let (foreground_writer, foreground_control_rx, _foreground_render_rx) =
+            test_client_writer();
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(sender_writer),
+            ),
+        );
+        server.clients.insert(
+            2,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                Some(foreground_writer),
+            ),
+        );
+        server.foreground_client_id = Some(2);
+        server.sync_foreground_client_state();
+
+        assert!(
+            !server.handle_server_event(ServerEvent::ClientPasteRejected {
+                client_id: 1,
+                size: 5_000_012,
+                max: 1_048_576,
+            })
+        );
+
+        match read_server_message(
+            sender_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("sending client rejection notification"),
+        ) {
+            ServerMessage::Notify {
+                kind,
+                message,
+                body,
+            } => {
+                assert_eq!(kind, protocol::NotifyKind::Toast);
+                assert_eq!(message, "Paste rejected");
+                assert_eq!(
+                    body.as_deref(),
+                    Some("Input message is 5000012 bytes; Herdr's limit is 1048576 bytes")
+                );
+            }
+            other => panic!("expected paste rejection notification, got {other:?}"),
+        }
+        assert!(
+            foreground_control_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "foreground client must not receive another client's rejection"
+        );
+        assert_eq!(server.foreground_client_id, Some(2));
+        assert_eq!(server.clients.len(), 2);
+        assert!(server.app.state.toast.is_none());
     }
 
     #[test]
