@@ -903,7 +903,7 @@ pub struct ExperimentalConfig {
     /// if the list contains no valid names, the reveal does not apply.
     /// Accepted names: pi, claude, codex, gemini, cursor, devin, cline,
     /// opencode, copilot, kimi, kiro, droid, amp, grok, hermes, kilo,
-    /// qodercli, qoder, maki.
+    /// qodercli, qoder, maki, tau.
     /// Default: empty.
     pub cjk_ime_agents: Vec<String>,
     /// Cursor shape rendered for the IME anchor when

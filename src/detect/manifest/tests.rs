@@ -301,6 +301,23 @@ fn all_bundled_manifests_parse_and_validate() {
 }
 
 #[test]
+fn tau_manifest_detects_idle_and_working_chrome() {
+    let idle = explain(
+        Agent::Tau,
+        "τ  Ask Tau…  Enter submits, Shift+Enter inserts a newline\n~/code/project  openai:gpt-5\nSubmit  Newline  Sessions  Thinking  Model  Cancel",
+    );
+    assert_eq!(idle.state, AgentState::Idle);
+    assert!(idle.visible_idle);
+
+    let working = explain(
+        Agent::Tau,
+        "τ  Ask Tau…  Enter submits, Shift+Enter inserts a newline\n~/code/project  openai:gpt-5\nSteer  Follow-up  Cancel  Thinking  Tools",
+    );
+    assert_eq!(working.state, AgentState::Working);
+    assert!(working.visible_working);
+}
+
+#[test]
 fn devin_manifest_detects_idle_working_and_blocked_states() {
     let idle = explain(
         Agent::Devin,

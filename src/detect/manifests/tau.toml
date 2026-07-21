@@ -1,0 +1,24 @@
+id = "tau"
+version = "2026.07.21.1"
+min_engine_version = 1
+updated_at = "2026-07-21T00:00:00Z"
+
+# Tau keeps its prompt and keybinding footer visible while a turn runs. The
+# prompt placeholder identifies the idle form; the working footer replaces
+# Submit/Newline with Steer/Follow-up while the animated tau glyph is active.
+
+[[rules]]
+id = "working_footer"
+state = "working"
+priority = 100
+region = "bottom_non_empty_lines(2)"
+visible_working = true
+contains = ["Steer", "Follow-up", "Cancel"]
+
+[[rules]]
+id = "idle_prompt"
+state = "idle"
+priority = 90
+region = "bottom_non_empty_lines(3)"
+visible_idle = true
+contains = ["Ask Tau…", "Enter submits", "Shift+Enter inserts a newline"]

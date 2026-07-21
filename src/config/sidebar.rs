@@ -622,6 +622,7 @@ rows = [[{ token = "git_status", fg = "#ff00aa" }], [{ token = "$jj", bold = tru
             Agent::Kilo,
             Agent::Qodercli,
             Agent::Maki,
+            Agent::Tau,
         ];
         let entries = agents
             .iter()
