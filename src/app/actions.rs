@@ -2791,13 +2791,19 @@ impl AppState {
                 source,
                 agent_label,
                 seq,
+                session_ref,
                 ..
             } => {
                 if crate::agent_resume::is_reserved_native_state_source(&source, &agent_label) {
                     Vec::new()
                 } else {
                     self.update_terminal_state(pane_id, |terminal| {
-                        terminal.release_agent_with_mutation(&source, &agent_label, seq)
+                        terminal.release_agent_with_mutation(
+                            &source,
+                            &agent_label,
+                            session_ref.as_ref(),
+                            seq,
+                        )
                     })
                     .into_iter()
                     .collect()
@@ -5003,6 +5009,7 @@ mod tests {
             agent_label: "claude".into(),
             known_agent: Some(Agent::Claude),
             seq: Some(1),
+            session_ref: None,
         });
 
         let terminal = state.terminals.get(&terminal_id).unwrap();
@@ -5081,6 +5088,65 @@ mod tests {
     }
 
     #[test]
+    fn session_scoped_release_is_dispatched_to_terminal_ownership_checks() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0]
+            .pane_state(pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        let root_session = crate::agent_resume::AgentSessionRef::path(
+            std::env::current_dir()
+                .unwrap()
+                .join("pi-root.jsonl")
+                .display()
+                .to_string(),
+        )
+        .expect("root session");
+        let nested_session = crate::agent_resume::AgentSessionRef::path(
+            std::env::current_dir()
+                .unwrap()
+                .join("pi-nested.jsonl")
+                .display()
+                .to_string(),
+        )
+        .expect("nested session");
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Working);
+        terminal.set_hook_authority_with_session_ref(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Working,
+            None,
+            Some(root_session.clone()),
+            Some(20),
+        );
+
+        let nested_updates = state.handle_app_event(AppEvent::HookAgentReleased {
+            pane_id,
+            source: "herdr:pi".into(),
+            agent_label: "pi".into(),
+            known_agent: Some(Agent::Pi),
+            seq: Some(1000),
+            session_ref: Some(nested_session),
+        });
+        let root_updates = state.handle_app_event(AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:pi".into(),
+            agent_label: "pi".into(),
+            state: AgentState::Idle,
+            message: None,
+            seq: Some(21),
+            session_ref: Some(root_session),
+        });
+
+        assert!(nested_updates.is_empty());
+        assert_eq!(root_updates.len(), 1);
+        assert_eq!(state.terminals[&terminal_id].state, AgentState::Idle);
+    }
+
+    #[test]
     fn releasing_an_agent_alias_marks_the_session_dirty() {
         let mut state = app_with_workspaces(&["active"]);
         let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
@@ -5100,6 +5166,7 @@ mod tests {
             agent_label: "pi".into(),
             known_agent: Some(Agent::Pi),
             seq: Some(1),
+            session_ref: None,
         });
 
         assert!(state.terminals[&terminal_id].agent_name.is_none());

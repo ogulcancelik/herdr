@@ -224,6 +224,38 @@ for (const integration of integrations) {
   });
 }
 
+for (const integration of integrations) {
+  test(`${integration.name} scopes quit releases to the current session`, async () => {
+    const requests = await startRecordingServer(
+      `${integration.name.toLowerCase().replaceAll(" ", "-")}-release-session`,
+    );
+    const { handlers, pi } = createExtensionHarness();
+    const sessionPath = `/tmp/${integration.name.toLowerCase().replaceAll(" ", "-")}-root.jsonl`;
+
+    const { default: install } = await importFresh(integration.modulePath);
+    install(pi);
+    await handlers.get("session_start")?.(
+      { reason: "startup" },
+      {
+        hasUI: true,
+        isIdle: () => true,
+        sessionManager: {
+          getSessionFile: () => sessionPath,
+          getSessionId: () => "root-session",
+        },
+      },
+    );
+    await handlers.get("session_shutdown")?.({ reason: "quit" }, {});
+
+    const release = requests.find(
+      (request) => isRecord(request) && request.method === "pane.release_agent",
+    );
+    expect(release).toBeDefined();
+    expect(isRecord(release) && isRecord(release.params) ? release.params.agent_session_path : null)
+      .toBe(sessionPath);
+  });
+}
+
 test("Pi reports the session replacement source", async () => {
   const requests = await startRecordingServer("pi-session-source");
   const { handlers, pi } = createExtensionHarness();

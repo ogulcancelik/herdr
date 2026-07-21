@@ -2691,6 +2691,18 @@
             "agent": {
               "type": "string"
             },
+            "agent_session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "agent_session_path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "pane_id": {
               "type": "string"
             },

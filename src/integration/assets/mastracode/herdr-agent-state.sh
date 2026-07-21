@@ -3,7 +3,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=mastracode
-# HERDR_INTEGRATION_VERSION=1
+# HERDR_INTEGRATION_VERSION=2
 
 set -eu
 
@@ -78,8 +78,8 @@ else:
             "seq": report_seq,
         },
     }
-    if agent_session_id:
-        request["params"]["agent_session_id"] = agent_session_id
+if agent_session_id:
+    request["params"]["agent_session_id"] = agent_session_id
 
 try:
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

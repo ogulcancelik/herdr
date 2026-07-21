@@ -2741,12 +2741,43 @@ fn bundled_integration_assets_report_session_refs() {
     assert!(!CURSOR_HOOK_ASSET.contains("\"state\":"));
     assert!(!CURSOR_HOOK_ASSET.contains("pane.release_agent"));
     assert!(MASTRACODE_HOOK_ASSET.contains("HERDR_INTEGRATION_ID=mastracode"));
-    assert!(MASTRACODE_HOOK_ASSET.contains("HERDR_INTEGRATION_VERSION=1"));
+    assert!(MASTRACODE_HOOK_ASSET.contains("HERDR_INTEGRATION_VERSION=2"));
     assert!(MASTRACODE_HOOK_ASSET.contains("session_id"));
     assert!(!MASTRACODE_HOOK_ASSET.contains("run_id"));
     assert!(MASTRACODE_HOOK_ASSET.contains("agent_session_id"));
     assert!(MASTRACODE_HOOK_ASSET.contains("pane.report_agent"));
     assert!(MASTRACODE_HOOK_ASSET.contains("pane.release_agent"));
+}
+
+#[test]
+fn pi_and_omp_release_payloads_include_current_session_refs() {
+    for (name, asset) in [("pi", PI_EXTENSION_ASSET), ("omp", OMP_EXTENSION_ASSET)] {
+        let release_start = asset
+            .find("function releaseAgent()")
+            .unwrap_or_else(|| panic!("{name} release function"));
+        let release_end = asset[release_start..]
+            .find("function shouldReleaseOnSessionShutdown")
+            .map(|offset| release_start + offset)
+            .unwrap_or_else(|| panic!("{name} release function end"));
+        let release = &asset[release_start..release_end];
+
+        assert!(release.contains("const sessionRef = currentSessionRef()"));
+        assert!(release.contains("...sessionRef"));
+    }
+}
+
+#[test]
+fn mastracode_release_payload_includes_hook_session_id() {
+    let release_start = MASTRACODE_HOOK_ASSET
+        .find("if action == \"release\":")
+        .expect("mastracode release branch");
+    let release_end = MASTRACODE_HOOK_ASSET[release_start..]
+        .find("\ntry:")
+        .map(|offset| release_start + offset)
+        .expect("mastracode request construction end");
+    let release = &MASTRACODE_HOOK_ASSET[release_start..release_end];
+
+    assert!(release.contains("agent_session_id"));
 }
 
 #[test]

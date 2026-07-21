@@ -169,6 +169,7 @@ function sendState(state: AgentState, message?: string, seq = nextReportSeq()): 
 }
 
 function releaseAgent(): Promise<void> {
+  const sessionRef = currentSessionRef();
   return sendRequest({
     id: `${source}:release:${Date.now()}:${Math.random().toString(36).slice(2)}`,
     method: "pane.release_agent",
@@ -177,6 +178,7 @@ function releaseAgent(): Promise<void> {
       source,
       agent: "omp",
       seq: nextReportSeq(),
+      ...sessionRef,
     },
   });
 }

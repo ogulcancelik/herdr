@@ -988,11 +988,7 @@ impl TerminalState {
                 Some("startup" | "clear" | "resume" | "compact")
             ) | ("herdr:opencode", "opencode", Some("new"))
                 | ("herdr:pi", "pi", Some("new" | "resume" | "fork"))
-                | (
-                    "herdr:omp",
-                    "omp",
-                    Some("startup" | "new" | "resume" | "fork")
-                )
+                | ("herdr:omp", "omp", Some("new" | "resume" | "fork"))
         )
     }
 
@@ -1029,9 +1025,6 @@ impl TerminalState {
         session_start_source: Option<String>,
     ) -> Option<TerminalStateMutation> {
         let session_ref = session_ref?;
-        if !self.accept_hook_report(&source, seq) {
-            return None;
-        }
         if self.known_agent_label_conflicts_with_detected_agent(&agent_label) {
             return None;
         }
@@ -1068,6 +1061,9 @@ impl TerminalState {
             &session_ref,
         );
         if replaced_hook_session.is_some() && !session_replacement_allowed {
+            return None;
+        }
+        if !self.accept_hook_report(&source, seq) {
             return None;
         }
 
@@ -1237,7 +1233,18 @@ impl TerminalState {
         agent_label: &str,
         seq: Option<u64>,
     ) -> Option<EffectiveStateChange> {
-        self.release_agent_with_mutation(source, agent_label, seq)
+        let session_ref = self
+            .hook_authority
+            .as_ref()
+            .filter(|authority| authority.source == source && authority.agent_label == agent_label)
+            .and_then(|authority| authority.session_ref.clone())
+            .or_else(|| {
+                self.persisted_agent_session
+                    .as_ref()
+                    .filter(|session| session.source == source && session.agent == agent_label)
+                    .map(|session| session.session_ref.clone())
+            });
+        self.release_agent_with_mutation(source, agent_label, session_ref.as_ref(), seq)
             .and_then(|mutation| mutation.effective_state_change)
     }
 
@@ -1245,12 +1252,9 @@ impl TerminalState {
         &mut self,
         source: &str,
         agent_label: &str,
+        session_ref: Option<&crate::agent_resume::AgentSessionRef>,
         seq: Option<u64>,
     ) -> Option<TerminalStateMutation> {
-        if !self.accept_hook_report(source, seq) {
-            return None;
-        }
-
         if self.hook_authority.as_ref().is_some_and(|authority| {
             authority.agent_label != agent_label || authority.source != source
         }) {
@@ -1262,11 +1266,12 @@ impl TerminalState {
         if !matches_current_agent && !matches_persisted_session {
             return None;
         }
-        let preserve_foreign_persisted_session = self
-            .persisted_agent_session
-            .as_ref()
-            .is_some_and(|session| session.source != source || session.agent != agent_label);
-
+        if !self.release_session_matches_current_owner(source, agent_label, session_ref) {
+            return None;
+        }
+        if !self.accept_hook_report(source, seq) {
+            return None;
+        }
         let now = Instant::now();
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
         let previous_known_agent = self.effective_known_agent();
@@ -1284,9 +1289,7 @@ impl TerminalState {
         self.fallback_observed_at = None;
         self.hook_authority = None;
         self.clear_agent_name();
-        if !preserve_foreign_persisted_session {
-            self.persisted_agent_session = None;
-        }
+        self.persisted_agent_session = None;
         let current_session = self.current_session_identity_for_persistence();
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
@@ -1299,6 +1302,25 @@ impl TerminalState {
             session_ref_changed: previous_session != current_session,
             agent_released: true,
         })
+    }
+
+    fn release_session_matches_current_owner(
+        &self,
+        source: &str,
+        agent_label: &str,
+        session_ref: Option<&crate::agent_resume::AgentSessionRef>,
+    ) -> bool {
+        let Some((owner_source, owner_agent, owner_kind, owner_value)) =
+            self.current_session_identity_for_persistence()
+        else {
+            return true;
+        };
+
+        owner_source == source
+            && owner_agent == agent_label
+            && session_ref.is_some_and(|session_ref| {
+                session_ref.kind == owner_kind && session_ref.value == owner_value
+            })
     }
 
     pub fn effective_agent_label(&self) -> Option<&str> {
@@ -3701,19 +3723,108 @@ mod tests {
     }
 
     #[test]
-    fn release_agent_clears_identity_immediately() {
+    fn mismatched_session_scoped_release_does_not_clear_or_consume_sequence() {
+        for (source, agent_label, agent) in [
+            ("herdr:pi", "pi", Agent::Pi),
+            ("herdr:omp", "omp", Agent::Omp),
+        ] {
+            let mut terminal = test_terminal();
+            let root_session = crate::agent_resume::AgentSessionRef::path(test_session_path(
+                &format!("{agent_label}-root.jsonl"),
+            ))
+            .expect("root session path");
+            let nested_session = crate::agent_resume::AgentSessionRef::path(test_session_path(
+                &format!("{agent_label}-nested.jsonl"),
+            ))
+            .expect("nested session path");
+            terminal.set_detected_state(Some(agent), AgentState::Working);
+            terminal.set_hook_authority_with_session_ref(
+                source.into(),
+                agent_label.into(),
+                AgentState::Working,
+                None,
+                Some(root_session.clone()),
+                Some(20),
+            );
+
+            let release = terminal.release_agent_with_mutation(
+                source,
+                agent_label,
+                Some(&nested_session),
+                Some(1000),
+            );
+            let root_update = terminal.set_hook_authority_with_session_ref(
+                source.into(),
+                agent_label.into(),
+                AgentState::Idle,
+                None,
+                Some(root_session),
+                Some(21),
+            );
+
+            assert!(release.is_none());
+            assert!(
+                root_update.is_some(),
+                "rejected release must not consume seq"
+            );
+            assert!(terminal.hook_authority.is_some());
+            assert_eq!(terminal.state, AgentState::Idle);
+            assert_eq!(terminal.hook_report_sequences.get(source), Some(&21));
+        }
+    }
+
+    #[test]
+    fn unscoped_release_against_session_bound_owner_does_not_consume_sequence() {
+        let mut terminal = test_terminal();
+        let root_session = crate::agent_resume::AgentSessionRef::path(test_session_path(
+            "unscoped-release-root.jsonl",
+        ))
+        .expect("root session path");
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Working);
+        terminal.set_hook_authority_with_session_ref(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Working,
+            None,
+            Some(root_session.clone()),
+            Some(20),
+        );
+
+        let release = terminal.release_agent_with_mutation("herdr:pi", "pi", None, Some(1000));
+        let root_update = terminal.set_hook_authority_with_session_ref(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Idle,
+            None,
+            Some(root_session),
+            Some(21),
+        );
+
+        assert!(release.is_none());
+        assert!(
+            root_update.is_some(),
+            "rejected release must not consume seq"
+        );
+        assert!(terminal.hook_authority.is_some());
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(terminal.hook_report_sequences.get("herdr:pi"), Some(&21));
+    }
+
+    #[test]
+    fn custom_sessionless_release_clears_identity_immediately() {
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         terminal.set_hook_authority(
-            "herdr:pi".into(),
+            "custom:integration".into(),
             "pi".into(),
             AgentState::Working,
             None,
             None,
         );
 
-        terminal.release_agent("herdr:pi", "pi", None);
+        let release = terminal.release_agent_with_mutation("custom:integration", "pi", None, None);
 
+        assert!(release.is_some());
         assert!(terminal.hook_authority.is_none());
         assert_eq!(terminal.detected_agent, None);
         assert_eq!(terminal.fallback_state, AgentState::Unknown);
@@ -3869,7 +3980,7 @@ mod tests {
     }
 
     #[test]
-    fn different_same_agent_session_ref_is_ignored_until_current_session_clears() {
+    fn rejected_session_start_does_not_consume_root_sequence() {
         let mut terminal = test_terminal();
         terminal
             .set_agent_session_ref(
@@ -3884,10 +3995,17 @@ mod tests {
             "herdr:claude".into(),
             "claude".into(),
             crate::agent_resume::AgentSessionRef::id("nested-session"),
+            Some(1000),
+        );
+        let root_update = terminal.set_agent_session_ref(
+            "herdr:claude".into(),
+            "claude".into(),
+            crate::agent_resume::AgentSessionRef::id("claude-session"),
             Some(21),
         );
 
         assert!(mutation.is_none());
+        assert!(root_update.is_some());
         assert_eq!(
             terminal.hook_report_sequences.get("herdr:claude"),
             Some(&21)
@@ -4003,6 +4121,62 @@ mod tests {
                 Some(next_session.as_str())
             );
         }
+    }
+
+    #[test]
+    fn nested_omp_startup_does_not_replace_root_or_consume_sequence() {
+        let mut terminal = test_terminal();
+        let root_session =
+            crate::agent_resume::AgentSessionRef::path(test_session_path("omp-root.jsonl"))
+                .expect("root session");
+        let nested_session =
+            crate::agent_resume::AgentSessionRef::path(test_session_path("omp-nested.jsonl"))
+                .expect("nested session");
+        terminal.set_detected_state(Some(Agent::Omp), AgentState::Working);
+        terminal.set_hook_authority_with_session_ref(
+            "herdr:omp".into(),
+            "omp".into(),
+            AgentState::Working,
+            None,
+            Some(root_session.clone()),
+            Some(20),
+        );
+
+        let root_start = terminal.set_agent_session_ref_for_session_start(
+            "herdr:omp".into(),
+            "omp".into(),
+            Some(root_session.clone()),
+            Some(21),
+            Some("startup".into()),
+        );
+        let nested_start = terminal.set_agent_session_ref_for_session_start(
+            "herdr:omp".into(),
+            "omp".into(),
+            Some(nested_session),
+            Some(1000),
+            Some("startup".into()),
+        );
+        let root_update = terminal.set_hook_authority_with_session_ref(
+            "herdr:omp".into(),
+            "omp".into(),
+            AgentState::Idle,
+            None,
+            Some(root_session.clone()),
+            Some(22),
+        );
+
+        assert!(root_start.is_some());
+        assert!(nested_start.is_none());
+        assert!(root_update.is_some());
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(terminal.hook_report_sequences.get("herdr:omp"), Some(&22));
+        assert_eq!(
+            terminal
+                .hook_authority
+                .as_ref()
+                .and_then(|authority| authority.session_ref.as_ref()),
+            Some(&root_session)
+        );
     }
 
     #[test]
@@ -4516,20 +4690,21 @@ mod tests {
     }
 
     #[test]
-    fn release_agent_clears_session_ref() {
+    fn matching_session_scoped_release_clears_session_ref_immediately() {
         let mut terminal = test_terminal();
-        let session_path = test_session_path("pi.jsonl");
+        let session_ref = crate::agent_resume::AgentSessionRef::path(test_session_path("pi.jsonl"))
+            .expect("session path");
         terminal.set_hook_authority_with_session_ref(
             "herdr:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
-            crate::agent_resume::AgentSessionRef::path(session_path),
+            Some(session_ref.clone()),
             Some(20),
         );
 
         let mutation = terminal
-            .release_agent_with_mutation("herdr:pi", "pi", Some(21))
+            .release_agent_with_mutation("herdr:pi", "pi", Some(&session_ref), Some(21))
             .expect("accepted release");
 
         assert!(mutation.session_ref_changed);
@@ -4550,7 +4725,7 @@ mod tests {
 
         terminal.set_agent_name("replacement".into());
         terminal
-            .release_agent_with_mutation("herdr:codex", "codex", None)
+            .release_agent_with_mutation("herdr:codex", "codex", None, None)
             .expect("detected agent release should be accepted");
         assert!(terminal.agent_name.is_none());
     }
@@ -4651,14 +4826,15 @@ mod tests {
     #[test]
     fn release_agent_clears_matching_restored_session_ref_before_detection() {
         let mut terminal = test_terminal();
+        let session_ref = crate::agent_resume::AgentSessionRef::id("hermes-session").unwrap();
         terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
             source: "herdr:hermes".into(),
             agent: "hermes".into(),
-            session_ref: crate::agent_resume::AgentSessionRef::id("hermes-session").unwrap(),
+            session_ref: session_ref.clone(),
         });
 
         let mutation = terminal
-            .release_agent_with_mutation("herdr:hermes", "hermes", Some(21))
+            .release_agent_with_mutation("herdr:hermes", "hermes", Some(&session_ref), Some(21))
             .expect("accepted release");
 
         assert!(mutation.session_ref_changed);
@@ -4667,27 +4843,28 @@ mod tests {
     }
 
     #[test]
-    fn release_agent_preserves_foreign_persisted_session_ref() {
+    fn unscoped_release_is_ignored_for_persisted_session_owner() {
         let mut terminal = test_terminal();
         terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
-            source: "herdr:claude".into(),
-            agent: "claude".into(),
-            session_ref: crate::agent_resume::AgentSessionRef::id("claude-session").unwrap(),
+            source: "herdr:pi".into(),
+            agent: "pi".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::path(test_session_path(
+                "persisted-pi.jsonl",
+            ))
+            .expect("persisted session"),
         });
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
 
-        let mutation = terminal
-            .release_agent_with_mutation("herdr:pi", "pi", Some(21))
-            .expect("visible agent release should be accepted");
+        let mutation = terminal.release_agent_with_mutation("herdr:pi", "pi", None, Some(21));
 
-        assert!(!mutation.session_ref_changed);
+        assert!(mutation.is_none());
+        assert_eq!(terminal.detected_agent, Some(Agent::Pi));
         assert_eq!(
-            terminal.persisted_agent_session.as_ref().map(|session| (
-                session.source.as_str(),
-                session.agent.as_str(),
-                session.session_ref.value.as_str()
-            )),
-            Some(("herdr:claude", "claude", "claude-session"))
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some(test_session_path("persisted-pi.jsonl").as_str())
         );
     }
 

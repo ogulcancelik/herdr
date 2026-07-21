@@ -689,6 +689,23 @@ Session-only official integrations report native session references with `pane.r
 
 If no native session reference is stored, the field is omitted.
 
+Lifecycle integrations release agent authority with `pane.release_agent`. Integrations that know their current session should include the same `agent_session_id` or `agent_session_path` used in their state reports:
+
+```json
+{
+  "id": "req_3",
+  "method": "pane.release_agent",
+  "params": {
+    "pane_id": "w1:p1",
+    "source": "herdr:pi",
+    "agent": "pi",
+    "agent_session_path": "/path/to/pi-session.jsonl"
+  }
+}
+```
+
+When the current owner is session-bound, Herdr accepts the release only when its source, agent, and session reference all match. Mismatched or unscoped releases are ignored without consuming their sequence number. Sessionless integrations retain the existing immediate release behavior.
+
 `pane.get`, `pane.list`, `agent.get`, and `agent.list` also expose `foreground_cwd` when Herdr can resolve the cwd of the process currently controlling the pane PTY. The existing `cwd` field remains the pane/workspace cwd used for labels, follow-cwd behavior, and restored session state.
 
 `PaneInfo` and `AgentInfo` expose optional `terminal_title` and `terminal_title_stripped` fields. `terminal_title` is the latest OSC 0/2 title after safety normalization. `terminal_title_stripped` removes one recognized leading activity or spinner glyph and following whitespace. These server-owned values are ephemeral across a cold restart and are independent of the metadata `title` and semantic agent state.

@@ -650,6 +650,8 @@ fn release_agent_command() -> Command {
         .arg(option("source", "ID").required(true))
         .arg(option("agent", "LABEL").required(true))
         .arg(option("seq", "N"))
+        .arg(option("agent-session-id", "ID"))
+        .arg(path_option("agent-session-path", "PATH"))
 }
 
 fn report_metadata_command() -> Command {
@@ -1141,6 +1143,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn release_agent_exposes_optional_session_scope() {
+        let command = super::command();
+        let release = command_path(&command, &["pane", "release-agent"]);
+
+        assert!(release
+            .get_arguments()
+            .any(|arg| arg.get_id() == "agent-session-id"));
+        assert!(release
+            .get_arguments()
+            .any(|arg| arg.get_id() == "agent-session-path"));
     }
 
     #[test]

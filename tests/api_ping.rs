@@ -1914,7 +1914,7 @@ fn pane_report_agent_accepts_unknown_agent_labels() {
 
 #[cfg(not(target_os = "macos"))]
 #[test]
-fn pane_release_agent_suppresses_reacquire_during_graceful_exit() {
+fn matching_session_scoped_pane_release_clears_immediately() {
     let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
@@ -1999,11 +1999,13 @@ fn pane_release_agent_suppresses_reacquire_during_graceful_exit() {
         thread::sleep(Duration::from_millis(100));
     }
 
+    let session_path = base.join("pi-root.jsonl");
     let hook = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_release_4","method":"pane.report_agent","params":{{"pane_id":"{}","source":"herdr:pi","agent":"pi","state":"working"}}}}"#,
-            pane_id
+            r#"{{"id":"req_release_4","method":"pane.report_agent","params":{{"pane_id":"{}","source":"herdr:pi","agent":"pi","state":"working","seq":20,"agent_session_path":"{}"}}}}"#,
+            pane_id,
+            session_path.display()
         ),
     );
     assert_eq!(hook["result"]["type"], "ok");
@@ -2011,8 +2013,9 @@ fn pane_release_agent_suppresses_reacquire_during_graceful_exit() {
     let released = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_release_5","method":"pane.release_agent","params":{{"pane_id":"{}","source":"herdr:pi","agent":"pi"}}}}"#,
-            pane_id
+            r#"{{"id":"req_release_5","method":"pane.release_agent","params":{{"pane_id":"{}","source":"herdr:pi","agent":"pi","seq":21,"agent_session_path":"{}"}}}}"#,
+            pane_id,
+            session_path.display()
         ),
     );
     assert_eq!(released["result"]["type"], "ok");

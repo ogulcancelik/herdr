@@ -317,6 +317,22 @@ fn foreground_shell_agent_action(
     ForegroundShellAgentAction::ObserveProbe
 }
 
+fn foreground_agent_under_lifecycle_authority(
+    previous_agent: Option<Agent>,
+    observed_agent: Option<Agent>,
+    full_lifecycle_authority_active: bool,
+) -> Option<Agent> {
+    if full_lifecycle_authority_active
+        && previous_agent.is_some()
+        && observed_agent.is_some()
+        && previous_agent != observed_agent
+    {
+        previous_agent
+    } else {
+        observed_agent
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ProcessProbeInput {
     current_agent: Option<Agent>,
@@ -680,6 +696,11 @@ fn spawn_basic_detection_task(
                     }
                 }
                 let previous_agent = agent_presence.current_agent();
+                new_agent = foreground_agent_under_lifecycle_authority(
+                    previous_agent,
+                    new_agent,
+                    lifecycle_authority_active,
+                );
                 let changed = match foreground_shell_agent_action(
                     previous_agent,
                     new_agent,
@@ -2102,6 +2123,11 @@ impl PaneRuntime {
                             }
 
                             let previous_agent = agent_presence.current_agent();
+                            new_agent = foreground_agent_under_lifecycle_authority(
+                                previous_agent,
+                                new_agent,
+                                lifecycle_authority_active,
+                            );
                             let changed = match foreground_shell_agent_action(
                                 previous_agent,
                                 new_agent,
@@ -3351,6 +3377,23 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_millis(10), rx.recv())
                 .await
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn nested_foreground_agent_does_not_replace_authoritative_root() {
+        assert_eq!(
+            foreground_agent_under_lifecycle_authority(Some(Agent::Pi), Some(Agent::Claude), true,),
+            Some(Agent::Pi)
+        );
+        assert_eq!(
+            foreground_agent_under_lifecycle_authority(Some(Agent::Pi), Some(Agent::Claude), false,),
+            Some(Agent::Claude)
+        );
+        assert_eq!(
+            foreground_agent_under_lifecycle_authority(Some(Agent::Pi), None, true),
+            None,
+            "returning to the shell remains exit evidence"
         );
     }
 

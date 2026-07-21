@@ -339,6 +339,32 @@ fn agent_view_requests_round_trip() {
 }
 
 #[test]
+fn pane_release_agent_round_trips_optional_session_scope() {
+    let json = serde_json::json!({
+        "id": "release-session",
+        "method": "pane.release_agent",
+        "params": {
+            "pane_id": "w1:p1",
+            "source": "herdr:pi",
+            "agent": "pi",
+            "seq": 21,
+            "agent_session_path": "/tmp/pi-root.jsonl"
+        }
+    });
+
+    let request: Request = serde_json::from_value(json.clone()).expect("release request");
+    let Method::PaneReleaseAgent(params) = &request.method else {
+        panic!("expected pane.release_agent");
+    };
+    assert_eq!(
+        params.agent_session_path.as_deref(),
+        Some("/tmp/pi-root.jsonl")
+    );
+    assert!(params.agent_session_id.is_none());
+    assert_eq!(serde_json::to_value(request).unwrap(), json);
+}
+
+#[test]
 fn unknown_method_is_rejected() {
     let json = r#"{"id":"req_1","method":"nope","params":{}}"#;
     let err = serde_json::from_str::<Request>(json)
