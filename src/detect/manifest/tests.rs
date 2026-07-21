@@ -879,3 +879,25 @@ fn codex_osc_working_beats_weak_blocker_screen() {
         Some("osc_title_working")
     );
 }
+
+#[test]
+fn omp_manifest_detects_working_state() {
+    let explain = explain(Agent::Omp, "Some previous output\nWorking...\n> ");
+    assert_eq!(explain.state, AgentState::Working);
+    assert!(explain.visible_working);
+    assert_eq!(
+        explain.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("working_literal")
+    );
+}
+
+#[test]
+fn omp_manifest_defaults_to_idle_fallback() {
+    let explain = explain(Agent::Omp, "ordinary prompt text\n> ");
+    assert_eq!(explain.state, AgentState::Idle);
+    assert!(!explain.visible_idle);
+    assert_eq!(
+        explain.fallback_reason.as_deref(),
+        Some(DEFAULT_KNOWN_AGENT_IDLE_FALLBACK)
+    );
+}
