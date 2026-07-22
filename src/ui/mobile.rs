@@ -529,7 +529,7 @@ fn render_mobile_switcher_content(
                 ratatui::style::Color::Reset,
                 Line::from(Span::styled(
                     "  no matching agents",
-                    Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                    Style::default().fg(p.overlay0),
                 )),
             );
             doc_y += 1;

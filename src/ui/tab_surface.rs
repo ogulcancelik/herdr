@@ -302,9 +302,12 @@ mod tests {
         assert!(!app.view.split_borders.is_empty());
         assert!(frame.cursor.is_some());
         assert_eq!(frame.hyperlinks, vec![uri.to_owned()]);
+        // Digest updated: sidebar token separators no longer carry Modifier::DIM
+        // (see the `terminal` theme contrast fix), which changes this frame's
+        // rendered style fingerprint.
         assert_eq!(
             frame_digest(&frame),
-            "ce383feeaac30922502b7c4f8af53b5ca30e816ec4503ca6d015738b584da487"
+            "9e157f411d3334ce365650e6a465aa3b68efe5a2761c7b8035e4d9d843ce15c8"
         );
     }
 

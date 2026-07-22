@@ -1024,7 +1024,7 @@ fn resolved_token_spans(
             let previous = &resolved[visible_indices[position - 1]];
             spans.push(Span::styled(
                 tokens::separator(previous, token),
-                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                Style::default().fg(p.overlay0),
             ));
         }
         match &token.kind {
@@ -1361,7 +1361,7 @@ fn render_agent_detail(
     if details.is_empty() && app.agent_view_override.is_some() {
         frame.render_widget(
             Paragraph::new(" no matching agents")
-                .style(Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)),
+                .style(Style::default().fg(p.overlay0)),
             Rect::new(body.x, body.y, body.width, 1),
         );
         return;
@@ -1650,7 +1650,7 @@ rows = [[{ token = "$hype", fg = "#abcdef", bold = true, dim = false }, "workspa
             assert_eq!(style.bg, Some(app.palette.surface_dim));
         }
         assert_eq!(separator.fg, Some(app.palette.overlay0));
-        assert!(separator.add_modifier.contains(Modifier::DIM));
+        assert!(!separator.add_modifier.contains(Modifier::DIM));
         assert!(!separator.add_modifier.contains(Modifier::BOLD));
         assert_eq!(separator.bg, Some(app.palette.surface_dim));
     }
