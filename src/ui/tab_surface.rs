@@ -194,7 +194,8 @@ mod tests {
         let full_area = Rect::new(0, 0, 106, 20);
         crate::ui::compute_view(&mut app, full_area);
         let area = app.view.terminal_area;
-        assert_eq!(area, Rect::new(26, 1, 80, 19));
+        // Status bar occupies row 0; tab bar at y=1; terminal below.
+        assert_eq!(area, Rect::new(26, 2, 80, 18));
         let surface = compute_tab_surface(
             &app,
             &TerminalRuntimeRegistry::new(),
@@ -295,16 +296,18 @@ mod tests {
         let frame = full_app_frame(&mut app, Rect::new(0, 0, 106, 20));
 
         assert_eq!((frame.width, frame.height), (106, 20));
-        assert_eq!(app.view.sidebar_rect, Rect::new(0, 0, 26, 20));
-        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 0, 80, 1));
-        assert_eq!(app.view.terminal_area, Rect::new(26, 1, 80, 19));
+        // Status bar occupies row 0 full-width; chrome starts at y=1.
+        assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 106, 1));
+        assert_eq!(app.view.sidebar_rect, Rect::new(0, 1, 26, 19));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 1, 80, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(26, 2, 80, 18));
         assert_eq!(app.view.pane_infos.len(), 2);
         assert!(!app.view.split_borders.is_empty());
         assert!(frame.cursor.is_some());
         assert_eq!(frame.hyperlinks, vec![uri.to_owned()]);
         assert_eq!(
             frame_digest(&frame),
-            "ce383feeaac30922502b7c4f8af53b5ca30e816ec4503ca6d015738b584da487"
+            "34d7abe39cf002c13e1bab7b899e5ce9532804e45be693485704b374f74ecda8"
         );
     }
 

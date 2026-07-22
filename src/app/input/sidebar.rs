@@ -1516,10 +1516,12 @@ mod tests {
         app.state.sidebar_spaces.row_gap = 1;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
 
-        assert_eq!(app.state.workspace_drop_index_at_row(0), Some(0));
+        // Status bar occupies row 0; sidebar list starts at y=1.
+        assert_eq!(app.state.workspace_drop_index_at_row(0), None);
         assert_eq!(app.state.workspace_drop_index_at_row(1), Some(0));
         assert_eq!(app.state.workspace_drop_index_at_row(2), Some(0));
-        assert_eq!(app.state.workspace_drop_index_at_row(3), Some(1));
+        assert_eq!(app.state.workspace_drop_index_at_row(3), Some(0));
+        assert_eq!(app.state.workspace_drop_index_at_row(4), Some(1));
 
         let _ = fs::remove_dir_all(first_repo);
         let _ = fs::remove_dir_all(second_repo);

@@ -1,3 +1,7 @@
+use std::path::{Path, PathBuf};
+#[cfg(not(test))]
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -6,13 +10,419 @@ use ratatui::{
     Frame,
 };
 
-use super::text::display_width_u16;
+use super::text::{display_width, display_width_u16, truncate_end};
 use super::widgets::panel_contrast_fg;
 use crate::{
-    app::state::{CopyFeedback, Palette, ToastKind, ToastNotification},
+    app::state::{CopyFeedback, Mode, Palette, ToastKind, ToastNotification},
+    app::AppState,
     config::{ToastClipboardPosition, ToastHerdrPosition},
     detect::AgentState,
+    platform::status_metrics::{status_metrics, NetKind},
+    session,
 };
+
+/// Full-width top status row — native parity with the user's tmux powerline.
+///
+/// Left:  [prefix]  session:ws.pane · host ·  user · cwd ·  branch
+/// Right: 󰛳 lan 󰌘 ts  wan ·  [] ↓/↑ ·  mem ·  cpu · battery ·  date · time
+///
+/// Layout: spans the full client width above the sidebar. On narrow widths,
+/// right-side tail segments drop first, then non-essential left segments.
+pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let p = &app.palette;
+    let bg = Style::default().bg(p.panel_bg);
+    frame.render_widget(Paragraph::new("").style(bg), area);
+
+    let metrics = status_metrics();
+    let prefix_active = app.mode == Mode::Prefix;
+
+    let left = left_segments(app, &metrics, prefix_active, p);
+    let right = right_segments(&metrics, p);
+
+    // Fit strategy (powerline-ish):
+    // 1) drop right-side segments from the tail (time → date → battery → …)
+    // 2) if still too wide, drop left-side segments from the tail (branch → cwd)
+    //    but never drop the session identity (+ prefix pill when present).
+    let width_of = |segs: &[Segment], n: usize| -> usize {
+        segs[..n].iter().map(|s| display_width(&s.text)).sum()
+    };
+    let min_left = {
+        let mut n = 0usize;
+        for (i, seg) in left.iter().enumerate() {
+            if seg.preserve_bg {
+                n = i + 1;
+                continue;
+            }
+            if seg.text.contains('') {
+                n = i + 1;
+                if left.get(i + 1).is_some_and(|s| s.text.starts_with(':')) {
+                    n = i + 2;
+                }
+                break;
+            }
+            n = i + 1;
+            break;
+        }
+        n.clamp(1, left.len().max(1))
+    };
+    let mut left_keep = left.len();
+    let mut right_keep = right.len();
+    loop {
+        let total = width_of(&left, left_keep) + width_of(&right, right_keep);
+        if total <= area.width as usize {
+            break;
+        }
+        if right_keep > 0 {
+            right_keep -= 1;
+        } else if left_keep > min_left {
+            left_keep -= 1;
+        } else {
+            break;
+        }
+    }
+
+    let mut spans: Vec<Span> = Vec::new();
+    for seg in &left[..left_keep] {
+        let style = if seg.preserve_bg {
+            seg.style
+        } else {
+            seg.style.bg(p.panel_bg)
+        };
+        spans.push(Span::styled(seg.text.clone(), style));
+    }
+    let used_left = width_of(&left, left_keep);
+    let used_right = width_of(&right, right_keep);
+    let pad = (area.width as usize)
+        .saturating_sub(used_left)
+        .saturating_sub(used_right);
+    if pad > 0 {
+        spans.push(Span::styled(" ".repeat(pad), bg));
+    }
+    for seg in &right[..right_keep] {
+        let style = if seg.preserve_bg {
+            seg.style
+        } else {
+            seg.style.bg(p.panel_bg)
+        };
+        spans.push(Span::styled(seg.text.clone(), style));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(bg), area);
+}
+
+struct Segment {
+    text: String,
+    style: Style,
+    /// When true, `style` already carries its own background (prefix pill).
+    preserve_bg: bool,
+}
+
+fn left_segments(
+    app: &AppState,
+    metrics: &crate::platform::status_metrics::StatusMetrics,
+    prefix_active: bool,
+    p: &Palette,
+) -> Vec<Segment> {
+    let mut out = Vec::new();
+
+    if prefix_active {
+        // Match tmux `#{?client_prefix,... § ...}`.
+        out.push(Segment {
+            text: " § ".into(),
+            style: Style::default()
+                .fg(p.panel_bg)
+                .bg(p.yellow)
+                .add_modifier(Modifier::BOLD),
+            preserve_bg: true,
+        });
+    }
+
+    let session = session::active_name()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| session::DEFAULT_SESSION_NAME.to_string());
+    let (ws_label, _tab_label, pane_label, cwd, branch) = focused_identity(app);
+
+    // Powerline session_icon: " #S" + dimmed ":#I.#P".
+    out.push(Segment {
+        text: format!("  {session}"),
+        style: Style::default().fg(p.blue),
+        preserve_bg: false,
+    });
+    out.push(Segment {
+        text: format!(":{ws_label}.{pane_label} "),
+        style: Style::default().fg(p.overlay0),
+        preserve_bg: false,
+    });
+
+    // hostname_ssh: icon only when remote (SSH/mosh).
+    let host_text = if metrics.remote_session {
+        format!(" 󰣀 {} ", metrics.hostname)
+    } else {
+        format!(" {} ", metrics.hostname)
+    };
+    out.push(Segment {
+        text: host_text,
+        style: Style::default().fg(p.green),
+        preserve_bg: false,
+    });
+
+    out.push(Segment {
+        text: format!("  {} ", metrics.username),
+        style: Style::default().fg(p.teal),
+        preserve_bg: false,
+    });
+
+    if let Some(cwd) = cwd {
+        let display = shorten_path(&cwd, 40);
+        out.push(Segment {
+            text: format!(" {display} "),
+            style: Style::default().fg(p.mauve),
+            preserve_bg: false,
+        });
+    }
+
+    if let Some(branch) = branch {
+        let branch = shorten_branch(&branch, 24);
+        out.push(Segment {
+            text: format!("  {branch} "),
+            style: Style::default().fg(p.yellow),
+            preserve_bg: false,
+        });
+    }
+
+    out
+}
+
+fn right_segments(
+    metrics: &crate::platform::status_metrics::StatusMetrics,
+    p: &Palette,
+) -> Vec<Segment> {
+    let mut out = Vec::new();
+
+    // network_ips: "󰛳 LAN 󰌘 TS  WAN"
+    let mut ip_parts: Vec<String> = Vec::new();
+    if let Some(ip) = &metrics.local_ip {
+        ip_parts.push(format!("󰛳 {ip}"));
+    }
+    if let Some(ip) = &metrics.tailscale_ip {
+        ip_parts.push(format!("󰌘 {ip}"));
+    }
+    if let Some(ip) = &metrics.public_ip {
+        ip_parts.push(format!(" {ip}"));
+    }
+    if !ip_parts.is_empty() {
+        out.push(Segment {
+            text: format!(" {} ", ip_parts.join(" ")),
+            style: Style::default().fg(p.teal),
+            preserve_bg: false,
+        });
+    }
+
+    // bandwidth: wifi/eth glyph + optional VPN lock + ↓/↑ KiB/s
+    if let (Some(down), Some(up)) = (metrics.net_down_kib, metrics.net_up_kib) {
+        let kind_icon = match metrics.net_kind {
+            NetKind::Ethernet => "󰈀",
+            NetKind::Wifi | NetKind::Unknown => "",
+        };
+        let vpn = if metrics.vpn_active { " " } else { "" };
+        out.push(Segment {
+            text: format!(" {kind_icon}{vpn} ↓{down}K/s ↑{up}K/s "),
+            style: Style::default().fg(p.green),
+            preserve_bg: false,
+        });
+    }
+
+    if let (Some(used), Some(total)) = (metrics.mem_used_gb, metrics.mem_total_gb) {
+        out.push(Segment {
+            text: format!("  {used:.1}/{total:.0} GB "),
+            style: Style::default().fg(p.yellow),
+            preserve_bg: false,
+        });
+    }
+
+    if let Some(cpu) = metrics.cpu_percent {
+        out.push(Segment {
+            text: format!("  {cpu}% "),
+            style: Style::default().fg(p.red),
+            preserve_bg: false,
+        });
+    }
+
+    if let Some(pct) = metrics.battery_percent {
+        let icon = match metrics.battery_charging {
+            Some(true) => "󰂄",
+            _ => battery_icon(pct),
+        };
+        out.push(Segment {
+            text: format!(" {icon} {pct}% "),
+            style: Style::default().fg(p.blue),
+            preserve_bg: false,
+        });
+    }
+
+    let (date, time) = local_date_time();
+    out.push(Segment {
+        text: format!("  {date} "),
+        style: Style::default().fg(p.overlay0),
+        preserve_bg: false,
+    });
+    out.push(Segment {
+        text: format!(" {time} "),
+        style: Style::default().fg(p.subtext0),
+        preserve_bg: false,
+    });
+    out
+}
+
+/// Nerd Font battery glyph by charge bucket.
+fn battery_icon(pct: u8) -> &'static str {
+    match pct {
+        0..=10 => "󰁺",
+        11..=20 => "󰁻",
+        21..=30 => "󰁼",
+        31..=40 => "󰁽",
+        41..=50 => "󰁾",
+        51..=60 => "󰁿",
+        61..=70 => "󰂀",
+        71..=80 => "󰂁",
+        81..=90 => "󰂂",
+        _ => "󰁹",
+    }
+}
+
+fn focused_identity(app: &AppState) -> (String, String, String, Option<PathBuf>, Option<String>) {
+    let Some(ws_idx) = app.active else {
+        return ("1".into(), "1".into(), "1".into(), None, None);
+    };
+    let Some(ws) = app.workspaces.get(ws_idx) else {
+        return ("1".into(), "1".into(), "1".into(), None, None);
+    };
+    let ws_label = (ws_idx + 1).to_string();
+    let tab_idx = ws.active_tab_index();
+    let tab_label = (tab_idx + 1).to_string();
+    let pane_id = ws.focused_pane_id();
+    // Prefer stable public pane numbers (tmux #P parity), not internal PaneId.
+    let pane_label = pane_id
+        .and_then(|id| ws.public_pane_number(id))
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "1".into());
+    // Prefer live focused-pane terminal cwd; fall back to workspace identity.
+    let cwd = pane_id
+        .and_then(|pane_id| {
+            ws.tabs
+                .get(tab_idx)
+                .and_then(|tab| tab.panes.get(&pane_id))
+                .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
+                .map(|terminal| terminal.cwd.clone())
+        })
+        .or_else(|| ws.resolved_identity_cwd())
+        .or_else(|| Some(ws.identity_cwd.clone()));
+    let branch = ws.cached_git_branch.clone();
+    (ws_label, tab_label, pane_label, cwd, branch)
+}
+
+fn shorten_path(path: &Path, max_width: usize) -> String {
+    let raw = path.to_string_lossy();
+    let display = if let Ok(home) = std::env::var("HOME") {
+        if let Some(rest) = raw.strip_prefix(&home) {
+            // Powerline `pwd` collapses $HOME to `~` (keeping the slash as `~/…`).
+            format!("~{rest}")
+        } else {
+            raw.into_owned()
+        }
+    } else {
+        raw.into_owned()
+    };
+    if display_width(&display) <= max_width {
+        return display;
+    }
+    // Left-truncate like powerline: keep the trailing path, prefix with `…/`.
+    left_truncate_path(&display, max_width)
+}
+
+fn left_truncate_path(display: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    // Never shorter than the final path component if possible.
+    let file = display.rsplit('/').next().unwrap_or(display);
+    let file_w = display_width(file);
+    if file_w >= max_width {
+        return truncate_end(file, max_width);
+    }
+    let ellipsis = "…/";
+    let ellipsis_w = display_width(ellipsis);
+    if ellipsis_w + file_w >= max_width {
+        return truncate_end(file, max_width);
+    }
+    let budget = max_width.saturating_sub(ellipsis_w);
+    // Take a suffix of `display` that fits in budget, then force a clean `…/rest`.
+    let mut width = 0usize;
+    let mut start = display.len();
+    for (idx, ch) in display.char_indices().rev() {
+        let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_w > budget {
+            break;
+        }
+        width += ch_w;
+        start = idx;
+    }
+    let mut suffix = &display[start..];
+    // Drop a partial leading component so we always start on a path boundary when possible.
+    if let Some(slash) = suffix.find('/') {
+        suffix = &suffix[slash + 1..];
+    }
+    if suffix.is_empty() {
+        suffix = file;
+    }
+    format!("{ellipsis}{suffix}")
+}
+
+fn shorten_branch(branch: &str, max_width: usize) -> String {
+    if display_width(branch) <= max_width {
+        branch.to_string()
+    } else {
+        truncate_end(branch, max_width)
+    }
+}
+
+fn local_date_time() -> (String, String) {
+    // Characterization tests hash the full frame; freeze wall-clock there.
+    #[cfg(test)]
+    {
+        return ("2026-01-02".into(), "03:04".into());
+    }
+
+    // Format via libc localtime to avoid a chrono dependency.
+    #[cfg(not(test))]
+    {
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        #[cfg(unix)]
+        {
+            // SAFETY: localtime_r writes into our stack tm.
+            let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
+            let t = secs as libc::time_t;
+            let rc = unsafe { libc::localtime_r(&t, &mut tm) };
+            if !rc.is_null() {
+                let date =
+                    format!("{:04}-{:02}-{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+                let time = format!("{:02}:{:02}", tm.tm_hour, tm.tm_min);
+                return (date, time);
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = secs;
+        }
+        ("----/--/--".into(), "--:--".into())
+    }
+}
 
 pub(crate) fn copy_feedback_rect(
     area: Rect,
@@ -321,5 +731,41 @@ mod tests {
             bottom_center.x,
             area.x + area.width.saturating_sub(bottom_center.width) / 2
         );
+    }
+
+    #[test]
+    fn shorten_path_uses_tilde_for_home() {
+        // Other tests mutate HOME; pin a private value for this assertion.
+        let home = "/tmp/herdr-status-home-fixture";
+        // SAFETY: tests run single-threaded in CI for env-sensitive cases; we restore below.
+        let previous = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", home);
+        }
+        let path = PathBuf::from(format!("{home}/Code/personal/home"));
+        let display = shorten_path(&path, 80);
+        match previous {
+            Some(value) => unsafe {
+                std::env::set_var("HOME", value);
+            },
+            None => unsafe {
+                std::env::remove_var("HOME");
+            },
+        }
+        assert!(
+            display.starts_with("~/") || display.starts_with("~\\"),
+            "expected tilde-shortened path, got {display}"
+        );
+        assert!(display.contains("Code"));
+    }
+
+    #[test]
+    fn local_date_time_returns_plausible_shapes() {
+        let (date, time) = local_date_time();
+        assert_eq!(date.len(), 10, "YYYY-MM-DD");
+        assert_eq!(time.len(), 5, "HH:MM");
+        assert_eq!(&date[4..5], "-");
+        assert_eq!(&date[7..8], "-");
+        assert_eq!(&time[2..3], ":");
     }
 }
