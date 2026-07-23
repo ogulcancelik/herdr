@@ -10,7 +10,7 @@ use crate::app::{
 };
 
 use super::{
-    modal::{leave_modal, modal_action_from_buttons, ModalAction},
+    modal::{keybind_help_back, leave_modal, modal_action_from_buttons, ModalAction},
     ScrollbarClickTarget,
 };
 
@@ -197,7 +197,7 @@ impl App {
                         .state
                         .keybind_help_close_button_at(mouse.column, mouse.row) =>
                 {
-                    leave_modal(&mut self.state);
+                    keybind_help_back(&mut self.state);
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
                     if let Some(target) = self
@@ -736,6 +736,33 @@ mod tests {
         ));
 
         assert_eq!(app.state.mode, Mode::Navigate);
+    }
+
+    #[test]
+    fn clicking_keybind_help_back_button_leaves_help_open() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::KeybindHelp;
+        app.state.keybind_help.search_focused = true;
+        app.state.keybind_help.query = "work".into();
+
+        let rect = app.state.keybind_help_popup_rect();
+        let inner = Rect::new(
+            rect.x + 1,
+            rect.y + 1,
+            rect.width.saturating_sub(2),
+            rect.height.saturating_sub(2),
+        );
+        let back =
+            crate::ui::release_notes_close_button_rect(Rect::new(inner.x, inner.y, inner.width, 1));
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            back.x,
+            back.y,
+        ));
+
+        assert_eq!(app.state.mode, Mode::KeybindHelp);
+        assert!(!app.state.keybind_help.search_focused);
+        assert!(app.state.keybind_help.query.is_empty());
     }
 
     #[test]
