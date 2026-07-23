@@ -84,26 +84,36 @@ try {
         throw "server did not become ready"
     }
 
-    Invoke-Checked $exe @("agent", "start", "smoke", "--", $env:ComSpec, "/K", "dir")
+    $created = & $exe workspace create --cwd $PWD.Path 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "workspace create failed with exit code $LASTEXITCODE`: $($created -join "`n")"
+    }
+    $paneId = (($created -join "`n") | ConvertFrom-Json).result.root_pane.pane_id
+    if ([string]::IsNullOrWhiteSpace($paneId)) {
+        throw "workspace create did not return a root pane id: $($created -join "`n")"
+    }
+    $marker = "HERDR_CONPTY_SMOKE_OK"
+    Invoke-Checked $exe @("pane", "run", $paneId, "echo $marker")
+
     $text = ""
     $deadline = (Get-Date).AddSeconds(15)
     do {
         Start-Sleep -Milliseconds 500
         try {
-            $read = & $exe agent read smoke --source recent --lines 40 --format text 2>&1
+            $read = & $exe pane read $paneId --source recent-unwrapped --lines 40 --format text 2>&1
             $readExitCode = $LASTEXITCODE
         } catch {
             $read = @($_.Exception.Message)
             $readExitCode = 1
         }
         $text = $read -join "`n"
-        if ($readExitCode -eq 0 -and $text -match "File\(s\)" -and $text -match "Dir\(s\)") {
+        if ($readExitCode -eq 0 -and (($text -replace "\s", "") -match $marker)) {
             break
         }
     } while ((Get-Date) -lt $deadline)
 
-    if ($text -notmatch "File\(s\)" -or $text -notmatch "Dir\(s\)") {
-        throw "pane read did not include cmd.exe directory output: $text"
+    if (($text -replace "\s", "") -notmatch $marker) {
+        throw "pane read did not include the smoke marker: $text"
     }
 } finally {
     if ($null -ne $server) {

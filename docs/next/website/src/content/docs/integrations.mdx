@@ -76,7 +76,7 @@ Herdr writes the bundled extension to:
 ~/.pi/agent/extensions/herdr-agent-state.ts
 ```
 
-If `PI_CODING_AGENT_DIR` is set, Herdr writes to `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts` instead. The extensions directory must already exist. Uninstall removes only that extension file.
+If `PI_CODING_AGENT_DIR` is set, Herdr writes to `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts` instead. Herdr creates the extensions directory when the Pi agent directory already exists. Uninstall removes only that extension file.
 
 ## OMP
 
@@ -92,7 +92,7 @@ Herdr writes the bundled extension to:
 ~/.omp/agent/extensions/herdr-omp-agent-state.ts
 ```
 
-If `PI_CODING_AGENT_DIR` is set, Herdr writes to `$PI_CODING_AGENT_DIR/extensions/herdr-omp-agent-state.ts` instead. The extensions directory must already exist. Uninstall removes only that extension file.
+Herdr uses `PI_CODING_AGENT_DIR` as the complete agent directory when set. Otherwise, it uses `$HOME/$PI_CONFIG_DIR/agent` when `PI_CONFIG_DIR` is set, falling back to `~/.omp/agent`. If Pi and OMP resolve to the same extension directory, Herdr refuses the OMP install so the OMP extension cannot be loaded by Pi. Configure separate agent directories before installing both integrations. Herdr creates the extensions directory when the resolved OMP agent directory already exists. Uninstall removes only that extension file.
 
 The OMP integration reports `omp` as the agent label, lifecycle state, and native session identity through Herdr's socket API. It does not require native process detection for the `omp` executable, and Herdr can resume an OMP pane with `omp --resume=<session>` after a server restart.
 

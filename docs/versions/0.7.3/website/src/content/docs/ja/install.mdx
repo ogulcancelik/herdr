@@ -1,0 +1,151 @@
+---
+title: Herdr のインストール
+description: Linux、macOS、Windows ベータでの Herdr のインストール、アップデート、動作確認。
+---
+
+Herdr は Linux と macOS 向けに安定版バイナリを提供しています。ネイティブ Windows 対応はプレビュー限定のベータです。
+
+## インストール
+
+Linux または macOS では次を実行します:
+
+```bash
+curl -fsSL https://herdr.dev/install.sh | sh
+```
+
+Windows プレビューベータでは、プレビューチャンネルをインストールします:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://herdr.dev/install.ps1 | iex"
+```
+
+インストーラーはプラットフォームに合ったリリースバイナリをダウンロードして PATH 上に配置します。Windows インストーラーはデフォルトでプレビューを使い、そのチャンネルを Herdr の設定に書き込み、バージョン付きインストールフォルダーを使い、`current` ジャンクションを更新します。そのため、アップデート時に実行中の `herdr.exe` を上書きする必要がありません。
+
+## Homebrew でインストール
+
+すでに Homebrew を使っている場合:
+
+```bash
+brew install herdr
+```
+
+## mise でインストール
+
+すでに mise を使っている場合:
+
+```bash
+mise use -g herdr
+```
+
+mise が `herdr not found in mise tool registry` と報告する場合は、mise をアップデートして再試行してください。古い mise は Herdr のレジストリ登録より前のバージョンです。一時的な回避策として `mise use -g github:ogulcancelik/herdr` も使えます。
+
+## Nix でインストール
+
+すでに Nix を使っている場合、Herdr はソースからビルドする flake を提供しています:
+
+```bash
+nix run github:ogulcancelik/herdr/v0.x.y
+nix build github:ogulcancelik/herdr/v0.x.y
+nix profile install github:ogulcancelik/herdr/v0.x.y
+```
+
+`v0.x.y` は最新のリリースタグに置き換えてください。タグを省略すると `master` を追跡できますが、通常のインストールにはリリースタグを推奨します。
+
+flake は開発用シェルも公開しています:
+
+```bash
+nix develop github:ogulcancelik/herdr
+```
+
+アップデートは、Herdr のインストールに使ったのと同じ Nix ワークフローで行います。プロファイルインストールの場合は、プロファイルのエントリを一覧して Herdr のエントリをアップグレードします:
+
+```bash
+nix profile list
+nix profile upgrade <index-or-name>
+```
+
+Herdr が自分の flake の input になっている場合は、その input を更新してシステム、Home Manager、または開発環境を再ビルドします:
+
+```bash
+nix flake update herdr
+```
+
+## 手動でダウンロード
+
+[GitHub releases](https://github.com/ogulcancelik/herdr/releases) からバイナリをダウンロードすることもできます。
+
+システムに合ったアセットを選んでください:
+
+| システム | アセット |
+| --- | --- |
+| Linux x86_64 | `herdr-linux-x86_64` |
+| Linux aarch64 | `herdr-linux-aarch64` |
+| macOS Intel | `herdr-macos-x86_64` |
+| macOS Apple silicon | `herdr-macos-aarch64` |
+
+Linux または macOS では、実行可能にして PATH 上のどこかに移動します。
+
+```bash
+chmod +x herdr-linux-x86_64
+mv herdr-linux-x86_64 ~/.local/bin/herdr
+```
+
+### Windows ベータのダウンロード
+
+ネイティブ Windows 対応がベータの間、Windows バイナリはプレビューリリースでのみ公開されます。通常のテストには上記のプレビューインストーラーを使うか、プレビューの GitHub プレリリースから Windows アセットをダウンロードしてください:
+
+| システム | アセット |
+| --- | --- |
+| Windows x86_64 ベータ | `herdr-windows-x86_64.exe` |
+
+## 動作確認
+
+Herdr を起動します:
+
+```bash
+herdr
+```
+
+シェルが `herdr` を見つけられない場合は、ターミナルを再起動するか、インストール先ディレクトリが PATH に含まれているか確認してください。
+
+## アップデート
+
+Herdr は新しいリリースをチェックし、アプリ内で通知します。手動でアップデートすることもできます:
+
+```bash
+herdr update
+```
+
+`herdr update` は Herdr 自身のインストーラーで管理されているインストール向けです。Homebrew、mise、Nix のインストールは、それぞれのパッケージマネージャーでアップデートしてください。
+
+Linux と macOS では、Herdr はデフォルトで安定版アップデートチャンネルを使います。`master` からのプレビュービルドにオプトインするには、チャンネルを設定します:
+
+```bash
+herdr channel set preview
+```
+
+Linux と macOS の直接インストールを安定版に戻すのも同じ方法です:
+
+```bash
+herdr channel set stable
+```
+
+直接インストールの場合、チャンネルの変更はそのチャンネルをチェックして最新バイナリをインストールします。そのアップデートが失敗した場合は、`herdr update` を実行して設定済みチャンネルから再試行してください。
+
+プレビュービルドは、現在の開発ブランチから手動で公開される GitHub プレリリースです。次の安定版リリースより前に修正が欲しいときに便利ですが、リグレッションの可能性があります。Homebrew、mise、Nix のインストールはプレビューチャンネルを使いません。
+
+Windows ベータビルドは今のところプレビュー限定です。安定版の Windows リリースが提供されるまで、Windows では `herdr channel set stable` は拒否されます。
+
+デフォルトでは、`herdr update` は新しいバイナリをインストールし、互換性のある実行中セッションには手を付けません。アップデートが Herdr のクライアント/サーバープロトコルを変更する場合、Herdr はインストール後に古いサーバーを停止するか尋ねます。新しいバージョンを使うには古いサーバーを停止してください。停止するとペインのプロセスは終了します。デフォルトセッションでは `herdr server stop` を実行してから再度 `herdr` を実行します。名前付きセッションでは `herdr session stop <name>` を実行してから再度 `herdr session attach <name>` を実行します。
+
+対応する実行中セッションで実験的なライブサーバーハンドオフにオプトインするには:
+
+```bash
+herdr update --handoff
+```
+
+ライブハンドオフは Homebrew、mise、Nix のパッケージマネージャー経由のアップデートには適用されません。それらのインストールではパッケージマネージャーでアップデートし、新しいサーバーを使う準備ができたらその Herdr セッションを再起動してください。実行中のセッションがまだ古いサーバーを使っている場合は、`herdr server stop` または `herdr session stop <name>` で停止してから、再度 Herdr を実行します。
+
+## 動作要件
+
+Herdr の安定版リリースは Linux と macOS をサポートします。ネイティブ Windows ビルドはプレビュー限定のベータリリースです。サポートされるワークフローと既知の制限は [Windows ベータ](/ja/docs/windows-beta/)を参照してください。

@@ -1,5 +1,4 @@
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
-use unicode_width::UnicodeWidthChar;
 
 use crate::{
     app::{
@@ -948,7 +947,7 @@ fn last_character_col(text: &str) -> Option<u16> {
     let mut col = 0u16;
     let mut last_col = None;
     for ch in text.chars() {
-        let width = UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+        let width = u16::from(crate::ghostty::unicode_codepoint_width(ch as u32));
         if width > 0 {
             last_col = Some(col);
             col = col.saturating_add(width);
@@ -958,7 +957,7 @@ fn last_character_col(text: &str) -> Option<u16> {
 }
 
 fn char_cell_width(ch: char) -> u16 {
-    UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16
+    u16::from(crate::ghostty::unicode_codepoint_width(ch as u32)).max(1)
 }
 
 /// (leading_col, cell_width) for each glyph in a visible row, in column order.
@@ -1806,6 +1805,11 @@ mod tests {
 
         submit_copy_search(&mut app, '?', "000000");
         assert!(copy_mode_offset_from_bottom(&app, pane_id) > 0);
+        let copy_mode = app.state.copy_mode.as_ref().expect("copy mode");
+        assert_eq!(
+            copy_mode_viewport_top_row(&app, pane_id) + usize::from(copy_mode.cursor_row),
+            0
+        );
         let runtime = app
             .state
             .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)

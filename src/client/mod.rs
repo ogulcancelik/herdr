@@ -30,6 +30,7 @@ use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 #[cfg(not(windows))]
 use crossterm::event::{PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
 use crossterm::execute;
+use crossterm::terminal::{DisableLineWrap, EnableLineWrap};
 use interprocess::local_socket::traits::Stream as _;
 use interprocess::TryClone as _;
 use tracing::{debug, info, warn};
@@ -68,6 +69,8 @@ struct ClientState {
     blit_encoder: render_ansi::BlitEncoder,
     /// Whether host mouse capture is currently active.
     mouse_capture_active: bool,
+    /// Whether the host terminal currently reports all keys as Kitty sequences.
+    keyboard_report_all_active: bool,
     /// The terminal size we reported to the server in our last Hello/Resize.
     reported_size: (u16, u16),
     /// Client-local sound playback config, refreshed on server request.
@@ -404,6 +407,8 @@ fn setup_terminal_with_capabilities(
         io::stdout().flush()?;
     }
 
+    execute!(io::stdout(), DisableLineWrap)?;
+
     Ok(TerminalGuard {
         reset_modify_other_keys: modify_other_keys_mode.is_some(),
         reset_host_color_scheme_reports: host_color_scheme_reports,
@@ -576,6 +581,7 @@ fn restore_terminal_state(
 
     let _ = execute!(
         io::stdout(),
+        EnableLineWrap,
         DisableFocusChange,
         DisableBracketedPaste,
         DisableMouseCapture
@@ -1286,6 +1292,7 @@ async fn run_client_loop(
     let mut state = ClientState {
         blit_encoder: render_ansi::BlitEncoder::new(),
         mouse_capture_active: config.mouse_capture_active,
+        keyboard_report_all_active: false,
         reported_size: (cols, rows),
         sound_config: config.sound_config,
         kitty_graphics_enabled: config.kitty_graphics_enabled,
@@ -1579,6 +1586,16 @@ async fn run_client_loop(
                         }
                         state.mouse_capture_active = desired;
                         host_mouse_capture_active.store(desired, Ordering::Release);
+                    }
+                }
+                ServerMessage::KittyKeyboardReportAll { enabled } => {
+                    if enabled != state.keyboard_report_all_active {
+                        crate::terminal_modes::set_host_kitty_keyboard_report_all(
+                            &mut io::stdout(),
+                            enabled,
+                        )
+                        .map_err(ClientError::ConnectionFailed)?;
+                        state.keyboard_report_all_active = enabled;
                     }
                 }
                 ServerMessage::PrefixInputSource { active } => {
@@ -2118,7 +2135,8 @@ fn should_query_host_terminal_theme() -> bool {
 }
 
 fn write_host_terminal_theme_query(mut writer: impl io::Write) -> io::Result<()> {
-    writer.write_all(crate::terminal_theme::HOST_COLOR_QUERY_SEQUENCE.as_bytes())?;
+    let query = crate::terminal_theme::host_terminal_theme_query_sequence();
+    writer.write_all(query.as_bytes())?;
     writer.flush()
 }
 
@@ -2395,7 +2413,7 @@ mod tests {
         write_host_terminal_theme_query(&mut output).unwrap();
         assert_eq!(
             output,
-            crate::terminal_theme::HOST_COLOR_QUERY_SEQUENCE.as_bytes()
+            crate::terminal_theme::host_terminal_theme_query_sequence().as_bytes()
         );
     }
 

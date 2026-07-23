@@ -520,6 +520,10 @@ pub enum EventData {
         workspace_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        released: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        final_status: Option<AgentStatus>,
     },
     PaneAgentStatusChanged {
         pane_id: String,

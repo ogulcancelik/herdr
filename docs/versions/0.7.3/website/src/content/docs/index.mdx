@@ -1,0 +1,77 @@
+---
+title: Herdr documentation
+description: Terminal workspace manager for AI coding agents.
+template: splash
+hero:
+  tagline: "Install, learn, and configure Herdr. Start on the path that matches you — no multiplexer experience required."
+  image:
+    file: ../../../public/assets/logo.svg
+  actions:
+    - text: Install Herdr
+      link: /docs/install/
+    - text: Quick start
+      link: /docs/quick-start/
+      variant: secondary
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Pick your path
+
+<CardGrid>
+  <Card title="New to terminal multiplexers?">
+    You don't need to learn shortcuts to start. Herdr is mouse-first: click panes, drag borders, split and switch from right-click menus.
+
+    [Quick start →](/docs/quick-start/)
+  </Card>
+  <Card title="Coming from tmux or zellij?">
+    You already know the model. The prefix is `ctrl+b`, panes persist, detach and reattach work the way you expect.
+
+    [Concepts →](/docs/concepts/) · [Keybindings →](/docs/configuration/#keybindings)
+  </Card>
+</CardGrid>
+
+## Or let your agent introduce you
+
+Already running an AI coding agent? Let it do the onboarding. Paste this prompt:
+
+```text
+Help me understand and set up Herdr. Read https://herdr.dev/agent-guide.md first, then walk me through it step by step.
+```
+
+The guide teaches your agent Herdr's concepts, setup, configuration, and common fixes, so its answers stay accurate instead of improvised.
+
+## Core guides
+
+<CardGrid>
+  <Card title="Agents">
+    See supported agents, detection behavior, integrations, custom labels, and direct attach.
+
+    [Understand agents →](/docs/agents/)
+  </Card>
+  <Card title="Session state">
+    Understand detach, restart restore, pane history replay, native agent resume, and live handoff.
+
+    [Compare state paths →](/docs/session-state/)
+  </Card>
+  <Card title="Configuration">
+    Configure keybindings, themes, sidebar behavior, notifications, scrollback, and advanced options.
+
+    [Configure Herdr →](/docs/configuration/)
+  </Card>
+  <Card title="API">
+    Control Herdr from scripts, tools, and agents through the CLI and local socket API.
+
+    [Read the API guide →](/docs/socket-api/)
+  </Card>
+  <Card title="Plugins">
+    Author local executable workflow plugins with manifest actions and event hooks.
+
+    [Write a plugin →](/docs/plugins/)
+  </Card>
+  <Card title="Marketplace">
+    Share plugins from GitHub today and tag your repo to be listed when the marketplace launches.
+
+    [Publish a plugin →](/docs/marketplace/)
+  </Card>
+</CardGrid>

@@ -126,6 +126,8 @@ herdr workspace close <workspace_id>
 herdr workspace create --cwd ~/project --label api --no-focus
 ```
 
+工作区是顶层项目或工作上下文。创建工作区也会创建第一个标签页和根窗格。JSON 响应中的 `.result.workspace.workspace_id`、`.result.tab.tab_id` 和 `.result.root_pane.pane_id` 是对应 ID。
+
 ## Worktree
 
 ```bash
@@ -150,6 +152,10 @@ herdr tab rename <tab_id> <label>
 herdr tab close <tab_id>
 ```
 
+标签页是工作区内的另一个终端布局。不指定 `--workspace` 时,`tab create` 使用活动工作区;如果没有活动工作区则失败。JSON 响应中的 `.result.tab.tab_id` 和 `.result.root_pane.pane_id` 是对应 ID。
+
+创建工作区、标签页和拆分窗格默认不改变焦点。`--focus` 选择新布局;`--no-focus` 显式表达默认行为。不指定 `--cwd` 时,新终端遵循 `terminal.new_cwd` 设置,默认跟随来源窗格或工作区。每个 `--env KEY=VALUE` 在新的根 shell 中添加或替换一个环境变量。
+
 ## 窗格
 
 ```bash
@@ -173,13 +179,19 @@ herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--f
 herdr pane close <pane_id>
 ```
 
+接受 `--current` 的窗格命令在 Herdr 窗格内运行时使用调用方的 `HERDR_PANE_ID`。对 `pane split` 而言,显式窗格 ID 或 `--pane ID` 拆分该窗格,`--current` 拆分调用方窗格,省略目标则使用 UI 当前聚焦的窗格。拆分响应中的新窗格 ID 位于 `.result.pane.pane_id`。
+
+执行 `pane move` 后,后续命令应使用 `.result.move_result.pane.pane_id`。跨工作区移动会改变带工作区前缀的窗格 ID;旧值保留在 `.result.move_result.previous_pane_id`。运行中进程的 `HERDR_PANE_ID`、`HERDR_TAB_ID` 和 `HERDR_WORKSPACE_ID` 保持启动时的值,但 Herdr 会把旧窗格 ID 保留为该终端的别名,所以使用 `--current` 的窗格命令仍能解析它。实时智能体名称也会跟随终端。
+
 读取输出:
 
 ```bash
-herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N]
+herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--raw]
 herdr pane read <pane_id> --source visible --ansi
 herdr pane read <pane_id> --source recent-unwrapped --lines 120
 ```
+
+`pane read` 直接打印 UTF-8 终端文本。默认去除 ANSI 转义;来源包含样式时,使用 `--format ansi` 或 `--ansi` 保留。`detection` 来源始终是纯文本。对 recent 类来源,`--lines N` 会在可选的取消折行之前选择最后 N 个已渲染终端行;省略时默认读取 80 行。对 `visible` 和 `detection`,省略 `--lines` 会返回完整快照,指定时保留按换行分隔的最后 N 行。`agent read` 使用相同的输出和行数行为。
 
 发送输入:
 
@@ -191,7 +203,9 @@ herdr pane run <pane_id> <command>
 
 `<key>` 使用 Herdr 的组合键语法: `a` 这类普通可打印键,`enter`、`tab`、`esc`、`backspace`、`left`、`right`、`up`、`down` 这类特殊键,`ctrl+h`、`control+j`、`alt+x`、`shift+tab` 这类修饰组合键,`f1` 这类功能键,以及 `minus`、`plus`、`backtick` 这类命名标点。旧式的 `C-c` 和 `c-c` 作为 `ctrl+c` 的别名被接受。
 
-`pane run` 把文本和回车作为一个原子操作提交。发送命令时优先用它,而不是 `send-text` 加 `send-keys Enter`。
+标准拼写是 `esc`;也接受 `escape`。
+
+`pane run` 会遵循当前的 bracketed paste 模式,并把文本和 Enter 作为一个原子操作提交。发送命令时优先用它,而不是 `send-text` 加 `send-keys Enter`;单独的发送操作仍是底层操作,不会提交命令。
 
 从自定义钩子上报智能体状态:
 
@@ -204,7 +218,22 @@ herdr pane report-agent <pane_id> \
   [--seq N] \
   [--agent-session-id ID] \
   [--agent-session-path PATH]
+
+herdr pane report-agent-session <pane_id> \
+  --source ID \
+  --agent LABEL \
+  [--seq N] \
+  [--agent-session-id ID] \
+  [--agent-session-path PATH] \
+  [--session-start-source SOURCE]
+
+herdr pane release-agent <pane_id> \
+  --source ID \
+  --agent LABEL \
+  [--seq N]
 ```
+
+`report-agent-session` 只更新原生会话身份,不上报生命周期状态。`release-agent` 在智能体进程退出时结束该来源的生命周期权威。
 
 当官方集成上报了原生会话引用时,`pane get`、`pane list`、`agent get` 和 `agent list` 会包含一个只读的 `agent_session` 对象。没有存储原生会话引用时,该字段被省略。
 
@@ -237,23 +266,34 @@ herdr pane report-metadata <pane_id> \
 
 ## 智能体
 
+窗格与智能体的模型和完整协调示例见[智能体自动化](/zh-cn/docs/agent-automation/)。
+
 ```bash
 herdr agent list
 herdr agent get <target>
 herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]
-herdr agent send <target> <text>
+herdr agent send-keys <target> <key> [key ...]
+herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]
 herdr agent rename <target> <name>|--clear
 herdr agent focus <target>
-herdr agent wait <target> --status <idle|working|blocked|unknown> [--timeout MS]
+herdr agent wait <target> [--until STATUS]... [--timeout MS]
 herdr agent attach <target> [--takeover]
-herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>
+herdr agent start <name> --kind KIND --pane ID [--timeout MS] [-- <agent-args...>]
 herdr agent explain <target> [--json|--verbose]
 herdr agent explain --file PATH --agent LABEL [--json|--verbose]
 ```
 
-智能体目标可以是终端 ID、唯一的智能体名称、检测到或上报的智能体标签,以及旧式窗格 ID。名称和标签是智能体的身份。终端 ID 和旧式窗格 ID 是底层的逃生舱。
+智能体目标只能是唯一的实时智能体名称,或当前承载该智能体的窗格 ID。终端 ID 和单独的智能体 kind 标签不能作为目标。通过 `agent start` 启动的智能体必须有名称;手动启动的智能体保持未命名,通过窗格 ID 寻址。
 
-`agent read` 读取解析出的终端流。`agent send` 向该流写入字面文本。`agent get`、`agent focus`、`agent wait` 和 `agent attach` 要求解析出的终端具有智能体身份。`agent rename` 可以赋予这个身份。
+`agent start` 会在现有可用 shell 窗格中启动智能体:交互式 shell 必须占用前台,不能有正在前台运行的命令、编辑器或智能体。拓扑必须单独创建。名称在实时智能体中必须唯一,并匹配 `[a-z][a-z0-9_-]{0,31}`。支持的 kind 是 `pi`、`claude`、`codex`、`gemini`、`cursor`、`devin`、`agy`、`cline`、`omp`、`mastracode`、`opencode`、`copilot`、`kimi`、`kiro`、`droid`、`amp`、`grok`、`hermes`、`kilo`、`qodercli` 和 `maki`。名称属于当前窗格占用者,在该智能体退出、release 或被替换时清除;短暂的检测不确定不会清除它。
+
+start 只有在预期智能体占用同一终端并可接受交互输入后才返回。默认启动超时是 30000 毫秒;显式值必须大于 3000 且不超过 300000。
+
+`agent prompt` 遵循当前的 bracketed paste 模式，即使智能体处于 working 也会原子地提交文本和编码后的 Enter。使用 `--wait` 时，从非 working 状态发送的提示必须在五秒内产生可观察的生命周期变化，否则 Herdr 返回 `agent_prompt_stalled`；调用方超时不超过五秒时，仍返回普通的 `timeout` 错误。观察到活动后，它会等待请求的稳定状态。它不会跟踪单独的轮次。如果智能体已经处于 working，当前轮次的完成可能满足等待。`--until` 用于缩小匹配状态，不带 `--wait` 时会被拒绝。独立的 `agent wait` 在当前状态匹配时立即返回。两者默认匹配 `idle`、`done` 或 `blocked`；需要 `unknown` 时请明确使用 `--until unknown`。
+
+`idle` 表示智能体在等待输入,且其标签页已在聚焦的 Herdr 界面中显示。`done` 是相同的底层 idle 状态,用于未查看的后台工作完成后。聚焦该标签页或用 `pane focus` / `agent focus` 指向它会标记为已查看;仅通过 CLI 读取不会改变它。`blocked` 表示 Herdr 识别到审批或提问界面。`unknown` 表示智能体存在但无法可靠分类,不代表工作成功。
+
+`agent send-keys` 发送 `enter`、`up`、`esc`、`ctrl+c` 等逻辑按键。Herdr 会在写入任何字节前验证所有按键。`agent read` 读取解析出的终端流,`agent rename` 为已检测到的智能体命名。
 
 `agent explain` 请求运行中的服务器对屏幕检测所用的同一份底部缓冲区检测快照进行分类,因此实时输出反映服务器生效的清单缓存。因为它使用 `agent.explain` socket 方法,升级 Herdr 后,请先重启或交接到更新后的服务器,再使用实时 explain。用 `--file PATH --agent LABEL` 可以改为在本地解释一份保存的样本。默认输出显示智能体、最终状态、清单来源和版本、匹配的规则及其区域证据,以及任何回退、跳过或警告原因。加 `--verbose` 可以看到可见证据标志、缓存的远程版本、本地覆盖的遮蔽情况、远程更新状态,以及带匹配器和区域证据的完整已评估规则列表。提交问题报告或写测试时加 `--json`。
 
@@ -270,21 +310,19 @@ herdr terminal title clear
 从直接附加中用 `ctrl+b q` 分离。用 `ctrl+b ctrl+b` 发送字面的 `ctrl+b`。
 `terminal title clear` 恢复 Herdr 默认的外层终端窗口标题。
 
-## 等待
+## 输出等待
 
 等待窗格中的输出:
 
 ```bash
-herdr wait output <pane_id> --match <text> [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--regex] [--raw]
+herdr pane wait-output <pane_id> (--match <text> | --regex <pattern>) [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--raw]
 ```
 
-等待窗格的智能体状态:
+普通命令和服务器用 `pane wait-output`。编程智能体用 `agent wait`。
 
-```bash
-herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [--timeout MS]
-```
+`pane wait-output` 会立即检查所选快照,所以已经存在的输出也能匹配。默认来源名是 `recent`;匹配时会把最近 80 个已渲染终端行作为未折行输出处理。`--lines` 可以修改这个行数限制。`--match` 在单行中查找字面子串;`--regex` 使用 Rust 正则表达式语法并逐行匹配。
 
-普通命令和服务器用 `wait output`。编程智能体用 `wait agent-status`。
+`pane wait-output`、`agent wait` 和 `agent prompt --wait` 在省略 `--timeout` 时会无限等待。超时或服务器错误以 JSON 写到 stderr,退出状态为 1。CLI 用法错误的退出状态为 2。
 
 ## 集成
 
@@ -388,6 +426,8 @@ herdr plugin pane close <pane_id>
 | `recent` | 带终端折行的最近回滚内容。 |
 | `recent-unwrapped` | 不带软折行的最近回滚内容。最适合日志。 |
 | `detection` | 智能体屏幕检测使用的底部缓冲区快照。 |
+
+此表描述读取时的含义。仅对 `pane wait-output` 而言,`recent` 和 `recent-unwrapped` 都搜索 recent 的未折行快照,默认写法仍是 `recent`。
 
 ## 环境变量
 

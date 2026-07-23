@@ -1,25 +1,25 @@
 ---
 import StarlightSearch from '@astrojs/starlight/components/Search.astro';
-import { docsChannel } from '../docs-path';
+import { docsVersion } from '../docs-path';
 
-const channel = docsChannel(Astro.url.pathname);
+const version = docsVersion(Astro.url.pathname);
 ---
 
-<channel-search data-channel={channel}>
+<version-search data-version={version}>
   <StarlightSearch />
-</channel-search>
+</version-search>
 
 <script>
-  class ChannelSearch extends HTMLElement {
+  class VersionSearch extends HTMLElement {
     observer?: MutationObserver;
 
     connectedCallback() {
-      const channel = this.dataset.channel;
-      if (!channel) return;
+      const version = this.dataset.version;
+      if (!version) return;
 
-      const selectChannel = () => {
+      const selectVersion = () => {
         const checkbox = this.querySelector<HTMLInputElement>(
-          `.pagefind-ui__filter-checkbox[name="channel"][value="${channel}"]`,
+          `.pagefind-ui__filter-checkbox[name="version"][value="${version}"]`,
         );
         if (!checkbox) return false;
         if (!checkbox.checked) checkbox.click();
@@ -27,9 +27,9 @@ const channel = docsChannel(Astro.url.pathname);
         return true;
       };
 
-      if (selectChannel()) return;
+      if (selectVersion()) return;
       // Starlight does not expose its PagefindUI instance, so wait for Pagefind's filter control.
-      this.observer = new MutationObserver(selectChannel);
+      this.observer = new MutationObserver(selectVersion);
       this.observer.observe(this, { childList: true, subtree: true });
     }
 
@@ -38,15 +38,15 @@ const channel = docsChannel(Astro.url.pathname);
     }
   }
 
-  customElements.define('channel-search', ChannelSearch);
+  customElements.define('version-search', VersionSearch);
 </script>
 
 <style>
-  channel-search {
+  version-search {
     display: contents;
   }
 
-  channel-search :global(.pagefind-ui__filter-panel) {
+  version-search :global(.pagefind-ui__filter-panel) {
     display: none;
   }
 </style>

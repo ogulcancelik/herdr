@@ -1,0 +1,105 @@
+---
+title: 会话状态与恢复
+description: 理解 Herdr 保持哪些实时状态、重启后恢复什么、从历史回放什么、通过智能体集成恢复什么会话,以及更新时如何交接。
+---
+
+Herdr 有多条状态路径,它们解决的是不同的问题。
+
+## 什么能保留下来
+
+| 场景 | 进程继续运行 | 布局恢复 | 最近的屏幕内容恢复 | 智能体对话恢复 |
+| --- | --- | --- | --- | --- |
+| 分离并重新连接 | 是 | 是 | 是,来自实时终端 | 是,因为进程从未停止 |
+| 服务器重启 | 否 | 是 | 仅在开启窗格屏幕历史时 | 仅在有智能体原生会话恢复时 |
+| 不带 `--handoff` 的更新 | 兼容的服务器继续运行;需要重启的服务器可能要停止/重启 | 重启后恢复 | 仅在开启窗格屏幕历史时 | 仅在有智能体原生会话恢复时 |
+| 带 `--handoff` 的更新 | 对受支持的运行中服务器尽力而为 | 是 | 是,交接成功时来自实时终端 | 是,交接成功时进程保持运行 |
+
+下面的小节逐一解释这些路径。
+
+## 实时持久化
+
+普通分离会让 Herdr 服务器继续运行。窗格、shell、智能体、服务器、测试和命令进程都在该服务器中继续运行。
+
+用 `ctrl+b q` 分离客户端。之后重新连接:
+
+```bash
+herdr
+```
+
+这是最强的持久化路径,因为原始进程从未停止。
+
+## 快照恢复
+
+如果 Herdr 服务器停止后再启动,原来的窗格进程已经不在了。Herdr 会恢复保存的会话形态: 工作区、标签页、窗格、cwd、布局和焦点。
+
+快照恢复不会保留运行中的 shell、服务器、测试或任意进程。无法使用更强恢复路径的窗格,会在各自保存的目录中作为新 shell 回来。
+
+## 窗格屏幕历史回放
+
+窗格屏幕历史在服务器完全重启后恢复最近的终端内容。它恢复的是 Herdr 能展示的内容,而不是原来的进程。
+
+它默认关闭,因为窗格输出可能包含密钥、令牌、提示词和命令输出。可以在 Settings > Experiments > pane screen history 中开启,或者:
+
+```toml
+[experimental]
+pane_history = true
+```
+
+开启后,Herdr 把保存的窗格历史存放在 `session.json` 旁边的 `session-history.json` 中。请像对待终端历史一样对待 Herdr 的配置/会话目录。
+
+## 智能体原生会话恢复
+
+一些智能体可以恢复它们自己的对话会话。Herdr 可以使用官方集成上报的会话引用,在 Herdr 服务器重启后重新启动受支持的智能体窗格。
+
+这默认开启。关闭方法:
+
+```toml
+[session]
+resume_agents_on_restore = false
+```
+
+Herdr 只会恢复那些通过当前官方 Herdr 集成上报了原生会话引用的窗格。
+
+当客户端连接并提供终端尺寸和主题上下文后,Herdr 会跨工作区和标签页恢复符合条件的智能体窗格,不需要等每个窗格被聚焦。
+
+智能体原生会话恢复需要以下版本或更新的 Herdr 集成:
+
+| 智能体 | 最低 Herdr 集成版本 | 恢复命令 |
+| --- | --- | --- |
+| Pi | `2` | `pi --session <path-or-id>` |
+| OMP | `3` | `omp --resume=<path-or-id>` |
+| Claude Code | `6` | `claude --resume <id>` |
+| Codex | `5` | `codex resume <id>` |
+| Cursor Agent CLI | `1` | `cursor-agent --resume <id>` |
+| GitHub Copilot CLI | `2` | `copilot --resume=<id>` |
+| Devin CLI | `2` | `devin --resume <id>` |
+| Droid | `2` | `droid --resume <id>` |
+| Kimi Code CLI | `3` | `kimi --session <id>` |
+| Qoder CLI | `2` | `qodercli --resume <id>` |
+| OpenCode | `5` | `opencode --session <id>` |
+| Kilo Code CLI | `1` | `kilo --session <id>` |
+| Hermes Agent | `2` | `hermes --resume <id>` |
+| MastraCode | `1` | `mastracode --thread <id>` |
+
+运行 `herdr integration status` 查看已安装的集成版本。用 `herdr integration install <agent>` 重新安装过期的集成。
+
+不受支持、缺失、无效、重复或过期的会话引用,会在保存的窗格目录中作为普通 shell 恢复。
+
+如果某个窗格适用智能体原生会话恢复,Herdr 会对该窗格恢复智能体会话,而不是回放保存的窗格历史。
+
+## 实时交接
+
+实时交接用于需要替换运行中 Herdr 服务器的更新和远程连接流程。它请求旧服务器把实时窗格转移给新服务器,让窗格进程跨服务器替换继续运行。
+
+这与快照恢复、窗格历史回放和智能体原生会话恢复不同。交接尝试让当前进程活下去,其他路径则是在旧服务器已经停止之后重建状态。
+
+实时交接是实验性功能,需要主动开启:
+
+```bash
+herdr update --handoff
+herdr --remote workbox --handoff
+```
+
+普通的 `herdr update` 和普通的 `herdr --remote workbox` 默认使用常规的重启/停止流程。
+
+`herdr update --handoff` 只适用于由 Herdr 自带更新器管理的安装。Homebrew、mise 和 Nix 安装通过各自的包管理器更新,因此那些安装中 `herdr update` 被禁用,无法执行实时交接。

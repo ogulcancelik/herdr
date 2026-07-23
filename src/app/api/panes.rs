@@ -11,7 +11,7 @@ use crate::api::schema::{
     PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
     PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams,
     PaneSwapReason, PaneSwapResult, PaneTarget, PaneZoomMode, PaneZoomParams, PaneZoomReason,
-    PaneZoomResult, ReadFormat, ReadSource, ResponseResult,
+    PaneZoomResult, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
@@ -20,9 +20,8 @@ use crate::app::Mode;
 use crate::layout::{find_in_direction, NavDirection, PaneId};
 
 use super::super::api_helpers::{
-    detect_state_from_api, encode_api_keys, encode_api_text, normalize_metadata_source,
-    normalize_metadata_tokens, normalize_metadata_ttl, normalize_reported_agent_label,
-    MAX_METADATA_TOKEN_KEYS_PER_RESOURCE,
+    detect_state_from_api, encode_api_keys, normalize_metadata_source, normalize_metadata_tokens,
+    normalize_metadata_ttl, normalize_reported_agent_label, MAX_METADATA_TOKEN_KEYS_PER_RESOURCE,
 };
 #[cfg(test)]
 use super::super::api_helpers::{METADATA_SOURCE_MAX_CHARS, METADATA_TTL_MAX_MS};
@@ -52,7 +51,7 @@ impl App {
         };
         let (rows, cols) = self.state.estimate_pane_size();
         let split_cwd = params.cwd.map(std::path::PathBuf::from).or_else(|| {
-            let follow_cwd = self.follow_cwd_for_pane_in_workspace(ws_idx, target_pane_id);
+            let follow_cwd = self.launch_cwd_for_pane_in_workspace(ws_idx, target_pane_id);
             Some(self.resolve_new_terminal_cwd(follow_cwd))
         });
         let default_shell = self.state.default_shell.clone();
@@ -1180,21 +1179,12 @@ impl App {
         else {
             return pane_not_found(id, &params.pane_id);
         };
-        let requested_lines = params.lines.unwrap_or(80).min(1000) as usize;
-        let text = match params.format {
-            ReadFormat::Text => match params.source {
-                ReadSource::Visible => pane.visible_text(),
-                ReadSource::Recent => pane.recent_text(requested_lines),
-                ReadSource::RecentUnwrapped => pane.recent_unwrapped_text(requested_lines),
-                ReadSource::Detection => pane.detection_text(),
-            },
-            ReadFormat::Ansi => match params.source {
-                ReadSource::Visible => pane.visible_ansi(),
-                ReadSource::Recent => pane.recent_ansi(requested_lines),
-                ReadSource::RecentUnwrapped => pane.recent_unwrapped_ansi(requested_lines),
-                ReadSource::Detection => pane.detection_text(),
-            },
-        };
+        let text = crate::app::api_helpers::read_terminal_snapshot(
+            pane,
+            params.source,
+            params.format,
+            params.lines,
+        );
 
         encode_success(
             id,
@@ -1499,20 +1489,16 @@ impl App {
         let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
-        let encoded_keys = match encode_api_keys(runtime, &params.keys) {
-            Ok(encoded_keys) => encoded_keys,
+        let bytes = match super::super::api_helpers::encode_api_input(
+            runtime,
+            &params.text,
+            &params.keys,
+        ) {
+            Ok(bytes) => bytes,
             Err(key) => return encode_error(id, "invalid_key", format!("unsupported key {key}")),
         };
-        if !params.text.is_empty() {
-            let text_bytes = encode_api_text(runtime, &params.text);
-            if let Err(err) = runtime.try_send_bytes(Bytes::from(text_bytes)) {
-                return encode_error(id, "pane_send_failed", err.to_string());
-            }
-        }
-        for bytes in encoded_keys {
-            if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
-                return encode_error(id, "pane_send_failed", err.to_string());
-            }
+        if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
+            return encode_error(id, "pane_send_failed", err.to_string());
         }
 
         encode_success(id, ResponseResult::Ok {})
@@ -2072,6 +2058,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_pane_send_input_brackets_text_and_enter_atomically() {
+        let (mut app, pane_id, mut rx) = app_with_send_key_runtime(1);
+        let internal_pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        app.lookup_runtime_sender(0, internal_pane_id)
+            .unwrap()
+            .test_process_pty_bytes(b"\x1b[?2004h");
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::PaneSendInput(PaneSendInputParams {
+                pane_id,
+                text: "A != B".into(),
+                keys: vec!["Enter".into()],
+            }),
+        });
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            bytes::Bytes::from_static(b"\x1b[200~A != B\x1b[201~\r")
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn api_pane_send_input_keys_accept_key_combo_chords() {
         let (mut app, pane_id, mut rx) = app_with_send_key_runtime(1);
 
@@ -2559,6 +2571,80 @@ mod tests {
         assert_eq!(app.state.workspaces[0].tabs[0].layout.focused(), source);
     }
 
+    #[tokio::test]
+    async fn key_release_follows_pane_moved_across_workspaces() {
+        let mut app = app_with_linked_worktree();
+        let source = app.state.workspaces[0].tabs[0].root_pane;
+        let source_terminal_id = app.state.workspaces[0].tabs[0]
+            .terminal_id(source)
+            .unwrap()
+            .clone();
+        let (runtime, mut rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80,
+                24,
+                0,
+                b"\x1b[>15u",
+                2,
+            );
+        app.terminal_runtimes.insert(source_terminal_id, runtime);
+        app.state.workspaces.push(Workspace::test_new("other"));
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let source_public = app.public_pane_id(0, source).unwrap();
+        let target = app.state.workspaces[1].tabs[0].root_pane;
+        let target_tab_id = app.public_tab_id(1, 0).unwrap();
+        let target_pane_id = app.public_pane_id(1, target).unwrap();
+
+        app.route_client_events_from(
+            42,
+            vec![crate::raw_input::RawInputEvent::Key(
+                crate::input::TerminalKey::new(
+                    crossterm::event::KeyCode::Char('j'),
+                    crossterm::event::KeyModifiers::empty(),
+                ),
+            )],
+            false,
+        );
+        let response = app.handle_pane_move(
+            "req".into(),
+            PaneMoveParams {
+                pane_id: source_public,
+                destination: PaneMoveDestination::Tab {
+                    tab_id: target_tab_id,
+                    target_pane_id: Some(target_pane_id),
+                    split: SplitDirection::Down,
+                    ratio: None,
+                },
+                focus: false,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::PaneMove { .. }));
+        app.route_client_events_from(
+            42,
+            vec![crate::raw_input::RawInputEvent::Key(
+                crate::input::TerminalKey::new(
+                    crossterm::event::KeyCode::Char('j'),
+                    crossterm::event::KeyModifiers::empty(),
+                )
+                .with_kind(crossterm::event::KeyEventKind::Release),
+            )],
+            false,
+        );
+
+        assert_eq!(
+            rx.try_recv().expect("forwarded press"),
+            bytes::Bytes::from_static(b"\x1b[106;1:1u")
+        );
+        assert_eq!(
+            rx.try_recv().expect("forwarded release after pane move"),
+            bytes::Bytes::from_static(b"\x1b[106;1:3u")
+        );
+        assert!(app.pressed_terminal_keys.is_empty());
+    }
+
     #[test]
     fn api_pane_move_to_existing_tab_across_workspace_reassigns_public_pane_id() {
         let mut app = app_with_linked_worktree();
@@ -2570,6 +2656,11 @@ mod tests {
             .clone();
         let target = app.state.workspaces[1].tabs[0].root_pane;
         seed_terminal_states(&mut app);
+        app.state
+            .terminals
+            .get_mut(&source_terminal)
+            .unwrap()
+            .set_detected_state(Some(Agent::Pi), AgentState::Idle);
         let previous_pane_id = app.public_pane_id(0, source).unwrap();
         let previous_workspace_id = app.public_workspace_id(0);
         let target_workspace_id = app.public_workspace_id(1);
@@ -2612,6 +2703,11 @@ mod tests {
             Some(&source_terminal)
         );
         assert_eq!(app.parse_pane_id(&previous_pane_id), Some((0, source)));
+        assert!(matches!(
+            app.resolve_agent_target(&previous_pane_id),
+            Err(crate::app::terminal_targets::TerminalTargetError::NotFound { .. })
+        ));
+        assert!(app.resolve_agent_target(&move_result.pane.pane_id).is_ok());
     }
 
     #[test]

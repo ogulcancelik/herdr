@@ -172,9 +172,8 @@ impl App {
                 }
                 MouseEventKind::ScrollUp => {
                     self.state.navigator.scroll = self.state.navigator.scroll.saturating_sub(3);
-                    self.state.navigator.selected = self.state.navigator.scroll;
                     self.state
-                        .clamp_navigator_selection_from(&self.terminal_runtimes);
+                        .align_navigator_selection_to_scroll_from(&self.terminal_runtimes);
                 }
                 MouseEventKind::ScrollDown => {
                     let viewport = self.state.navigator_body_rect().height as usize;
@@ -183,9 +182,8 @@ impl App {
                         .navigator_max_scroll_from(&self.terminal_runtimes, viewport);
                     self.state.navigator.scroll =
                         self.state.navigator.scroll.saturating_add(3).min(max);
-                    self.state.navigator.selected = self.state.navigator.scroll;
                     self.state
-                        .clamp_navigator_selection_from(&self.terminal_runtimes);
+                        .align_navigator_selection_to_scroll_from(&self.terminal_runtimes);
                 }
                 _ => {}
             }
@@ -337,11 +335,17 @@ impl AppState {
         if !rect_contains(body, col, row) {
             return None;
         }
-        let idx = self
+        let line_idx = self
             .navigator
             .scroll
             .saturating_add(row.saturating_sub(body.y) as usize);
-        (idx < self.navigator_rows_from(terminal_runtimes).len()).then_some(idx)
+        let lines = crate::app::state::navigator_display_lines(
+            &self.navigator_rows_from(terminal_runtimes),
+        );
+        match lines.get(line_idx) {
+            Some(crate::app::state::NavigatorDisplayLine::Row(idx)) => Some(*idx),
+            _ => None,
+        }
     }
 
     pub(crate) fn navigator_row_caret_at(&self, col: u16) -> bool {

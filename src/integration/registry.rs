@@ -61,9 +61,13 @@ pub(crate) fn integration_target_supported(target: crate::api::schema::Integrati
     {
         matches!(
             target,
-            crate::api::schema::IntegrationTarget::Claude
+            crate::api::schema::IntegrationTarget::Pi
+                | crate::api::schema::IntegrationTarget::Omp
+                | crate::api::schema::IntegrationTarget::Claude
                 | crate::api::schema::IntegrationTarget::Codex
                 | crate::api::schema::IntegrationTarget::Copilot
+                | crate::api::schema::IntegrationTarget::Opencode
+                | crate::api::schema::IntegrationTarget::Kilo
                 | crate::api::schema::IntegrationTarget::Droid
                 | crate::api::schema::IntegrationTarget::Kimi
                 | crate::api::schema::IntegrationTarget::Qodercli

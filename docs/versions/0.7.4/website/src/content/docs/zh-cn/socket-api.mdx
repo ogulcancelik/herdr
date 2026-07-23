@@ -1,0 +1,676 @@
+---
+title: Socket API
+description: 从脚本、工具和编程智能体控制运行中的 Herdr 服务器。
+---
+
+Herdr 为需要检查或控制运行中会话的脚本和智能体提供了一个本地 socket API。
+
+大多数自动化应从 CLI 包装命令开始。只有在需要直接的请求/响应控制或长期事件订阅时,才使用原始 socket API。
+
+## 选择集成层
+
+| 层 | 用途 |
+| --- | --- |
+| 智能体技能 | 教编程智能体如何在窗格内使用 Herdr。 |
+| CLI 包装 | Shell 脚本、简单编排和人工调试。 |
+| 原始 socket API | 自定义工具、协议客户端和事件订阅者。 |
+
+这些层共享同一套控制面。
+
+## Schema
+
+安装的 CLI 可以打印该 Herdr 二进制中包含的 socket 协议 schema:
+
+```bash
+herdr api schema
+herdr api schema --json
+herdr api schema --output herdr-api.schema.json
+```
+
+普通的 `herdr api schema` 打印简短摘要。`--json` 打印供工具使用的完整 JSON Schema,`--output PATH` 将该文档写入文件。schema 覆盖原始请求、成功响应、错误响应、发出的事件和订阅事件。
+
+## 你能控制什么
+
+socket API 可以:
+
+- 创建、列出、聚焦、重命名和关闭工作区
+- 创建、列出、聚焦、重命名和关闭标签页
+- 列出、检查、分割、交换、聚焦、调整、重命名、读取、关闭窗格并向其发送输入
+- 通过 CLI 辅助命令列出、检查、读取、发送、重命名、聚焦、启动和附加智能体
+- 从钩子和插件上报自定义智能体状态
+- 订阅事件并等待输出或状态变化
+- 安装和卸载内置集成
+- 停止服务器并重载配置
+
+## CLI 示例
+
+创建工作区:
+
+```bash
+herdr workspace create --cwd ~/project --label api
+```
+
+创建标签页:
+
+```bash
+herdr tab create --label logs
+```
+
+分割窗格并运行命令:
+
+```bash
+herdr pane split w1:p1 --direction right
+herdr pane run w1:p2 "npm test"
+```
+
+检查并重排窗格:
+
+```bash
+herdr pane layout --current
+herdr pane neighbor --direction right --current
+herdr pane resize --direction right --amount 0.1 --current
+herdr pane swap --direction right --current
+herdr pane zoom --on --current
+herdr pane split w1:p1 --direction right --ratio 0.333
+```
+
+等待智能体:
+
+```bash
+herdr wait agent-status w1:p1 --status done
+```
+
+读取窗格输出:
+
+```bash
+herdr pane read w1:p2 --source recent --lines 50
+```
+
+## 原始方法
+
+原始 socket 方法名使用点号记法:
+
+| 领域 | 方法 |
+| --- | --- |
+| 服务器 | `ping`、`server.stop`、`server.reload_config`、`server.agent_manifests`、`server.reload_agent_manifests` |
+| 通知 | `notification.show` |
+| 客户端 | `client.window_title.set`、`client.window_title.clear` |
+| 会话 | `session.snapshot` |
+| 工作区 | `workspace.create`、`workspace.list`、`workspace.get`、`workspace.focus`、`workspace.rename`、`workspace.move`、`workspace.report_metadata`、`workspace.close` |
+| Worktree | `worktree.list`、`worktree.create`、`worktree.open`、`worktree.remove` |
+| 标签页 | `tab.create`、`tab.list`、`tab.get`、`tab.focus`、`tab.rename`、`tab.move`、`tab.close` |
+| 窗格 | `pane.split`、`pane.swap`、`pane.move`、`pane.zoom`、`pane.layout`、`pane.process_info`、`pane.neighbor`、`pane.edges`、`pane.focus_direction`、`pane.resize`、`pane.list`、`pane.current`、`pane.get`、`pane.rename`、`pane.send_text`、`pane.send_keys`、`pane.send_input`、`pane.read`、`pane.graphics.info`、`pane.graphics.set`、`pane.graphics.clear`、`pane.graphics.stream`、`pane.report_agent`、`pane.report_agent_session`、`pane.report_metadata`、`pane.clear_agent_authority`、`pane.release_agent`、`pane.close`、`pane.wait_for_output` |
+| 弹窗 | `popup.close` |
+| 布局 | `layout.export`、`layout.apply`、`layout.set_split_ratio` |
+| 智能体 | `agent.list`、`agent.get`、`agent.read`、`agent.explain`、`agent.send`、`agent.rename`、`agent.focus`、`agent.start` |
+| 事件 | `events.subscribe`、`events.wait` |
+| 集成 | `integration.install`、`integration.uninstall` |
+| 插件 | `plugin.link`、`plugin.list`、`plugin.unlink`、`plugin.enable`、`plugin.disable`、`plugin.action.list`、`plugin.action.invoke`、`plugin.log.list`、`plugin.pane.open`、`plugin.pane.focus`、`plugin.pane.close` |
+
+一些 CLI 命令是这些方法的便捷包装。比如 `herdr agent wait` 先解析智能体目标,然后订阅窗格智能体状态事件。
+
+`session.snapshot` 为维护本地运行时缓存的客户端返回一次性引导快照。响应包含版本/协议元数据、当前聚焦的工作区/标签页/窗格 id、工作区记录、标签页记录、窗格记录、标签页布局快照和智能体记录。它不是订阅;读取后应订阅资源事件,并根据事件更新本地缓存。重新连接后或本地缓存可能已过期时,再次调用 `session.snapshot`。工作区记录也包含关联 worktree 的来源信息。完整的仓库 worktree 发现仍使用 `worktree.list`。
+
+CLI 的 `herdr api snapshot` 会把当前 `session.snapshot` 响应输出为 JSON,让客户端和智能体可以简单地完成引导。
+
+窗格控制方法使用 `w1:p1` 这类公开窗格 id。schema 中 `pane_id` 可选的方法,在省略它时使用服务器当前聚焦的活动窗格。`pane.move` 总是要求来源 `pane_id`。
+
+`pane.send_keys` 和 `pane.send_input.keys` 接受 Herdr 组合键字符串: 普通可打印键、`enter` 和 `esc` 这类特殊键、`ctrl+h`、`control+j`、`alt+x`、`shift+tab` 这类修饰组合键、`f1` 这类功能键,以及 `minus` 和 `plus` 这类命名标点。它们不接受 `prefix+` 绑定字符串。
+
+```json
+{"id":"req_current","method":"pane.current","params":{"caller_pane_id":"w1:p1"}}
+{"id":"req_layout","method":"pane.layout","params":{"pane_id":"w1:p1"}}
+{"id":"req_neighbor","method":"pane.neighbor","params":{"pane_id":"w1:p1","direction":"right"}}
+{"id":"req_edges","method":"pane.edges","params":{"pane_id":"w1:p1"}}
+{"id":"req_focus","method":"pane.focus_direction","params":{"direction":"right"}}
+{"id":"req_resize","method":"pane.resize","params":{"pane_id":"w1:p1","direction":"right","amount":0.1}}
+{"id":"req_zoom","method":"pane.zoom","params":{"pane_id":"w1:p1","mode":"toggle"}}
+{"id":"req_split","method":"pane.split","params":{"direction":"right","ratio":0.333,"env":{"HERDR_ROLE":"tests"}}}
+{"id":"req_process","method":"pane.process_info","params":{"pane_id":"w1:p1"}}
+```
+
+`pane.current` 返回单个 `PaneInfo`。带有 `caller_pane_id` 时,Herdr 返回那个窗格。省略时,Herdr 返回当前聚焦的活动窗格。
+
+终端滚动指标可用时,`PaneInfo` 包含 `scroll`:
+
+```json
+{
+  "offset_from_bottom": 12,
+  "max_offset_from_bottom": 240,
+  "viewport_rows": 30
+}
+```
+
+客户端可以把 `offset_from_bottom == 0` 视为位于底部。
+
+### 实验性窗格图形
+
+窗格图形允许插件在窗格上放置图像数据。它们只在 `[experimental].kitty_graphics = true` 时可用;否则所有窗格图形方法都返回 `feature_disabled`。调用 `pane.graphics.info` 会返回所连接客户端的单元格像素宽度和高度,但不会创建图形层。`pane.graphics.set` 接受 `data_base64` 中的 `png`、`rgb` 或 `rgba` 数据,`pane.graphics.clear` 删除该图层。
+
+```json
+{"id":"graphics_info","method":"pane.graphics.info","params":{"pane_id":"w1:p1"}}
+{"id":"graphics_set","method":"pane.graphics.set","params":{"pane_id":"w1:p1","format":"png","image_width":800,"image_height":600,"data_base64":"...","placement":{"viewport_col":0,"viewport_row":0,"grid_cols":80,"grid_rows":30}}}
+{"id":"graphics_clear","method":"pane.graphics.clear","params":{"pane_id":"w1:p1"}}
+```
+
+要重复发送帧,用 `pane.graphics.stream` 打开专用 socket。Herdr 回复 `ok` 后,每一帧发送一个 JSON 头,再发送恰好 `data_length` 字节的原始数据。socket 关闭前,该流拥有对应窗格的图形层;并发 set、clear 或 stream 请求返回 `stream_conflict`。
+
+```json
+{"id":"graphics_stream","method":"pane.graphics.stream","params":{"pane_id":"w1:p1"}}
+{"format":"png","image_width":800,"image_height":600,"data_length":12345,"placement":{"viewport_col":0,"viewport_row":0,"grid_cols":80,"grid_rows":30}}
+```
+
+`pane.layout` 返回标签页布局快照,包含 `workspace_id`、`tab_id`、`zoomed`、外层 `area`、`focused_pane_id`、窗格矩形和分割矩形/比例。`pane.neighbor` 和 `pane.edges` 也包含同一份布局快照,让客户端不需要私有布局状态就能做出下一步决策。
+
+`pane.process_info` 返回窗格的 shell pid、可用时的前台进程组 id,以及平台暴露时带有 pid、名称、argv/cmdline 和 cwd 的前台进程。
+
+`layout.export` 返回可移植的标签页布局树。省略 `tab_id` 和 `pane_id` 导出活动标签页,传 `tab_id` 导出该标签页,或传 `pane_id` 导出包含该窗格的标签页。
+
+```json
+{"id":"req_export","method":"layout.export","params":{"tab_id":"w1:t1"}}
+```
+
+响应包含 `workspace_id`、`tab_id`、`zoomed`、`focused_pane_id` 和 `root`。`root` 是由 `pane` 和 `split` 节点组成的 BSP 树。窗格节点可以包含 `pane_id`、`label`、`cwd` 和 argv `command`。分割节点使用 `direction` (`right` 或 `down`)、`ratio`、`first` 和 `second`。
+
+`layout.apply` 从声明式的树创建一个新标签页。提供 `tab_id` 时,Herdr 先创建替代标签页,再关闭旧标签页。它会恢复结构、标签、cwd、env 和可选的 argv 命令;不会保留活跃的 PTY、回滚内容或运行中的进程。
+
+```json
+{
+  "id": "req_apply",
+  "method": "layout.apply",
+  "params": {
+    "workspace_id": "wabc",
+    "tab_label": "dev",
+    "focus": true,
+    "root": {
+      "type": "split",
+      "direction": "right",
+      "ratio": 0.65,
+      "first": {
+        "type": "pane",
+        "label": "editor",
+        "cwd": "/repo"
+      },
+      "second": {
+        "type": "pane",
+        "label": "tests",
+        "cwd": "/repo",
+        "command": ["sh", "-c", "just test"],
+        "env": { "HERDR_ROLE": "tests" }
+      }
+    }
+  }
+}
+```
+
+`layout.set_split_ratio` 更新标签页布局中已有分割的比例。响应是 `type: "layout_split_ratio_set"`,并包含更新后的可移植 `layout`。
+
+```json
+{"id":"req_ratio","method":"layout.set_split_ratio","params":{"tab_id":"w1:t1","path":[],"ratio":0.6}}
+```
+
+启动进程的方法接受一个 `env` 对象。Herdr 只把这些键值对应用到新启动的进程。Herdr 还向受管窗格进程注入 `HERDR_SOCKET_PATH`、`HERDR_ENV=1`、`HERDR_WORKSPACE_ID`、`HERDR_TAB_ID` 和 `HERDR_PANE_ID`。与调用方提供的环境变量冲突时,Herdr 管理的变量保持权威。
+
+`pane.swap` 支持按方向和显式两种形式:
+
+```json
+{"id":"req_swap_dir","method":"pane.swap","params":{"pane_id":"w1:p1","direction":"right"}}
+{"id":"req_swap_explicit","method":"pane.swap","params":{"source_pane_id":"w1:p1","target_pane_id":"w1:p2"}}
+```
+
+交换仅限同一标签页。它保留分割形状、分割比例、窗格 id 和运行中的进程。响应是 `type: "pane_swap"`,带 `changed`、可选的 `reason`、`source_pane_id`、可选的 `target_pane_id`、`focused_pane_id` 和 `layout`。reason 的取值有 `no_neighbor`、`same_pane`、`not_found` 和 `cross_tab`。标签页处于缩放状态时,交换保持缩放,并修改隐藏的整页布局。
+
+`pane.move` 把运行中的窗格移动到另一个标签页、新标签页或新工作区:
+
+```json
+{"id":"req_move_tab","method":"pane.move","params":{"pane_id":"w1:p2","destination":{"type":"tab","tab_id":"w1:t2","target_pane_id":"w1:p3","split":"right","ratio":0.5},"focus":true}}
+{"id":"req_move_new_tab","method":"pane.move","params":{"pane_id":"w1:p2","destination":{"type":"new_tab","workspace_id":"w1","label":"logs"},"focus":true}}
+{"id":"req_move_new_workspace","method":"pane.move","params":{"pane_id":"w1:p2","destination":{"type":"new_workspace","label":"logs","tab_label":"main"},"focus":true}}
+```
+
+移动到已有标签页需要 `split: "right" | "down"`。`target_pane_id` 可选,默认是目标标签页的聚焦窗格。同一标签页内的布局变化仍然用 `pane.swap`;移动到来源标签页返回 `changed: false` 和 `reason: "same_tab"`。涉及缩放状态的来源或目标标签页的移动返回 `changed: false` 和 `reason: "zoomed_tab"`。
+
+响应是 `type: "pane_move"`,带 `changed`、可选的 `reason`、`previous_pane_id`、`previous_workspace_id`、`previous_tab_id`、被移动的 `pane`、可选的 `source_layout`、`target_layout`、可选的新建工作区或标签页记录、可选的已关闭工作区或标签页 id,以及 `focused_pane_id`。跨工作区移动保持内部窗格和终端存活,但在目标工作区分配新的公开窗格 id。订阅者可以监听 `pane.moved`;Herdr 不会为被移动的终端进程发出假的窗格关闭/创建事件。
+
+`pane.zoom` 切换、启用或禁用目标窗格所在标签页的缩放:
+
+```json
+{"id":"req_zoom_toggle","method":"pane.zoom","params":{"pane_id":"w1:p1"}}
+{"id":"req_zoom_on","method":"pane.zoom","params":{"pane_id":"w1:p1","mode":"on"}}
+{"id":"req_zoom_off","method":"pane.zoom","params":{"pane_id":"w1:p1","mode":"off"}}
+```
+
+省略 `pane_id` 时,目标是服务器当前聚焦的活动窗格。响应是 `type: "pane_zoom"`,带 `changed`、`zoom_changed`、`focus_changed`、可选的 `reason`、`pane_id`、`focused_pane_id`、`zoomed` 和 `layout`。缩放状态或焦点任一发生变化时,`changed` 为 true。reason 的取值有 `single_pane`、`already_zoomed` 和 `already_unzoomed`。
+
+`notification.show` 的 CLI 包装是:
+
+```bash
+herdr notification show "build failed" --body "api workspace" --position top-left --sound request
+```
+
+通过配置的 toast 投递方式显示用户通知:
+
+```json
+{"id":"req_notify","method":"notification.show","params":{"title":"build failed","body":"api workspace","position":"top-left","sound":"request"}}
+```
+
+`title` 必填,并且在移除控制字符和重复空白后必须仍有可见文本。`body` 可选。Herdr 把换行、制表符、回车和重复空白折叠为空格,然后把通知文本截断: `title` 80 个字符,`body` 240 个字符。净化后为空的 `title` 返回 `invalid_params`。`position` 可选,只在 `ui.toast.delivery = "herdr"` 时生效;桌面位置相对于完整的 Herdr 画面,省略时使用 `ui.toast.herdr.position`。terminal、system 和 off 投递忽略 `position`。`sound` 可选,取值 `none`、`done` 或 `request`;默认 `none`,且只在通知实际显示时播放。
+
+响应会报告是否有内容被显示:
+
+```json
+{"id":"req_notify","result":{"type":"notification_show","shown":true,"reason":"shown"}}
+```
+
+可能的 reason 有 `shown`、`disabled`、`rate_limited`、`no_foreground_client` 和 `busy`。`disabled` 表示 `ui.toast.delivery = "off"`。`busy` 表示已有的应用内 toast 未被替换。terminal 和 system 投递是通过当前前台连接的 Herdr 客户端尽力而为的。
+
+设置或清除前台客户端的外层终端窗口标题:
+
+```json
+{"id":"req_title","method":"client.window_title.set","params":{"title":"herdr api"}}
+{"id":"req_title_clear","method":"client.window_title.clear","params":{}}
+```
+
+`client.window_title.clear` 恢复 Herdr 的默认标题。响应是 `type: "client_window_title"`,带 `changed` 和 `set`、`cleared` 或 `no_foreground_client` 之一的 reason。
+
+Worktree 方法把 Git 检出作为 Herdr 工作区管理。`worktree.create` 创建检出,并返回新的 `workspace`、`tab`、`root_pane` 和 `worktree` 记录。请求的分支已在本地存在时检出它;否则从请求的 base 或 `HEAD` 创建分支。`worktree.open` 打开已有检出,或返回已打开的工作区。`worktree.remove` 对关联的子工作区运行 `git worktree remove`,从不删除分支。
+
+从来源工作区创建 worktree:
+
+```json
+{"id":"req_1","method":"worktree.create","params":{"workspace_id":"w1","branch":"worktree/api","focus":false}}
+```
+
+打开已有检出:
+
+```json
+{"id":"req_2","method":"worktree.open","params":{"workspace_id":"w1","branch":"worktree/api","focus":true}}
+```
+
+移除关联的检出:
+
+```json
+{"id":"req_3","method":"worktree.remove","params":{"workspace_id":"2","force":false}}
+```
+
+`worktree.list`、`worktree.create` 和 `worktree.open` 中,`workspace_id` 和 `cwd` 最多用一个;两个都省略则使用活动工作区。`worktree.open` 中,`path` 和 `branch` 恰好用一个。原始 socket 的 `cwd` 和 `path` 值必须是绝对路径;CLI 在发送请求前会展开相对的 `--cwd` 和 `--path` 值。当工作区属于某个 Herdr worktree 组时,工作区响应包含可选的 `worktree` 来源信息。当已有工作区获得或改变 worktree 来源信息时,worktree 命令可能发出 `workspace.updated`。
+
+Worktree 命令也发出生命周期事件。`worktree.create` 发出 `workspace.created`、`tab.created`、`pane.created` 和 `worktree.created`。`worktree.open` 发出 `worktree.opened`,并在打开新的 Herdr 工作区时同时发出工作区/标签页/窗格创建事件。`worktree.remove` 发出 `worktree.removed`;如果关联的工作区仍然打开,还会发出 `workspace.closed`。
+
+## 插件 API
+
+插件 API 是面向可执行工作流工具的早期宿主面。插件是带 `herdr-plugin.toml` 清单的包。清单声明可分享的动作、事件钩子、终端窗格入口点和链接处理器。动作和窗格仅限清单声明;运行时动作注册和运行时 argv 窗格创建不在 v1 范围内。
+
+安装和链接的插件跨重启持久化。在 `plugin.link`、`plugin.unlink`、`plugin.enable` 和 `plugin.disable` 时,Herdr 在 `session.json` 旁写入一个 `plugins.json` 注册表文件。Herdr 不在运行时,`herdr plugin install` CLI 也写同一个注册表,然后启动时自动加载。启动时,Herdr 从原始路径重新读取每个清单;文件缺失或无法解析时,条目会带着 `warnings` 字段保留,`plugin.list` 会将其展示出来。
+
+事件钩子的 `on` 值在链接时会对照已知的 Herdr 事件名校验。无法识别的名称不算错误 — 链接仍会成功 — 但返回的插件信息会包含警告 (例如 `"unknown event 'worktree.craeted'"`)。检查 `plugin.link` 和 `plugin.list` 响应中的 `warnings` 字段。
+
+链接本地插件清单:
+
+```json
+{"id":"req_plugin_link","method":"plugin.link","params":{"path":"/path/to/plugin","enabled":true}}
+```
+
+`plugin.link` 也接受可选的 `source` 元数据。CLI 从 GitHub 安装时使用它,让 `plugin.list` 能显示来源、请求的 ref、解析的 commit 和托管检出路径:
+
+```json
+{"id":"req_plugin_link","method":"plugin.link","params":{"path":"/managed/plugin/herdr-plugin.toml","enabled":true,"source":{"kind":"github","owner":"ogulcancelik","repo":"herdr-plugin-examples","subdir":"worktree-bootstrap","requested_ref":"main","resolved_commit":"abc123","managed_path":"/data/plugins/github/<managed-checkout>","installed_unix_ms":1780000000000}}}
+```
+
+路径可以是包含 `herdr-plugin.toml` 的插件目录,或直接指向清单的路径。清单结构如下:
+
+```toml
+id = "example.worktree-bootstrap"
+name = "Worktree Bootstrap"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Prepare new worktrees"
+platforms = ["linux", "macos", "windows"]
+
+[[build]]
+command = ["bun", "install"]
+
+[[actions]]
+id = "bootstrap"
+title = "Bootstrap worktree"
+contexts = ["workspace"]
+command = ["bun", "run", "bootstrap.ts"]
+
+[[events]]
+on = "worktree.created"
+command = ["bun", "run", "bootstrap.ts"]
+
+[[panes]]
+id = "board"
+title = "Worktree board"
+placement = "overlay"
+command = ["bun", "run", "board.ts"]
+
+[[link_handlers]]
+id = "github-issue"
+title = "Open GitHub issue"
+pattern = "^https://github\\.com/[^/]+/[^/]+/(issues|pull)/[0-9]+$"
+action = "bootstrap"
+```
+
+`min_herdr_version` 是必填项。字段缺失、无效,或比运行中的 Herdr 二进制更新时,服务器拒绝链接插件。
+
+在顶层用你的插件支持的操作系统标识 (`linux`、`macos`、`windows`) 声明 `platforms`。本地开发允许省略 `platforms` — `plugin.link` 会成功,但响应包含警告。单个构建命令、动作、事件钩子、窗格和链接处理器可以声明自己的 `platforms` 来覆盖插件级列表;省略时从插件继承。调用有效 platforms 不包含当前操作系统的动作或打开这样的窗格,会返回 `platform_unsupported` 错误。
+
+列出、启用、禁用或取消链接插件:
+
+```json
+{"id":"req_plugin_list","method":"plugin.list","params":{}}
+{"id":"req_plugin_disable","method":"plugin.disable","params":{"plugin_id":"example.worktree-bootstrap"}}
+{"id":"req_plugin_enable","method":"plugin.enable","params":{"plugin_id":"example.worktree-bootstrap"}}
+{"id":"req_plugin_unlink","method":"plugin.unlink","params":{"plugin_id":"example.worktree-bootstrap"}}
+```
+
+动作从链接的清单解析。`plugin.action.list` 返回所有已安装插件的全部动作;传 `plugin_id` 过滤。
+
+```json
+{"id":"req_plugin_actions","method":"plugin.action.list","params":{}}
+{"id":"req_plugin_actions_filtered","method":"plugin.action.list","params":{"plugin_id":"example.worktree-bootstrap"}}
+```
+
+`plugin.action.list` 返回应用插件级继承后每个动作的有效 `platforms`。
+
+用限定 id 或裸动作 id 调用动作:
+
+```json
+{"id":"req_plugin_invoke","method":"plugin.action.invoke","params":{"action_id":"example.worktree-bootstrap.bootstrap","context":{"invocation_source":"keybinding"}}}
+```
+
+`plugin.action.invoke` 解析清单动作,启动清单命令,并返回 Herdr 构建的调用上下文和已启动命令的日志记录。缺失的上下文字段会从活动工作区、标签页、聚焦窗格、worktree 来源信息和请求 id 补全。调用被禁用插件的动作返回 `plugin_disabled` 错误。
+
+Herdr 注入 `HERDR_SOCKET_PATH`、`HERDR_BIN_PATH`、`HERDR_ENV=1`、`HERDR_PLUGIN_ID`、`HERDR_PLUGIN_ROOT`、`HERDR_PLUGIN_CONFIG_DIR`、`HERDR_PLUGIN_STATE_DIR`、`HERDR_PLUGIN_CONTEXT_JSON`,以及可用的 `HERDR_WORKSPACE_ID`、`HERDR_TAB_ID` 和 `HERDR_PANE_ID` 值。动作命令还收到 `HERDR_PLUGIN_ACTION_ID`;事件钩子收到 `HERDR_PLUGIN_EVENT` 和 `HERDR_PLUGIN_EVENT_JSON`;窗格命令收到 `HERDR_PLUGIN_ENTRYPOINT_ID`。
+
+列出最近的动作和事件命令日志:
+
+```json
+{"id":"req_plugin_logs","method":"plugin.log.list","params":{"plugin_id":"example.worktree-bootstrap","limit":20}}
+```
+
+当 Herdr 发出匹配的事件名 (比如 `worktree.created`) 时,事件钩子为已启用的已安装插件运行。
+
+v1 没有 Herdr 管理的插件存储 API。`HERDR_PLUGIN_CONFIG_DIR` 和 `HERDR_PLUGIN_STATE_DIR` 只提供路径发现;文件、schema、迁移和清理归插件所有。
+
+打开托管终端 UI:
+
+```json
+{"id":"req_plugin_pane","method":"plugin.pane.open","params":{"plugin_id":"example.board","entrypoint":"board","placement":"zoomed","target_pane_id":"w1:p1","env":{"HERDR_ROLE":"board"},"focus":true}}
+```
+
+`plugin.pane.open` 要求已安装、已启用、平台兼容的插件,然后把请求的清单 `[[panes]]` 入口点作为 argv 支撑的终端窗格启动。清单窗格的 `placement` 默认为 `overlay`;请求的 `placement` 可以用 `overlay`、`popup`、`split`、`tab` 或 `zoomed` 覆盖清单。overlay 和 popup 使用活动平铺窗格作为启动上下文。弹窗终端是会话级模态界面,不会改变标签页布局;可选的 `width` 和 `height` 以终端单元格数或 `"80%"` 这样的百分比设置外层尺寸。省略时默认为终端大小的一半,过小的值会限制为弹窗最小尺寸。弹窗没有窗格 id,不属于任何 `pane.*` 或智能体 API,不会发出窗格生命周期事件,会把插件焦点上下文保留在底层平铺窗格上,也不会向其进程导出 `HERDR_PANE_ID`。弹窗启动返回 `ok`;`popup.close` 关闭活动弹窗,没有弹窗时返回 `popup_not_open`。split 和 zoomed 针对已有窗格,tab 可以针对工作区。split、tab、zoomed 和 overlay 打开后表现得像普通 Herdr 窗格,`plugin.pane.focus` 和 `plugin.pane.close` 仍可操作这些窗格。
+
+## Socket 传输
+
+Herdr 在本地 socket 上使用换行分隔的 JSON。在 Unix 上,那个 socket 是 Unix 域 socket。在 Windows 上,是命名管道。
+
+每行发送一个请求:
+
+```json
+{"id":"req_1","method":"ping","params":{}}
+```
+
+成功响应包含相同的 `id`:
+
+```json
+{"id":"req_1","result":{"type":"pong"}}
+```
+
+事件订阅在初始响应之后保持连接打开。
+
+## Socket 路径
+
+默认 socket 位于你的 Herdr 配置目录下。
+
+命名会话有各自独立的 socket:
+
+```text
+~/.config/herdr/herdr.sock
+~/.config/herdr/sessions/<name>/herdr.sock
+```
+
+解析顺序:
+
+1. 显式的 CLI `--session <name>`
+2. `HERDR_SOCKET_PATH`
+3. `HERDR_SESSION=<name>`
+4. 默认会话 socket
+
+`HERDR_SOCKET_PATH` 只用于底层覆盖。
+
+对插件来说,需要可移植的 Windows 行为时,优先调用 `HERDR_BIN_PATH` 和 CLI 包装命令。原始 socket 客户端要自己负责使用平台原生的本地 socket 形式。
+
+## 智能体状态上报
+
+集成用 `pane.report_agent` 上报智能体状态。
+
+```json
+{
+  "id": "req_1",
+  "method": "pane.report_agent",
+  "params": {
+    "pane_id": "w1:p1",
+    "source": "custom:docs",
+    "agent": "docs-bot",
+    "state": "working",
+    "message": "building docs"
+  }
+}
+```
+
+`state` 是语义性的。它影响等待、通知和汇总。只影响展示的值应通过元数据单独上报。
+
+仅提供会话的官方集成用 `pane.report_agent_session` 上报原生会话引用。上报状态的集成仍然可以在 `pane.report_agent` 中包含原生会话引用。与状态无关的会话上报不影响等待、通知或汇总。
+
+```json
+{
+  "id": "req_2",
+  "method": "pane.report_agent_session",
+  "params": {
+    "pane_id": "w1:p1",
+    "source": "herdr:codex",
+    "agent": "codex",
+    "agent_session_id": "..."
+  }
+}
+```
+
+Herdr 存有原生会话引用时,`pane.get`、`pane.list`、`agent.get` 和 `agent.list` 暴露一个只读的 `agent_session` 对象:
+
+```json
+{
+  "agent_session": {
+    "source": "herdr:codex",
+    "agent": "codex",
+    "kind": "id",
+    "value": "..."
+  }
+}
+```
+
+没有存储原生会话引用时,该字段被省略。
+
+当 Herdr 能解析当前控制窗格 PTY 的进程的 cwd 时,`pane.get`、`pane.list`、`agent.get` 和 `agent.list` 也暴露 `foreground_cwd`。已有的 `cwd` 字段仍然是用于标签、follow-cwd 行为和恢复会话状态的窗格/工作区 cwd。
+
+`PaneInfo` 和 `AgentInfo` 暴露可选的 `terminal_title` 和 `terminal_title_stripped` 字段。`terminal_title` 是经过安全规范化的最新 OSC 0/2 标题。`terminal_title_stripped` 会移除开头一个已识别的活动或旋转指示符字形及其后的空白。这些值归服务器所有,冷重启后不会保留,并且独立于元数据 `title` 和语义智能体状态。
+
+当用户钩子想自定义展示、又不从 Herdr 集成接管生命周期状态时,使用 `pane.report_metadata`。
+
+```json
+{
+  "id": "req_2",
+  "method": "pane.report_metadata",
+  "params": {
+    "pane_id": "w1:p1",
+    "source": "user:claude-title",
+    "agent": "claude",
+    "title": "Refactor auth middleware",
+    "display_agent": "Claude: auth",
+    "state_labels": {
+      "working": "refactoring auth",
+      "idle": "ready",
+      "done": "review ready"
+    },
+    "tokens": {
+      "summary": "refactor auth",
+      "model": "opus"
+    },
+    "ttl_ms": 3600000
+  }
+}
+```
+
+元数据上报只影响展示。有效的元数据可以覆盖窗格标题、显示的智能体名称、可见的状态标签和任意命名令牌。`working`、`blocked`、`idle`、等待、通知和汇总仍来自语义状态。原生会话恢复来自存储的官方会话引用。`agent` 是展示字段针对权威智能体标签的可选守卫;`applies_to_source` 同样保护展示字段,使其只适用于活动生命周期权威来源。这些守卫不作用于令牌补丁;令牌上报方负责清除和刷新 TTL。用 `display_agent` 修改可见名称。`state_labels` 的键必须是 `idle`、`working`、`blocked`、`done` 或 `unknown`。
+
+令牌映射是针对每个资源的补丁。字符串设置键,JSON `null` 清除键,未提及的键保持不变。最后接受的更新生效。可选 TTL 分别应用于该次上报更新的每个令牌键。窗格令牌会在 pane 和 agent 的 get/list 响应中公开,并可在智能体侧边栏行中写成 `$name`。单次上报最多可包含 16 个令牌键,每个窗格或工作区最多保留 32 个键。令牌名称必须由 1–32 个 ASCII 字母、数字、下划线或连字符组成。
+
+工作区令牌使用相同约定:
+
+```json
+{"id":"req_3","method":"workspace.report_metadata","params":{"workspace_id":"w1","source":"user:jj","tokens":{"jj_status":"2 changes","old":null},"ttl_ms":5000}}
+```
+
+workspace 的 get/list 响应会公开生成的 `tokens` 映射,空间侧边栏行可显示 `$jj_status` 这类值。变更和 TTL 到期会发出包含最新工作区快照的 `workspace.metadata_updated`。该元数据事件会发送给 API 订阅者,但不会调用插件事件钩子。
+
+展示文本在存储前被规范化。Herdr 去掉首尾空白、移除控制字符,并把 `title`、`display_agent`、每个状态标签和令牌值截断到 80 个字符。规范化后为空的令牌值会清除该键。
+
+`source` 和 `applies_to_source` 是来源标识符。它们必须不超过 80 个字符,且只能包含 ASCII 字母、数字、冒号、点、下划线和连字符。
+
+短期元数据用 `ttl_ms`。取值必须在 `1` 到 `86400000` 毫秒之间。想让元数据保留到被替换、清除或窗格或工作区关闭时,省略 `ttl_ms`。展示字段继续按来源过期;该次调用更新的每个令牌都有独立期限。令牌元数据不会在服务器重启后恢复。
+
+钩子可能乱序发送更新时,使用 `seq`。对同一 `source`,序号小于等于最后接受序号的上报会被 API 接受,但被窗格状态忽略。每个窗格或工作区在其生命周期内最多接受来自 32 个不同来源的带序号令牌上报;清除或过期不会释放这些来源名额。
+
+## 事件订阅
+
+需要长期数据流时订阅事件:
+
+```json
+{
+  "id": "sub_1",
+  "method": "events.subscribe",
+  "params": {
+    "subscriptions": [
+      { "type": "pane.agent_status_changed", "pane_id": "w1:p1", "agent_status": "blocked" }
+    ]
+  }
+}
+```
+
+第一个响应确认订阅。之后的行是推送的事件。
+
+工作区事件订阅包括 `workspace.created`、`workspace.updated`、`workspace.metadata_updated`、`workspace.renamed`、`workspace.moved`、`workspace.closed` 和 `workspace.focused`。`workspace.metadata_updated` 报告令牌变更和 TTL 到期,但不会调用插件事件钩子。其他工作区事件描述 Herdr UI/运行时的生命周期。当工作区属于 worktree 组时,`workspace.created` 包含可选的 `workspace.worktree` 来源信息。`workspace.moved` 包含被移动的 `workspace_id`、请求的 `insert_index` 和更新后的有序 `workspaces` 列表。在移除前 Herdr 仍能识别时,`workspace.closed` 包含最终的 `workspace` 快照。
+标签页事件订阅包括 `tab.created`、`tab.closed`、`tab.focused`、`tab.renamed` 和 `tab.moved`。`tab.moved` 包含被移动的 `tab_id`、`workspace_id`、请求的 `insert_index` 和该工作区更新后的有序 `tabs` 列表。
+窗格事件订阅包括 `pane.created`、`pane.updated`、`pane.closed`、`pane.focused`、`pane.moved`、`pane.exited`、`pane.agent_detected`、`pane.output_matched`、`pane.agent_status_changed` 和 `pane.scroll_changed`。终端标题变化可能发出 `pane.updated`,但如果原始标题只有旋转指示符发生变化且 `terminal_title_stripped` 不变,则不会发出。`pane.scroll_changed` 只针对一个 `pane_id`,每当 Herdr 观察到滚动快照变化时,都会发出 `pane_id`、`workspace_id` 和当前 `scroll` 指标。
+布局事件订阅包括 `layout.updated`。该事件携带一个标签页更新后的 `PaneLayoutSnapshot`。使用 `session.snapshot` 引导的客户端应替换具有相同 `workspace_id` 和 `tab_id` 的缓存布局。
+
+Worktree 事件订阅包括 `worktree.created`、`worktree.opened` 和 `worktree.removed`。Worktree 事件描述 Git 检出的生命周期。`worktree.created` 包含打开的 `workspace` 和创建的 `worktree`。`worktree.opened` 包含目标 `workspace`、打开的 `worktree` 和 `already_open`。`worktree.removed` 包含 `workspace_id`、被移除的 `worktree` 和 `forced`。
+
+生命周期事件用 `events.subscribe`。支持一次性等待时,专门的等待辅助命令会单独在文档中说明。
+
+## 读取窗格
+
+除非你在编写协议客户端,否则通过 CLI 使用 `pane.read`。
+
+```bash
+herdr pane read w1:p1 --source visible --lines 80
+herdr pane read w1:p1 --source recent --lines 120
+herdr pane read w1:p1 --source recent-unwrapped --lines 120
+herdr pane read w1:p1 --source detection
+```
+
+`recent-unwrapped` 对日志很有用,因为它忽略软折行。
+`detection` 返回智能体屏幕检测使用的底部缓冲区快照。
+
+## 等待状态
+
+用等待来协调智能体和脚本。
+
+```bash
+herdr wait agent-status w1:p1 --status done
+herdr wait agent-status w1:p1 --status blocked
+```
+
+智能体等待观察的是语义状态,不是任意命令的完成。
+
+## 响应结构
+
+成功响应长这样:
+
+```json
+{
+  "id": "req_1",
+  "result": {
+    "type": "pane_info",
+    "pane": {
+      "pane_id": "w1:p1",
+      "terminal_id": "term_abc123",
+      "workspace_id": "w1",
+      "tab_id": "w1:t1",
+      "focused": true,
+      "agent_status": "working",
+      "revision": 42
+    }
+  }
+}
+```
+
+`server.agent_manifests` 返回生效的智能体检测清单来源和远程更新诊断信息,不重载规则:
+
+```json
+{
+  "id": "req_1",
+  "result": {
+    "type": "agent_manifest_status",
+    "last_check_unix": 1781043522,
+    "last_result": "checked",
+    "manifests": [
+      {
+        "agent": "cursor",
+        "source": "/home/me/.config/herdr/agent-detection/cursor.toml",
+        "source_kind": "local override",
+        "active_version": "2026.06.10.1",
+        "cached_remote_version": "2026.06.10.1",
+        "local_override_shadowing_remote": true,
+        "remote_update_result": "current"
+      }
+    ]
+  }
+}
+```
+
+`last_check_unix`、`last_result`、`active_version`、`cached_remote_version`、`remote_update_result`、`remote_update_error`、`remote_last_checked_unix` 和 `warning` 这类字段在不可用时被省略。`server.reload_agent_manifests` 在重载内存中的规则缓存后,返回带相同 `manifests` 条目结构的 `agent_manifest_reload`。
+
+`agent.explain` 使用服务器生效的清单缓存,在运行中的服务器上评估目标窗格的检测快照:
+
+```json
+{
+  "id": "req_2",
+  "method": "agent.explain",
+  "params": { "target": "w1:p1" }
+}
+```
+
+响应包含与 `herdr agent explain --json` 打印的相同的 explain 对象,包括最终状态、清单来源和版本、匹配的规则、已评估规则的证据、跳过状态原因、idle 回退原因,以及当完整生命周期钩子权威使屏幕规则不再权威时的 `screen_detection_skip_reason`。
+
+客户端需要一个支持 `agent.explain` 的运行中服务器;升级 Herdr 后,请先重启或实时交接服务器,再依赖此方法。
+
+错误长这样:
+
+```json
+{
+  "id": "req_1",
+  "error": {
+    "code": "not_found",
+    "message": "pane not found"
+  }
+}
+```
+
+## 协议稳定性
+
+Herdr 有一个用于客户端/服务器兼容性的协议版本。协议变更会在考虑发布兼容性的前提下进行评审。
+
+在依赖新行为之前,用 `ping` 或 `herdr status` 检查服务器协议。对未知字段做宽容处理。

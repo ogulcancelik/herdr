@@ -9,6 +9,7 @@ pub struct TerminalKey {
     pub modifiers: KeyModifiers,
     pub kind: crossterm::event::KeyEventKind,
     pub shifted_codepoint: Option<u32>,
+    pub is_text_commit: bool,
 }
 
 impl TerminalKey {
@@ -18,6 +19,7 @@ impl TerminalKey {
             modifiers,
             kind: crossterm::event::KeyEventKind::Press,
             shifted_codepoint: None,
+            is_text_commit: false,
         }
     }
 
@@ -32,6 +34,19 @@ impl TerminalKey {
         self
     }
 
+    pub fn as_text_commit(mut self) -> Self {
+        let has_text_only_modifiers = match self.code {
+            KeyCode::Char(ch) if ch.is_ascii_uppercase() => {
+                self.modifiers == KeyModifiers::SHIFT || self.modifiers.is_empty()
+            }
+            KeyCode::Char(_) => self.modifiers.is_empty(),
+            _ => false,
+        };
+        self.is_text_commit =
+            has_text_only_modifiers && self.kind == crossterm::event::KeyEventKind::Press;
+        self
+    }
+
     pub fn as_key_event(self) -> KeyEvent {
         KeyEvent::new_with_kind(self.code, self.modifiers, self.kind)
     }
@@ -42,6 +57,8 @@ impl From<KeyEvent> for TerminalKey {
         Self::new(value.code, value.modifiers).with_kind(value.kind)
     }
 }
+
+pub(crate) const KITTY_FLAG_REPORT_ALL_KEYS: u16 = 0b0000_1000;
 
 #[cfg(not(windows))]
 pub fn ime_compatible_keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
@@ -116,6 +133,10 @@ impl KeyboardProtocol {
 
     pub(crate) fn reports_event_types(self) -> bool {
         matches!(self, Self::Kitty { flags } if flags & 0b0000_0010 != 0)
+    }
+
+    pub(crate) fn reports_all_keys(self) -> bool {
+        matches!(self, Self::Kitty { flags } if flags & KITTY_FLAG_REPORT_ALL_KEYS != 0)
     }
 }
 

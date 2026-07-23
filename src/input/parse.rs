@@ -45,6 +45,7 @@ fn parse_kitty_key_sequence(data: &str) -> Option<TerminalKey> {
         modifiers: key_modifiers_from_u8(modifier),
         kind,
         shifted_codepoint,
+        is_text_commit: false,
     })
 }
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import sys
 import tomllib
@@ -39,15 +40,29 @@ REGION_RE = re.compile(
     r"before_current_prompt_marker|current_prompt_block_marker|after_current_prompt_block_marker|"
     r"prompt_box_body|above_prompt_box|last_non_empty_above_prompt_box|after_last_horizontal_rule|"
     r"osc_title|osc_progress|"
-    r"bottom_lines\([1-9][0-9]*\)|bottom_non_empty_lines\([1-9][0-9]*\))$"
+    r"bottom_lines\([1-9][0-9]*\)|bottom_non_empty_lines\([1-9][0-9]*\)|"
+    r"top_non_empty_lines\([1-9][0-9]*\))$"
 )
+REGION_COUNT_RE = re.compile(r"\(([1-9][0-9]*)\)$")
 VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*$")
+MAX_TOP_REGION_LINE_COUNT = 65_535
 MAX_RULES_PER_MANIFEST = 128
 MAX_GATE_DEPTH = 8
 MAX_TOTAL_GATES = 512
 MAX_MATCHERS_PER_GATE = 32
 MAX_TOTAL_MATCHERS = 1024
 MAX_MATCHER_CHARS = 512
+
+# Keep engine-2 clients on the OSC-capable manifest until an engine-3 release
+# can consume top_non_empty_lines. Remove this entry when the website publishes
+# the bundled Grok manifest.
+STAGED_WEBSITE_MANIFESTS = {
+    "grok": (
+        "2026.07.16.2",
+        "2026.07.16.1",
+        "1f35b3271a96cf830c64bed78751619bfd8013c277c0d7c0f999b7a433895f28",
+    ),
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -136,6 +151,11 @@ def validate_manifest(path: Path, engine_version: int) -> dict:
     complexity = {"gates": 0, "matchers": 0}
     for index, rule in enumerate(rules):
         validate_rule(path, index, rule, complexity)
+        region = rule.get("region", "whole_recent")
+        if region.startswith("top_non_empty_lines(") and min_engine < 3:
+            raise CheckError(
+                f"{path}: rule {rule['id']} region {region!r} requires min_engine_version 3"
+            )
 
     return manifest
 
@@ -154,6 +174,13 @@ def validate_rule(path: Path, index: int, rule: object, complexity: dict[str, in
         raise CheckError(f"{path}: rule {rule_id} has invalid state {state!r}")
     region = rule.get("region", "whole_recent")
     if not isinstance(region, str) or not REGION_RE.fullmatch(region):
+        raise CheckError(f"{path}: rule {rule_id} has invalid region {region!r}")
+    count_match = REGION_COUNT_RE.search(region)
+    if (
+        region.startswith("top_non_empty_lines(")
+        and count_match
+        and int(count_match.group(1)) > MAX_TOP_REGION_LINE_COUNT
+    ):
         raise CheckError(f"{path}: rule {rule_id} has invalid region {region!r}")
     if rule.get("skip_state_update"):
         if state != "unknown":
@@ -295,7 +322,15 @@ def validate_catalog(
 
         bundled_path, bundled_manifest = bundled[agent_id]
         cmp = compare_versions(manifest["version"], bundled_manifest["version"], manifest_path)
-        if cmp < 0:
+        staged_manifest = STAGED_WEBSITE_MANIFESTS.get(agent_id)
+        website_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        stages_new_engine_manifest = (
+            staged_manifest
+            == (bundled_manifest["version"], manifest["version"], website_digest)
+            and bundled_manifest["min_engine_version"] == engine_version
+            and manifest["min_engine_version"] < bundled_manifest["min_engine_version"]
+        )
+        if cmp < 0 and not stages_new_engine_manifest:
             raise CheckError(
                 f"{manifest_path}: website version {manifest['version']} is lower than bundled "
                 f"{bundled_manifest['version']} in {bundled_path}"

@@ -1,10 +1,19 @@
 id = "grok"
-version = "2026.07.03.1"
+version = "2026.07.16.1"
 min_engine_version = 2
-updated_at = "2026-07-03T00:00:00Z"
+updated_at = "2026-07-16T00:00:00Z"
 aliases = ["grok-build"]
 
-# Evidence: Grok Build 0.2.82 live pane reads.
+# Evidence: Grok Build 0.2.101 source and live pane reads.
+#
+# Grok emits OSC 0 titles by default. Idle is "grok" or
+# "<session> - grok". During a turn, the configured title gains a braille
+# spinner and activity text. Permission prompts add "⚠ Action Required";
+# that prefix blinks while the terminal is unfocused, so visible blocker
+# rules outrank the generic non-idle title rule.
+#
+# Grok also emits OSC 9;4 progress on supported terminals. Herdr retains the
+# payload after "9;": "4;1;-1" while busy and "4;0;0" when idle.
 #
 # Working turns render one live status line directly above the prompt box:
 #   "⠧ Waiting on subagent… 2.8s   13s ⇣29.7k [stop]"
@@ -21,9 +30,17 @@ aliases = ["grok-build"]
 # rules must anchor on the [stop] chip, not on a bare spinner glyph.
 
 [[rules]]
+id = "osc_title_blocked"
+state = "blocked"
+priority = 1300
+region = "osc_title"
+visible_blocker = true
+contains = ["Action Required"]
+
+[[rules]]
 id = "option_dialog_blocked"
 state = "blocked"
-priority = 320
+priority = 1200
 region = "whole_recent"
 visible_blocker = true
 line_regex = ['^\s*┃\s+[0-9a-z]+\s+\([●○]\)\s']
@@ -31,7 +48,7 @@ line_regex = ['^\s*┃\s+[0-9a-z]+\s+\([●○]\)\s']
 [[rules]]
 id = "permission_hints_blocked"
 state = "blocked"
-priority = 310
+priority = 1190
 region = "bottom_non_empty_lines(2)"
 visible_blocker = true
 contains = [":select", "ctrl+o:yolo", "ctrl+c:cancel"]
@@ -39,7 +56,7 @@ contains = [":select", "ctrl+o:yolo", "ctrl+c:cancel"]
 [[rules]]
 id = "question_dialog_hints_blocked"
 state = "blocked"
-priority = 305
+priority = 1185
 region = "bottom_non_empty_lines(2)"
 visible_blocker = true
 contains = ["tab:scrollback", "shift+x:dismiss"]
@@ -48,7 +65,7 @@ contains = ["tab:scrollback", "shift+x:dismiss"]
 [[rules]]
 id = "permission_scope_selector"
 state = "blocked"
-priority = 300
+priority = 1180
 region = "whole_recent"
 visible_blocker = true
 contains = ["yes, proceed", "no, reject"]
@@ -56,6 +73,44 @@ any = [
   { contains = ["use ← → to choose permission whitelist scope"] },
   { contains = ["←/→:scope"] },
 ]
+
+[[rules]]
+id = "osc_progress_working"
+state = "working"
+priority = 1150
+region = "osc_progress"
+visible_working = true
+regex = ['^4;1;-1$']
+
+[[rules]]
+id = "osc_title_idle"
+state = "idle"
+priority = 1100
+region = "osc_title"
+visible_idle = true
+regex = ['(?:^| - )grok$']
+not = [
+  { regex = ['[\x{2800}-\x{28FF}]'] },
+]
+
+# After known idle titles are excluded, any other non-empty Grok title is
+# active. OSC progress remains authoritative when a custom title omits the
+# spinner but the terminal supports progress reporting.
+[[rules]]
+id = "osc_title_working"
+state = "working"
+priority = 1000
+region = "osc_title"
+visible_working = true
+regex = ['\S']
+
+[[rules]]
+id = "osc_progress_idle"
+state = "idle"
+priority = 950
+region = "osc_progress"
+visible_idle = true
+regex = ['^4;0;0$']
 
 [[rules]]
 id = "spinner_status_working"

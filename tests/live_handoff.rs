@@ -1212,7 +1212,97 @@ fn live_handoff_accepts_canonical_pane_id_from_child_env() {
 }
 
 #[test]
+fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let old_session = base.join("old-session.jsonl");
+    let new_session = base.join("new-session.jsonl");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:agent:report",
+            "method": "pane.report_agent",
+            "params": {
+                "pane_id": pane_id,
+                "source": "herdr:pi",
+                "agent": "pi",
+                "state": "idle",
+                "seq": 1,
+                "agent_session_path": old_session
+            }
+        }),
+    ));
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:agent:rename",
+            "method": "agent.rename",
+            "params": {"target": pane_id, "name": "reviewer"}
+        }),
+    ));
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:agent:new-session",
+            "method": "pane.report_agent_session",
+            "params": {
+                "pane_id": pane_id,
+                "source": "herdr:pi",
+                "agent": "pi",
+                "seq": 2,
+                "agent_session_path": new_session,
+                "session_start_source": "new"
+            }
+        }),
+    ));
+    let old_name = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:agent:get-old-name",
+            "method": "agent.get",
+            "params": {"target": "reviewer"}
+        }),
+    );
+    assert_eq!(old_name["error"]["code"], "agent_not_found", "{old_name}");
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn live_handoff_keeps_agent_started_pane_after_agent_exits() {
+    use std::os::unix::fs::PermissionsExt;
+
     let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
@@ -1221,16 +1311,43 @@ fn live_handoff_keeps_agent_started_pane_after_agent_exits() {
     let started_marker = base.join("agent-started");
     let exited_marker = base.join("agent-exited");
     let shell_marker = base.join("shell-after-agent");
+    let bin = base.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let fake_pi = bin.join("pi");
+    fs::write(
+        &fake_pi,
+        format!(
+            "#!/bin/sh\nexport HERDR_AGENT=pi\necho started > {}\n/bin/sleep 1\necho exited > {}\n",
+            started_marker.display(),
+            exited_marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_pi, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:/bin:/usr/bin", bin.display());
 
-    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    let spawned = spawn_server_with_env(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &[("PATH", path.as_str())],
+    );
     wait_for_socket(&api_socket, Duration::from_secs(10));
     register_runtime_dir(&runtime_dir);
-
-    let command = format!(
-        "echo started > {}; sleep 1; echo exited > {}",
-        started_marker.display(),
-        exited_marker.display()
+    let workspace = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace-create",
+            "method": "workspace.create",
+            "params": { "cwd": "/tmp", "focus": false }
+        }),
     );
+    assert_ok(workspace.clone());
+    let pane_id = workspace["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
     let started = request(
         &api_socket,
         serde_json::json!({
@@ -1238,17 +1355,13 @@ fn live_handoff_keeps_agent_started_pane_after_agent_exits() {
             "method": "agent.start",
             "params": {
                 "name": "handoff-agent",
-                "cwd": "/tmp",
-                "focus": true,
-                "argv": ["/bin/sh", "-c", command]
+                "kind": "pi",
+                "pane_id": pane_id,
+                "timeout_ms": 5000
             }
         }),
     );
-    assert_ok(started.clone());
-    let pane_id = started["result"]["agent"]["pane_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    assert_ok(started);
     support::wait_for_file(&started_marker, Duration::from_secs(5));
 
     assert_ok(request(

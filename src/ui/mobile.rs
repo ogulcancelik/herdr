@@ -94,13 +94,12 @@ pub(crate) fn mobile_switcher_max_scroll_for_height(app: &AppState, viewport_hei
     mobile_switcher_content_height(app).saturating_sub(viewport_height as usize)
 }
 
-/// Doc-row height of the agents section (title + two rows per agent), or 0 when
-/// there are no agents so we don't show an empty header. The switcher leads with
-/// agents, so every section below it is offset by this.
+/// Doc-row height of the agents section. An active query keeps its title and an
+/// empty-state row visible even when no agents match.
 fn mobile_agents_block_height(app: &AppState) -> usize {
     let count = agent_panel_entries(app).len();
     if count == 0 {
-        0
+        usize::from(app.agent_view_override.is_some()) * 2
     } else {
         1 + count * 2
     }
@@ -136,27 +135,34 @@ pub(crate) fn mobile_switcher_target_at(
         return None;
     }
 
-    let doc_row = app
+    let scroll = app
         .mobile_switcher_scroll
-        .saturating_add(row.saturating_sub(areas.viewport.y) as usize);
+        .min(mobile_switcher_max_scroll_for_height(
+            app,
+            areas.viewport.height,
+        ));
+    let doc_row = scroll.saturating_add(row.saturating_sub(areas.viewport.y) as usize);
     let mut cursor = 0usize;
 
     // Agents lead the switcher: the primary job is switching between running
     // agents. Spaces/tabs/create actions follow for navigation and management.
-    // The section is omitted entirely when there are no agents.
     let agents = agent_panel_entries(app);
-    if !agents.is_empty() {
+    if !agents.is_empty() || app.agent_view_override.is_some() {
         cursor += 1; // agents title
-        let agents_end = cursor + agents.len() * 2;
-        if doc_row >= cursor && doc_row < agents_end {
-            let idx = (doc_row - cursor) / 2;
-            return agents.get(idx).map(|entry| MobileSwitcherTarget::Agent {
-                ws_idx: entry.ws_idx,
-                tab_idx: entry.tab_idx,
-                pane_id: entry.pane_id,
-            });
+        if agents.is_empty() {
+            cursor += 1; // active-query empty state
+        } else {
+            let agents_end = cursor + agents.len() * 2;
+            if doc_row >= cursor && doc_row < agents_end {
+                let idx = (doc_row - cursor) / 2;
+                return agents.get(idx).map(|entry| MobileSwitcherTarget::Agent {
+                    ws_idx: entry.ws_idx,
+                    tab_idx: entry.tab_idx,
+                    pane_id: entry.pane_id,
+                });
+            }
+            cursor = agents_end;
         }
-        cursor = agents_end;
     }
 
     cursor += 1; // spaces title
@@ -492,22 +498,42 @@ fn render_mobile_switcher_content(
     let mut doc_y = 0usize;
 
     let entries = agent_panel_entries_from(app, terminal_runtimes);
-    if !entries.is_empty() {
+    if !entries.is_empty() || app.agent_view_override.is_some() {
         let focused_agent = app.active.and_then(|ws_idx| {
             let ws = app.workspaces.get(ws_idx)?;
             ws.focused_pane_id()
                 .map(|pane_id| (ws_idx, ws.active_tab, pane_id))
         });
+        let title = app
+            .agent_view_override
+            .as_ref()
+            .map(|view| format!("agents · {}", view.label.as_deref().unwrap_or("filtered")))
+            .unwrap_or_else(|| "agents".to_string());
         render_section_title_at(
             frame,
             viewport,
             content,
             doc_y,
             app.mobile_switcher_scroll,
-            "agents",
+            &title,
             p,
         );
         doc_y += 1;
+        if entries.is_empty() {
+            render_one_line_item(
+                frame,
+                viewport,
+                content,
+                doc_y,
+                app.mobile_switcher_scroll,
+                ratatui::style::Color::Reset,
+                Line::from(Span::styled(
+                    "  no matching agents",
+                    Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                )),
+            );
+            doc_y += 1;
+        }
         for entry in &entries {
             let active = focused_agent.is_some_and(|(ws_idx, tab_idx, pane_id)| {
                 entry.ws_idx == ws_idx && entry.tab_idx == tab_idx && entry.pane_id == pane_id
@@ -968,7 +994,7 @@ impl GlobalAgentCounts {
 
 fn global_agent_counts(app: &AppState) -> GlobalAgentCounts {
     let mut counts = GlobalAgentCounts::default();
-    for entry in agent_panel_entries(app) {
+    for entry in crate::ui::all_agent_panel_entries(app) {
         match (entry.state, entry.seen) {
             (AgentState::Blocked, _) => counts.blocked += 1,
             (AgentState::Idle, false) => counts.done += 1,
@@ -1140,6 +1166,7 @@ mod tests {
             terminal_title: None,
             terminal_title_stripped: None,
             agent_label: agent_label.map(str::to_string),
+            agent_kind_label: agent_label.map(str::to_string),
             agent: agent_label.and_then(crate::detect::parse_agent_label),
             state: AgentState::Idle,
             seen: true,
@@ -1147,6 +1174,40 @@ mod tests {
             state_labels: std::collections::HashMap::new(),
             tokens: std::collections::HashMap::new(),
         }
+    }
+
+    #[test]
+    fn global_agent_counts_ignore_active_agent_view_filter() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            crate::workspace::Workspace::test_new("blocked"),
+            crate::workspace::Workspace::test_new("working"),
+        ];
+        app.ensure_test_terminals();
+        for (ws_idx, state) in [(0, AgentState::Blocked), (1, AgentState::Working)] {
+            let pane_id = app.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(crate::detect::Agent::Claude);
+            terminal.state = state;
+        }
+        app.agent_view_override = Some(crate::api::schema::AgentViewSetParams {
+            source: "example.views".to_string(),
+            label: None,
+            filter: Some(crate::api::schema::AgentViewFilter::Eq {
+                field: crate::api::schema::AgentViewField::Builtin(
+                    crate::api::schema::AgentViewBuiltinField::Status,
+                ),
+                value: crate::api::schema::AgentViewValue::String("working".to_string()),
+            }),
+            sort: Vec::new(),
+        });
+
+        let counts = global_agent_counts(&app);
+        assert_eq!(counts.blocked, 1);
+        assert_eq!(counts.working, 1);
     }
 
     #[test]
@@ -1252,6 +1313,7 @@ mod tests {
         assert_eq!(mobile_switcher_workspace_doc_range(&app, 0).start, 7);
 
         let viewport = mobile_switcher_areas(&app).viewport;
+        app.mobile_switcher_scroll = 100;
         let agent_hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 1);
         assert!(matches!(
             agent_hit,

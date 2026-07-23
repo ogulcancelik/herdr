@@ -48,6 +48,35 @@ pub(super) fn encode_api_keys(
     Ok(encoded_keys)
 }
 
+pub(super) fn encode_api_submission(
+    runtime: &crate::terminal::TerminalRuntime,
+    text: &str,
+) -> Vec<u8> {
+    let mut bytes = encode_api_text(runtime, text);
+    let enter = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    bytes.extend_from_slice(&runtime.encode_terminal_key(enter.into()));
+    bytes
+}
+
+pub(super) fn encode_api_input(
+    runtime: &crate::terminal::TerminalRuntime,
+    text: &str,
+    keys: &[String],
+) -> Result<Vec<u8>, String> {
+    let mut bytes = if text.is_empty() {
+        Vec::new()
+    } else {
+        encode_api_text(runtime, text)
+    };
+    for encoded in encode_api_keys(runtime, keys)? {
+        bytes.extend_from_slice(&encoded);
+    }
+    Ok(bytes)
+}
+
 pub(super) fn detect_state_from_api(
     state: crate::api::schema::PaneAgentState,
 ) -> crate::detect::AgentState {
@@ -69,6 +98,58 @@ pub(super) fn pane_agent_status(
         (crate::detect::AgentState::Working, _) => crate::api::schema::AgentStatus::Working,
         (crate::detect::AgentState::Blocked, _) => crate::api::schema::AgentStatus::Blocked,
         (crate::detect::AgentState::Unknown, _) => crate::api::schema::AgentStatus::Unknown,
+    }
+}
+
+pub(super) fn read_terminal_snapshot(
+    terminal: &crate::terminal::TerminalRuntime,
+    source: crate::api::schema::ReadSource,
+    format: crate::api::schema::ReadFormat,
+    lines: Option<u32>,
+) -> String {
+    use crate::api::schema::{ReadFormat, ReadSource};
+
+    let requested_lines = lines.unwrap_or(80).min(1000) as usize;
+    let text = match (format, source) {
+        (ReadFormat::Text, ReadSource::Visible) => terminal.visible_text(),
+        (ReadFormat::Text, ReadSource::Recent) => terminal.recent_text(requested_lines),
+        (ReadFormat::Text, ReadSource::RecentUnwrapped) => {
+            terminal.recent_unwrapped_text(requested_lines)
+        }
+        (ReadFormat::Text, ReadSource::Detection) => terminal.detection_text(),
+        (ReadFormat::Ansi, ReadSource::Visible) => terminal.visible_ansi(),
+        (ReadFormat::Ansi, ReadSource::Recent) => terminal.recent_ansi(requested_lines),
+        (ReadFormat::Ansi, ReadSource::RecentUnwrapped) => {
+            terminal.recent_unwrapped_ansi(requested_lines)
+        }
+        (ReadFormat::Ansi, ReadSource::Detection) => terminal.detection_text(),
+    };
+
+    if lines.is_some() && matches!(source, ReadSource::Visible | ReadSource::Detection) {
+        last_lines(&text, requested_lines)
+    } else {
+        text
+    }
+}
+
+fn last_lines(text: &str, count: usize) -> String {
+    if text.is_empty() || count == 0 {
+        return String::new();
+    }
+    let lines: Vec<_> = text.split_inclusive('\n').collect();
+    lines[lines.len().saturating_sub(count)..].concat()
+}
+
+#[cfg(test)]
+mod read_snapshot_tests {
+    use super::last_lines;
+
+    #[test]
+    fn last_lines_preserves_real_line_endings_and_unicode() {
+        assert_eq!(last_lines("one\ntwø\n三\n", 2), "twø\n三\n");
+        assert_eq!(last_lines("one\ntwo\nthree", 1), "three");
+        assert_eq!(last_lines("one\ntwo", 0), "");
+        assert_eq!(last_lines("", 2), "");
     }
 }
 

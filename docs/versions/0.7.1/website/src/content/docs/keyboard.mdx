@@ -1,0 +1,112 @@
+---
+title: Keyboard
+description: What the prefix is, which bindings to learn first, and how to go prefix-free.
+---
+
+:::tip[Coming from tmux or zellij?]
+You already know this model. Jump to the [keybinding reference](/docs/configuration/#keybindings) for the full default keymap and config syntax.
+:::
+
+Herdr is mouse-native. You can click panes, tabs, workspaces, and agents, drag split borders, and use right-click menus without learning a single keybinding. Keyboard control is an optional layer, not a requirement.
+
+## What the prefix is
+
+A terminal multiplexer sits between your terminal and the programs running inside it. Those programs already use most key combinations: `ctrl+c` interrupts, `ctrl+r` searches history, editors claim nearly everything else. If Herdr grabbed common keys directly, it would break the programs inside it.
+
+The prefix solves this. Press the prefix key, default `ctrl+b`, and the next keypress goes to Herdr instead of your terminal. `prefix+c` means: press `ctrl+b`, release, then press `c`. One reserved key instead of dozens.
+
+Press `prefix+?` at any time to see every active binding.
+
+## Learn these five first
+
+| Action | Key |
+| --- | --- |
+| New tab | `prefix+c` |
+| Split right / down | `prefix+v` / `prefix+minus` |
+| Move between panes | `prefix+h/j/k/l` |
+| Workspace navigation | `prefix+w` |
+| Detach, leave everything running | `prefix+q` |
+
+These cover most daily movement. Everything else can stay on the mouse.
+
+## The rest, by task
+
+Panes:
+
+| Action | Key |
+| --- | --- |
+| Zoom the focused pane | `prefix+z` |
+| Close pane | `prefix+x` |
+| Swap panes | `prefix+shift+h/j/k/l` |
+| Resize mode | `prefix+r` |
+| Copy mode | `prefix+[` |
+
+Tabs:
+
+| Action | Key |
+| --- | --- |
+| Next / previous tab | `prefix+n` / `prefix+p` |
+| Jump to tab 1–9 | `prefix+1..9` |
+| Rename tab | `prefix+shift+t` |
+| Close tab | `prefix+shift+x` |
+
+Workspaces and session:
+
+| Action | Key |
+| --- | --- |
+| New workspace | `prefix+shift+n` |
+| Rename workspace | `prefix+shift+w` |
+| Close workspace | `prefix+shift+d` |
+| Goto picker | `prefix+g` |
+| Toggle sidebar | `prefix+b` |
+
+The full keymap and the binding syntax live in the [keybinding reference](/docs/configuration/#keybindings).
+
+## Copy mode
+
+Press `prefix+[` to enter copy mode for the focused pane. Use `h/j/k/l`, `w/b/e`, and `{`/`}` to move, `v` or Space to start a selection, `y` or Enter to copy it, and `q` or Esc to leave without copying. Mouse drag-select copies without entering copy mode at all.
+
+## Change anything
+
+Every binding is configurable, including the prefix itself:
+
+```toml
+[keys]
+prefix = "ctrl+a"
+```
+
+## Going prefix-free
+
+You can bind Herdr actions to direct chords that need no prefix at all. The hard part is knowing which chords are safe, because terminals, shells, and desktop environments already own most of the keyboard.
+
+Any chord works as a binding: `ctrl+j`, `alt+k`, whatever fits your hands. But a chord has to survive three layers before Herdr sees it: your operating system, your outer terminal (Ghostty, iTerm2, and others ship their own defaults), and the programs running inside the pane. `ctrl+j` reaches Herdr fine, but shells and editors treat it as enter. `alt+k` is free on Linux, but macOS composes it into a special character in most terminals. If you pick chords from these families, double-check them against your own terminal and OS shortcuts.
+
+We mapped the default keybindings of Ghostty, iTerm2, Terminal.app, kitty, WezTerm, Alacritty, Warp, Windows Terminal, GNOME Terminal, and Konsole, plus the global shortcuts of GNOME and KDE. One modifier family is almost untouched everywhere: `ctrl+alt`. Terminals leave it free, it is not affected by the macOS option-key composing behavior that blocks plain `alt` chords, and it transmits even in terminals without a modern keyboard protocol. It is the safe default recommendation; the choice stays yours.
+
+This setup keeps the prefix bindings working and adds direct chords on top:
+
+```toml
+[keys]
+focus_pane_left = ["prefix+h", "ctrl+alt+h"]
+focus_pane_down = ["prefix+j", "ctrl+alt+j"]
+focus_pane_up = ["prefix+k", "ctrl+alt+k"]
+focus_pane_right = ["prefix+l", "ctrl+alt+l"]
+previous_tab = ["prefix+p", "ctrl+alt+["]
+next_tab = ["prefix+n", "ctrl+alt+]"]
+new_tab = ["prefix+c", "ctrl+alt+c"]
+split_vertical = ["prefix+v", "ctrl+alt+d"]
+split_horizontal = ["prefix+minus", "ctrl+alt+shift+d"]
+zoom = ["prefix+z", "ctrl+alt+z"]
+```
+
+A few `ctrl+alt` chords are taken elsewhere. Avoid these:
+
+| Chord | Owned by |
+| --- | --- |
+| `ctrl+alt+arrows` | GNOME workspace switching, Ghostty and Konsole defaults |
+| `ctrl+alt+t` | "Launch terminal" on Ubuntu and Fedora |
+| `ctrl+alt+l` / `ctrl+alt+a` | KDE lock screen / attention window |
+| `ctrl+alt+s` / `ctrl+alt+u` | Konsole |
+| `ctrl+alt+f1..f12` | Linux virtual console switching |
+
+If a direct chord does nothing, your terminal or desktop environment consumed it before Herdr could see it. Rebind either side: free the chord in the terminal's settings, or pick another chord in Herdr.

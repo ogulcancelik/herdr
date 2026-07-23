@@ -1,0 +1,286 @@
+---
+title: Integrations
+description: Install Herdr integrations for Pi, OMP, Claude Code, Codex, GitHub Copilot CLI, Devin CLI, Droid, Kimi Code CLI, OpenCode, Kilo Code CLI, Hermes Agent, Qoder CLI, and Cursor Agent CLI.
+---
+
+Herdr detects supported agents automatically. Official integrations can add native session identity for restore, lifecycle state reports, or both.
+
+Use integrations when you want native agent session restore from Claude Code/Codex/Copilot/Devin-style hooks, direct lifecycle reports from Pi/OMP/Kimi/OpenCode/Kilo/Hermes-style hooks or plugins, or both. See [Agents](/docs/agents/) for the full status authority model.
+
+## Install integrations
+
+Open settings inside Herdr and use the integrations tab to install recommended integrations for agents found on your `PATH`, or run commands manually:
+
+```bash
+herdr integration install pi
+herdr integration install omp
+herdr integration install claude
+herdr integration install codex
+herdr integration install copilot
+herdr integration install devin
+herdr integration install droid
+herdr integration install kimi
+herdr integration install opencode
+herdr integration install kilo
+herdr integration install hermes
+herdr integration install qodercli
+herdr integration install cursor
+```
+
+## Uninstall integrations
+
+```bash
+herdr integration uninstall pi
+herdr integration uninstall omp
+herdr integration uninstall claude
+herdr integration uninstall codex
+herdr integration uninstall copilot
+herdr integration uninstall devin
+herdr integration uninstall droid
+herdr integration uninstall kimi
+herdr integration uninstall opencode
+herdr integration uninstall kilo
+herdr integration uninstall hermes
+herdr integration uninstall qodercli
+herdr integration uninstall cursor
+```
+
+## How Herdr uses integrations
+
+Herdr uses integrations in two different ways:
+
+| Integration type | Agents | Effect |
+| --- | --- | --- |
+| Lifecycle authority | Pi, OMP, Kimi Code CLI, OpenCode, Kilo Code CLI, Hermes Agent | When installed and actively reporting for the pane, hook or plugin events author `idle`, `working`, and `blocked`. Herdr does not also use screen manifest fallback for that same lifecycle authority. |
+| Session identity | Claude Code, Codex, GitHub Copilot CLI, Devin CLI, Droid, Qoder CLI, Cursor Agent CLI | The integration reports native session references for restore. State still comes from Herdr's screen manifest detection. |
+
+Custom socket integrations can also report state when they define state that is not visible in the native terminal UI.
+
+Some integrations report native agent session references. Herdr uses official session references to resume Claude Code, Codex, Devin CLI, Droid, Kimi Code CLI, Qoder CLI, Cursor Agent CLI, GitHub Copilot CLI, Pi, OMP, Hermes Agent, OpenCode, and Kilo Code CLI panes after a Herdr server restart unless `[session] resume_agents_on_restore = false` disables it.
+
+Native session restore requires current Herdr integrations: Pi integration version `2`, OMP version `3`, Claude Code version `6`, Codex version `5`, GitHub Copilot CLI version `2`, Devin CLI version `2`, Droid version `2`, Kimi Code CLI version `3`, Qoder CLI version `2`, Cursor Agent CLI version `1`, OpenCode version `5`, Kilo Code CLI version `1`, or Hermes Agent version `2`. Check installed versions with `herdr integration status`.
+
+## Pi
+
+Install the Pi integration:
+
+```bash
+herdr integration install pi
+```
+
+Herdr writes the bundled extension to:
+
+```text
+~/.pi/agent/extensions/herdr-agent-state.ts
+```
+
+If `PI_CODING_AGENT_DIR` is set, Herdr writes to `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts` instead. The extensions directory must already exist. Uninstall removes only that extension file.
+
+## OMP
+
+Install the OMP integration:
+
+```bash
+herdr integration install omp
+```
+
+Herdr writes the bundled extension to:
+
+```text
+~/.omp/agent/extensions/herdr-omp-agent-state.ts
+```
+
+If `PI_CODING_AGENT_DIR` is set, Herdr writes to `$PI_CODING_AGENT_DIR/extensions/herdr-omp-agent-state.ts` instead. The extensions directory must already exist. Uninstall removes only that extension file.
+
+The OMP integration reports `omp` as the agent label, lifecycle state, and native session identity through Herdr's socket API. It does not require native process detection for the `omp` executable, and Herdr can resume an OMP pane with `omp --resume=<session>` after a server restart.
+
+## Claude Code
+
+Install the Claude Code hook:
+
+```bash
+herdr integration install claude
+```
+
+The hook reports Claude Code session identity to the local Herdr socket on session start. Claude Code state comes from Herdr's screen manifest detection.
+
+Herdr uses `~/.claude` by default, or `CLAUDE_CONFIG_DIR` when set. The Claude config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and updates `settings.json` with Herdr hook entries. Uninstall removes the matching hook entries and deletes the hook script.
+
+## Codex
+
+Install the Codex hook:
+
+```bash
+herdr integration install codex
+```
+
+The Codex hook reports session identity through the same local socket API used by other integrations. Codex state comes from Herdr's screen manifest detection.
+
+Herdr uses `~/.codex` by default, or `CODEX_HOME` when set. The Codex config directory must already exist. Install writes `herdr-agent-state.sh`, updates `hooks.json`, and ensures `[features] hooks = true` in `config.toml`. It also removes the deprecated top-level `codex_hooks` flag when present. Uninstall removes Herdr entries from `hooks.json` and deletes the hook script, but leaves `config.toml` unchanged.
+
+## GitHub Copilot CLI
+
+Install the GitHub Copilot CLI hook:
+
+```bash
+herdr integration install copilot
+```
+
+The Copilot hook reports session identity through the same local socket API used by other integrations. Copilot state comes from Herdr's screen manifest detection.
+
+Herdr uses `~/.copilot` by default, or `COPILOT_HOME` when set. The Copilot config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and updates `settings.json` with a `SessionStart` hook entry. Uninstall removes Herdr entries from `settings.json` and deletes the hook script.
+
+After Copilot emits a session-bearing event, Herdr can use the reported session id to resume the pane with `copilot --resume=<id>`.
+
+## Devin CLI
+
+Install the Devin CLI hook:
+
+```bash
+herdr integration install devin
+```
+
+The hook reports native session identity from Devin session, prompt, tool-use, permission, and stop events. Devin state still comes from Herdr's screen manifest and OSC detection because Devin hooks do not emit a reliable state transition after every permission cancellation or user interrupt.
+
+Herdr uses `~/.config/devin` by default, or `$XDG_CONFIG_HOME/devin` when `XDG_CONFIG_HOME` is set. The Devin config directory must already exist. Install writes `herdr-agent-state.sh` and updates `config.json` with Herdr hook entries. The hook refreshes the session reference while Devin runs. Uninstall removes Herdr entries from `config.json` and deletes the hook script.
+
+Herdr resumes stored Devin sessions with `devin --resume <id>`. Native screen manifest detection remains the state authority whether or not the hook is installed.
+
+## Kimi Code CLI
+
+Install the Kimi Code CLI hook:
+
+```bash
+herdr integration install kimi
+```
+
+The hook reports Kimi session identity and lifecycle state to Herdr for native restore and authoritative `idle`, `working`, and `blocked` status. It requires Kimi Code CLI `0.14.0` or newer.
+
+Herdr uses `~/.kimi-code` by default, or `KIMI_CODE_HOME` when set. The Kimi Code config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and appends Herdr-managed `[[hooks]]` entries to `config.toml`. Uninstall removes the Herdr-managed config block and deletes the hook script.
+
+Herdr resumes stored Kimi sessions with `kimi --session <id>`.
+
+## Droid
+
+Install the Droid hook:
+
+```bash
+herdr integration install droid
+```
+
+The Droid hook reports session identity through the same local socket API used by other integrations. Lifecycle state still comes from Herdr's screen manifest detection because Droid hooks do not cover every lifecycle transition.
+
+Herdr uses `~/.factory` for Droid hooks. The Factory config directory must already exist. Install writes `hooks/herdr-agent-state.sh`, updates `settings.json` with a Herdr `SessionStart` hook entry, and removes older Herdr Droid hook entries from `hooks.json` if present. Uninstall removes Herdr entries from both config files and deletes the hook script.
+
+After Droid emits a session start event, Herdr can use the reported session id to resume the pane with `droid --resume <id>`.
+
+## OpenCode
+
+Install the OpenCode plugin:
+
+```bash
+herdr integration install opencode
+```
+
+Herdr writes the plugin to `~/.config/opencode/plugins/herdr-agent-state.js`. The OpenCode config directory must already exist. Uninstall removes only that plugin file.
+
+The plugin reports lifecycle state and session identity while OpenCode runs inside a Herdr pane. After OpenCode emits a session-bearing event, Herdr can use the reported session id to resume the pane with `opencode --session <id>`. Native screen manifest detection remains available when the plugin is not installed.
+
+## Kilo Code CLI
+
+Install the Kilo Code CLI plugin:
+
+```bash
+herdr integration install kilo
+```
+
+Herdr writes the plugin to `~/.config/kilo/plugin/herdr-agent-state.js`. The Kilo config directory must already exist. Uninstall removes only that plugin file.
+
+The plugin reports lifecycle state and session identity while Kilo runs inside a Herdr pane. After Kilo emits a session-bearing event, Herdr can use the reported session id to resume the pane with `kilo --session <id>`. Native screen manifest detection remains available when the plugin is not installed.
+
+## Hermes Agent
+
+Install the Hermes Agent plugin:
+
+```bash
+herdr integration install hermes
+```
+
+Herdr writes `~/.hermes/plugins/herdr-agent-state/` and enables `herdr-agent-state` in `~/.hermes/config.yaml`. The Hermes config directory must already exist. Restart Hermes after installing so the plugin loads. Uninstall removes the plugin directory and removes `herdr-agent-state` from `plugins.enabled`.
+
+The plugin reports lifecycle, tool, approval state, and session id while Hermes runs inside a Herdr pane. Herdr can use the reported session id to resume the pane with `hermes --resume <id>`. Native screen manifest detection remains available when the plugin is not installed.
+
+## Qoder CLI
+
+Install the Qoder CLI hook:
+
+```bash
+herdr integration install qodercli
+```
+
+The hook reports Qoder CLI session identity to Herdr for native restore. Lifecycle state still comes from Herdr's screen manifest detection because Qoder hooks do not cover every lifecycle transition.
+
+Herdr uses `~/.qoder` by default, or `QODER_CONFIG_DIR` when set. The Qoder config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and updates `settings.json` with Herdr hook entries. Uninstall removes the matching hook entries and deletes the hook script.
+
+Herdr resumes stored Qoder CLI sessions with `qodercli --resume <id>`.
+
+Native screen manifest detection remains available when the hook is not installed.
+
+## Cursor Agent CLI
+
+Install the Cursor Agent CLI hook:
+
+```bash
+herdr integration install cursor
+```
+
+The hook reports session identity through Cursor's `sessionStart` hook while Cursor Agent CLI runs inside a Herdr pane. Cursor state comes from Herdr's screen manifest detection.
+
+Herdr uses `~/.cursor` by default, or `CURSOR_CONFIG_DIR` when set. The Cursor config directory must already exist. Install writes `herdr-agent-state.sh` and adds a Herdr `sessionStart` entry to `hooks.json`. Uninstall removes the matching hook entry and deletes the hook script.
+
+After Cursor emits a session start event, Herdr can use the reported session id to resume the pane with `cursor-agent --resume <id>`. The `cursor-agent` command must be on `PATH` when Herdr restores the pane; Herdr does not launch the generic `agent` command.
+
+## Custom status labels
+
+Integrations can report a short visual label without changing the semantic state.
+
+For example, an agent can remain semantically `working` while showing `indexing` in the UI.
+
+```bash
+herdr pane report-agent w1:p1 \
+  --source custom:docs \
+  --agent docs-bot \
+  --state working \
+  --custom-status indexing
+```
+
+User hooks that run next to a Herdr-managed integration should use metadata instead of `report-agent`. Metadata changes presentation without taking over the integration's `idle`, `working`, `blocked`, or session restore authority. `--agent` guards the report so it only applies while that authoritative agent is active. `--applies-to-source` guards the report so it only applies while that lifecycle authority source is active. `--display-agent` changes the visible name.
+
+```bash
+herdr pane report-metadata "$HERDR_PANE_ID" \
+  --source user:claude-title \
+  --agent claude \
+  --title "Refactor auth middleware" \
+  --display-agent "Claude: auth" \
+  --custom-status "refactor auth" \
+  --state-label working="refactoring auth" \
+  --ttl-ms 3600000
+```
+
+Custom status and state labels are visual-only. Waits, notifications, and workspace rollups still use the semantic state.
+
+## Debug integration state
+
+List known agents:
+
+```bash
+herdr agent list
+```
+
+Read a pane when you need to verify what Herdr can see:
+
+```bash
+herdr pane read w1:p1 --source recent --lines 50
+```
+
+If integration state looks wrong, first confirm the agent is running inside Herdr and that the relevant hook or plugin was installed for the same user account.

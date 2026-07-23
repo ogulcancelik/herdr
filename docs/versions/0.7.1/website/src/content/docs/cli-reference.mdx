@@ -1,0 +1,369 @@
+---
+title: CLI reference
+description: Herdr commands for sessions, workspaces, tabs, panes, notifications, agents, waits, integrations, and status.
+---
+
+Herdr’s CLI talks to the running server over the same local socket API used by integrations and agents.
+
+Most commands print JSON responses. Use them from scripts when you want deterministic automation.
+
+## Launch and status
+
+```bash
+herdr                         # launch or attach to the default session
+herdr --session work          # launch or attach to a named session
+herdr --remote workbox        # attach through SSH, using local keybindings
+herdr --remote workbox --remote-keybindings server
+herdr --remote workbox --handoff
+herdr --no-session            # single-process escape hatch
+herdr --default-config        # print default config
+herdr update                  # download and install from the configured channel
+herdr update --handoff        # opt into live handoff for supported running servers
+herdr channel show            # print stable or preview
+herdr channel set preview     # opt into preview builds
+herdr channel set stable      # return Linux/macOS direct installs to stable
+herdr --version               # print version
+```
+
+Status commands:
+
+```bash
+herdr status
+herdr status server
+herdr status client
+```
+
+## Server
+
+```bash
+herdr server
+herdr server stop
+herdr server reload-config
+herdr server agent-manifests [--json]
+herdr server update-agent-manifests [--json]
+herdr server reload-agent-manifests
+```
+
+`herdr server` runs the headless server explicitly. Use it for supervised or service-style setups. `reload-config` applies reloadable settings without restarting panes. `agent-manifests` shows the active agent detection manifest sources, cached remote versions, and last remote update results. `update-agent-manifests` fetches remote manifest updates immediately, reloads them into the running server, and prints the updated manifest status; pass `--json` for the raw status response. `reload-agent-manifests` reloads agent detection manifests into the running server after local override edits.
+
+## Notifications
+
+```bash
+herdr notification show <title> [--body TEXT] [--position top-left|top-right|bottom-left|bottom-right] [--sound none|done|request]
+```
+
+`notification show` uses the configured `[ui.toast]` delivery. `--position` only affects in-app Herdr toasts. `--sound` defaults to `none`; `done` and `request` play the existing finished and needs-attention sounds only when the notification is shown.
+
+## Sessions
+
+```bash
+herdr session list [--json]
+herdr session attach <name>
+herdr session stop <name> [--json]
+herdr session delete <name> [--json]
+```
+
+Use `default` as the session name when you need to stop the default session explicitly.
+
+## Workspaces
+
+```bash
+herdr workspace list
+herdr workspace create [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [--no-focus]
+herdr workspace get <workspace_id>
+herdr workspace focus <workspace_id>
+herdr workspace rename <workspace_id> <label>
+herdr workspace close <workspace_id>
+```
+
+Create a workspace without stealing focus:
+
+```bash
+herdr workspace create --cwd ~/project --label api --no-focus
+```
+
+## Worktrees
+
+```bash
+herdr worktree list [--workspace ID | --cwd PATH] [--json]
+herdr worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--focus] [--no-focus] [--json]
+herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus] [--json]
+herdr worktree remove --workspace ID [--force] [--json]
+```
+
+Worktrees are normal Herdr workspaces with Git checkout provenance. `worktree create` creates a Git worktree checkout, opens it as a workspace, and groups it with the parent repo workspace. If `--branch` names an existing local branch, Herdr checks it out; otherwise it creates the branch from `--base` or `HEAD`. Without `--path`, Herdr creates the checkout under `<worktrees.directory>/<repo>/<branch-slug>`.
+
+`workspace close` closes Herdr state only. `worktree remove` is the explicit checkout deletion path; it runs `git worktree remove`, never deletes the branch, and requires `--force` when Git refuses a dirty checkout.
+
+## Tabs
+
+```bash
+herdr tab list [--workspace <workspace_id>]
+herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [--no-focus]
+herdr tab get <tab_id>
+herdr tab focus <tab_id>
+herdr tab rename <tab_id> <label>
+herdr tab close <tab_id>
+```
+
+## Panes
+
+```bash
+herdr pane list [--workspace <workspace_id>]
+herdr pane current [--pane ID|--current]
+herdr pane get <pane_id>
+herdr pane layout [--pane ID|--current]
+herdr pane process-info [--pane ID|--current]
+herdr pane neighbor --direction left|right|up|down [--pane ID|--current]
+herdr pane edges [--pane ID|--current]
+herdr pane focus --direction left|right|up|down [--pane ID|--current]
+herdr pane resize --direction left|right|up|down [--amount FLOAT] [--pane ID|--current]
+herdr pane zoom [<pane_id>|--pane ID|--current] [--toggle|--on|--off]
+herdr pane rename <pane_id> <label>|--clear
+herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--focus] [--no-focus]
+herdr pane swap --direction left|right|up|down [--pane ID|--current]
+herdr pane swap --source-pane ID --target-pane ID
+herdr pane move <pane_id> --tab <tab_id> --split right|down [--target-pane ID] [--ratio FLOAT] [--focus|--no-focus]
+herdr pane move <pane_id> --new-tab [--workspace ID] [--label TEXT] [--focus|--no-focus]
+herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--focus|--no-focus]
+herdr pane close <pane_id>
+```
+
+Read output:
+
+```bash
+herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N]
+herdr pane read <pane_id> --source visible --ansi
+herdr pane read <pane_id> --source recent-unwrapped --lines 120
+```
+
+Send input:
+
+```bash
+herdr pane send-text <pane_id> <text>
+herdr pane send-keys <pane_id> <key> [key ...]
+herdr pane run <pane_id> <command>
+```
+
+`<key>` uses Herdr key-combo syntax: plain printable keys such as `a`,
+special keys such as `enter`, `tab`, `esc`, `backspace`, `left`, `right`,
+`up`, and `down`, modifier chords such as `ctrl+h`, `control+j`, `alt+x`,
+and `shift+tab`, function keys such as `f1`, and named punctuation such as
+`minus`, `plus`, and `backtick`. Legacy `C-c` and `c-c` are accepted as
+aliases for `ctrl+c`.
+
+`pane run` submits text plus Enter atomically. Prefer it over `send-text` plus `send-keys Enter` for commands.
+
+Report agent state from custom hooks:
+
+```bash
+herdr pane report-agent <pane_id> \
+  --source ID \
+  --agent LABEL \
+  --state idle|working|blocked|unknown \
+  [--message TEXT] \
+  [--custom-status TEXT] \
+  [--seq N] \
+  [--agent-session-id ID] \
+  [--agent-session-path PATH]
+```
+
+`pane get`, `pane list`, `agent get`, and `agent list` include a read-only `agent_session` object when an official integration has reported a native session reference. If no native session reference is stored, the field is omitted.
+
+Those commands include `foreground_cwd` when Herdr can resolve the cwd of the foreground process controlling the pane. The existing `cwd` field remains the pane/workspace cwd used for labels and follow-cwd behavior.
+
+Report display-only pane metadata without taking over semantic state:
+
+```bash
+herdr pane report-metadata <pane_id> \
+  --source ID \
+  [--agent LABEL] \
+  [--applies-to-source ID] \
+  [--title TEXT|--clear-title] \
+  [--display-agent TEXT|--clear-display-agent] \
+  [--custom-status TEXT|--clear-custom-status] \
+  [--state-label STATUS=TEXT] \
+  [--clear-state-labels] \
+  [--seq N] \
+  [--ttl-ms N]
+```
+
+`STATUS` is one of `idle`, `working`, `blocked`, `done`, or `unknown`. `--agent` is a guard for the authoritative agent label. `--applies-to-source` is a guard for the active lifecycle authority source. Use `--display-agent` to change the visible name.
+
+Metadata text is normalized before storage. Herdr trims surrounding whitespace, removes control characters, caps `--custom-status` at 32 characters, and caps `--title`, `--display-agent`, and each `--state-label` value at 80 characters. Empty normalized values are ignored.
+
+`--source` and `--applies-to-source` must be 80 characters or fewer and may contain only ASCII letters, digits, colon, dot, underscore, and hyphen. `--ttl-ms` makes metadata expire automatically and must be between `1` and `86400000` milliseconds. Omit it for metadata that should stay until replaced, cleared, or the pane closes. `--seq` lets Herdr ignore stale reports from the same `--source`; stale reports are accepted by the API but ignored by pane state.
+
+## Agents
+
+```bash
+herdr agent list
+herdr agent get <target>
+herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]
+herdr agent send <target> <text>
+herdr agent rename <target> <name>|--clear
+herdr agent focus <target>
+herdr agent wait <target> --status <idle|working|blocked|unknown> [--timeout MS]
+herdr agent attach <target> [--takeover]
+herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>
+herdr agent explain <target> [--json|--verbose]
+herdr agent explain --file PATH --agent LABEL [--json|--verbose]
+```
+
+Agent targets can be terminal IDs, unique agent names, detected or reported agent labels, or legacy pane IDs. Names and labels are agent identities. Terminal IDs and legacy pane IDs are low-level escape hatches.
+
+`agent read` reads the resolved terminal stream. `agent send` writes literal text to that stream. `agent get`, `agent focus`, `agent wait`, and `agent attach` require the resolved terminal to have agent identity. `agent rename` can assign that identity.
+
+`agent explain` asks the running server to classify the same bottom-buffer detection snapshot used by screen detection, so live output reflects the server's active manifest cache. Because this uses the `agent.explain` socket method, restart or hand off to an updated server after upgrading Herdr before using live explain. Use `--file PATH --agent LABEL` to explain a saved fixture locally instead. The default output shows the agent, final state, manifest source and version, matched rule with its region evidence, and any fallback, skip, or warning reasons. Add `--verbose` for visible evidence flags, cached remote version, local override shadowing, remote update status, and the full evaluated-rules list with matcher and region evidence. Add `--json` for issue reports or tests.
+
+Use `pane send-text`, `pane send-keys`, `pane run`, and `terminal attach` for ordinary terminals, servers, tests, shells, or low-level terminal control. Use `pane run` when you want to submit a command with Enter.
+
+## Direct terminal attach
+
+```bash
+herdr terminal attach <terminal_id> [--takeover]
+herdr terminal title set <title>
+herdr terminal title clear
+```
+
+Detach from direct attach with `ctrl+b q`. Send literal `ctrl+b` with `ctrl+b ctrl+b`.
+`terminal title clear` restores Herdr's default outer terminal window title.
+
+## Waits
+
+Wait for output in a pane:
+
+```bash
+herdr wait output <pane_id> --match <text> [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--regex] [--raw]
+```
+
+Wait for pane agent state:
+
+```bash
+herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [--timeout MS]
+```
+
+Use `wait output` for normal commands and servers. Use `wait agent-status` for coding agents.
+
+## Integrations
+
+```bash
+herdr integration install pi
+herdr integration install omp
+herdr integration install claude
+herdr integration install codex
+herdr integration install copilot
+herdr integration install devin
+herdr integration install droid
+herdr integration install kimi
+herdr integration install opencode
+herdr integration install kilo
+herdr integration install hermes
+herdr integration install qodercli
+herdr integration install cursor
+herdr integration uninstall pi
+herdr integration uninstall omp
+herdr integration uninstall claude
+herdr integration uninstall codex
+herdr integration uninstall copilot
+herdr integration uninstall devin
+herdr integration uninstall droid
+herdr integration uninstall kimi
+herdr integration uninstall opencode
+herdr integration uninstall kilo
+herdr integration uninstall hermes
+herdr integration uninstall qodercli
+herdr integration uninstall cursor
+herdr integration status [--outdated-only]
+```
+
+## Plugins
+
+Plugin commands install and run local executable workflow plugins. A plugin is a manifest plus out-of-process commands; Herdr owns the host surface and plugins own their implementation language.
+
+Install, list, and remove plugins:
+
+```bash
+herdr plugin install <owner>/<repo>[/subdir...] [--ref REF] [--yes]
+herdr plugin list [--plugin ID] [--json]
+herdr plugin uninstall <plugin_id|owner/repo[/subdir...]>
+herdr plugin enable <plugin_id>
+herdr plugin disable <plugin_id>
+```
+
+`plugin install` accepts GitHub shorthand only, such as `ogulcancelik/herdr-plugin-examples/worktree-bootstrap`. It uses `git`, shows a trust preview in interactive terminals, runs supported manifest build commands, and stores GitHub installs in a Herdr-managed directory. Use `--yes` for noninteractive installs. Reinstalling a GitHub-managed plugin replaces that managed checkout. Installing over a locally linked plugin is refused. Plugin manifests must declare `min_herdr_version`; install and link fail when the plugin requires a newer Herdr binary. `plugin list` is human-readable by default; pass `--json` for the raw API response.
+
+Local development:
+
+```bash
+herdr plugin link <path> [--disabled]
+herdr plugin unlink <plugin_id>
+```
+
+`plugin link` accepts a plugin directory containing `herdr-plugin.toml` or a direct manifest path. It is still the right command while authoring or testing a plugin from a local checkout. `plugin unlink` unregisters the plugin and leaves files alone. `plugin uninstall` unregisters a plugin and also removes Herdr-managed GitHub checkout files. For GitHub installs, uninstall accepts either the plugin id or the same `owner/repo[/subdir...]` shorthand used by install. Actions, event hooks, panes, and link handlers are declared in the manifest; runtime action registration is not part of v1.
+
+Config directory:
+
+```bash
+herdr plugin config-dir <plugin_id>
+```
+
+`plugin config-dir` prints the plugin's config directory, creating it (and seeding it from legacy plugin config locations when present) if needed. Use it in setup docs and shell scripts to point users at a stable path for `.env` files and other user-editable config, separate from the managed plugin checkout.
+
+Actions:
+
+```bash
+herdr plugin action list [--plugin ID]
+herdr plugin action invoke <action_id> [--plugin ID]
+```
+
+`plugin action invoke` starts the manifest command for an installed, enabled,
+platform-compatible plugin action and prints the started command log record in
+the JSON response. Use the qualified action id (`plugin.id.action`) when more
+than one plugin uses the same action id. Local action ids cannot contain dots,
+so qualified ids remain unambiguous even when plugin ids contain dots.
+
+Logs:
+
+```bash
+herdr plugin log list [--plugin ID] [--limit N]
+```
+
+Managed terminal panes:
+
+```bash
+herdr plugin pane open --plugin ID --entrypoint ID [--placement overlay|split|tab|zoomed] [--workspace ID] [--target-pane PANE] [--direction right|down] [--cwd PATH] [--env KEY=VALUE] [--focus|--no-focus]
+herdr plugin pane focus <pane_id>
+herdr plugin pane close <pane_id>
+```
+
+`plugin pane open` requires the plugin to be linked, enabled, and compatible
+with the current platform. It starts a manifest-declared `[[panes]]` command as
+a Herdr-managed terminal pane. The manifest default is `overlay`, which opens a
+temporary zoomed overlay over the active pane. It can also open as a split, a
+new tab, or a zoomed pane. Native non-terminal plugin panes are a later surface.
+
+`--env KEY=VALUE` can be repeated on process-launching commands. It applies to the newly launched process only. Herdr-managed variables such as `HERDR_SOCKET_PATH`, `HERDR_BIN_PATH`, `HERDR_ENV`, `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`, `HERDR_PANE_ID`, `HERDR_PLUGIN_ID`, `HERDR_PLUGIN_ROOT`, `HERDR_PLUGIN_CONFIG_DIR`, `HERDR_PLUGIN_STATE_DIR`, `HERDR_PLUGIN_ENTRYPOINT_ID`, and `HERDR_PLUGIN_CONTEXT_JSON` stay authoritative when they conflict with caller-provided env.
+
+## Read sources
+
+| Source | Meaning |
+| --- | --- |
+| `visible` | Current rendered screen. Best for UI feedback loops. |
+| `recent` | Recent scrollback with terminal wrapping. |
+| `recent-unwrapped` | Recent scrollback without soft wrapping. Best for logs. |
+| `detection` | Bottom-buffer snapshot used by agent screen detection. |
+
+## Environment variables
+
+| Variable | Purpose |
+| --- | --- |
+| `HERDR_CONFIG_PATH` | Override the config file path. |
+| `HERDR_SESSION` | Select a named session for CLI commands. |
+| `HERDR_SOCKET_PATH` | Low-level socket path override. |
+| `HERDR_ENV` | Set to `1` inside Herdr-managed pane processes. |
+| `HERDR_PANE_ID` | Public pane id for the running pane process. |
+| `HERDR_TAB_ID` | Public tab id for the running pane process. |
+| `HERDR_WORKSPACE_ID` | Public workspace id for the running pane process. |
+| `HERDR_LOG` | Set log filter, for example `HERDR_LOG=herdr=debug`. |
+| `HERDR_DISABLE_SOUND` | Disable sound playback even when sound notifications are enabled. |

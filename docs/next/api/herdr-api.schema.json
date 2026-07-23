@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 16,
+  "protocol": 18,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -597,8 +597,21 @@
                     "null"
                   ]
                 },
+                "final_status": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/event/$defs/AgentStatus"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "pane_id": {
                   "type": "string"
+                },
+                "released": {
+                  "type": "boolean"
                 },
                 "type": {
                   "const": "pane_agent_detected",
@@ -1176,6 +1189,50 @@
     },
     "request": {
       "$defs": {
+        "AgentPromptParams": {
+          "properties": {
+            "target": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "wait": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/AgentPromptWaitOptions"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "target",
+            "text"
+          ],
+          "type": "object"
+        },
+        "AgentPromptWaitOptions": {
+          "properties": {
+            "timeout_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "until": {
+              "items": {
+                "$ref": "#/schemas/request/$defs/AgentStatus"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
         "AgentReadParams": {
           "properties": {
             "format": {
@@ -1224,74 +1281,55 @@
           ],
           "type": "object"
         },
-        "AgentSendParams": {
+        "AgentSendKeysParams": {
           "properties": {
-            "target": {
-              "type": "string"
-            },
-            "text": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "target",
-            "text"
-          ],
-          "type": "object"
-        },
-        "AgentStartParams": {
-          "properties": {
-            "argv": {
+            "keys": {
               "items": {
                 "type": "string"
               },
               "type": "array"
             },
-            "cwd": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "env": {
-              "additionalProperties": {
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target",
+            "keys"
+          ],
+          "type": "object"
+        },
+        "AgentStartParams": {
+          "properties": {
+            "args": {
+              "items": {
                 "type": "string"
               },
-              "type": "object"
+              "type": "array"
             },
-            "focus": {
-              "default": false,
-              "type": "boolean"
+            "kind": {
+              "type": "string"
             },
             "name": {
               "type": "string"
             },
-            "split": {
-              "anyOf": [
-                {
-                  "$ref": "#/schemas/request/$defs/SplitDirection"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+            "pane_id": {
+              "type": "string"
             },
-            "tab_id": {
+            "timeout_ms": {
+              "description": "Startup timeout in milliseconds. Values must be greater than 3000 and at most 300000.",
+              "format": "uint64",
+              "minimum": 0,
               "type": [
-                "string",
-                "null"
-              ]
-            },
-            "workspace_id": {
-              "type": [
-                "string",
+                "integer",
                 "null"
               ]
             }
           },
           "required": [
             "name",
-            "argv"
+            "kind",
+            "pane_id"
           ],
           "type": "object"
         },
@@ -1309,6 +1347,308 @@
           "properties": {
             "target": {
               "type": "string"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "type": "object"
+        },
+        "AgentViewBuiltinField": {
+          "enum": [
+            "status",
+            "workspace_id",
+            "tab_id",
+            "pane_id",
+            "agent",
+            "seen",
+            "state_change_seq"
+          ],
+          "type": "string"
+        },
+        "AgentViewBuiltinSortField": {
+          "enum": [
+            "workspace_order",
+            "tab_order",
+            "pane_order",
+            "attention",
+            "status",
+            "agent",
+            "seen",
+            "state_change_seq"
+          ],
+          "type": "string"
+        },
+        "AgentViewClearParams": {
+          "properties": {
+            "source": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "AgentViewContext": {
+          "enum": [
+            "current_workspace_id",
+            "current_tab_id"
+          ],
+          "type": "string"
+        },
+        "AgentViewField": {
+          "anyOf": [
+            {
+              "$ref": "#/schemas/request/$defs/AgentViewBuiltinField"
+            },
+            {
+              "properties": {
+                "token": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "token"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "AgentViewFilter": {
+          "oneOf": [
+            {
+              "properties": {
+                "filters": {
+                  "items": {
+                    "$ref": "#/schemas/request/$defs/AgentViewFilter"
+                  },
+                  "type": "array"
+                },
+                "op": {
+                  "const": "all",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "op",
+                "filters"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "filters": {
+                  "items": {
+                    "$ref": "#/schemas/request/$defs/AgentViewFilter"
+                  },
+                  "type": "array"
+                },
+                "op": {
+                  "const": "any",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "op",
+                "filters"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "filter": {
+                  "$ref": "#/schemas/request/$defs/AgentViewFilter"
+                },
+                "op": {
+                  "const": "not",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "op",
+                "filter"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "field": {
+                  "$ref": "#/schemas/request/$defs/AgentViewField"
+                },
+                "op": {
+                  "const": "eq",
+                  "type": "string"
+                },
+                "value": {
+                  "$ref": "#/schemas/request/$defs/AgentViewValue"
+                }
+              },
+              "required": [
+                "op",
+                "field",
+                "value"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "field": {
+                  "$ref": "#/schemas/request/$defs/AgentViewField"
+                },
+                "op": {
+                  "const": "in",
+                  "type": "string"
+                },
+                "values": {
+                  "items": {
+                    "$ref": "#/schemas/request/$defs/AgentViewValue"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "op",
+                "field",
+                "values"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "field": {
+                  "$ref": "#/schemas/request/$defs/AgentViewField"
+                },
+                "op": {
+                  "const": "exists",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "op",
+                "field"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "AgentViewSetParams": {
+          "properties": {
+            "filter": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/AgentViewFilter"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sort": {
+              "items": {
+                "$ref": "#/schemas/request/$defs/AgentViewSort"
+              },
+              "type": "array"
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source"
+          ],
+          "type": "object"
+        },
+        "AgentViewSort": {
+          "properties": {
+            "field": {
+              "$ref": "#/schemas/request/$defs/AgentViewSortField"
+            },
+            "order": {
+              "$ref": "#/schemas/request/$defs/AgentViewSortOrder",
+              "default": "asc"
+            }
+          },
+          "required": [
+            "field"
+          ],
+          "type": "object"
+        },
+        "AgentViewSortField": {
+          "anyOf": [
+            {
+              "$ref": "#/schemas/request/$defs/AgentViewBuiltinSortField"
+            },
+            {
+              "properties": {
+                "token": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "token"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "AgentViewSortOrder": {
+          "enum": [
+            "asc",
+            "desc"
+          ],
+          "type": "string"
+        },
+        "AgentViewValue": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "properties": {
+                "context": {
+                  "$ref": "#/schemas/request/$defs/AgentViewContext"
+                }
+              },
+              "required": [
+                "context"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "AgentWaitParams": {
+          "properties": {
+            "target": {
+              "type": "string"
+            },
+            "timeout_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "until": {
+              "items": {
+                "$ref": "#/schemas/request/$defs/AgentStatus"
+              },
+              "type": "array"
             }
           },
           "required": [
@@ -4506,11 +4846,11 @@
         {
           "properties": {
             "method": {
-              "const": "agent.send",
+              "const": "agent.send_keys",
               "type": "string"
             },
             "params": {
-              "$ref": "#/schemas/request/$defs/AgentSendParams"
+              "$ref": "#/schemas/request/$defs/AgentSendKeysParams"
             }
           },
           "required": [
@@ -4527,6 +4867,38 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/AgentRenameParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.view.set",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentViewSetParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.view.clear",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentViewClearParams"
             }
           },
           "required": [
@@ -4559,6 +4931,38 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/AgentStartParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.prompt",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentPromptParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.wait",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentWaitParams"
             }
           },
           "required": [
@@ -5604,6 +6008,12 @@
                 "null"
               ]
             },
+            "interactive_ready": {
+              "type": "boolean"
+            },
+            "launch_pending": {
+              "type": "boolean"
+            },
             "name": {
               "type": [
                 "string",
@@ -5620,6 +6030,12 @@
             },
             "screen_detection_skipped": {
               "type": "boolean"
+            },
+            "state_change_seq": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
             },
             "state_labels": {
               "additionalProperties": {
@@ -6311,8 +6727,21 @@
                     "null"
                   ]
                 },
+                "final_status": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/AgentStatus"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "pane_id": {
                   "type": "string"
+                },
+                "released": {
+                  "type": "boolean"
                 },
                 "type": {
                   "const": "pane_agent_detected",
@@ -6511,6 +6940,12 @@
               "default": {
                 "kind": "local"
               }
+            },
+            "startup": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/PluginManifestStartup"
+              },
+              "type": "array"
             },
             "version": {
               "type": "string"
@@ -7855,6 +8290,29 @@
           ],
           "type": "object"
         },
+        "PluginManifestStartup": {
+          "properties": {
+            "command": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "platforms": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/PluginPlatform"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        },
         "PluginPaneInfo": {
           "properties": {
             "entrypoint": {
@@ -8296,6 +8754,22 @@
             },
             {
               "properties": {
+                "agent": {
+                  "$ref": "#/schemas/success_response/$defs/AgentInfo"
+                },
+                "type": {
+                  "const": "agent_prompted",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "agent"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "agents": {
                   "items": {
                     "$ref": "#/schemas/success_response/$defs/AgentInfo"
@@ -8310,6 +8784,34 @@
               "required": [
                 "type",
                 "agents"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "active": {
+                  "type": "boolean"
+                },
+                "label": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "source": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "const": "agent_view",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "active"
               ],
               "type": "object"
             },

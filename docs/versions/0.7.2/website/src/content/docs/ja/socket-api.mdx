@@ -1,0 +1,609 @@
+---
+title: ソケット API
+description: スクリプト、ツール、コーディングエージェントから実行中の Herdr サーバーを制御します。
+---
+
+Herdr は、実行中のセッションを調査・制御する必要があるスクリプトやエージェント向けに、ローカルソケット API を公開しています。
+
+ほとんどの自動化は CLI ラッパーから始めるべきです。生のソケット API は、直接のリクエスト/レスポンス制御や長寿命のイベント購読が必要なときだけ使ってください。
+
+## インテグレーション層を選ぶ
+
+| 層 | 用途 |
+| --- | --- |
+| エージェントスキル | ペイン内からの Herdr の使い方をコーディングエージェントに教える。 |
+| CLI ラッパー | シェルスクリプト、シンプルなオーケストレーション、人間によるデバッグ。 |
+| 生のソケット API | カスタムツール、プロトコルクライアント、イベント購読者。 |
+
+これらの層は同じ制御面を共有します。
+
+## 制御できるもの
+
+ソケット API では次のことができます:
+
+- ワークスペースの作成、一覧、フォーカス、名前変更、クローズ
+- タブの作成、一覧、フォーカス、名前変更、クローズ
+- ペインの一覧、調査、分割、入れ替え、フォーカス、リサイズ、名前変更、読み取り、クローズ、入力送信
+- CLI ヘルパーを通じたエージェントの一覧、調査、読み取り、送信、名前変更、フォーカス、起動、アタッチ
+- フックやプラグインからのカスタムエージェント状態の報告
+- イベントの購読と、出力や状態変化の待機
+- 組み込みインテグレーションのインストールとアンインストール
+- サーバーの停止と設定のリロード
+
+## CLI の例
+
+ワークスペースを作成する:
+
+```bash
+herdr workspace create --cwd ~/project --label api
+```
+
+タブを作成する:
+
+```bash
+herdr tab create --label logs
+```
+
+ペインを分割してコマンドを実行する:
+
+```bash
+herdr pane split w1:p1 --direction right
+herdr pane run w1:p2 "npm test"
+```
+
+ペインを調査して並べ替える:
+
+```bash
+herdr pane layout --current
+herdr pane neighbor --direction right --current
+herdr pane resize --direction right --amount 0.1 --current
+herdr pane swap --direction right --current
+herdr pane zoom --on --current
+herdr pane split w1:p1 --direction right --ratio 0.333
+```
+
+エージェントを待つ:
+
+```bash
+herdr wait agent-status w1:p1 --status done
+```
+
+ペインの出力を読む:
+
+```bash
+herdr pane read w1:p2 --source recent --lines 50
+```
+
+## 生のメソッド
+
+生のソケットメソッド名はドット記法を使います:
+
+| 領域 | メソッド |
+| --- | --- |
+| サーバー | `ping`、`server.stop`、`server.reload_config`、`server.agent_manifests`、`server.reload_agent_manifests` |
+| 通知 | `notification.show` |
+| クライアント | `client.window_title.set`、`client.window_title.clear` |
+| ワークスペース | `workspace.create`、`workspace.list`、`workspace.get`、`workspace.focus`、`workspace.rename`、`workspace.close` |
+| Worktree | `worktree.list`、`worktree.create`、`worktree.open`、`worktree.remove` |
+| タブ | `tab.create`、`tab.list`、`tab.get`、`tab.focus`、`tab.rename`、`tab.close` |
+| ペイン | `pane.split`、`pane.swap`、`pane.move`、`pane.zoom`、`pane.layout`、`pane.process_info`、`pane.neighbor`、`pane.edges`、`pane.focus_direction`、`pane.resize`、`pane.list`、`pane.current`、`pane.get`、`pane.rename`、`pane.send_text`、`pane.send_keys`、`pane.send_input`、`pane.read`、`pane.report_agent`、`pane.report_agent_session`、`pane.report_metadata`、`pane.clear_agent_authority`、`pane.release_agent`、`pane.close`、`pane.wait_for_output` |
+| レイアウト | `layout.export`、`layout.apply` |
+| エージェント | `agent.list`、`agent.get`、`agent.read`、`agent.explain`、`agent.send`、`agent.rename`、`agent.focus`、`agent.start` |
+| イベント | `events.subscribe`、`events.wait` |
+| インテグレーション | `integration.install`、`integration.uninstall` |
+| プラグイン | `plugin.link`、`plugin.list`、`plugin.unlink`、`plugin.enable`、`plugin.disable`、`plugin.action.list`、`plugin.action.invoke`、`plugin.log.list`、`plugin.pane.open`、`plugin.pane.focus`、`plugin.pane.close` |
+
+一部の CLI コマンドは、これらのメソッドの便利ラッパーです。たとえば `herdr agent wait` は、エージェントターゲットを解決してからペインのエージェント状態イベントを購読します。
+
+ペイン制御メソッドは `w1:p1` のような公開ペイン id を使います。スキーマ上 `pane_id` が省略可能なメソッドは、省略時にサーバーのアクティブなフォーカス中ペインを使います。`pane.move` は常に送信元の `pane_id` を要求します。
+
+`pane.send_keys` と `pane.send_input.keys` は Herdr のキーコンボ文字列を受け付けます: 通常の印字可能キー、`enter` や `esc` のような特殊キー、`ctrl+h`、`control+j`、`alt+x`、`shift+tab` のような修飾キーコード、`f1` のようなファンクションキー、`minus` や `plus` のような名前付き記号です。`prefix+` のバインド文字列は受け付けません。
+
+```json
+{"id":"req_current","method":"pane.current","params":{"caller_pane_id":"w1:p1"}}
+{"id":"req_layout","method":"pane.layout","params":{"pane_id":"w1:p1"}}
+{"id":"req_neighbor","method":"pane.neighbor","params":{"pane_id":"w1:p1","direction":"right"}}
+{"id":"req_edges","method":"pane.edges","params":{"pane_id":"w1:p1"}}
+{"id":"req_focus","method":"pane.focus_direction","params":{"direction":"right"}}
+{"id":"req_resize","method":"pane.resize","params":{"pane_id":"w1:p1","direction":"right","amount":0.1}}
+{"id":"req_zoom","method":"pane.zoom","params":{"pane_id":"w1:p1","mode":"toggle"}}
+{"id":"req_split","method":"pane.split","params":{"direction":"right","ratio":0.333,"env":{"HERDR_ROLE":"tests"}}}
+{"id":"req_process","method":"pane.process_info","params":{"pane_id":"w1:p1"}}
+```
+
+`pane.current` は単一の `PaneInfo` を返します。`caller_pane_id` があるときはそのペインを返します。省略時はアクティブなフォーカス中ペインを返します。
+
+`pane.layout` は、`workspace_id`、`tab_id`、`zoomed`、外側の `area`、`focused_pane_id`、ペインの矩形、分割の矩形/比率を含むタブレイアウトのスナップショットを返します。`pane.neighbor` と `pane.edges` は同じレイアウトスナップショットを含むので、クライアントは非公開のレイアウト状態なしに次の判断を下せます。
+
+`pane.process_info` は、ペインのシェル pid、利用可能な場合はフォアグラウンドプロセスグループ id、そしてプラットフォームが公開している場合は pid、名前、argv/cmdline、cwd を含むフォアグラウンドプロセスを返します。
+
+`layout.export` は移植可能なタブレイアウトツリーを返します。アクティブなタブをエクスポートするには `tab_id` と `pane_id` の両方を省略し、特定のタブなら `tab_id` を、そのペインを含むタブなら `pane_id` を渡します。
+
+```json
+{"id":"req_export","method":"layout.export","params":{"tab_id":"w1:t1"}}
+```
+
+レスポンスには `workspace_id`、`tab_id`、`zoomed`、`focused_pane_id`、`root` が含まれます。`root` は `pane` ノードと `split` ノードの BSP ツリーです。ペインノードは `pane_id`、`label`、`cwd`、argv の `command` を含められます。分割ノードは `direction` (`right` または `down`)、`ratio`、`first`、`second` を使います。
+
+`layout.apply` は宣言的なツリーから新しいタブを作成します。`tab_id` が与えられた場合、Herdr は先に置き換え用のタブを作成してから古いタブを閉じます。これは構造、ラベル、cwd、env、任意の argv コマンドを復元しますが、ライブの PTY、スクロールバック、実行中プロセスは保存しません。
+
+```json
+{
+  "id": "req_apply",
+  "method": "layout.apply",
+  "params": {
+    "workspace_id": "wabc",
+    "tab_label": "dev",
+    "focus": true,
+    "root": {
+      "type": "split",
+      "direction": "right",
+      "ratio": 0.65,
+      "first": {
+        "type": "pane",
+        "label": "editor",
+        "cwd": "/repo"
+      },
+      "second": {
+        "type": "pane",
+        "label": "tests",
+        "cwd": "/repo",
+        "command": ["sh", "-c", "just test"],
+        "env": { "HERDR_ROLE": "tests" }
+      }
+    }
+  }
+}
+```
+
+プロセスを起動するメソッドは `env` オブジェクトを受け付けます。Herdr はそのキー/値ペアを新しく起動されるプロセスにのみ適用します。Herdr は管理下のペインプロセスに `HERDR_SOCKET_PATH`、`HERDR_ENV=1`、`HERDR_WORKSPACE_ID`、`HERDR_TAB_ID`、`HERDR_PANE_ID` も注入します。呼び出し側が与えた環境変数と衝突した場合、Herdr 管理の変数が権威を持ちます。
+
+`pane.swap` は方向指定と明示指定の両方の形式をサポートします:
+
+```json
+{"id":"req_swap_dir","method":"pane.swap","params":{"pane_id":"w1:p1","direction":"right"}}
+{"id":"req_swap_explicit","method":"pane.swap","params":{"source_pane_id":"w1:p1","target_pane_id":"w1:p2"}}
+```
+
+入れ替えは同じタブ内に限られます。分割の形、分割比率、ペイン id、実行中のプロセスを保存します。レスポンスは `type: "pane_swap"` で、`changed`、任意の `reason`、`source_pane_id`、任意の `target_pane_id`、`focused_pane_id`、`layout` を含みます。reason の値は `no_neighbor`、`same_pane`、`not_found`、`cross_tab` です。タブがズームされている場合、入れ替えはズームを維持したまま隠れた全タブレイアウトを変更します。
+
+`pane.move` は、実行中のペインを別のタブ、新しいタブ、または新しいワークスペースに移動します:
+
+```json
+{"id":"req_move_tab","method":"pane.move","params":{"pane_id":"w1:p2","destination":{"type":"tab","tab_id":"w1:t2","target_pane_id":"w1:p3","split":"right","ratio":0.5},"focus":true}}
+{"id":"req_move_new_tab","method":"pane.move","params":{"pane_id":"w1:p2","destination":{"type":"new_tab","workspace_id":"w1","label":"logs"},"focus":true}}
+{"id":"req_move_new_workspace","method":"pane.move","params":{"pane_id":"w1:p2","destination":{"type":"new_workspace","label":"logs","tab_label":"main"},"focus":true}}
+```
+
+既存タブへの移動には `split: "right" | "down"` が必要です。`target_pane_id` は任意で、デフォルトは移動先タブのフォーカス中ペインです。同じタブ内のレイアウト変更は引き続き `pane.swap` です。元のタブへの移動は `reason: "same_tab"` 付きで `changed: false` を返します。ズームされた移動元/移動先タブを含む移動は `reason: "zoomed_tab"` 付きで `changed: false` を返します。
+
+レスポンスは `type: "pane_move"` で、`changed`、任意の `reason`、`previous_pane_id`、`previous_workspace_id`、`previous_tab_id`、移動された `pane`、任意の `source_layout`、`target_layout`、任意の作成されたワークスペース/タブのレコード、任意の閉じられたワークスペース/タブの id、`focused_pane_id` を含みます。ワークスペースをまたぐ移動では、内部のペインとターミナルは生きたまま、移動先ワークスペースで新しい公開ペイン id が割り当てられます。購読者は `pane.moved` を購読できます。Herdr は移動されたターミナルプロセスについて偽のペインの close/create イベントを発行しません。
+
+`pane.zoom` は、対象ペインのタブのズームをトグル、有効化、無効化します:
+
+```json
+{"id":"req_zoom_toggle","method":"pane.zoom","params":{"pane_id":"w1:p1"}}
+{"id":"req_zoom_on","method":"pane.zoom","params":{"pane_id":"w1:p1","mode":"on"}}
+{"id":"req_zoom_off","method":"pane.zoom","params":{"pane_id":"w1:p1","mode":"off"}}
+```
+
+`pane_id` を省略すると、サーバーのアクティブなフォーカス中ペインが対象になります。レスポンスは `type: "pane_zoom"` で、`changed`、`zoom_changed`、`focus_changed`、任意の `reason`、`pane_id`、`focused_pane_id`、`zoomed`、`layout` を含みます。`changed` は、ズーム状態またはフォーカスのどちらかが変わったときに true です。reason の値は `single_pane`、`already_zoomed`、`already_unzoomed` です。
+
+`notification.show` の CLI ラッパーは次のとおりです:
+
+```bash
+herdr notification show "build failed" --body "api workspace" --position top-left --sound request
+```
+
+設定済みのトースト配信を通じてユーザー通知を表示します:
+
+```json
+{"id":"req_notify","method":"notification.show","params":{"title":"build failed","body":"api workspace","position":"top-left","sound":"request"}}
+```
+
+`title` は必須で、制御文字と連続する空白を除去した後に可視のテキストが残っていなければなりません。`body` は任意です。Herdr は改行、タブ、キャリッジリターン、連続する空白をスペースにまとめてから、通知テキストを `title` は 80 文字、`body` は 240 文字に切り詰めます。サニタイズ後の `title` が空の場合は `invalid_params` を返します。`position` は任意で、`ui.toast.delivery = "herdr"` のときのみ適用されます。デスクトップの位置は Herdr のフレーム全体を基準とし、省略時は `ui.toast.herdr.position` を使います。terminal、system、off の配信では `position` は無視されます。`sound` は任意で `none`、`done`、`request` のいずれかを指定でき、デフォルトは `none` で、通知が表示されたときにのみ再生されます。
+
+レスポンスは何かが表示されたかどうかを報告します:
+
+```json
+{"id":"req_notify","result":{"type":"notification_show","shown":true,"reason":"shown"}}
+```
+
+reason の候補は `shown`、`disabled`、`rate_limited`、`no_foreground_client`、`busy` です。`disabled` は `ui.toast.delivery = "off"` を意味します。`busy` は既存のアプリ内トーストが置き換えられなかったことを意味します。terminal と system の配信は、現在フォアグラウンドでアタッチしている Herdr クライアントを通じたベストエフォートです。
+
+フォアグラウンドクライアントの外側ターミナルウィンドウタイトルを設定またはクリアします:
+
+```json
+{"id":"req_title","method":"client.window_title.set","params":{"title":"herdr api"}}
+{"id":"req_title_clear","method":"client.window_title.clear","params":{}}
+```
+
+`client.window_title.clear` は Herdr のデフォルトタイトルを復元します。レスポンスは `type: "client_window_title"` で、`changed` と、`set`、`cleared`、`no_foreground_client` のいずれかの reason を含みます。
+
+Worktree メソッドは Git チェックアウトを Herdr ワークスペースとして管理します。`worktree.create` はチェックアウトを作成し、新しい `workspace`、`tab`、`root_pane`、`worktree` のレコードを返します。要求されたブランチがローカルに既存ならそれをチェックアウトし、なければ要求されたベースまたは `HEAD` からブランチを作成します。`worktree.open` は既存のチェックアウトを開くか、すでに開いているワークスペースを返します。`worktree.remove` はリンクされた子ワークスペースに対して `git worktree remove` を実行し、ブランチは決して削除しません。
+
+元のワークスペースから worktree を作成する:
+
+```json
+{"id":"req_1","method":"worktree.create","params":{"workspace_id":"w1","branch":"worktree/api","focus":false}}
+```
+
+既存のチェックアウトを開く:
+
+```json
+{"id":"req_2","method":"worktree.open","params":{"workspace_id":"w1","branch":"worktree/api","focus":true}}
+```
+
+リンクされたチェックアウトを削除する:
+
+```json
+{"id":"req_3","method":"worktree.remove","params":{"workspace_id":"2","force":false}}
+```
+
+`worktree.list`、`worktree.create`、`worktree.open` では `workspace_id` と `cwd` は最大どちらか一方だけを使い、両方省略するとアクティブなワークスペースを使います。`worktree.open` では `path` と `branch` のちょうど一方を使います。生のソケットの `cwd` と `path` の値は絶対パスでなければなりません。CLI は相対の `--cwd` と `--path` の値をリクエスト送信前に展開します。ワークスペースが Herdr の worktree グループに属している場合、ワークスペースのレスポンスには任意の `worktree` 出自情報が含まれます。既存のワークスペースが worktree の出自情報を獲得または変更したとき、worktree コマンドは `workspace.updated` を発行することがあります。
+
+worktree コマンドはライフサイクルイベントも発行します。`worktree.create` は `workspace.created`、`tab.created`、`pane.created`、`worktree.created` を発行します。`worktree.open` は `worktree.opened` を発行し、新しい Herdr ワークスペースを開いた場合はワークスペース/タブ/ペインの作成イベントも発行します。`worktree.remove` は `worktree.removed` を発行し、リンクされたワークスペースがまだ開いている場合は `workspace.closed` も発行します。
+
+## プラグイン API
+
+プラグイン API は、実行可能なワークフローツールのための初期のホスト面です。プラグインは `herdr-plugin.toml` マニフェストを持つパッケージです。マニフェストは、共有可能なアクション、イベントフック、ターミナルペインのエントリーポイント、リンクハンドラーを宣言します。アクションとペインはマニフェスト専用です。ランタイムでのアクション登録とランタイムでの argv ペイン作成は v1 の範囲外です。
+
+インストールおよびリンクされたプラグインは再起動をまたいで永続化されます。Herdr は `plugin.link`、`plugin.unlink`、`plugin.enable`、`plugin.disable` の際に、`session.json` の隣に `plugins.json` レジストリファイルを書き込みます。`herdr plugin install` CLI も、Herdr が動作していないときに同じレジストリを書き込み、起動時に自動的に読み込まれます。起動時、Herdr は各マニフェストを元のパスから再読み込みします。ファイルが欠落しているかパースできない場合、エントリは `warnings` フィールド付きで保持され、`plugin.list` がそれを表面化します。
+
+イベントフックの `on` の値は、リンク時に既知の Herdr イベント名と照合されます。認識されない名前はエラーではなく、リンクは成功しますが、返されるプラグイン情報に警告が含まれます (例: `"unknown event 'worktree.craeted'"`)。`plugin.link` と `plugin.list` のレスポンスの `warnings` フィールドを確認してください。
+
+ローカルのプラグインマニフェストをリンクする:
+
+```json
+{"id":"req_plugin_link","method":"plugin.link","params":{"path":"/path/to/plugin","enabled":true}}
+```
+
+`plugin.link` は任意の `source` メタデータも受け付けます。CLI は GitHub からインストールするときにこれを使い、`plugin.list` が出自、要求された ref、解決されたコミット、管理チェックアウトのパスを表示できるようにします:
+
+```json
+{"id":"req_plugin_link","method":"plugin.link","params":{"path":"/managed/plugin/herdr-plugin.toml","enabled":true,"source":{"kind":"github","owner":"ogulcancelik","repo":"herdr-plugin-examples","subdir":"worktree-bootstrap","requested_ref":"main","resolved_commit":"abc123","managed_path":"/data/plugins/github/<managed-checkout>","installed_unix_ms":1780000000000}}}
+```
+
+パスは `herdr-plugin.toml` を含むプラグインディレクトリでも、マニフェストへの直接パスでも構いません。マニフェストの形式は次のとおりです:
+
+```toml
+id = "example.worktree-bootstrap"
+name = "Worktree Bootstrap"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Prepare new worktrees"
+platforms = ["linux", "macos", "windows"]
+
+[[build]]
+command = ["bun", "install"]
+
+[[actions]]
+id = "bootstrap"
+title = "Bootstrap worktree"
+contexts = ["workspace"]
+command = ["bun", "run", "bootstrap.ts"]
+
+[[events]]
+on = "worktree.created"
+command = ["bun", "run", "bootstrap.ts"]
+
+[[panes]]
+id = "board"
+title = "Worktree board"
+placement = "overlay"
+command = ["bun", "run", "board.ts"]
+
+[[link_handlers]]
+id = "github-issue"
+title = "Open GitHub issue"
+pattern = "^https://github\\.com/[^/]+/[^/]+/(issues|pull)/[0-9]+$"
+action = "bootstrap"
+```
+
+`min_herdr_version` は必須です。このフィールドが欠落している、無効、または実行中の Herdr バイナリより新しい場合、サーバーはプラグインのリンクを拒否します。
+
+プラグインが対応する OS 識別子 (`linux`、`macos`、`windows`) をトップレベルの `platforms` で宣言してください。ローカル開発では `platforms` の省略が許されます — `plugin.link` は成功しますが、レスポンスに警告が含まれます。個々のビルドコマンド、アクション、イベントフック、ペイン、リンクハンドラーは独自の `platforms` を宣言してプラグインレベルのリストを上書きできます。省略時はプラグインから継承します。実効的な platforms が現在の OS を含まないアクションの呼び出しやペインのオープンは `platform_unsupported` エラーを返します。
+
+リンク済みプラグインの一覧、有効化、無効化、リンク解除:
+
+```json
+{"id":"req_plugin_list","method":"plugin.list","params":{}}
+{"id":"req_plugin_disable","method":"plugin.disable","params":{"plugin_id":"example.worktree-bootstrap"}}
+{"id":"req_plugin_enable","method":"plugin.enable","params":{"plugin_id":"example.worktree-bootstrap"}}
+{"id":"req_plugin_unlink","method":"plugin.unlink","params":{"plugin_id":"example.worktree-bootstrap"}}
+```
+
+アクションはリンクされたマニフェストから解決されます。`plugin.action.list` はインストール済みプラグイン全体のすべてのアクションを返します。絞り込むには `plugin_id` を渡してください。
+
+```json
+{"id":"req_plugin_actions","method":"plugin.action.list","params":{}}
+{"id":"req_plugin_actions_filtered","method":"plugin.action.list","params":{"plugin_id":"example.worktree-bootstrap"}}
+```
+
+`plugin.action.list` は、プラグインレベルの継承を適用した後の各アクションの実効的な `platforms` を返します。
+
+修飾 id または素のアクション id でアクションを呼び出す:
+
+```json
+{"id":"req_plugin_invoke","method":"plugin.action.invoke","params":{"action_id":"example.worktree-bootstrap.bootstrap","context":{"invocation_source":"keybinding"}}}
+```
+
+`plugin.action.invoke` はマニフェストのアクションを解決し、マニフェストのコマンドを起動し、Herdr が構築した呼び出しコンテキストと、開始されたコマンドのログレコードを返します。欠けているコンテキストフィールドは、アクティブなワークスペース、タブ、フォーカス中のペイン、worktree の出自情報、リクエスト id から補完されます。無効化されたプラグインのアクションの呼び出しは `plugin_disabled` エラーを返します。
+
+Herdr は `HERDR_SOCKET_PATH`、`HERDR_BIN_PATH`、`HERDR_ENV=1`、`HERDR_PLUGIN_ID`、`HERDR_PLUGIN_ROOT`、`HERDR_PLUGIN_CONFIG_DIR`、`HERDR_PLUGIN_STATE_DIR`、`HERDR_PLUGIN_CONTEXT_JSON`、そして利用可能な `HERDR_WORKSPACE_ID`、`HERDR_TAB_ID`、`HERDR_PANE_ID` の値を注入します。アクションコマンドは加えて `HERDR_PLUGIN_ACTION_ID` を受け取ります。イベントフックは `HERDR_PLUGIN_EVENT` と `HERDR_PLUGIN_EVENT_JSON` を、ペインコマンドは `HERDR_PLUGIN_ENTRYPOINT_ID` を受け取ります。
+
+直近のアクションおよびイベントコマンドのログを一覧する:
+
+```json
+{"id":"req_plugin_logs","method":"plugin.log.list","params":{"plugin_id":"example.worktree-bootstrap","limit":20}}
+```
+
+イベントフックは、Herdr が `worktree.created` のような一致するイベント名を発行したときに、有効なインストール済みプラグインに対して実行されます。
+
+v1 には Herdr が管理するプラグインストレージ API はありません。`HERDR_PLUGIN_CONFIG_DIR` と `HERDR_PLUGIN_STATE_DIR` はパスの発見だけを提供します。ファイル、スキーマ、マイグレーション、クリーンアップはプラグインが所有します。
+
+管理されたターミナル UI を開く:
+
+```json
+{"id":"req_plugin_pane","method":"plugin.pane.open","params":{"plugin_id":"example.board","entrypoint":"board","placement":"zoomed","target_pane_id":"w1:p1","env":{"HERDR_ROLE":"board"},"focus":true}}
+```
+
+`plugin.pane.open` は、インストール済みで有効かつプラットフォーム互換のプラグインを要求し、要求されたマニフェストの `[[panes]]` エントリーポイントを argv ベースのターミナルペインとして起動します。マニフェストのペイン `placement` のデフォルトは `overlay` です。リクエストの `placement` は `overlay`、`split`、`tab`、`zoomed` でマニフェストを上書きできます。オーバーレイのペインはアクティブなペインを対象とします。分割とズームのペインは既存のペインを対象とし、タブのペインはワークスペースを対象にできます。ペインは開いた後は通常の Herdr ペインとして振る舞いますが、`plugin.pane.focus` と `plugin.pane.close` はプラグイン API 経由で開かれたペインにのみ作用します。focus は `plugin_pane_focused` を、close は `plugin_pane_closed` を返します。
+
+## ソケットトランスポート
+
+Herdr はローカルソケット上の改行区切り JSON を使います。Unix では Unix ドメインソケットです。Windows では名前付きパイプです。
+
+1 行につき 1 リクエストを送ります:
+
+```json
+{"id":"req_1","method":"ping","params":{}}
+```
+
+成功レスポンスは同じ `id` を含みます:
+
+```json
+{"id":"req_1","result":{"type":"pong"}}
+```
+
+イベント購読は、最初のレスポンスの後も接続を開いたままにします。
+
+## ソケットパス
+
+デフォルトのソケットは Herdr の設定ディレクトリの下にあります。
+
+名前付きセッションは別のソケットを持ちます:
+
+```text
+~/.config/herdr/herdr.sock
+~/.config/herdr/sessions/<name>/herdr.sock
+```
+
+解決順:
+
+1. 明示的な CLI の `--session <name>`
+2. `HERDR_SOCKET_PATH`
+3. `HERDR_SESSION=<name>`
+4. デフォルトセッションのソケット
+
+`HERDR_SOCKET_PATH` は低レベルな上書きにのみ使ってください。
+
+プラグインでは、移植性のある Windows の挙動が必要なときは `HERDR_BIN_PATH` と CLI ラッパーの呼び出しを推奨します。生のソケットクライアントは、プラットフォームネイティブのローカルソケット形式を使う責任を負います。
+
+## エージェント状態の報告
+
+インテグレーションは `pane.report_agent` でエージェント状態を報告します。
+
+```json
+{
+  "id": "req_1",
+  "method": "pane.report_agent",
+  "params": {
+    "pane_id": "w1:p1",
+    "source": "custom:docs",
+    "agent": "docs-bot",
+    "state": "working",
+    "message": "building docs",
+    "custom_status": "indexing"
+  }
+}
+```
+
+`state` は意味的です。wait、通知、ロールアップに影響します。
+
+`custom_status` は表示用です。意味的な挙動を変えずに `indexing` のような短いアクティビティラベルを表示できます。
+
+セッションのみの公式インテグレーションは、`pane.report_agent_session` でネイティブセッション参照を報告します。状態を報告するインテグレーションは、`pane.report_agent` にネイティブセッション参照を含めることもできます。状態に依存しないセッション報告は、wait、通知、ロールアップに影響しません。
+
+```json
+{
+  "id": "req_2",
+  "method": "pane.report_agent_session",
+  "params": {
+    "pane_id": "w1:p1",
+    "source": "herdr:codex",
+    "agent": "codex",
+    "agent_session_id": "..."
+  }
+}
+```
+
+Herdr に保存されたネイティブセッション参照があるとき、`pane.get`、`pane.list`、`agent.get`、`agent.list` は読み取り専用の `agent_session` オブジェクトを公開します:
+
+```json
+{
+  "agent_session": {
+    "source": "herdr:codex",
+    "agent": "codex",
+    "kind": "id",
+    "value": "..."
+  }
+}
+```
+
+ネイティブセッション参照が保存されていない場合、このフィールドは省略されます。
+
+`pane.get`、`pane.list`、`agent.get`、`agent.list` は、ペインの PTY を現在制御しているプロセスの cwd を解決できるときに `foreground_cwd` も公開します。既存の `cwd` フィールドは、ラベル、follow-cwd 挙動、復元されたセッション状態に使われるペイン/ワークスペースの cwd のままです。
+
+ユーザーフックが Herdr インテグレーションからライフサイクル状態を奪わずに表示をカスタマイズしたいときは `pane.report_metadata` を使ってください。
+
+```json
+{
+  "id": "req_2",
+  "method": "pane.report_metadata",
+  "params": {
+    "pane_id": "w1:p1",
+    "source": "user:claude-title",
+    "agent": "claude",
+    "title": "Refactor auth middleware",
+    "display_agent": "Claude: auth",
+    "custom_status": "refactor auth",
+    "state_labels": {
+      "working": "refactoring auth",
+      "idle": "ready",
+      "done": "review ready"
+    },
+    "ttl_ms": 3600000
+  }
+}
+```
+
+メタデータ報告は表示専用です。有効なメタデータは、ペインのタイトル、表示されるエージェント名、コンパクトなアクティビティラベル、可視の状態ラベルを上書きできます。`working`、`blocked`、`idle`、wait、通知、ロールアップは引き続き意味的な状態から得られます。エージェントネイティブのセッション復元は、保存された公式セッション参照から得られます。`agent` は権威あるエージェントラベルに対する任意のガードで、`applies_to_source` はアクティブなライフサイクル権威ソースに対する任意のガードです。表示名を変えるには `display_agent` を使います。`state_labels` のキーは `idle`、`working`、`blocked`、`done`、`unknown` のいずれかでなければなりません。ひとつの表示上書きを取り除くには、同じ `source` で `clear_custom_status: true` のようなクリアフィールドを使ってください。
+
+表示テキストは保存前に正規化されます。Herdr は前後の空白を取り除き、制御文字を除去し、`custom_status` を 32 文字に、`title`、`display_agent`、各状態ラベルを 80 文字に制限します。正規化後に空になった値は無視されます。
+
+`source` と `applies_to_source` はソース識別子です。80 文字以下で、ASCII の英字、数字、コロン、ドット、アンダースコア、ハイフンのみを含められます。
+
+短寿命のメタデータには `ttl_ms` を使ってください。`1` から `86400000` ミリ秒の間でなければなりません。置き換え・クリア・ペインのクローズまで残るべきメタデータでは省略します。TTL が切れると、Herdr はそのソースのメタデータを削除し、可視のペイン表示が変わった場合は表示変更イベントを発行します。
+
+フックが順不同で更新を送る可能性がある場合は `seq` を使ってください。同じ `source` について、最後に受理されたシーケンス以下のシーケンス番号を持つ報告は、API には受理されますがペイン状態には無視されます。
+
+## イベント購読
+
+長寿命のストリームが必要なときはイベントを購読します:
+
+```json
+{
+  "id": "sub_1",
+  "method": "events.subscribe",
+  "params": {
+    "subscriptions": [
+      { "type": "pane.agent_status_changed", "pane_id": "w1:p1", "agent_status": "blocked" }
+    ]
+  }
+}
+```
+
+最初のレスポンスは購読の確認応答です。以降の行はプッシュされるイベントです。
+
+ワークスペースのイベント購読には `workspace.created`、`workspace.updated`、`workspace.renamed`、`workspace.closed`、`workspace.focused` があります。ワークスペースイベントは Herdr の UI/ランタイムのライフサイクルを記述します。ワークスペースが worktree グループに属している場合、`workspace.created` は任意の `workspace.worktree` 出自情報を含みます。削除前に Herdr がまだ識別できる場合、`workspace.closed` は最終的な `workspace` スナップショットを含みます。
+ペインのイベント購読には `pane.created`、`pane.closed`、`pane.focused`、`pane.moved`、`pane.exited`、`pane.agent_detected`、`pane.output_matched`、`pane.agent_status_changed` があります。
+
+worktree のイベント購読には `worktree.created`、`worktree.opened`、`worktree.removed` があります。worktree イベントは Git チェックアウトのライフサイクルを記述します。`worktree.created` は開かれた `workspace` と作成された `worktree` を含みます。`worktree.opened` は対象の `workspace`、開かれた `worktree`、`already_open` を含みます。`worktree.removed` は `workspace_id`、削除された `worktree`、`forced` を含みます。
+
+ライフサイクルイベントには `events.subscribe` を使ってください。ワンショットの wait がサポートされる場合、専用の wait ヘルパーが別途ドキュメント化されます。
+
+## ペインの読み取り
+
+プロトコルクライアントを書いているのでなければ、CLI 経由で `pane.read` を使ってください。
+
+```bash
+herdr pane read w1:p1 --source visible --lines 80
+herdr pane read w1:p1 --source recent --lines 120
+herdr pane read w1:p1 --source recent-unwrapped --lines 120
+herdr pane read w1:p1 --source detection
+```
+
+`recent-unwrapped` はソフト折り返しを無視するのでログに便利です。
+`detection` は、エージェントのスクリーン検出が使う下部バッファのスナップショットを返します。
+
+## 状態の待機
+
+エージェントとスクリプトの協調には wait を使います。
+
+```bash
+herdr wait agent-status w1:p1 --status done
+herdr wait agent-status w1:p1 --status blocked
+```
+
+エージェントの wait は、任意のコマンドの完了ではなく意味的な状態を観測します。
+
+## レスポンスの形式
+
+成功レスポンスは次のようになります:
+
+```json
+{
+  "id": "req_1",
+  "result": {
+    "type": "pane_info",
+    "pane": {
+      "pane_id": "w1:p1",
+      "terminal_id": "term_abc123",
+      "workspace_id": "w1",
+      "tab_id": "w1:t1",
+      "focused": true,
+      "agent_status": "working",
+      "revision": 42
+    }
+  }
+}
+```
+
+`server.agent_manifests` は、ルールをリロードせずに、アクティブなエージェント検出マニフェストのソースとリモート更新の診断情報を返します:
+
+```json
+{
+  "id": "req_1",
+  "result": {
+    "type": "agent_manifest_status",
+    "last_check_unix": 1781043522,
+    "last_result": "checked",
+    "manifests": [
+      {
+        "agent": "cursor",
+        "source": "/home/me/.config/herdr/agent-detection/cursor.toml",
+        "source_kind": "local override",
+        "active_version": "2026.06.10.1",
+        "cached_remote_version": "2026.06.10.1",
+        "local_override_shadowing_remote": true,
+        "remote_update_result": "current"
+      }
+    ]
+  }
+}
+```
+
+`last_check_unix`、`last_result`、`active_version`、`cached_remote_version`、`remote_update_result`、`remote_update_error`、`remote_last_checked_unix`、`warning` のようなフィールドは、利用できないときは省略されます。`server.reload_agent_manifests` は、メモリ内のルールキャッシュをリロードした後、同じ `manifests` の項目形式を持つ `agent_manifest_reload` を返します。
+
+`agent.explain` は、サーバーのアクティブなマニフェストキャッシュを使って、対象ペインの検出スナップショットを実行中のサーバーで評価します:
+
+```json
+{
+  "id": "req_2",
+  "method": "agent.explain",
+  "params": { "target": "w1:p1" }
+}
+```
+
+レスポンスには `herdr agent explain --json` が出力するのと同じ explain オブジェクトが含まれます: 最終状態、マニフェストのソースとバージョン、マッチしたルール、評価されたルールの証拠、スキップ状態の理由、idle フォールバックの理由、そして完全なライフサイクルフック権威によってスクリーンルールが権威でなくなったときの `screen_detection_skip_reason` です。
+
+クライアントには `agent.explain` をサポートする実行中のサーバーが必要です。Herdr のアップグレード後は、このメソッドに頼る前にサーバーを再起動するかライブハンドオフしてください。
+
+エラーは次のようになります:
+
+```json
+{
+  "id": "req_1",
+  "error": {
+    "code": "not_found",
+    "message": "pane not found"
+  }
+}
+```
+
+## プロトコルの安定性
+
+Herdr にはクライアント/サーバー互換性のためのプロトコルバージョンがあります。プロトコルの変更は、リリースの互換性を念頭にレビューされます。
+
+新しい挙動に依存する前に、`ping` または `herdr status` でサーバーのプロトコルを確認してください。未知のフィールドは寛容に扱ってください。

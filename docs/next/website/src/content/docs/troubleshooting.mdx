@@ -12,6 +12,19 @@ herdr status
 
 Also record your operating system, outer terminal name and version, whether the session is local or remote, and whether tmux is involved.
 
+## The CJK IME window is misplaced or the cursor flickers on Windows
+
+Herdr defaults to a cell-drawn cursor on native Windows and WSL because native cursors can flicker, jump, or show stale positions while ConPTY-based multiplexers repaint the screen. A cell-drawn cursor cannot provide the native cursor anchor used by Korean, Japanese, and Chinese IME composition UI.
+
+If the IME composition or candidate window appears at the wrong location, enable the native cursor:
+
+```toml
+[ui]
+host_cursor = "native"
+```
+
+Native mode restores the IME anchor but may reintroduce occasional cursor movement artifacts during active output. Return to the visually stable cursor with `host_cursor = "drawn"`, or remove the setting to use the Windows default. See [Windows beta](/docs/windows-beta/) for the current limitation.
+
 ## Enter, Tab, or Backspace fires twice
 
 Older terminal versions can emit the release of Enter, Tab, and Backspace as the same bytes as the press when an application enables Kitty keyboard event reporting. Herdr cannot distinguish those duplicate bytes after the terminal sends them.

@@ -12,7 +12,6 @@ from pathlib import Path
 
 @dataclass
 class VendorMetadata:
-    source_repo: str
     source_commit: str
     dist_archive: str
     extracted_dir: str
@@ -34,13 +33,25 @@ def git_head(repo: Path) -> str:
     return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
 
 
+def require_clean_checkout(repo: Path) -> None:
+    status = subprocess.check_output(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=repo,
+        text=True,
+    ).strip()
+    if status:
+        raise ValueError(f"refusing to vendor from dirty checkout {repo}:\n{status}")
+
+
 def ensure_dist_archive(source_repo: Path) -> Path:
+    require_clean_checkout(source_repo)
     head = git_head(source_repo)[:9]
     subprocess.run(
         ["zig", "build", "dist", "-Demit-lib-vt", "-Doptimize=ReleaseFast"],
         cwd=source_repo,
         check=True,
     )
+    require_clean_checkout(source_repo)
     dist_dir = source_repo / "zig-out" / "dist"
     archives = sorted(dist_dir.glob(f"libghostty-vt-*+{head}.tar.gz"))
     if not archives:
@@ -69,7 +80,6 @@ def vendor_libghostty_vt(source_repo: Path, destination: Path) -> VendorMetadata
         shutil.copytree(extracted, destination)
 
     return VendorMetadata(
-        source_repo=str(source_repo),
         source_commit=git_head(source_repo),
         dist_archive=archive.name,
         extracted_dir=root,

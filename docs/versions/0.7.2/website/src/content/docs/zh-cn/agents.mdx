@@ -1,0 +1,164 @@
+---
+title: 智能体
+description: 了解 Herdr 能检测什么、智能体状态如何工作,以及集成如何改进它。
+---
+
+Herdr 为同时运行多个编程智能体而生。每个智能体都待在一个真实的终端窗格里,shell、日志、提示符和运行中的进程都完好无损。Herdr 跟踪哪些窗格里有智能体,把它们的状态汇总到标签页和工作区,让你直接跳到需要关注的窗格,而不是手动轮询每个终端。
+
+## 受支持的智能体
+
+常见编程智能体开箱即用地支持自动检测。重要的区别不在于 Herdr 能不能看到某个智能体,而在于允许哪个信号来决定 `idle`、`working` 和 `blocked`。
+
+| 智能体 | 状态权威 | 集成角色 |
+| --- | --- | --- |
+| Pi | 安装后为生命周期钩子;否则为屏幕清单 | 状态与会话 |
+| OMP | 安装后为生命周期钩子 | 状态 |
+| GitHub Copilot CLI | 屏幕清单 | 会话 |
+| Devin CLI | 屏幕清单 | 会话 |
+| Kimi Code CLI | 安装后为生命周期钩子;否则为屏幕清单 | 状态与会话 |
+| Hermes Agent | 安装后为生命周期钩子;否则为屏幕清单 | 状态与会话 |
+| Qoder CLI | 屏幕清单 | 会话 |
+| Droid | 屏幕清单 | 会话 |
+| OpenCode | 安装后为生命周期插件;否则为屏幕清单 | 状态与会话 |
+| Kilo Code CLI | 安装后为生命周期插件;否则为屏幕清单 | 状态与会话 |
+| MastraCode | 安装后为生命周期钩子 | 状态与会话 |
+| Claude Code | 屏幕清单 | 会话 |
+| Codex | 屏幕清单 | 会话 |
+| Cursor Agent CLI | 屏幕清单 | 会话 |
+| Amp | 屏幕清单 | 无 |
+| Grok CLI | 屏幕清单 | 无 |
+| Antigravity CLI | 屏幕清单 | 无 |
+| Kiro CLI | 屏幕清单 | 无 |
+
+可检测但测试较少: Gemini CLI 和 Cline。不受支持的智能体仍然可以作为普通终端进程正常运行,只是在你添加集成或通过 socket API 上报状态之前,可能得不到丰富的状态。
+
+## 状态权威
+
+Herdr 首先检测每个窗格的前台进程。之后,每个窗格有且只有一个状态权威。
+
+对于具备完整生命周期钩子的智能体,当集成已安装并在为运行中的窗格主动上报时,集成就是权威。Herdr 用这些钩子上报来决定 `idle`、`working`、`blocked` 和会话身份。对同一个生命周期权威,它不会再并行运行屏幕清单兜底。这样可以避免出现两个相互竞争的事实来源。
+
+对于没有完整生命周期钩子的智能体,Herdr 识别前台进程,并读取实时的底部缓冲区屏幕快照。它对该快照评估 TOML 清单,来判定 `idle`、`working` 和 `blocked`。对于会发出这些信号的智能体,清单也可以把终端标题和进度 (OSC) 序列作为检测证据;当这些证据不存在时,屏幕规则独自承担检测。
+
+屏幕快照来自窗格缓冲区最近的底部,而不是滚动后的视口。即使你在 Herdr 里向上翻页,检测仍然跟随底部的实时智能体 UI。
+
+Claude Code、Codex、GitHub Copilot CLI、Droid、Qoder CLI 和 Cursor Agent CLI 的集成有意不作为生命周期权威。它们为恢复提供原生会话身份,但它们的钩子并不覆盖整个生命周期,可能漏掉权限审批结果、Esc 中断或其他状态转换。对这些智能体,Herdr 仍然使用屏幕清单检测。
+
+## 虚拟机与沙箱包装器
+
+在 Linux 上,VM、Bubblewrap 或 `fence` 之类的包装器可能把真实的智能体进程从宿主的 `/proc` 中隐藏起来。在命令上设置 `HERDR_AGENT=<agent>`,例如 `HERDR_AGENT=claude fence -- claude`,告诉 Herdr 该使用哪个已有智能体的屏幕清单。这个提示的作用范围只限于那个前台进程;除非所有继承它的前台进程都应被视为该智能体,否则不要在 shell 里全局 export。
+
+## blocked 状态
+
+对屏幕清单类智能体,blocked 检测刻意从严。只有当实时底部缓冲区快照匹配已知可见的审批、提问或权限 UI 时,Herdr 才标记 `blocked`。对已知智能体,如果没有任何清单规则匹配,Herdr 会回退到 `idle`,并在 explain 输出中把该回退标记为 `default_known_agent_idle_fallback`。
+
+这意味着不常见的新智能体提示可能一开始显示为 `idle` 而不是 `blocked`,直到 Herdr 学会那种屏幕形态。这些交互不会让 Herdr 发送输入或执行破坏性操作;它们只影响可见状态和等待。
+
+## 检测清单
+
+内置清单打包在 Herdr 内部。Herdr 还会向 herdr.dev 检查远程清单更新,并自动应用有效的按智能体规则更新,不需要重启 Herdr。远程清单存放在 Herdr 的状态目录中。设置 `[update] manifest_check = false` 可以禁用后台远程清单检查。
+
+本地覆盖可以从平台配置目录替换远程或内置清单:
+
+```text
+~/.config/herdr/agent-detection/<agent>.toml
+```
+
+本地覆盖始终优先。没有本地覆盖时,Herdr 在缓存的远程清单和运行中二进制文件内置的清单之间,选择更新且兼容的那个。在调试构建上,同一个配置助手可能使用 `herdr-dev` 之类的开发目录。无效的覆盖文件会被忽略并给出警告,Herdr 会对该智能体回退到缓存的远程或内置清单。
+
+远程清单只为 Herdr 已经知道如何识别的智能体修补检测规则。添加全新的智能体仍然需要更新 Herdr 二进制文件,以获得进程检测、标签和集成行为。
+
+运行中的服务器在启动时把生效的清单加载进内存。自动的远程清单更新会在写入新规则后重新加载该内存缓存。运行 `herdr server update-agent-manifests` 可以立即拉取远程清单更新并重载运行中的服务器。手动编辑本地覆盖后,重启 Herdr 或运行 `herdr server reload-agent-manifests` 把文件应用到运行中的服务器。
+
+当某个窗格显示了错误状态时,用 `herdr agent explain`:
+
+```bash
+herdr agent explain <target>
+herdr agent explain --file screen.txt --agent codex --json
+```
+
+实时 explain 由运行中的服务器评估,因此反映的是生效的清单缓存。explain 输出包括: 智能体、最终状态、屏幕检测是否被完整生命周期权威跳过、清单来源和版本、缓存的远程版本、本地覆盖的遮蔽情况、远程更新状态、匹配的规则、可见证据标志、已评估规则的匹配器和区域证据、转写查看器的跳过更新原因,以及没有规则匹配时的 idle 回退原因。
+
+Herdr 可以在 tmux 作为外层终端环境时运行。智能体检测不会检查在 Herdr 窗格内启动的 tmux 会话。如果某个 shell 框架在 Herdr 内自动进入 tmux,Herdr 看到的窗格进程就是 `tmux`,而不是它背后的智能体。
+
+## 状态汇总
+
+侧边栏会把状态向上汇总。
+
+一个 blocked 的智能体会让它的窗格、标签页和工作区看起来是 blocked。一个 working 的智能体会让工作区看起来处于活跃状态。一个 done 的智能体在你查看之前会一直保持可见。
+
+这就是 Herdr 的主要工作流: 启动多个智能体,让它们并行工作,用侧边栏看哪个项目需要决策、哪个还在运行、哪个已经可以审阅。
+
+## 直接集成
+
+为你使用的每个智能体安装集成;它让 Herdr 获得钩子或插件上报,而不是只靠屏幕检测:
+
+```bash
+herdr integration install claude
+herdr integration status
+```
+
+每个受支持的智能体都有自己的集成名称和行为。按智能体的细节和完整安装列表见[集成](/zh-cn/docs/integrations/)。
+
+## 自定义智能体标签
+
+你可以重命名智能体目标的显示名:
+
+```bash
+herdr agent rename w1:p1 reviewer
+herdr agent rename reviewer --clear
+```
+
+目标可以是终端 ID、唯一的智能体名称、检测到或上报的智能体标签,以及旧式窗格 ID。
+
+## 自定义状态标签
+
+集成可以上报一个视觉状态标签,而不改变语义状态。
+
+```bash
+herdr pane report-agent w1:p1 \
+  --source custom:indexer \
+  --agent docs-bot \
+  --state working \
+  --custom-status indexing
+```
+
+`state` 控制等待、通知和汇总。`custom-status` 只是显示文本。
+
+## 从 CLI 启动智能体
+
+当你希望一个终端被当作智能体目标时,使用 `herdr agent ...` 命令。智能体目标会出现在 `agent list` 中,可以按智能体名称读取或发送输入,可以按智能体状态等待,也可以被直接附加。
+
+从脚本向 Herdr 中启动一个智能体:
+
+```bash
+herdr agent start reviewer --cwd ~/project --split right -- pi
+```
+
+也可以把该智能体放进特定的工作区或标签页:
+
+```bash
+herdr agent start docs --workspace w1 --tab w1:t1 -- claude
+```
+
+普通终端、服务器、测试、shell 和底层终端输入请使用 `herdr pane ...` 命令。例如跑 `cargo test` 用 `pane split` 和 `pane run`,而不是 `agent start`,除非那个终端就是有意要当作智能体目标。
+
+## 直接附加到智能体
+
+把当前终端附加到某一个智能体终端,而不是完整的 Herdr UI:
+
+```bash
+herdr agent attach reviewer
+```
+
+用 `ctrl+b q` 分离。用 `ctrl+b ctrl+b` 发送字面的 `ctrl+b`。
+
+用鼠标滚轮或普通的 page up/page down 滚动。正常输入会跳回底部。
+
+如果另一个直接附加客户端已经拥有输入,用 `--takeover`:
+
+```bash
+herdr agent attach reviewer --takeover
+```
+
+想对非智能体终端获得相同的直接附加行为时,用 `herdr terminal attach <terminal_id>`。

@@ -1,0 +1,103 @@
+---
+title: 使用 Herdr 的工作方式
+description: 在本地、SSH 内或通过远程连接运行 Herdr。
+---
+
+在工作所在的地方运行 Herdr,从你所在的任何地方连接。
+
+Herdr 由一个后台会话服务器和一个或多个终端客户端组成。窗格在服务器中持续运行。客户端负责连接、分离和渲染会话。
+
+## 本地工作
+
+在项目目录中启动 Herdr:
+
+```bash
+herdr
+```
+
+Herdr 会自动启动或连接到本地后台会话。你不需要管理 socket。在窗格里照常运行 shell、服务器、测试和智能体。
+
+用 `ctrl+b q` 分离客户端。窗格会继续运行。
+
+之后重新连接:
+
+```bash
+herdr
+```
+
+如果想结束会话并停止其中的窗格,停止服务器:
+
+```bash
+herdr server stop
+```
+
+## 通过普通 SSH 的远程工作
+
+SSH 到有代码和凭据的机器,然后在那里运行 Herdr:
+
+```bash
+ssh you@server
+herdr
+```
+
+这和终端复用器的用法一样。你的 shell 在远程,Herdr 服务器在远程,智能体和窗格都运行在远程机器上。用 `ctrl+b q` 分离并断开连接,之后再 SSH 回去,重新运行 `herdr`。
+
+当你本来就工作在 SSH shell 里、在手机或平板的 SSH 客户端上,或者想要最简单的配置时,用这条路径。
+
+## 用手机工作
+
+你不需要 Herdr 手机应用或 Web 仪表盘。在手机上装任意一个 SSH 客户端,连到智能体所在的机器,在那里启动 Herdr:
+
+```bash
+ssh you@server
+herdr
+```
+
+同一个持久的 Herdr 会话就会在手机终端中打开。TUI 会适应窄屏,所以你可以在不离开 SSH 的情况下检查智能体、切换工作区、查看窗格。
+
+在 iPhone 上,[moshi](https://getmoshi.app/) 这类应用表现很好。
+
+<div class="mobile-doc-shots">
+  <figure>
+    <img src="/assets/mobile-agent-session-v2.jpeg" alt="手机上通过 SSH 的 Herdr 智能体会话" loading="lazy" />
+    <figcaption>SSH 上的智能体会话</figcaption>
+  </figure>
+  <figure>
+    <img src="/assets/mobile-switch-menu-v2.jpeg" alt="手机上 Herdr 的响应式切换菜单" loading="lazy" />
+    <figcaption>响应式切换菜单</figcaption>
+  </figure>
+</div>
+
+## 从本地终端远程工作
+
+不先打开 shell,直接通过 SSH 连接:
+
+```bash
+herdr --remote workbox
+herdr --remote ssh://you@server:2222
+```
+
+你本地的 Herdr 充当瘦客户端。它通过 SSH 连接,启动或连接远程 Herdr 服务器,并把 UI 流式传回你的本地终端。
+
+想让远程会话用起来像本地时,用这条路径。客户端运行在你的机器上,所以图像剪贴板粘贴等本地桌面功能可以桥接到远程服务器。如果你先 SSH 再在服务器上运行 `herdr`,Herdr 就完全运行在那台服务器上,无法读取你本地桌面的剪贴板。
+
+对于经常连接的目标,把主机写进 SSH 配置:
+
+```text
+Host workbox
+  HostName server.example.com
+  User you
+  Port 2222
+```
+
+然后这样连接:
+
+```bash
+herdr --remote workbox
+```
+
+## 该用哪条路径
+
+本地工作用 `herdr`。想让 Herdr 在远程 shell 上表现得像 tmux,或者在用手机 SSH 客户端时,用 `ssh you@server` 再 `herdr`。想要一个连接远程会话的本地瘦客户端 (包括本地剪贴板图像粘贴桥接) 时,用 `herdr --remote <host>`。
+
+关于远程引导细节、命名远程会话、自定义二进制、直接终端附加和 `--no-session`,参见[持久化与远程访问](/zh-cn/docs/persistence-remote/)。

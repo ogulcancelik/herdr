@@ -3,4 +3,7 @@ public/
 dist/
 .astro/
 src/content/docs/preview/
+src/content/docs/_versions/
 src/data/config-reference-preview.json
+src/data/config-reference-versions.json
+src/data/docs-versions.json

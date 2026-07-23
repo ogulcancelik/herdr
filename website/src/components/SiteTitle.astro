@@ -1,8 +1,11 @@
 ---
+import { docsRoute } from '../docs-path';
+
 const { siteTitle, siteTitleHref, locale } = Astro.locals.starlightRoute;
-const isPreview = Astro.url.pathname === '/docs/preview/' || Astro.url.pathname.startsWith('/docs/preview/');
+const route = docsRoute(Astro.url.pathname);
 const localePrefix = locale ? `/${locale}` : '';
-const docsHref = isPreview ? '/docs/preview/' : `${localePrefix}/docs/`;
+const targetSegment = route.target === 'stable' ? '' : `/${route.target}`;
+const docsHref = `${localePrefix}/docs${targetSegment}/`;
 ---
 
 <div class="title-row sl-flex">

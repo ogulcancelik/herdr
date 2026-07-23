@@ -5,6 +5,8 @@ description: See what Herdr can detect, how agent state works, and how integrati
 
 Herdr is built for running more than one coding agent at a time. Each agent stays in a real terminal pane with its shell, logs, prompts, and running processes intact. Herdr tracks which panes contain agents, rolls their state up to tabs and workspaces, and lets you jump straight to the pane that needs attention instead of polling every terminal by hand.
 
+To coordinate agents from scripts or from another agent, see [Agent automation](/docs/agent-automation/).
+
 ## Supported agents
 
 Automatic detection works out of the box for common coding agents. The important difference is not whether Herdr can see an agent. It is which signal is allowed to author `idle`, `working`, and `blocked`.
@@ -110,7 +112,7 @@ herdr agent rename w1:p1 reviewer
 herdr agent rename reviewer --clear
 ```
 
-Targets accept terminal IDs, unique agent names, detected or reported agent labels, and legacy pane IDs.
+Targets accept a unique live agent name or the pane ID that currently hosts the agent. Terminal IDs and bare agent-kind labels are not accepted.
 
 ## Custom status labels
 
@@ -130,24 +132,6 @@ herdr pane report-metadata w1:p1 \
 `state` controls waits, notifications, and rollups. The `summary` token is display-only and can be used as `$summary` in an Agent sidebar row.
 
 Agent sidebar rows can also opt into `terminal_title` or `terminal_title_stripped`; neither appears in the default rows. The first shows the latest safety-normalized OSC 0/2 terminal title. The second removes one recognized leading activity or spinner glyph and following whitespace. Herdr owns these values on the server; they are ephemeral across a cold restart and remain independent of metadata titles and semantic agent state. Spinner animation can therefore update the raw title without producing a pane update when the stripped text stays the same.
-
-## Start agents from the CLI
-
-Use `herdr agent ...` commands when you want a terminal to be treated as an agent target. Agent targets show up in `agent list`, can be read or sent input by agent name, can be waited on by agent state, and can be directly attached.
-
-Spawn an agent into Herdr from a script:
-
-```bash
-herdr agent start reviewer --cwd ~/project --split right -- pi
-```
-
-You can place that agent in a specific workspace or tab:
-
-```bash
-herdr agent start docs --workspace w1 --tab w1:t1 -- claude
-```
-
-Use `herdr pane ...` commands for ordinary terminals, servers, tests, shells, and low-level terminal input. For example, use `pane split` and `pane run` for `cargo test`, not `agent start`, unless that terminal is intentionally being treated as an agent target.
 
 ## Attach directly to an agent
 

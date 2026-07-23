@@ -453,6 +453,10 @@ impl TerminalRuntime {
         self.0.cwd()
     }
 
+    pub fn follow_cwd(&self) -> Option<std::path::PathBuf> {
+        self.0.follow_cwd()
+    }
+
     pub fn foreground_cwd(&self) -> Option<std::path::PathBuf> {
         self.0.foreground_cwd()
     }

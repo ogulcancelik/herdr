@@ -56,6 +56,15 @@ jobs:
               return Buffer.from(fileContent.content, 'base64').toString('utf8');
             }
 
+            async function addGreptileReviewLabel() {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                labels: ['greptile-review'],
+              });
+            }
+
             async function closePullRequest(message) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
@@ -75,6 +84,7 @@ jobs:
             const authorPermission = await getPermission(prAuthor);
             if (maintainerPermissions.includes(authorPermission)) {
               console.log(`${prAuthor} is a collaborator with ${authorPermission} access`);
+              await addGreptileReviewLabel();
               return;
             }
 
@@ -82,6 +92,7 @@ jobs:
               const reopenerPermission = reopener ? await getPermission(reopener) : null;
               if (maintainerPermissions.includes(reopenerPermission)) {
                 console.log(`${reopener} reopened this PR with ${reopenerPermission} access; leaving it open`);
+                await addGreptileReviewLabel();
                 return;
               }
             }
@@ -95,6 +106,7 @@ jobs:
 
             if (isApprovedContributor) {
               console.log(`${prAuthor} is in the approved contributors list`);
+              await addGreptileReviewLabel();
               return;
             }
 

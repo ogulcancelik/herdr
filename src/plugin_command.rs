@@ -12,7 +12,7 @@ pub(crate) fn command_for_argv(program: &str, args: &[String]) -> Command {
 
 #[cfg(not(windows))]
 fn command_for_program(program: &str) -> Command {
-    Command::new(program)
+    crate::noninteractive_process::command(program)
 }
 
 #[cfg(windows)]
@@ -29,11 +29,11 @@ fn command_for_program(program: &str) -> Command {
     {
         let shell =
             std::env::var_os("ComSpec").unwrap_or_else(|| r"C:\Windows\System32\cmd.exe".into());
-        let mut command = Command::new(shell);
+        let mut command = crate::noninteractive_process::command(shell);
         command.arg("/d").arg("/c").arg(command_program);
         command
     } else {
-        Command::new(command_program)
+        crate::noninteractive_process::command(command_program)
     }
 }
 
@@ -125,5 +125,26 @@ mod tests {
         assert!(is_windows_batch_file_name("script.BAT"));
         assert!(!is_windows_batch_file_name("node.exe"));
         assert!(!is_windows_batch_file_name("node"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_batch_command_captures_output() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-plugin-command-output-{}.cmd",
+            std::process::id()
+        ));
+        std::fs::write(&path, "@echo off\r\necho plugin-%1\r\n").expect("write batch fixture");
+
+        let output = command_for_argv(&path.display().to_string(), &["ready".to_string()])
+            .output()
+            .expect("run batch fixture");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "plugin-ready"
+        );
     }
 }

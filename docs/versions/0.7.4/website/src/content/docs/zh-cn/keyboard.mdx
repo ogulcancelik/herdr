@@ -1,0 +1,112 @@
+---
+title: 键盘
+description: 前缀键是什么、应该先学哪些绑定,以及如何做到不用前缀键。
+---
+
+:::tip[从 tmux 或 zellij 迁移过来?]
+这套模型你已经很熟悉了。直接跳到[按键绑定参考](/zh-cn/docs/configuration/#按键绑定)查看完整的默认键位和配置语法。
+:::
+
+Herdr 是鼠标原生的。你可以点击窗格、标签页、工作区和智能体,拖动分割边框,使用右键菜单,一个按键绑定都不用学。键盘操作是可选的一层,不是必需项。
+
+## 前缀键是什么
+
+终端复用器位于终端和其中运行的程序之间。这些程序已经占用了大多数按键组合: `ctrl+c` 中断,`ctrl+r` 搜索历史,编辑器几乎占用了剩下的一切。如果 Herdr 直接抢占常用按键,就会破坏其中运行的程序。
+
+前缀键解决了这个问题。按下前缀键 (默认 `ctrl+b`),下一次按键会发给 Herdr 而不是终端。`prefix+c` 的意思是: 按下 `ctrl+b`,松开,再按 `c`。只保留一个键,而不是几十个。
+
+随时按 `prefix+?` 可以查看所有生效的绑定。
+
+## 先学这五个
+
+| 动作 | 按键 |
+| --- | --- |
+| 新建标签页 | `prefix+c` |
+| 向右 / 向下分割 | `prefix+v` / `prefix+minus` |
+| 在窗格间移动 | `prefix+h/j/k/l` |
+| 工作区导航 | `prefix+w` |
+| 分离并让一切继续运行 | `prefix+q` |
+
+这些覆盖了日常的大部分移动操作。其余的都可以继续用鼠标。
+
+## 其余的,按任务分
+
+窗格:
+
+| 动作 | 按键 |
+| --- | --- |
+| 缩放聚焦的窗格 | `prefix+z` |
+| 关闭窗格 | `prefix+x` |
+| 交换窗格 | `prefix+shift+h/j/k/l` |
+| 调整大小模式 | `prefix+r` |
+| 复制模式 | `prefix+[` |
+
+标签页:
+
+| 动作 | 按键 |
+| --- | --- |
+| 下一个 / 上一个标签页 | `prefix+n` / `prefix+p` |
+| 跳转到标签页 1–9 | `prefix+1..9` |
+| 重命名标签页 | `prefix+shift+t` |
+| 关闭标签页 | `prefix+shift+x` |
+
+工作区与会话:
+
+| 动作 | 按键 |
+| --- | --- |
+| 新建工作区 | `prefix+shift+n` |
+| 重命名工作区 | `prefix+shift+w` |
+| 关闭工作区 | `prefix+shift+d` |
+| Goto 选择器 | `prefix+g` |
+| 切换侧边栏 | `prefix+b` |
+
+完整键位和绑定语法见[按键绑定参考](/zh-cn/docs/configuration/#按键绑定)。
+
+## 复制模式
+
+按 `prefix+[` 让聚焦的窗格进入复制模式。用 `h/j/k/l`、tmux 风格的 `w/b/e` 和 `{`/`}` 移动。按 `/` 或 `?` 向前或向后进行文本搜索,再用 `n` 或 `N` 按相同或相反方向重复搜索。查询包含大写字母时区分大小写,否则不区分。用 `v` 或空格开始选择,用 `y` 或回车复制,用 `q` 或 Esc 不复制直接退出。Esc 会先清除当前选择或搜索,然后才退出。复制模式不会暂停窗格进程:停留在底部时继续跟随输出,进入历史记录后保持当前位置。鼠标拖选可以直接复制,完全不用进入复制模式。
+
+## 一切都可以改
+
+每个绑定都可以配置,包括前缀键本身:
+
+```toml
+[keys]
+prefix = "ctrl+a"
+```
+
+## 不用前缀键
+
+你可以把 Herdr 动作绑定到完全不需要前缀的直接组合键。难点在于知道哪些组合键是安全的,因为终端、shell 和桌面环境已经占用了键盘的大部分。
+
+任何组合键都可以做绑定: `ctrl+j`、`alt+k`,顺手就行。但一个组合键要经过三层才能到达 Herdr: 操作系统、外层终端 (Ghostty、iTerm2 等都带有自己的默认键位),以及窗格内运行的程序。`ctrl+j` 能顺利到达 Herdr,但 shell 和编辑器把它当作回车。`alt+k` 在 Linux 上是空闲的,但在 macOS 的大多数终端里会被组合成特殊字符。如果你从这些键系里选组合键,请对照自己的终端和系统快捷键再确认一遍。
+
+我们梳理了 Ghostty、iTerm2、Terminal.app、kitty、WezTerm、Alacritty、Warp、Windows Terminal、GNOME Terminal 和 Konsole 的默认按键绑定,以及 GNOME 和 KDE 的全局快捷键。有一个修饰键系几乎在所有地方都没被占用: `ctrl+alt`。终端把它留空,它不受 macOS option 键组合行为 (会挡掉纯 `alt` 组合键) 的影响,而且即使在没有现代键盘协议的终端里也能正常传输。它是安全的默认推荐;选择权在你。
+
+下面的配置保留前缀绑定,并在其上叠加直接组合键:
+
+```toml
+[keys]
+focus_pane_left = ["prefix+h", "ctrl+alt+h"]
+focus_pane_down = ["prefix+j", "ctrl+alt+j"]
+focus_pane_up = ["prefix+k", "ctrl+alt+k"]
+focus_pane_right = ["prefix+l", "ctrl+alt+l"]
+previous_tab = ["prefix+p", "ctrl+alt+["]
+next_tab = ["prefix+n", "ctrl+alt+]"]
+new_tab = ["prefix+c", "ctrl+alt+c"]
+split_vertical = ["prefix+v", "ctrl+alt+d"]
+split_horizontal = ["prefix+minus", "ctrl+alt+shift+d"]
+zoom = ["prefix+z", "ctrl+alt+z"]
+```
+
+少数 `ctrl+alt` 组合键已被其他地方占用。请避开这些:
+
+| 组合键 | 占用者 |
+| --- | --- |
+| `ctrl+alt+arrows` | GNOME 工作区切换,Ghostty 和 Konsole 默认键位 |
+| `ctrl+alt+t` | Ubuntu 和 Fedora 的“启动终端” |
+| `ctrl+alt+l` / `ctrl+alt+a` | KDE 锁屏 / 注意力窗口 |
+| `ctrl+alt+s` / `ctrl+alt+u` | Konsole |
+| `ctrl+alt+f1..f12` | Linux 虚拟控制台切换 |
+
+如果某个直接组合键没有任何反应,说明终端或桌面环境在 Herdr 看到它之前就把它消费掉了。两边任选其一重新配置: 在终端设置里释放这个组合键,或者在 Herdr 里换一个。

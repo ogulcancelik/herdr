@@ -40,7 +40,7 @@ The socket API can:
 - create, list, focus, rename, and close workspaces
 - create, list, focus, rename, and close tabs
 - list, inspect, split, swap, focus, resize, rename, read, close, and send input to panes
-- list, inspect, read, send to, rename, focus, start, and attach agents through CLI helpers
+- list, inspect, read, prompt, wait on, rename, focus, start, and attach agents through CLI helpers
 - report custom agent state from hooks and plugins
 - subscribe to events and wait for output or state changes
 - install and uninstall built-in integrations
@@ -81,7 +81,7 @@ herdr pane split w1:p1 --direction right --ratio 0.333
 Wait for an agent:
 
 ```bash
-herdr wait agent-status w1:p1 --status done
+herdr agent wait w1:p1 --until done
 ```
 
 Read pane output:
@@ -106,12 +106,12 @@ Raw socket method names use dot notation:
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
-| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send`, `agent.rename`, `agent.focus`, `agent.start` |
+| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
 | Plugins | `plugin.link`, `plugin.list`, `plugin.unlink`, `plugin.enable`, `plugin.disable`, `plugin.action.list`, `plugin.action.invoke`, `plugin.log.list`, `plugin.pane.open`, `plugin.pane.focus`, `plugin.pane.close` |
 
-Some CLI commands are conveniences around these methods. For example, `herdr agent wait` resolves an agent target and then subscribes to pane agent state events.
+`agent.wait` is server-owned and event-driven. It pins the resolved pane occupant so a replacement cannot satisfy the wait. `agent.prompt` accepts an optional `wait` object with `until` and `timeout_ms`; this submits the prompt and starts the wait in one request, avoiding a race between separate calls.
 
 `session.snapshot` returns a one-time bootstrap snapshot for clients that keep
 their own local runtime cache. The response includes version/protocol metadata,
@@ -366,19 +366,96 @@ Use at most one of `workspace_id` or `cwd` for `worktree.list`, `worktree.create
 
 Worktree commands also emit lifecycle events. `worktree.create` emits `workspace.created`, `tab.created`, `pane.created`, and `worktree.created`. `worktree.open` emits `worktree.opened`, and it also emits workspace/tab/pane creation events when it opens a new Herdr workspace. `worktree.remove` emits `worktree.removed`; if the linked workspace is still open, it also emits `workspace.closed`.
 
+## Agent view queries
+
+`agent.view.set` installs one transient declarative projection for the built-in
+Agents view. The projection is reevaluated whenever agent facts or current UI
+context change. It controls the expanded and collapsed sidebar, mobile Agents
+list, mouse targets, indexed focus, and next/previous Agent navigation. It does
+not change `agent.list`, notifications, detection, or global attention counts.
+
+Show agents in the currently presented Space or agents needing attention
+elsewhere, then order by attention and most recent state transition:
+
+```json
+{
+  "id": "view_set",
+  "method": "agent.view.set",
+  "params": {
+    "source": "plugin:example.agent-views",
+    "label": "focus",
+    "filter": {
+      "op": "any",
+      "filters": [
+        {
+          "op": "eq",
+          "field": "workspace_id",
+          "value": {"context": "current_workspace_id"}
+        },
+        {
+          "op": "in",
+          "field": "status",
+          "values": ["blocked", "done"]
+        }
+      ]
+    },
+    "sort": [
+      {"field": "attention", "order": "desc"},
+      {"field": "state_change_seq", "order": "desc"}
+    ]
+  }
+}
+```
+
+Filter nodes use `op` values `all`, `any`, `not`, `eq`, `in`, or `exists`.
+Built-in filter fields are `status`, `workspace_id`, `tab_id`, `pane_id`,
+`agent`, `seen`, and `state_change_seq`. Use `{"token":"name"}` as a field to
+filter plugin-reported pane metadata. Values are strings, booleans, unsigned
+numbers, or a context object. Context values are `current_workspace_id` and
+`current_tab_id`, and may only be compared to the matching ID field. Effective
+status values are `idle`, `working`, `blocked`, `done`, and `unknown`; `done`
+means idle and not yet seen.
+
+Sort fields are `workspace_order`, `tab_order`, `pane_order`, `attention`,
+`status`, `agent`, `seen`, `state_change_seq`, or `{"token":"name"}`. Sorts are
+stable, evaluated in order, and accept `asc` or `desc`. Missing values stay
+after present values. When `sort` is omitted, the existing
+`ui.agent_panel_sort` policy remains active. A custom sort temporarily replaces
+that policy without rewriting config.
+
+`source` identifies the owner. Plugins use `plugin:<HERDR_PLUGIN_ID>`; Herdr
+rejects plugin-owned sets when that plugin is missing or disabled. Other callers
+may use their own non-`plugin:` source. A successful set atomically replaces the
+previous view. The view lasts until it is cleared, replaced, its owning plugin
+is disabled, unlinked, or uninstalled, or the server exits. Plugins that want
+durable behavior should save the query under `HERDR_PLUGIN_STATE_DIR` and
+reapply it from a `[[startup]]` hook.
+
+Clear unconditionally, or only when the named source still owns the view:
+
+```json
+{"id":"view_clear","method":"agent.view.clear","params":{}}
+{"id":"view_clear_owned","method":"agent.view.clear","params":{"source":"plugin:example.agent-views"}}
+```
+
+A source mismatch leaves the active view unchanged. Set and clear responses use
+`type: "agent_view"` and report `active`, `source`, and optional `label`.
+
 ## Plugin APIs
 
 The plugin API is an early host surface for executable workflow tools. A plugin
 is a package with a `herdr-plugin.toml` manifest. The manifest declares
-shareable actions, event hooks, terminal pane entrypoints, and link handlers.
+startup hooks, shareable actions, event hooks, terminal pane entrypoints, and
+link handlers. Startup hooks run once after restore when the API is ready.
 Actions and panes are manifest-only; runtime action registration and runtime
 argv pane creation are not part of v1.
 
 Installed and linked plugins persist across restarts. Herdr writes a
 `plugins.json` registry file alongside `session.json` on `plugin.link`,
 `plugin.unlink`, `plugin.enable`, and `plugin.disable`. The
-`herdr plugin install` CLI also writes the same registry when Herdr is not
-running, then startup loads it automatically. On startup, Herdr re-reads each
+`herdr plugin install` and `herdr plugin link` CLIs also write the same registry
+when Herdr is not running, then startup loads it automatically. On startup,
+Herdr re-reads each
 manifest from its original path; if the file is missing or unparseable the entry
 is kept with a `warnings` field so `plugin.list` surfaces it.
 
@@ -721,8 +798,8 @@ herdr pane read w1:p1 --source detection
 Use waits to coordinate agents and scripts.
 
 ```bash
-herdr wait agent-status w1:p1 --status done
-herdr wait agent-status w1:p1 --status blocked
+herdr agent wait w1:p1 --until done
+herdr agent wait w1:p1 --until blocked
 ```
 
 Agent waits observe semantic state, not arbitrary command completion.

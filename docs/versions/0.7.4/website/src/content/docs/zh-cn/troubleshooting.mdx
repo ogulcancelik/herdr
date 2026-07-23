@@ -1,0 +1,82 @@
+---
+title: 故障排除
+description: 诊断常见的安装、终端输入、会话、快捷键和远程连接问题。
+---
+
+先检查版本和会话状态:
+
+```bash
+herdr -V
+herdr status
+```
+
+同时记录操作系统、外层终端名称和版本、会话是本地还是远程，以及是否使用了 tmux。
+
+## Enter、Tab 或 Backspace 触发两次
+
+旧版终端在应用启用 Kitty 键盘事件报告后，可能把 Enter、Tab 和 Backspace 的释放事件发送为与按下事件相同的字节。终端发送后，Herdr 无法区分这些重复字节。
+
+请把外层终端更新到包含上游修复的版本:
+
+| 终端 | 最低修复版本 |
+| --- | --- |
+| kitty | 0.33.0 |
+| foot | 1.20.0 |
+| Alacritty | 0.15.0 |
+
+长期支持版 Linux 发行版中的旧终端软件包尤其容易出现此问题。已确认的边界捕获和上游链接见 [Herdr issue #1116](https://github.com/ogulcancelik/herdr/issues/1116)。如果当前版本仍有问题，请报告准确的终端版本，以及该问题是否也会在 Herdr 外出现。
+
+## 按 Option+Left 或 Option+Right 时输入 `;3D` 或 `;3C`
+
+终端通常把 Alt+Left 和 Alt+Right 发送为标准的带修饰键方向键序列 `ESC[1;3D` 和 `ESC[1;3C`。在 macOS 上，需要先把外层终端配置为将 Option 视为 Alt。如果 shell 没有绑定这些序列，zsh 可能会把剩余字符显示为 `;3D` 或 `;3C`。kitty、Alacritty 和其他终端都可能出现这种情况；Herdr 和 tmux 都会保留原始的带修饰键方向键输入。
+
+如果希望带修饰键的方向键在所有终端和嵌套 shell 中都执行按单词移动，请添加明确的 zsh 绑定:
+
+```zsh
+bindkey $'\e[1;3D' backward-word
+bindkey $'\e[1;3C' forward-word
+```
+
+kitty 在 Herdr 外可能表现不同，因为它的自动 zsh 集成只会为 kitty 直接启动的 shell 添加这些绑定，而不会为终端多路复用器创建的 shell 添加。请按照 kitty 的[手动 shell 集成说明](https://sw.kovidgoyal.net/kitty/shell-integration/#manual-shell-integration)，或在按键到达 shell 前通过 `kitty.conf` 映射它们:
+
+```text
+map alt+left send_text all \x1bb
+map alt+right send_text all \x1bf
+```
+
+终端应用可能会直接使用 Alt+Left 和 Alt+Right，因此 Herdr 不会改写带修饰键的方向键。调查详情见 [Herdr issue #1370](https://github.com/ogulcancelik/herdr/issues/1370)。
+
+## Herdr 已更新，但运行中的会话仍是旧版本
+
+更新二进制文件不一定会替换已经运行且兼容的服务器。先检查 `herdr status`。要启动更新后的服务器，请停止会话并重新启动 Herdr:
+
+```bash
+herdr server stop
+herdr
+```
+
+停止服务器会结束窗格进程。命名会话使用 `herdr session stop <name>`。更新器、软件包管理器和实时移交行为见[安装 Herdr](/zh-cn/docs/install/#update)。
+
+## 找不到 `herdr` 命令
+
+重启终端以重新加载环境，然后确认 Herdr 安装目录位于 `PATH` 中。通过软件包管理器安装的 Herdr 必须通过该管理器更新并加入环境。见[安装 Herdr](/zh-cn/docs/install/#verify)。
+
+## 直接快捷键没有反应
+
+操作系统或外层终端可能在 Herdr 收到按键前就拦截了组合键。请在对应层释放该组合键，或改用其他绑定。已知冲突和安全默认值见[键盘](/zh-cn/docs/keyboard/#going-prefix-free)。
+
+## 远程连接无法认证
+
+先用 `ssh <host>` 确认普通 OpenSSH 连接正常。若在非交互 shell、CI 或移动终端中使用带密码的密钥，请在远程连接前把密钥载入 `ssh-agent`。见[持久化和远程访问](/zh-cn/docs/persistence-remote/#remote-attach-over-ssh)。
+
+## 查找诊断日志
+
+Herdr 日志默认位于 `~/.config/herdr/`:
+
+```text
+herdr.log
+herdr-client.log
+herdr-server.log
+```
+
+设置 `HERDR_LOG=herdr=debug` 可获得更多细节。报告问题时请附上当前日志和轮转后的日志。见[配置](/zh-cn/docs/configuration/#logs)。

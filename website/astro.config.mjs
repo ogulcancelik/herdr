@@ -1,7 +1,9 @@
 import { defineConfig } from 'astro/config';
+import sitemap from '@astrojs/sitemap';
 import starlight from '@astrojs/starlight';
 
 const repoBlob = 'https://github.com/ogulcancelik/herdr/blob/master/';
+const nonCanonicalDocsPath = /^\/(?:ja\/|zh-cn\/)?docs\/(?:preview|\d+\.\d+\.\d+)(?:\/|$)/;
 
 function rewriteHerdrLinks() {
   const docsLinks = new Map([
@@ -54,6 +56,13 @@ export default defineConfig({
     '/zh-cn': '/zh-cn/docs/',
   },
   integrations: [
+    sitemap({
+      filter: (page) => !nonCanonicalDocsPath.test(new URL(page).pathname),
+      i18n: {
+        defaultLocale: 'root',
+        locales: { root: 'en', ja: 'ja', 'zh-cn': 'zh-CN' },
+      },
+    }),
     starlight({
       title: 'herdr',
       description: 'Terminal-native agent runtime and multiplexer.',
@@ -159,6 +168,7 @@ export default defineConfig({
           items: [
             { label: 'How to work with Herdr', translations: { ja: 'Herdr での作業の進め方', 'zh-CN': '使用 Herdr 的工作方式' }, slug: 'docs/how-to-work' },
             { label: 'Agents', translations: { ja: 'エージェント', 'zh-CN': '智能体' }, slug: 'docs/agents' },
+            { label: 'Agent automation', translations: { ja: 'エージェント自動化', 'zh-CN': '智能体自动化' }, slug: 'docs/agent-automation' },
             { label: 'Session state and restore', translations: { ja: 'セッション状態と復元', 'zh-CN': '会话状态与恢复' }, slug: 'docs/session-state' },
             { label: 'Persistence and remote access', translations: { ja: '永続化とリモートアクセス', 'zh-CN': '持久化与远程访问' }, slug: 'docs/persistence-remote' },
           ],
@@ -189,7 +199,7 @@ export default defineConfig({
           translations: { ja: 'ヘルプ', 'zh-CN': '帮助' },
           items: [
             { label: 'Troubleshooting', translations: { ja: 'トラブルシューティング', 'zh-CN': '故障排除' }, slug: 'docs/troubleshooting' },
-            { label: 'Preview docs', translations: { ja: 'プレビュー版ドキュメント', 'zh-CN': '预览版文档' }, slug: 'docs/preview' },
+            { label: 'Next docs', translations: { ja: '次期版ドキュメント', 'zh-CN': '下一版文档' }, slug: 'docs/preview' },
           ],
         },
       ],

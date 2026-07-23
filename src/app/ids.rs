@@ -141,4 +141,12 @@ impl App {
             .find_map(|(pane_id, number)| (*number == pane_number).then_some(*pane_id))?;
         Some((ws_idx, pane_id))
     }
+
+    pub(crate) fn parse_current_public_pane_id(
+        &self,
+        id: &str,
+    ) -> Option<(usize, crate::layout::PaneId)> {
+        let (ws_idx, pane_id) = self.parse_pane_id(id)?;
+        (self.public_pane_id(ws_idx, pane_id).as_deref() == Some(id)).then_some((ws_idx, pane_id))
+    }
 }

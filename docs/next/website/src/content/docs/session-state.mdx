@@ -93,6 +93,8 @@ Live handoff is for update and remote attach flows that need to replace a runnin
 
 This is different from snapshot restore, pane history replay, and native agent session restore. Handoff tries to keep the current processes alive. The others reconstruct state after the old server has already stopped.
 
+Handoff protects long-lived server-owned session state: pane PTYs and processes, agent identity and durable metadata, and plugin/session state needed by the replacement server. It does not preserve transient coordination across the replacement boundary. In-flight CLI or API requests, waits, subscription streams, client sockets, and pane-to-pane messages may be interrupted; clients should reconnect and retry them.
+
 Live handoff is experimental and opt-in:
 
 ```bash

@@ -180,9 +180,48 @@ impl App {
         Ok(log)
     }
 
+    pub(crate) fn run_plugin_startup_hooks(&mut self) {
+        let mut context = self.current_plugin_context("plugin.startup");
+        context.invocation_source = Some("startup".to_string());
+        let mut plugins = self
+            .state
+            .installed_plugins
+            .values()
+            .filter(|plugin| {
+                plugin.enabled && plugin_manifest_available(plugin) && !plugin.startup.is_empty()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        plugins.sort_by(|left, right| left.plugin_id.cmp(&right.plugin_id));
+        for plugin in plugins {
+            for startup in plugin.startup.clone() {
+                if ensure_platform_supported(
+                    &effective_platforms(&startup.platforms, &plugin.platforms).clone(),
+                    "startup",
+                )
+                .is_err()
+                {
+                    continue;
+                }
+                let _ = self.start_plugin_command(
+                    &plugin,
+                    None,
+                    Some("startup".to_string()),
+                    startup.command,
+                    &context,
+                    None,
+                );
+            }
+        }
+    }
+
     pub(crate) fn run_plugin_event_hooks(&mut self, event: &crate::api::schema::EventEnvelope) {
         let event_name = event.event.dot_name();
         if !crate::api::schema::PLUGIN_HOOK_EVENT_KINDS.contains(&event.event) {
+            return;
+        }
+        if let Err(err) = self.refresh_installed_plugins() {
+            tracing::warn!(err = %err, "failed to refresh plugin registry before event hooks");
             return;
         }
         let plugins = self

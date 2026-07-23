@@ -1,0 +1,151 @@
+---
+title: 安装 Herdr
+description: 在 Linux、macOS 和 Windows 测试版上安装、更新和验证 Herdr。
+---
+
+Herdr 为 Linux 和 macOS 提供稳定版二进制文件。Windows 原生支持是仅限预览版的测试版。
+
+## 安装
+
+在 Linux 或 macOS 上运行:
+
+```bash
+curl -fsSL https://herdr.dev/install.sh | sh
+```
+
+在 Windows 预览测试版上,安装预览通道:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://herdr.dev/install.ps1 | iex"
+```
+
+安装器会下载适合你平台的发布二进制文件并放到 PATH 上。Windows 安装器默认使用预览通道,把该通道写入 Herdr 配置,使用带版本号的安装文件夹,并更新一个 `current` 联接点,因此更新时不需要覆盖正在运行的 `herdr.exe`。
+
+## 用 Homebrew 安装
+
+如果你已经在用 Homebrew:
+
+```bash
+brew install herdr
+```
+
+## 用 mise 安装
+
+如果你已经在用 mise:
+
+```bash
+mise use -g herdr
+```
+
+如果 mise 报 `herdr not found in mise tool registry`,请更新 mise 后重试。旧版 mise 早于 Herdr 的注册表条目;`mise use -g github:ogulcancelik/herdr` 可以作为临时兜底。
+
+## 用 Nix 安装
+
+如果你已经在用 Nix,Herdr 提供了一个从源码构建的 flake:
+
+```bash
+nix run github:ogulcancelik/herdr/v0.x.y
+nix build github:ogulcancelik/herdr/v0.x.y
+nix profile install github:ogulcancelik/herdr/v0.x.y
+```
+
+把 `v0.x.y` 替换为最新的发布标签。省略标签可以跟踪 `master`,但常规安装建议使用发布标签。
+
+flake 还提供一个开发 shell:
+
+```bash
+nix develop github:ogulcancelik/herdr
+```
+
+更新时使用你安装 Herdr 的同一套 Nix 工作流。对于 profile 安装,列出 profile 条目并升级 Herdr 条目:
+
+```bash
+nix profile list
+nix profile upgrade <index-or-name>
+```
+
+如果 Herdr 是你自己 flake 的一个 input,更新该 input 并重建你的系统、Home Manager 或开发环境:
+
+```bash
+nix flake update herdr
+```
+
+## 手动下载
+
+也可以从 [GitHub releases](https://github.com/ogulcancelik/herdr/releases) 下载二进制文件。
+
+选择匹配你系统的产物:
+
+| 系统 | 产物 |
+| --- | --- |
+| Linux x86_64 | `herdr-linux-x86_64` |
+| Linux aarch64 | `herdr-linux-aarch64` |
+| macOS Intel | `herdr-macos-x86_64` |
+| macOS Apple silicon | `herdr-macos-aarch64` |
+
+在 Linux 或 macOS 上,赋予可执行权限并移动到 PATH 上的某个位置。
+
+```bash
+chmod +x herdr-linux-x86_64
+mv herdr-linux-x86_64 ~/.local/bin/herdr
+```
+
+### Windows 测试版下载
+
+在 Windows 原生支持处于测试阶段期间,Windows 二进制文件只在预览版发布中提供。常规测试请使用上面的预览安装器,或从预览的 GitHub 预发布中下载 Windows 产物:
+
+| 系统 | 产物 |
+| --- | --- |
+| Windows x86_64 测试版 | `herdr-windows-x86_64.exe` |
+
+## 验证
+
+启动 Herdr:
+
+```bash
+herdr
+```
+
+如果 shell 找不到 `herdr`,重启终端,或检查安装目录是否在 PATH 上。
+
+## 更新
+
+Herdr 会检查新版本并在应用内通知你。也可以手动更新:
+
+```bash
+herdr update
+```
+
+`herdr update` 适用于由 Herdr 自带安装器管理的安装。Homebrew、mise 和 Nix 安装请改用那些包管理器更新。
+
+在 Linux 和 macOS 上,Herdr 默认使用稳定更新通道。要启用来自 `master` 的预览构建,设置通道:
+
+```bash
+herdr channel set preview
+```
+
+用同样的方式把 Linux 和 macOS 的直接安装切回稳定版:
+
+```bash
+herdr channel set stable
+```
+
+对于直接安装,切换通道时也会检查该通道并安装其最新二进制文件。如果该更新失败,运行 `herdr update` 从配置的通道重试。
+
+预览构建是从当前开发分支手动发布的 GitHub 预发布。当你想在下一个稳定版之前拿到修复时很有用,但它们可能出现回归。Homebrew、mise 和 Nix 安装不使用预览通道。
+
+Windows 测试版构建目前仅限预览通道。在稳定的 Windows 发布可用之前,Windows 上的 `herdr channel set stable` 会被拒绝。
+
+默认情况下,`herdr update` 安装新二进制文件,并不打扰兼容的运行中会话。如果某次更新改变了 Herdr 的客户端/服务器协议,Herdr 会在安装后询问是否停止旧服务器。要使用新版本,请停止旧服务器。停止会退出窗格进程。对于默认会话,运行 `herdr server stop`,再运行 `herdr`。对于命名会话,运行 `herdr session stop <name>`,再运行 `herdr session attach <name>`。
+
+要对受支持的运行中会话启用实验性的实时服务器交接,运行:
+
+```bash
+herdr update --handoff
+```
+
+实时交接不适用于 Homebrew、mise 或 Nix 的包管理器更新。这些安装先用包管理器更新,然后在准备好使用新服务器时重启那个 Herdr 会话。如果运行中的会话仍在使用旧服务器,用 `herdr server stop` 或 `herdr session stop <name>` 停止它,再重新运行 Herdr。
+
+## 系统要求
+
+Herdr 稳定版支持 Linux 和 macOS。Windows 原生构建是仅限预览版的测试版发布;受支持的工作流和已知限制见 [Windows 测试版](/zh-cn/docs/windows-beta/)。

@@ -68,7 +68,7 @@ pub fn parse_raw_input_bytes_with_ranges(data: &[u8]) -> Vec<RawInputEventWithRa
         } else if let Ok(text) = std::str::from_utf8(&buffer) {
             if let Some(key) = parse_terminal_key_sequence(text) {
                 events.push(RawInputEventWithRange {
-                    event: RawInputEvent::Key(key),
+                    event: RawInputEvent::Key(key.as_text_commit()),
                     start: offset,
                     len: buffer.len(),
                 });
@@ -96,7 +96,8 @@ use tokio::sync::mpsc;
 
 use crate::input::{parse_terminal_key_sequence, TerminalKey};
 use crate::terminal_theme::{
-    parse_default_color_response, DefaultColorKind, HostAppearance, RgbColor,
+    parse_default_color_response, parse_palette_color_response, DefaultColorKind, HostAppearance,
+    RgbColor,
 };
 
 const ESC: u8 = 0x1b;
@@ -106,6 +107,21 @@ pub(crate) const GHOSTTY_COLOR_SCHEME_DARK_REPORT: &[u8] = b"\x1b[?997;1n";
 pub(crate) const GHOSTTY_COLOR_SCHEME_LIGHT_REPORT: &[u8] = b"\x1b[?997;2n";
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
 const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
+
+/// Returns whether `data` is exactly one complete bracketed-paste sequence.
+///
+/// Client transport uses this to distinguish recoverable oversized interactive
+/// pastes from generic oversized input, which remains a protocol violation.
+pub(crate) fn is_complete_text_bracketed_paste(data: &[u8]) -> bool {
+    if !data.starts_with(BRACKETED_PASTE_START) {
+        return false;
+    }
+    let Some(end) = find_subsequence(data, BRACKETED_PASTE_END) else {
+        return false;
+    };
+    end + BRACKETED_PASTE_END.len() == data.len()
+        && std::str::from_utf8(&data[BRACKETED_PASTE_START.len()..end]).is_ok()
+}
 
 #[derive(Debug)]
 pub enum RawInputEvent {
@@ -118,6 +134,9 @@ pub enum RawInputEvent {
         kind: DefaultColorKind,
         color: RgbColor,
     },
+    HostPaletteColors {
+        colors: Vec<(u8, RgbColor)>,
+    },
     HostColorSchemeChanged(HostAppearance),
     Unsupported,
 }
@@ -128,6 +147,12 @@ pub(crate) struct RawInputFramer {
 }
 
 impl RawInputFramer {
+    pub(crate) fn for_host_input() -> Self {
+        Self {
+            byte_framer: RawInputByteFramer::for_host_input(),
+        }
+    }
+
     pub(crate) fn push(&mut self, data: &[u8]) -> Vec<RawInputEvent> {
         Self::events_from_chunks(self.byte_framer.push(data))
     }
@@ -182,15 +207,29 @@ pub(crate) struct RawInputByteFramer {
     discard_until: Option<ControlStringFamily>,
     discarded_tail_bytes: usize,
     lone_escape_recently_flushed: bool,
-    host_color_replies_awaited: u8,
+    host_color_replies_awaited: u16,
     held_pending_color_esc: bool,
     host_color_scheme_change_tracking: bool,
+    split_coalesced_escape: bool,
 }
 
-const HOST_COLOR_QUERY_REPLIES: u8 = 2;
+const HOST_COLOR_QUERY_REPLIES: u16 = 258;
 const MAX_ORPHANED_SGR_MOUSE_TAIL_BYTES: usize = 32;
 
 impl RawInputByteFramer {
+    pub(crate) fn for_host_input() -> Self {
+        Self::with_host_input_policy(
+            crate::platform::capabilities().preserve_legacy_doubled_escape_input,
+        )
+    }
+
+    fn with_host_input_policy(preserve_legacy_doubled_escape_input: bool) -> Self {
+        Self {
+            split_coalesced_escape: !preserve_legacy_doubled_escape_input,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn push(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
         self.buffer.extend_from_slice(data);
         self.drain_available_chunks()
@@ -405,10 +444,19 @@ impl RawInputByteFramer {
                 continue;
             }
 
+            if self.split_coalesced_escape && self.buffer.starts_with(b"\x1b\x1b") {
+                chunks.push(vec![ESC]);
+                self.buffer.drain(..1);
+                continue;
+            }
+
             let Some((event, consumed)) = extract_one_event(&self.buffer) else {
                 break;
             };
-            if matches!(event, RawInputEvent::HostDefaultColor { .. }) {
+            if matches!(
+                event,
+                RawInputEvent::HostDefaultColor { .. } | RawInputEvent::HostPaletteColors { .. }
+            ) {
                 self.host_color_replies_awaited = self.host_color_replies_awaited.saturating_sub(1);
             } else if self.host_color_scheme_change_tracking
                 && matches!(event, RawInputEvent::HostColorSchemeChanged(_))
@@ -491,26 +539,33 @@ pub fn spawn_input_reader() -> mpsc::Receiver<RawInputEvent> {
         let stdin = std::io::stdin();
         let mut reader = stdin.lock();
         let mut scratch = [0u8; 1024];
-        let mut framer = RawInputFramer::default();
+        let mut framer = RawInputFramer::for_host_input();
         framer.host_color_query_sent();
         framer.enable_host_color_scheme_change_tracking();
+        let mut pending_palette = Vec::new();
 
         loop {
             match reader.read(&mut scratch) {
                 Ok(0) => break,
                 Ok(n) => {
-                    send_raw_input_events(framer.push(&scratch[..n]), &tx);
+                    send_raw_input_events(framer.push(&scratch[..n]), &tx, &mut pending_palette);
 
                     if stdin_read_ready(&reader, input_flush_timeout_ms(&framer)) == Some(false) {
                         let had_pending = framer.has_pending_input();
                         let events = framer.flush_timeout();
                         let held_escape = had_pending && events.is_empty();
-                        send_raw_input_events(events, &tx);
+                        send_raw_input_events(events, &tx, &mut pending_palette);
+                        flush_host_palette_events(&tx, &mut pending_palette);
                         if held_escape
                             && stdin_read_ready(&reader, RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS)
                                 == Some(false)
                         {
-                            send_raw_input_events(framer.flush_timeout(), &tx);
+                            send_raw_input_events(
+                                framer.flush_timeout(),
+                                &tx,
+                                &mut pending_palette,
+                            );
+                            flush_host_palette_events(&tx, &mut pending_palette);
                         }
                     }
                 }
@@ -522,10 +577,39 @@ pub fn spawn_input_reader() -> mpsc::Receiver<RawInputEvent> {
     rx
 }
 
-fn send_raw_input_events(events: Vec<RawInputEvent>, tx: &mpsc::Sender<RawInputEvent>) {
+fn send_raw_input_events(
+    events: Vec<RawInputEvent>,
+    tx: &mpsc::Sender<RawInputEvent>,
+    pending_palette: &mut Vec<(u8, RgbColor)>,
+) {
     for event in events {
-        let _ = tx.blocking_send(event);
+        match event {
+            RawInputEvent::HostPaletteColors { colors } => {
+                pending_palette.extend(colors);
+                if pending_palette.len() == 256 {
+                    flush_host_palette_events(tx, pending_palette);
+                }
+            }
+            event @ RawInputEvent::HostDefaultColor { .. } => {
+                let _ = tx.blocking_send(event);
+            }
+            event => {
+                flush_host_palette_events(tx, pending_palette);
+                let _ = tx.blocking_send(event);
+            }
+        }
     }
+}
+
+fn flush_host_palette_events(
+    tx: &mpsc::Sender<RawInputEvent>,
+    pending_palette: &mut Vec<(u8, RgbColor)>,
+) {
+    if pending_palette.is_empty() {
+        return;
+    }
+    let colors = std::mem::take(pending_palette);
+    let _ = tx.blocking_send(RawInputEvent::HostPaletteColors { colors });
 }
 
 #[cfg(test)]
@@ -644,6 +728,14 @@ fn extract_one_event(buffer: &[u8]) -> Option<(RawInputEvent, usize)> {
         if let Some((kind, color)) = parse_default_color_response(seq) {
             return Some((RawInputEvent::HostDefaultColor { kind, color }, seq_len));
         }
+        if let Some((index, color)) = parse_palette_color_response(seq) {
+            return Some((
+                RawInputEvent::HostPaletteColors {
+                    colors: vec![(index, color)],
+                },
+                seq_len,
+            ));
+        }
 
         match seq {
             "\x1b[I" => return Some((RawInputEvent::OuterFocusGained, seq_len)),
@@ -669,7 +761,7 @@ fn extract_one_event(buffer: &[u8]) -> Option<(RawInputEvent, usize)> {
 
     let consumed = first_complete_utf8_char_len(buffer)?;
     let text = std::str::from_utf8(&buffer[..consumed]).ok()?;
-    let key = parse_terminal_key_sequence(text)?;
+    let key = parse_terminal_key_sequence(text)?.as_text_commit();
     Some((RawInputEvent::Key(key), consumed))
 }
 
@@ -1109,6 +1201,19 @@ mod tests {
     }
 
     #[test]
+    fn complete_text_bracketed_paste_requires_one_exact_utf8_sequence() {
+        assert!(is_complete_text_bracketed_paste(b"\x1b[200~hello\x1b[201~"));
+        assert!(!is_complete_text_bracketed_paste(b"\x1b[200~hello"));
+        assert!(!is_complete_text_bracketed_paste(
+            b"\x1b[200~hello\x1b[201~rest"
+        ));
+        assert!(!is_complete_text_bracketed_paste(
+            b"\x1b[200~one\x1b[201~\x1b[200~two\x1b[201~"
+        ));
+        assert!(!is_complete_text_bracketed_paste(b"\x1b[200~\xff\x1b[201~"));
+    }
+
+    #[test]
     fn parses_sgr_mouse() {
         let (RawInputEvent::Mouse(mouse), consumed) = extract_one_event(b"\x1b[<0;20;10M").unwrap()
         else {
@@ -1176,6 +1281,27 @@ mod tests {
                 g: 0x22,
                 b: 0x33
             }
+        );
+    }
+
+    #[test]
+    fn parses_host_palette_color_response() {
+        let (RawInputEvent::HostPaletteColors { colors }, consumed) =
+            extract_one_event(b"\x1b]4;7;rgb:1111/2222/3333\x1b\\").unwrap()
+        else {
+            panic!("expected host palette response");
+        };
+        assert_eq!(consumed, 26);
+        assert_eq!(
+            colors,
+            vec![(
+                7,
+                RgbColor {
+                    r: 0x11,
+                    g: 0x22,
+                    b: 0x33,
+                }
+            )]
         );
     }
 
@@ -1618,6 +1744,24 @@ mod tests {
             KeyModifiers::ALT,
         );
         assert!(framer.flush_timeout().is_empty());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn non_macos_host_input_splits_lone_escape_from_arrow() {
+        let mut framer = RawInputByteFramer::for_host_input();
+
+        assert_eq!(
+            framer.push(b"\x1b\x1b[D"),
+            vec![b"\x1b".to_vec(), b"\x1b[D".to_vec()]
+        );
+    }
+
+    #[test]
+    fn macos_host_input_policy_preserves_legacy_doubled_escape_alt_arrow() {
+        let mut framer = RawInputByteFramer::with_host_input_policy(true);
+
+        assert_eq!(framer.push(b"\x1b\x1b[D"), vec![b"\x1b\x1b[D".to_vec()]);
     }
 
     #[test]
@@ -2387,6 +2531,7 @@ mod tests {
         ));
 
         assert!(framer.push(b"\x1b").is_empty());
+        assert!(framer.flush_timeout().is_empty());
         assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
     }
 
@@ -2412,12 +2557,18 @@ mod tests {
 
     #[test]
     fn stops_holding_lone_escape_after_host_color_reply_completes() {
+        use std::fmt::Write as _;
+
         let mut framer = RawInputByteFramer::default();
         framer.host_color_query_sent();
+        let mut replies =
+            String::from("\x1b]10;rgb:6565/7b7b/8383\x1b\\\x1b]11;rgb:2424/2727/3a3a\x1b\\");
+        for index in 0..=u8::MAX {
+            let _ = write!(replies, "\x1b]4;{index};rgb:1111/2222/3333\x1b\\");
+        }
 
-        let chunks =
-            framer.push(b"\x1b]10;rgb:6565/7b7b/8383\x1b\\\x1b]11;rgb:2424/2727/3a3a\x1b\\");
-        assert_eq!(chunks.len(), 2);
+        let chunks = framer.push(replies.as_bytes());
+        assert_eq!(chunks.len(), 258);
 
         // Window closed: a later lone Escape flushes immediately.
         assert!(framer.push(b"\x1b").is_empty());

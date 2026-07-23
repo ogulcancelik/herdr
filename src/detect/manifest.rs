@@ -922,6 +922,16 @@ fn validate_manifest(manifest: &AgentManifest) -> Result<(), String> {
         }
         validate_region_name(&rule.region)
             .map_err(|err| format!("rule {} uses invalid region: {err}", rule.id))?;
+        if rule.region.trim().starts_with("top_non_empty_lines(")
+            && manifest
+                .min_engine_version
+                .is_some_and(|version| version < TOP_NON_EMPTY_LINES_ENGINE_VERSION)
+        {
+            return Err(format!(
+                "rule {} uses top_non_empty_lines but min_engine_version is below {}",
+                rule.id, TOP_NON_EMPTY_LINES_ENGINE_VERSION
+            ));
+        }
         validate_rule_gate(rule, &mut complexity)
             .map_err(|err| format!("rule {} has invalid matcher gates: {err}", rule.id))?;
     }
@@ -1075,7 +1085,8 @@ fn validate_region_name(spec: &str) -> Result<(), String> {
         | "osc_title"
         | "osc_progress" => Ok(()),
         _ if region_count(trimmed, "bottom_lines").is_some()
-            || region_count(trimmed, "bottom_non_empty_lines").is_some() =>
+            || region_count(trimmed, "bottom_non_empty_lines").is_some()
+            || top_region_count(trimmed).is_some() =>
         {
             Ok(())
         }
@@ -1272,6 +1283,9 @@ fn region<'a>(input: DetectionInput<'a>, spec: &str) -> &'a str {
             if let Some(count) = region_count(trimmed, "bottom_non_empty_lines") {
                 return bottom_non_empty_lines(content, count);
             }
+            if let Some(count) = top_region_count(trimmed) {
+                return top_non_empty_lines(content, count);
+            }
             ""
         }
     }
@@ -1282,6 +1296,23 @@ fn region_count(spec: &str, name: &str) -> Option<usize> {
         .and_then(|rest| rest.strip_prefix('('))
         .and_then(|rest| rest.strip_suffix(')'))
         .and_then(|count| count.parse::<usize>().ok())
+}
+
+const TOP_NON_EMPTY_LINES_ENGINE_VERSION: u32 = 3;
+const MAX_TOP_REGION_LINE_COUNT: usize = u16::MAX as usize;
+
+fn top_region_count(spec: &str) -> Option<usize> {
+    let count = spec
+        .strip_prefix("top_non_empty_lines")?
+        .strip_prefix('(')?
+        .strip_suffix(')')?;
+    if count.starts_with('0') || !count.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    count
+        .parse::<usize>()
+        .ok()
+        .filter(|count| *count <= MAX_TOP_REGION_LINE_COUNT)
 }
 
 fn bottom_lines(content: &str, count: usize) -> &str {
@@ -1304,6 +1335,22 @@ fn bottom_non_empty_lines(content: &str, count: usize) -> &str {
         return "";
     };
     slice_from_line_index(content, &lines, start_index)
+}
+
+fn top_non_empty_lines(content: &str, count: usize) -> &str {
+    let lines: Vec<&str> = content.lines().collect();
+    let Some(end_index) = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .take(count)
+        .last()
+        .map(|(index, _)| index)
+    else {
+        return "";
+    };
+    let byte_offset = line_start_offset(content, &lines, end_index + 1);
+    &content[..byte_offset]
 }
 
 fn after_last_prompt_marker(content: &str) -> &str {

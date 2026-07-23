@@ -184,16 +184,7 @@ impl App {
         let previous_mode = self.state.mode;
         match action {
             NavigateAction::NewWorkspace => {
-                self.runtime_workspace_create(
-                    "tui.key.workspace.create",
-                    crate::api::schema::WorkspaceCreateParams {
-                        cwd: None,
-                        focus: true,
-                        label: None,
-                        env: Default::default(),
-                    },
-                );
-                leave_navigate_mode(&mut self.state);
+                self.begin_tui_workspace_create("tui.key.workspace.create");
             }
             NavigateAction::NewWorktree => {
                 if let Some(ws_idx) = workspace_action_target(&self.state, context).filter(|idx| {
@@ -733,14 +724,13 @@ impl App {
             .and_then(crate::workspace::Workspace::focused_pane_id);
         let current_idx = entries
             .iter()
-            .position(|entry| Some(entry.pane_id) == focused)
-            .unwrap_or(0);
-        let next_idx = if forward {
-            (current_idx + 1) % entries.len()
-        } else if current_idx == 0 {
-            entries.len() - 1
-        } else {
-            current_idx - 1
+            .position(|entry| Some(entry.pane_id) == focused);
+        let next_idx = match (current_idx, forward) {
+            (Some(idx), true) => (idx + 1) % entries.len(),
+            (Some(0), false) => entries.len() - 1,
+            (Some(idx), false) => idx - 1,
+            (None, true) => 0,
+            (None, false) => entries.len() - 1,
         };
         let target = entries.get(next_idx)?;
         Some((next_idx, target.ws_idx, target.pane_id))
@@ -1886,6 +1876,39 @@ mod tests {
     }
 
     #[test]
+    fn next_agent_starts_at_first_visible_entry_when_focused_agent_is_filtered_out() {
+        let mut app = app_with_test_workspaces(&["hidden", "first", "second"]);
+        for ws_idx in 0..app.state.workspaces.len() {
+            let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(crate::detect::Agent::Claude);
+            terminal.state = if ws_idx == 0 {
+                crate::detect::AgentState::Idle
+            } else {
+                crate::detect::AgentState::Working
+            };
+        }
+        app.state.agent_view_override = Some(crate::api::schema::AgentViewSetParams {
+            source: "example.views".to_string(),
+            label: None,
+            filter: Some(crate::api::schema::AgentViewFilter::Eq {
+                field: crate::api::schema::AgentViewField::Builtin(
+                    crate::api::schema::AgentViewBuiltinField::Status,
+                ),
+                value: crate::api::schema::AgentViewValue::String("working".to_string()),
+            }),
+            sort: Vec::new(),
+        });
+
+        app.execute_tui_navigate_action(NavigateAction::NextAgent, ActionContext::Prefix);
+
+        assert_eq!(app.state.active, Some(1));
+    }
+
+    #[test]
     fn default_goto_key_opens_navigator() {
         let mut state = state_with_workspaces(&["test"]);
 
@@ -1997,6 +2020,74 @@ mod tests {
 
         assert!(state.request_new_workspace);
         assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn new_workspace_key_opens_prefilled_prompt_and_preserves_captured_cwd() {
+        let cwd = unique_temp_path("workspace-name-suggestion");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let suggested_name = crate::workspace::derive_label_from_cwd(&cwd);
+        let mut app = app_with_test_workspaces(&["test"]);
+        app.state.new_terminal_cwd =
+            crate::config::NewTerminalCwdConfig::Path(cwd.display().to_string());
+        app.state.prompt_new_workspace_name = true;
+        app.state.mode = Mode::Navigate;
+        app.state.keybinds.new_workspace = crate::config::ActionKeybinds::prefix("g");
+
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()));
+
+        assert_eq!(app.state.mode, Mode::RenameWorkspace);
+        assert_eq!(app.state.name_input, suggested_name);
+        assert!(app.state.name_input_replace_on_type);
+        assert_eq!(app.state.pending_workspace_create_cwd.as_ref(), Some(&cwd));
+        assert_eq!(app.state.workspaces.len(), 1);
+
+        app.state.new_terminal_cwd =
+            crate::config::NewTerminalCwdConfig::Path("/tmp/changed-after-prompt".into());
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert_eq!(app.state.workspaces.len(), 2);
+        assert_eq!(app.state.workspaces[1].identity_cwd, cwd);
+        assert!(app.state.workspaces[1].custom_name.is_none());
+        assert!(app.state.pending_workspace_create_cwd.is_none());
+        assert_eq!(app.state.mode, Mode::Terminal);
+        crate::app::api::test_support::shutdown_test_runtimes(&mut app);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[tokio::test]
+    async fn new_workspace_prompt_saves_custom_name_atomically() {
+        let cwd = unique_temp_path("workspace-custom-name");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let mut app = app_with_test_workspaces(&["test"]);
+        app.state.new_terminal_cwd =
+            crate::config::NewTerminalCwdConfig::Path(cwd.display().to_string());
+        app.state.prompt_new_workspace_name = true;
+        app.state.mode = Mode::Navigate;
+
+        app.execute_tui_navigate_action(NavigateAction::NewWorkspace, ActionContext::Navigate);
+        app.state.name_input = "  logs  ".into();
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert_eq!(app.state.workspaces.len(), 2);
+        assert_eq!(app.state.workspaces[1].custom_name.as_deref(), Some("logs"));
+        assert_eq!(app.state.workspaces[1].identity_cwd, cwd);
+        crate::app::api::test_support::shutdown_test_runtimes(&mut app);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn cancelling_new_workspace_prompt_creates_nothing() {
+        let mut app = app_with_test_workspaces(&["test"]);
+        app.state.prompt_new_workspace_name = true;
+        app.state.mode = Mode::Navigate;
+
+        app.execute_tui_navigate_action(NavigateAction::NewWorkspace, ActionContext::Navigate);
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert!(app.state.pending_workspace_create_cwd.is_none());
+        assert_eq!(app.state.mode, Mode::Terminal);
     }
 
     #[test]

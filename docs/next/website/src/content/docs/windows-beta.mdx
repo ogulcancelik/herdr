@@ -48,9 +48,9 @@ Plugins support `windows` as a manifest platform in preview. GitHub install, loc
 | Live cwd after shell `cd` | partial |
 | Live cwd via shell integration/OSC7 | beta |
 | Clipboard image paste to agents | unverified |
-| CJK hidden-cursor reveal | beta |
+| CJK IME composition anchoring | partial |
 | Kitty graphics rendering | unverified |
-| Host cursor rendering | beta |
+| Host cursor rendering | partial |
 
 Herdr can launch panes in the right directory and can create the initial workspace from the directory where you started Herdr. PowerShell directory changes after startup are different: the process field Herdr can inspect does not reliably track later logical `cd` changes. Use Herdr integrations or prompt shell integration for live cwd reporting.
 
@@ -62,14 +62,18 @@ Kitty graphics remains experimental and is not claimed as Windows-supported yet.
 
 ### Cursor rendering
 
-Windows terminals run Herdr through ConPTY, and native terminal cursors can flicker, jump, or briefly show stale positions during active full-screen redraws. Herdr's default `host_cursor = "auto"` draws Herdr's cursor as terminal cell content for native Windows builds and WSL, while other Linux and macOS clients keep using the native terminal cursor. The Windows trade-off is a steady non-blinking cursor inside Herdr instead of the outer terminal's native blink, shape, and cursor color.
+Herdr relies on ConPTY for native Windows panes. The current Windows terminal cursor path can expose intermediate cursor positions while a multiplexer repaints the screen. A native cursor may flicker, jump, or briefly remain at an old position during active output. This behavior also reproduces in other native Windows terminal multiplexers and with direct VT cursor-position stress tests, so Herdr cannot eliminate it while preserving native cursor behavior.
 
-To opt back into the outer terminal cursor on native Windows or WSL, set:
+To prioritize visual stability, the default `host_cursor = "auto"` draws Herdr's cursor as terminal cell content on native Windows and WSL. Other Linux and macOS clients continue to use the native terminal cursor. The drawn Windows cursor is steady and non-blinking, but it does not provide the outer terminal's native blink, shape, or cursor color.
+
+A drawn cursor is not the cursor that Windows uses to position IME composition and candidate UI. Korean, Japanese, or Chinese IME UI may therefore appear at the wrong location. If this affects you, opt back into the outer terminal cursor:
 
 ```toml
 [ui]
 host_cursor = "native"
 ```
+
+Native mode restores the IME anchor, but it can reintroduce occasional cursor flicker, jumps, or stale cursor positions during active output. This is currently a compatibility trade-off in the Windows beta.
 
 ### Keyboard and mouse
 

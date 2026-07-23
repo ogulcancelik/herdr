@@ -155,12 +155,12 @@ pub fn topLeft(self: Selection, s: *const Screen) Pin {
         .reverse => self.end(),
         .mirrored_forward => pin: {
             var p = self.start();
-            p.x = self.end().x;
+            p.x = @min(self.end().x, p.node.cols() - 1);
             break :pin p;
         },
         .mirrored_reverse => pin: {
             var p = self.end();
-            p.x = self.start().x;
+            p.x = @min(self.start().x, p.node.cols() - 1);
             break :pin p;
         },
     };
@@ -173,12 +173,12 @@ pub fn bottomRight(self: Selection, s: *const Screen) Pin {
         .reverse => self.start(),
         .mirrored_forward => pin: {
             var p = self.end();
-            p.x = self.start().x;
+            p.x = @min(self.start().x, p.node.cols() - 1);
             break :pin p;
         },
         .mirrored_reverse => pin: {
             var p = self.start();
-            p.x = self.end().x;
+            p.x = @min(self.end().x, p.node.cols() - 1);
             break :pin p;
         },
     };
@@ -326,6 +326,7 @@ pub fn containedRowCached(
     br: point.Coordinate,
     p: point.Coordinate,
 ) ?Selection {
+    _ = s;
     if (p.y < tl.y or p.y > br.y) return null;
 
     // Rectangle case: we can return early as the x range will always be the
@@ -333,12 +334,12 @@ pub fn containedRowCached(
     if (self.rectangle) return init(
         start: {
             var copy: Pin = pin;
-            copy.x = tl.x;
+            copy.x = @min(tl.x, copy.node.cols() - 1);
             break :start copy;
         },
         end: {
             var copy: Pin = pin;
-            copy.x = br.x;
+            copy.x = @min(br.x, copy.node.cols() - 1);
             break :end copy;
         },
         true,
@@ -355,7 +356,7 @@ pub fn containedRowCached(
             tl_pin,
             end: {
                 var copy: Pin = pin;
-                copy.x = s.pages.cols - 1;
+                copy.x = copy.node.cols() - 1;
                 break :end copy;
             },
             false,
@@ -387,7 +388,7 @@ pub fn containedRowCached(
         },
         end: {
             var copy: Pin = pin;
-            copy.x = s.pages.cols - 1;
+            copy.x = copy.node.cols() - 1;
             break :end copy;
         },
         false,
@@ -432,7 +433,7 @@ pub fn adjust(
             var current = end_pin.*;
             while (current.down(1)) |next| : (current = next) {
                 const rac = next.rowAndCell();
-                const cells = next.node.data.getCells(rac.row);
+                const cells = next.node.page().getCells(rac.row);
                 if (page.Cell.hasTextAny(cells)) {
                     end_pin.* = next;
                     break;
@@ -494,7 +495,7 @@ pub fn adjust(
             );
             while (it.next()) |next| {
                 const rac = next.rowAndCell();
-                const cells = next.node.data.getCells(rac.row);
+                const cells = next.node.page().getCells(rac.row);
                 if (page.Cell.hasTextAny(cells)) {
                     end_pin.* = next;
                     end_pin.x = @intCast(cells.len - 1);
@@ -505,7 +506,7 @@ pub fn adjust(
 
         .beginning_of_line => end_pin.x = 0,
 
-        .end_of_line => end_pin.x = end_pin.node.data.size.cols - 1,
+        .end_of_line => end_pin.x = end_pin.node.cols() - 1,
     }
 }
 
@@ -1052,6 +1053,32 @@ test "Selection: order, standard" {
 
         try testing.expect(sel.order(&s) == .reverse);
     }
+}
+
+test "Selection: rectangle corners clamp across mixed-width pages" {
+    const testing = std.testing;
+    var s = try Screen.init(testing.allocator, .{
+        .cols = 4,
+        .rows = 2,
+        .max_scrollback = 0,
+    });
+    defer s.deinit();
+
+    const first = s.pages.pages.first.?;
+    try s.pages.split(.{ .node = first, .y = 1 });
+    const second = first.next.?;
+    second.page().size.cols = 2;
+
+    const sel = Selection.init(
+        .{ .node = first, .x = 3 },
+        .{ .node = second, .x = 1 },
+        true,
+    );
+    try testing.expectEqual(.mirrored_forward, sel.order(&s));
+
+    const bottom_right = sel.bottomRight(&s);
+    _ = bottom_right.rowAndCell();
+    try testing.expect((Pin{ .node = second, .x = 1 }).eql(bottom_right));
 }
 
 test "Selection: order, rectangle" {
@@ -1601,4 +1628,47 @@ test "Selection: containedRow" {
             s.pages.pin(.{ .screen = .{ .x = 1, .y = 1 } }).?,
         ).?);
     }
+}
+
+test "Selection: containedRow clamps mixed-width pages" {
+    const testing = std.testing;
+    var s = try Screen.init(testing.allocator, .{
+        .cols = 4,
+        .rows = 3,
+        .max_scrollback = 0,
+    });
+    defer s.deinit();
+
+    const first = s.pages.pages.first.?;
+    try s.pages.split(.{ .node = first, .y = 2 });
+    try s.pages.split(.{ .node = first, .y = 1 });
+    const middle = first.next.?;
+    const last = middle.next.?;
+    middle.page().size.cols = 2;
+
+    const linear = Selection.init(
+        .{ .node = first, .x = 1 },
+        .{ .node = last, .x = 1 },
+        false,
+    );
+    const linear_row = linear.containedRow(
+        &s,
+        .{ .node = middle },
+    ).?;
+    _ = linear_row.end().rowAndCell();
+    try testing.expect((Pin{ .node = middle }).eql(linear_row.start()));
+    try testing.expect((Pin{ .node = middle, .x = 1 }).eql(linear_row.end()));
+
+    const rectangle = Selection.init(
+        .{ .node = first, .x = 1 },
+        .{ .node = last, .x = 3 },
+        true,
+    );
+    const rectangle_row = rectangle.containedRow(
+        &s,
+        .{ .node = middle },
+    ).?;
+    _ = rectangle_row.end().rowAndCell();
+    try testing.expect((Pin{ .node = middle, .x = 1 }).eql(rectangle_row.start()));
+    try testing.expect((Pin{ .node = middle, .x = 1 }).eql(rectangle_row.end()));
 }

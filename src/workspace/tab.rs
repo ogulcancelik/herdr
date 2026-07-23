@@ -571,14 +571,4 @@ impl Tab {
             .get(terminal_id)
             .and_then(|rt| rt.foreground_cwd())
     }
-
-    pub fn follow_cwd_for_pane(
-        &self,
-        pane_id: PaneId,
-        terminals: &HashMap<TerminalId, TerminalState>,
-        terminal_runtimes: &TerminalRuntimeRegistry,
-    ) -> Option<PathBuf> {
-        self.foreground_cwd_for_pane(pane_id, terminal_runtimes)
-            .or_else(|| self.cwd_for_pane(pane_id, terminals, terminal_runtimes))
-    }
 }

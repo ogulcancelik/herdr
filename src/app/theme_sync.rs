@@ -6,8 +6,8 @@ impl App {
     pub(super) fn query_host_terminal_theme(&self) {
         use std::io::Write;
 
-        let _ = std::io::stdout()
-            .write_all(crate::terminal_theme::HOST_COLOR_QUERY_SEQUENCE.as_bytes());
+        let query = crate::terminal_theme::host_terminal_theme_query_sequence();
+        let _ = std::io::stdout().write_all(query.as_bytes());
         let _ = std::io::stdout().flush();
     }
 
@@ -24,6 +24,17 @@ impl App {
         }
         let next_theme = self.state.host_terminal_theme.with_color(kind, color);
         changed | self.set_host_terminal_theme(next_theme)
+    }
+
+    pub(super) fn update_host_terminal_palette_colors(
+        &mut self,
+        colors: &[(u8, crate::terminal_theme::RgbColor)],
+    ) -> bool {
+        let mut next_theme = self.state.host_terminal_theme;
+        for &(index, color) in colors {
+            next_theme = next_theme.with_palette_color(index, color);
+        }
+        self.set_host_terminal_theme(next_theme)
     }
 
     pub(super) fn set_host_terminal_appearance(

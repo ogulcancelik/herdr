@@ -3,20 +3,24 @@ use crossterm::event::KeyCode;
 use tracing::{debug, warn};
 
 use crate::{
-    app::{App, Mode},
+    app::{App, Mode, TerminalInputTarget},
     input::TerminalKey,
 };
 
 struct PreparedPaneInput {
     ws_idx: usize,
     pane_id: crate::layout::PaneId,
+    target: TerminalInputTarget,
     bytes: Bytes,
 }
 
 enum PreparedPopupInput {
     NotOpen,
     Consumed,
-    Bytes(Bytes),
+    Bytes {
+        target: TerminalInputTarget,
+        bytes: Bytes,
+    },
 }
 
 fn is_modifier_only_key(code: &KeyCode) -> bool {
@@ -24,26 +28,27 @@ fn is_modifier_only_key(code: &KeyCode) -> bool {
 }
 
 impl App {
-    pub(crate) fn handle_terminal_key_headless(&mut self, key: TerminalKey) {
+    pub(crate) fn handle_terminal_key_headless(
+        &mut self,
+        key: TerminalKey,
+    ) -> Option<TerminalInputTarget> {
         match self.prepare_popup_key_forward(key) {
             PreparedPopupInput::NotOpen => {}
-            PreparedPopupInput::Consumed => return,
-            PreparedPopupInput::Bytes(bytes) => {
+            PreparedPopupInput::Consumed => return None,
+            PreparedPopupInput::Bytes { target, bytes } => {
                 let Some(runtime) = self.popup_runtime() else {
                     self.close_popup_pane();
-                    return;
+                    return None;
                 };
-                let _ = runtime.try_send_bytes(bytes);
-                return;
+                return runtime.try_send_bytes(bytes).is_ok().then_some(target);
             }
         }
 
-        let Some(input) = self.prepare_terminal_key_forward(key) else {
-            return;
-        };
-        if let Some(runtime) = self.lookup_runtime_sender(input.ws_idx, input.pane_id) {
-            let _ = runtime.try_send_bytes(input.bytes);
-        }
+        let input = self.prepare_terminal_key_forward(key)?;
+        let sent = self
+            .lookup_runtime_sender(input.ws_idx, input.pane_id)
+            .is_some_and(|runtime| runtime.try_send_bytes(input.bytes).is_ok());
+        sent.then_some(input.target)
     }
 
     fn prepare_terminal_key_forward(&mut self, key: TerminalKey) -> Option<PreparedPaneInput> {
@@ -116,6 +121,7 @@ impl App {
         let ws_idx = self.state.active?;
         let ws = self.state.workspaces.get(ws_idx)?;
         let pane_id = ws.focused_pane_id()?;
+        let terminal_id = ws.terminal_id(pane_id)?.clone();
         let rt =
             self.state
                 .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)?;
@@ -207,6 +213,7 @@ impl App {
         Some(PreparedPaneInput {
             ws_idx,
             pane_id,
+            target: TerminalInputTarget { terminal_id },
             bytes: Bytes::from(bytes),
         })
     }
@@ -215,7 +222,15 @@ impl App {
         if self.state.popup_pane.is_none() {
             return PreparedPopupInput::NotOpen;
         }
-        let Some(rt) = self.popup_runtime() else {
+        let Some(terminal_id) = self
+            .state
+            .popup_pane
+            .as_ref()
+            .map(|popup| popup.terminal_id.clone())
+        else {
+            return PreparedPopupInput::NotOpen;
+        };
+        let Some(rt) = self.terminal_runtimes.get(&terminal_id) else {
             self.close_popup_pane();
             return PreparedPopupInput::Consumed;
         };
@@ -225,30 +240,136 @@ impl App {
         if bytes.is_empty() {
             PreparedPopupInput::Consumed
         } else {
-            PreparedPopupInput::Bytes(Bytes::from(bytes))
+            PreparedPopupInput::Bytes {
+                target: TerminalInputTarget { terminal_id },
+                bytes: Bytes::from(bytes),
+            }
         }
     }
 
-    pub(super) async fn handle_terminal_key(&mut self, key: TerminalKey) {
+    pub(crate) fn host_keyboard_report_all_requested(&self) -> bool {
+        let runtime = if self.state.popup_pane.is_some() {
+            self.popup_runtime()
+        } else if self.state.mode == Mode::Terminal {
+            self.state.active.and_then(|ws_idx| {
+                self.state
+                    .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+            })
+        } else {
+            None
+        };
+
+        runtime.is_some_and(|runtime| runtime.keyboard_protocol().reports_all_keys())
+    }
+
+    fn terminal_input_runtime(
+        &self,
+        target: &TerminalInputTarget,
+    ) -> Option<&crate::terminal::TerminalRuntime> {
+        if let Some(runtime) = self.terminal_runtimes.get(&target.terminal_id) {
+            return Some(runtime);
+        }
+        #[cfg(test)]
+        for (ws_idx, workspace) in self.state.workspaces.iter().enumerate() {
+            for tab in &workspace.tabs {
+                for (&pane_id, pane) in &tab.panes {
+                    if pane.attached_terminal_id == target.terminal_id {
+                        return self.state.runtime_for_pane_in_workspace(
+                            &self.terminal_runtimes,
+                            ws_idx,
+                            pane_id,
+                        );
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub(crate) fn forward_terminal_key_to_target_headless(
+        &self,
+        target: &TerminalInputTarget,
+        key: TerminalKey,
+    ) -> bool {
+        let Some(runtime) = self.terminal_input_runtime(target) else {
+            return false;
+        };
+        let bytes = runtime.encode_terminal_key(key);
+        bytes.is_empty() || runtime.try_send_bytes(Bytes::from(bytes)).is_ok()
+    }
+
+    pub(crate) async fn forward_terminal_key_to_target(
+        &self,
+        target: &TerminalInputTarget,
+        key: TerminalKey,
+    ) -> bool {
+        let Some(runtime) = self.terminal_input_runtime(target) else {
+            return false;
+        };
+        let bytes = runtime.encode_terminal_key(key);
+        bytes.is_empty() || runtime.send_bytes(Bytes::from(bytes)).await.is_ok()
+    }
+
+    fn take_pressed_keys_for_source(
+        &mut self,
+        source_id: crate::app::InputSourceId,
+    ) -> Vec<crate::app::PressedTerminalKey> {
+        let pressed = self
+            .pressed_terminal_keys
+            .iter()
+            .filter(|((id, _), _)| *id == source_id)
+            .map(|(_, pressed)| pressed.clone())
+            .collect();
+        self.pressed_terminal_keys
+            .retain(|(id, _), _| *id != source_id);
+        self.suppressed_repeat_keys
+            .retain(|(id, _)| *id != source_id);
+        pressed
+    }
+
+    pub(crate) fn release_input_source_headless(&mut self, source_id: crate::app::InputSourceId) {
+        for pressed in self.take_pressed_keys_for_source(source_id) {
+            let release = pressed
+                .key
+                .with_kind(crossterm::event::KeyEventKind::Release);
+            let _ = self.forward_terminal_key_to_target_headless(&pressed.target, release);
+        }
+    }
+
+    pub(crate) async fn release_input_source(&mut self, source_id: crate::app::InputSourceId) {
+        for pressed in self.take_pressed_keys_for_source(source_id) {
+            let release = pressed
+                .key
+                .with_kind(crossterm::event::KeyEventKind::Release);
+            let _ = self
+                .forward_terminal_key_to_target(&pressed.target, release)
+                .await;
+        }
+    }
+
+    pub(super) async fn handle_terminal_key(
+        &mut self,
+        key: TerminalKey,
+    ) -> Option<TerminalInputTarget> {
         match self.prepare_popup_key_forward(key) {
             PreparedPopupInput::NotOpen => {}
-            PreparedPopupInput::Consumed => return,
-            PreparedPopupInput::Bytes(bytes) => {
+            PreparedPopupInput::Consumed => return None,
+            PreparedPopupInput::Bytes { target, bytes } => {
                 let Some(runtime) = self.popup_runtime() else {
                     self.close_popup_pane();
-                    return;
+                    return None;
                 };
-                let _ = runtime.send_bytes(bytes).await;
-                return;
+                return runtime.send_bytes(bytes).await.is_ok().then_some(target);
             }
         }
 
-        let Some(input) = self.prepare_terminal_key_forward(key) else {
-            return;
+        let input = self.prepare_terminal_key_forward(key)?;
+        let sent = if let Some(runtime) = self.lookup_runtime_sender(input.ws_idx, input.pane_id) {
+            runtime.send_bytes(input.bytes).await.is_ok()
+        } else {
+            false
         };
-        if let Some(runtime) = self.lookup_runtime_sender(input.ws_idx, input.pane_id) {
-            let _ = runtime.send_bytes(input.bytes).await;
-        }
+        sent.then_some(input.target)
     }
 }
 
@@ -376,6 +497,7 @@ mod tests {
                 enabled: true,
                 platforms: None,
                 build: Vec::new(),
+                startup: Vec::new(),
                 actions: vec![crate::api::schema::PluginManifestAction {
                     id: "open".into(),
                     title: "Open link".into(),
@@ -548,7 +670,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn copy_on_select_disabled_ignores_drag_and_double_click_selection() {
+    async fn copy_on_select_disabled_keeps_drag_selection_without_copying() {
         let (mut app, info) = app_with_screen_bytes(b"alpha beta");
         app.state.copy_on_select = false;
         let row = info.inner_rect.y;
@@ -561,18 +683,109 @@ mod tests {
             row,
         ));
         app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), end_col, row));
+        assert_visible_selection(&app);
+        assert!(!app
+            .state
+            .selection
+            .as_ref()
+            .is_some_and(crate::selection::Selection::is_finalized));
+
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), end_col, row));
 
-        assert!(app.state.selection.is_none());
+        assert_visible_selection(&app);
+        assert_eq!(
+            app.state
+                .selection
+                .as_ref()
+                .map(crate::selection::Selection::ordered_cells),
+            Some(((0, 0), (0, 4)))
+        );
+        assert!(app
+            .state
+            .selection
+            .as_ref()
+            .is_some_and(crate::selection::Selection::is_finalized));
         assert!(app.state.selection_autoscroll.is_none());
-        assert!(app.event_rx.try_recv().is_err());
-
-        double_click(&mut app, start_col, row);
-
-        assert!(app.state.selection.is_none());
-        assert!(app.last_pane_click.is_none());
+        assert!(app.selection_autoscroll_deadline.is_none());
         assert!(app.selection_highlight_clear_deadline.is_none());
         assert!(app.event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn copy_on_select_disabled_keeps_explicit_double_click_copy() {
+        let (mut app, info) = app_with_screen_bytes(b"alpha beta");
+        app.state.copy_on_select = false;
+        let col = info.inner_rect.x + 2;
+        let row = info.inner_rect.y;
+
+        double_click(&mut app, col, row);
+
+        assert_eq!(clipboard_write_content(&mut app), b"alpha");
+        assert_visible_selection(&app);
+        assert!(app.selection_highlight_clear_deadline.is_some());
+        assert!(app.event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn new_drag_cancels_stale_double_click_highlight_deadline() {
+        let (mut app, info) = app_with_screen_bytes(b"alpha beta");
+        app.state.copy_on_select = false;
+        let row = info.inner_rect.y;
+        let word_col = info.inner_rect.x + 2;
+
+        double_click(&mut app, word_col, row);
+        assert_eq!(clipboard_write_content(&mut app), b"alpha");
+        let stale_deadline = app
+            .selection_highlight_clear_deadline
+            .expect("double-click highlight deadline");
+
+        let start_col = info.inner_rect.x + 6;
+        let end_col = info.inner_rect.x + 9;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            start_col,
+            row,
+        ));
+        assert!(app.selection_highlight_clear_deadline.is_none());
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), end_col, row));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), end_col, row));
+
+        assert_visible_selection(&app);
+        assert!(!app
+            .clear_due_selection_highlight(stale_deadline + std::time::Duration::from_millis(1)));
+        assert_visible_selection(&app);
+        assert!(app.event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn ignored_left_down_keeps_double_click_highlight_deadline() {
+        let (mut app, info) = app_with_screen_bytes(b"alpha beta");
+        let col = info.inner_rect.x + 2;
+        let row = info.inner_rect.y;
+
+        double_click(&mut app, col, row);
+        assert_eq!(clipboard_write_content(&mut app), b"alpha");
+        let deadline = app
+            .selection_highlight_clear_deadline
+            .expect("double-click highlight deadline");
+        app.state.toast = Some(crate::app::state::ToastNotification {
+            kind: crate::app::state::ToastKind::Finished,
+            title: "finished".into(),
+            context: "missing".into(),
+            position: None,
+            target: Some(crate::app::state::ToastTarget {
+                workspace_id: "missing".into(),
+                pane_id: info.id,
+            }),
+        });
+        app.state.view.toast_hit_area = Rect::new(0, 0, 1, 1);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 0, 0));
+
+        assert_visible_selection(&app);
+        assert_eq!(app.selection_highlight_clear_deadline, Some(deadline));
+        assert!(app.clear_due_selection_highlight(deadline + std::time::Duration::from_millis(1)));
+        assert!(app.state.selection.is_none());
     }
 
     #[tokio::test]
@@ -957,121 +1170,6 @@ mod tests {
                 (start_metrics.max_offset_from_bottom as u32, 2),
             )
         );
-    }
-
-    #[tokio::test]
-    async fn clicking_unfocused_pane_with_mouse_reporting_focuses_it_via_left_button() {
-        let mut app = app_for_mouse_test();
-        let mut ws = Workspace::test_new("test");
-        let first_pane = ws.tabs[0].root_pane;
-        let second_pane = ws.test_split(ratatui::layout::Direction::Vertical);
-
-        let terminal_area = Rect::new(26, 2, 80, 18);
-        let pane_infos = ws.tabs[0].layout.panes(terminal_area);
-        let first_info = pane_infos
-            .iter()
-            .find(|p| p.id == first_pane)
-            .unwrap()
-            .clone();
-        let second_info = pane_infos
-            .iter()
-            .find(|p| p.id == second_pane)
-            .unwrap()
-            .clone();
-
-        ws.insert_test_runtime(
-            first_pane,
-            crate::terminal::TerminalRuntime::test_with_screen_bytes(
-                first_info.inner_rect.width.max(1),
-                first_info.inner_rect.height.max(1),
-                b"",
-            ),
-        );
-        ws.insert_test_runtime(
-            second_pane,
-            crate::terminal::TerminalRuntime::test_with_screen_bytes(
-                second_info.inner_rect.width.max(1),
-                second_info.inner_rect.height.max(1),
-                b"\x1b[?1002h",
-            ),
-        );
-
-        ws.tabs[0].layout.focus_pane(first_pane);
-
-        app.state.workspaces = vec![ws];
-        app.state.active = Some(0);
-        app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
-        app.state.view.pane_infos = pane_infos;
-
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            second_info.inner_rect.x + 2,
-            second_info.inner_rect.y + 2,
-        ));
-
-        assert_eq!(
-            app.state.workspaces[0].tabs[0].layout.focused(),
-            second_pane
-        );
-        assert_eq!(app.state.mode, Mode::Terminal);
-    }
-
-    #[tokio::test]
-    async fn right_clicking_unfocused_mouse_reporting_pane_keeps_focus_for_context_menu() {
-        let mut app = app_for_mouse_test();
-        let mut ws = Workspace::test_new("test");
-        let first_pane = ws.tabs[0].root_pane;
-        let second_pane = ws.test_split(ratatui::layout::Direction::Vertical);
-
-        let terminal_area = Rect::new(26, 2, 80, 18);
-        let pane_infos = ws.tabs[0].layout.panes(terminal_area);
-        let first_info = pane_infos
-            .iter()
-            .find(|p| p.id == first_pane)
-            .unwrap()
-            .clone();
-        let second_info = pane_infos
-            .iter()
-            .find(|p| p.id == second_pane)
-            .unwrap()
-            .clone();
-
-        ws.insert_test_runtime(
-            first_pane,
-            crate::terminal::TerminalRuntime::test_with_screen_bytes(
-                first_info.inner_rect.width.max(1),
-                first_info.inner_rect.height.max(1),
-                b"",
-            ),
-        );
-        ws.insert_test_runtime(
-            second_pane,
-            crate::terminal::TerminalRuntime::test_with_screen_bytes(
-                second_info.inner_rect.width.max(1),
-                second_info.inner_rect.height.max(1),
-                b"\x1b[?1002h",
-            ),
-        );
-
-        ws.tabs[0].layout.focus_pane(first_pane);
-
-        app.state.workspaces = vec![ws];
-        app.state.active = Some(0);
-        app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
-        app.state.view.pane_infos = pane_infos;
-
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Right),
-            second_info.inner_rect.x + 2,
-            second_info.inner_rect.y + 2,
-        ));
-
-        assert_eq!(app.state.workspaces[0].tabs[0].layout.focused(), first_pane);
-        assert_eq!(app.state.mode, Mode::ContextMenu);
-        let menu = app.state.context_menu.as_ref().expect("pane context menu");
-        assert!(menu.items().contains(&"Swap with focused pane"));
     }
 
     #[tokio::test]

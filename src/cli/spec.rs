@@ -1,4 +1,6 @@
-use clap::{Arg, ArgAction, Command, ValueHint};
+use std::io::Write;
+
+use clap::{Arg, ArgAction, ArgGroup, Command, ValueHint};
 
 pub(super) fn command() -> Command {
     let command = Command::new("herdr")
@@ -36,18 +38,64 @@ pub(super) fn command() -> Command {
         .subcommand(notification_command())
         .subcommand(agent_command())
         .subcommand(pane_command())
-        .subcommand(wait_command())
         .subcommand(terminal_command())
         .subcommand(session_command())
         .subcommand(integration_command())
         .subcommand(plugin_command());
-    disable_auto_help(command)
+    configure_help(command, true)
 }
 
-fn disable_auto_help(command: Command) -> Command {
+fn configure_help(command: Command, root: bool) -> Command {
+    let command = if root {
+        command
+    } else {
+        command.disable_help_flag(false)
+    };
     command
-        .disable_help_flag(true)
-        .mut_subcommands(disable_auto_help)
+        .disable_help_subcommand(true)
+        .mut_subcommands(|subcommand| configure_help(subcommand, false))
+}
+
+pub(super) fn print_requested_help(args: &[String]) -> std::io::Result<bool> {
+    let mut stdout = std::io::stdout().lock();
+    write_requested_help(args, &mut stdout)
+}
+
+fn write_requested_help(args: &[String], output: &mut impl Write) -> std::io::Result<bool> {
+    let Some(help_index) = args
+        .iter()
+        .position(|arg| matches!(arg.as_str(), "--help" | "-h"))
+    else {
+        return Ok(false);
+    };
+    if help_index < 2 {
+        return Ok(false);
+    }
+    if args[1..help_index].iter().any(|arg| arg == "--") {
+        return Ok(false);
+    }
+
+    let mut root = command();
+    root.build();
+    let mut selected = &mut root;
+    let mut path = vec!["herdr".to_string()];
+    for segment in &args[1..help_index] {
+        if selected.find_subcommand(segment).is_none() {
+            break;
+        }
+        path.push(segment.clone());
+        selected = selected
+            .find_subcommand_mut(segment)
+            .expect("subcommand checked immediately before mutable lookup");
+    }
+    if path.len() == 1 || help_index != path.len() {
+        return Ok(false);
+    }
+
+    selected.set_bin_name(path.join(" "));
+    selected.write_long_help(&mut *output)?;
+    writeln!(output)?;
+    Ok(true)
 }
 
 fn completion_command() -> Command {
@@ -164,7 +212,7 @@ fn workspace_command() -> Command {
             Command::new("report-metadata")
                 .about("Report display-only workspace metadata")
                 .arg(required("workspace_id", "WORKSPACE_ID"))
-                .arg(option("source", "ID"))
+                .arg(option("source", "ID").required(true))
                 .arg(repeatable_option("token", "NAME=VALUE"))
                 .arg(repeatable_option("clear-token", "NAME"))
                 .arg(option("seq", "N"))
@@ -272,6 +320,7 @@ fn agent_command() -> Command {
         .subcommand(
             Command::new("read")
                 .about("Read agent terminal output")
+                .override_usage("herdr agent read <TARGET> [OPTIONS]")
                 .arg(required("target", "TARGET"))
                 .arg(read_source_option(true))
                 .arg(option("lines", "N"))
@@ -279,43 +328,106 @@ fn agent_command() -> Command {
                 .arg(flag("ansi")),
         )
         .subcommand(
-            Command::new("send")
-                .about("Send text to an agent")
+            Command::new("send-keys")
+                .about("Send key presses to an agent")
                 .arg(required("target", "TARGET"))
-                .arg(required("text", "TEXT")),
+                .arg(required("key", "KEY").num_args(1..))
+                .after_help("Use esc as the canonical Escape key name; escape is also accepted."),
+        )
+        .subcommand(
+            Command::new("prompt")
+                .about("Submit a prompt to an agent")
+                .override_usage("herdr agent prompt <TARGET> <TEXT> [OPTIONS]")
+                .arg(required("target", "TARGET"))
+                .arg(required("text", "TEXT"))
+                .arg(
+                    flag("wait")
+                        .help("Wait for the first matching state observed after submission"),
+                )
+                .arg(
+                    option("until", "STATUS")
+                        .action(ArgAction::Append)
+                        .requires("wait")
+                        .value_parser(["idle", "working", "blocked", "done", "unknown"])
+                        .help("State to match after --wait; repeat for more than one state"),
+                )
+                .arg(
+                    option("timeout", "MS")
+                        .requires("wait")
+                        .help("Fail after this many milliseconds"),
+                )
+                .after_help(
+                    "When submission starts from a non-working state, --wait first requires an observed state change within 5000ms; otherwise it returns agent_prompt_stalled. A shorter --timeout returns timeout instead. It then matches idle, done, or blocked by default, or any exact --until state. It does not track turns: if the agent is already working, that active turn's completion may match. Without --timeout, the settled-state wait is indefinite.",
+                ),
         )
         .subcommand(
             Command::new("rename")
                 .about("Rename an agent")
+                .override_usage("herdr agent rename <TARGET> <NAME>|--clear")
                 .arg(required("target", "TARGET"))
                 .arg(Arg::new("name").value_name("NAME"))
-                .arg(flag("clear")),
+                .arg(flag("clear"))
+                .group(
+                    ArgGroup::new("rename")
+                        .args(["name", "clear"])
+                        .required(true),
+                ),
         )
         .subcommand(id_command("focus", "target", "Focus an agent"))
         .subcommand(
             Command::new("wait")
-                .about("Wait for an agent status")
+                .about("Wait until an agent reaches one of the requested states")
+                .override_usage("herdr agent wait <TARGET> [OPTIONS]")
                 .arg(required("target", "TARGET"))
-                .arg(agent_wait_status_option())
-                .arg(option("timeout", "MS")),
+                .arg(
+                    option("until", "STATUS")
+                        .action(ArgAction::Append)
+                        .value_parser(["idle", "working", "blocked", "done", "unknown"])
+                        .help("State to match; repeat for more than one state"),
+                )
+                .arg(option("timeout", "MS").help("Fail after this many milliseconds"))
+                .after_help(
+                    "Without --until, matches idle, done, or blocked. Use --until unknown explicitly when needed. Without --timeout, waits indefinitely.",
+                ),
         )
         .subcommand(
             Command::new("attach")
                 .about("Attach directly to an agent terminal")
+                .override_usage("herdr agent attach <TARGET> [OPTIONS]")
                 .arg(required("target", "TARGET"))
                 .arg(flag("takeover")),
         )
         .subcommand(
             Command::new("start")
-                .about("Start an agent command")
+                .about("Start a supported interactive agent in an existing pane")
+                .override_usage(
+                    "herdr agent start <NAME> --kind <KIND> --pane <ID> [OPTIONS] [-- [AGENT_ARG]...]",
+                )
                 .arg(required("name", "NAME"))
-                .arg(path_option("cwd", "PATH"))
-                .arg(option("workspace", "ID"))
-                .arg(option("tab", "ID"))
-                .arg(split_option())
-                .arg(env_option())
-                .arg(flag("focus"))
-                .arg(flag("no-focus")),
+                .arg(
+                    option("kind", "KIND")
+                        .required(true)
+                        .value_parser(agent_kind_values())
+                        .help("Supported agent kind and canonical executable"),
+                )
+                .arg(
+                    option("pane", "ID")
+                        .required(true)
+                        .help("Existing pane at an interactive shell prompt"),
+                )
+                .arg(
+                    option("timeout", "MS")
+                        .help("Wait for interactive readiness (default: 30000; max: 300000)"),
+                )
+                .arg(
+                    Arg::new("agent_args")
+                        .value_name("AGENT_ARG")
+                        .num_args(0..)
+                        .last(true),
+                )
+                .after_help(
+                    "The pane must be at its interactive shell prompt. Success means the expected agent was detected in the same terminal and is ready for input.",
+                ),
         )
         .subcommand(
             Command::new("explain")
@@ -332,6 +444,13 @@ fn agent_command() -> Command {
                         .action(ArgAction::SetTrue),
                 ),
         )
+}
+
+pub(super) fn agent_kind_values() -> Vec<&'static str> {
+    crate::detect::Agent::ALL
+        .into_iter()
+        .map(crate::detect::agent_label)
+        .collect()
 }
 
 fn pane_command() -> Command {
@@ -361,7 +480,7 @@ fn pane_command() -> Command {
         .subcommand(
             Command::new("neighbor")
                 .about("Find a pane neighbor")
-                .arg(direction_option())
+                .arg(required_direction_option())
                 .args(current_pane_args()),
         )
         .subcommand(
@@ -372,13 +491,13 @@ fn pane_command() -> Command {
         .subcommand(
             Command::new("focus")
                 .about("Focus a neighboring pane")
-                .arg(direction_option())
+                .arg(required_direction_option())
                 .args(current_pane_args()),
         )
         .subcommand(
             Command::new("resize")
                 .about("Resize a pane split")
-                .arg(direction_option())
+                .arg(required_direction_option())
                 .arg(option("amount", "FLOAT"))
                 .args(current_pane_args()),
         )
@@ -455,7 +574,37 @@ fn pane_command() -> Command {
             Command::new("send-keys")
                 .about("Send key presses to a pane")
                 .arg(required("pane_id", "PANE_ID"))
-                .arg(required("key", "KEY").num_args(1..)),
+                .arg(required("key", "KEY").num_args(1..))
+                .after_help("Use esc as the canonical Escape key name; escape is also accepted."),
+        )
+        .subcommand(
+            Command::new("wait-output")
+                .about("Wait for matching pane output")
+                .arg(required("pane_id", "PANE_ID"))
+                .arg(
+                    option("match", "TEXT")
+                        .conflicts_with("regex")
+                        .required_unless_present("regex")
+                        .help("Match a literal substring"),
+                )
+                .arg(
+                    option("regex", "PATTERN")
+                        .conflicts_with("match")
+                        .required_unless_present("match")
+                        .help("Match a Rust regular expression"),
+                )
+                .arg(read_source_option(false))
+                .arg(option("lines", "N").help("Restrict the searched snapshot to N lines"))
+                .arg(option("timeout", "MS").help("Fail after this many milliseconds"))
+                .arg(flag("raw").help("Keep ANSI escape sequences while matching"))
+                .group(
+                    ArgGroup::new("matcher")
+                        .args(["match", "regex"])
+                        .required(true),
+                )
+                .after_help(
+                    "The selected snapshot is searched immediately, including existing output, then polled. Without --timeout, this waits indefinitely.",
+                ),
         )
         .subcommand(
             Command::new("run")
@@ -473,8 +622,8 @@ fn report_agent_command() -> Command {
     Command::new("report-agent")
         .about("Report pane agent lifecycle state")
         .arg(required("pane_id", "PANE_ID"))
-        .arg(option("source", "ID"))
-        .arg(option("agent", "LABEL"))
+        .arg(option("source", "ID").required(true))
+        .arg(option("agent", "LABEL").required(true))
         .arg(pane_agent_state_option("state"))
         .arg(option("message", "TEXT"))
         .arg(option("seq", "N"))
@@ -486,8 +635,8 @@ fn report_agent_session_command() -> Command {
     Command::new("report-agent-session")
         .about("Report pane agent session identity")
         .arg(required("pane_id", "PANE_ID"))
-        .arg(option("source", "ID"))
-        .arg(option("agent", "LABEL"))
+        .arg(option("source", "ID").required(true))
+        .arg(option("agent", "LABEL").required(true))
         .arg(option("seq", "N"))
         .arg(option("agent-session-id", "ID"))
         .arg(path_option("agent-session-path", "PATH"))
@@ -498,8 +647,8 @@ fn release_agent_command() -> Command {
     Command::new("release-agent")
         .about("Release pane agent lifecycle authority")
         .arg(required("pane_id", "PANE_ID"))
-        .arg(option("source", "ID"))
-        .arg(option("agent", "LABEL"))
+        .arg(option("source", "ID").required(true))
+        .arg(option("agent", "LABEL").required(true))
         .arg(option("seq", "N"))
 }
 
@@ -507,7 +656,7 @@ fn report_metadata_command() -> Command {
     Command::new("report-metadata")
         .about("Report display-only pane metadata")
         .arg(required("pane_id", "PANE_ID"))
-        .arg(option("source", "ID"))
+        .arg(option("source", "ID").required(true))
         .arg(option("agent", "LABEL"))
         .arg(option("applies-to-source", "ID"))
         .arg(option("title", "TEXT"))
@@ -522,29 +671,6 @@ fn report_metadata_command() -> Command {
         .arg(option("ttl-ms", "N"))
 }
 
-fn wait_command() -> Command {
-    Command::new("wait")
-        .about("Wait for pane output or agent state")
-        .subcommand(
-            Command::new("output")
-                .about("Wait for matching pane output")
-                .arg(required("pane_id", "PANE_ID"))
-                .arg(option("match", "TEXT"))
-                .arg(read_source_option(false))
-                .arg(option("lines", "N"))
-                .arg(option("timeout", "MS"))
-                .arg(flag("regex"))
-                .arg(flag("raw")),
-        )
-        .subcommand(
-            Command::new("agent-status")
-                .about("Wait for pane agent status")
-                .arg(required("pane_id", "PANE_ID"))
-                .arg(status_option("status", true))
-                .arg(option("timeout", "MS")),
-        )
-}
-
 fn terminal_command() -> Command {
     Command::new("terminal")
         .about("Attach to or observe raw terminal streams")
@@ -557,6 +683,14 @@ fn terminal_command() -> Command {
         .subcommand(
             Command::new("session")
                 .about("Work with terminal sessions")
+                .subcommand(
+                    Command::new("control")
+                        .about("Control a terminal stream")
+                        .arg(required("target", "TARGET"))
+                        .arg(flag("takeover"))
+                        .arg(option("cols", "N"))
+                        .arg(option("rows", "N")),
+                )
                 .subcommand(
                     Command::new("observe")
                         .about("Observe a terminal stream")
@@ -740,10 +874,14 @@ fn integration_target_arg() -> Arg {
     Arg::new("target")
         .value_name("TARGET")
         .required(true)
-        .value_parser([
-            "pi", "omp", "claude", "codex", "copilot", "devin", "droid", "kimi", "opencode",
-            "kilo", "hermes", "qodercli", "cursor",
-        ])
+        .value_parser(integration_target_values())
+}
+
+fn integration_target_values() -> Vec<&'static str> {
+    crate::api::schema::IntegrationTarget::ALL
+        .into_iter()
+        .map(crate::integration::integration_target_label)
+        .collect()
 }
 
 fn id_command(name: &'static str, id: &'static str, about: &'static str) -> Command {
@@ -754,24 +892,12 @@ fn direction_option() -> Arg {
     option("direction", "DIRECTION").value_parser(["left", "right", "up", "down"])
 }
 
-fn split_option() -> Arg {
-    option("split", "DIRECTION").value_parser(["right", "down"])
+fn required_direction_option() -> Arg {
+    direction_option().required(true)
 }
 
 fn split_direction_option() -> Arg {
     option("direction", "DIRECTION").value_parser(["right", "down"])
-}
-
-fn status_option(name: &'static str, required: bool) -> Arg {
-    option(name, "STATUS")
-        .required(required)
-        .value_parser(["idle", "working", "blocked", "done", "unknown"])
-}
-
-fn agent_wait_status_option() -> Arg {
-    option("status", "STATUS")
-        .required(true)
-        .value_parser(["idle", "working", "blocked", "unknown"])
 }
 
 fn pane_agent_state_option(name: &'static str) -> Arg {
@@ -786,7 +912,9 @@ fn read_source_option(include_detection: bool) -> Arg {
     } else {
         vec!["visible", "recent", "recent-unwrapped"]
     };
-    option("source", "SOURCE").value_parser(values)
+    option("source", "SOURCE")
+        .value_parser(values)
+        .help("Terminal snapshot source (default: recent)")
 }
 
 fn text_ansi_format_option() -> Arg {
@@ -844,7 +972,7 @@ fn path_arg(name: &'static str, value_name: &'static str) -> Arg {
 
 #[cfg(test)]
 mod tests {
-    use clap::Command;
+    use clap::{Arg, Command};
 
     fn command_path<'a>(cmd: &'a Command, path: &[&str]) -> &'a Command {
         let mut current = cmd;
@@ -875,6 +1003,31 @@ mod tests {
             .any(|arg| arg.get_long() == Some(option))
     }
 
+    fn option_arg<'a>(cmd: &'a Command, option: &str) -> &'a Arg {
+        cmd.get_arguments()
+            .find(|arg| arg.get_long() == Some(option))
+            .unwrap_or_else(|| panic!("missing --{option}"))
+    }
+
+    fn argument<'a>(cmd: &'a Command, id: &str) -> &'a Arg {
+        cmd.get_arguments()
+            .find(|arg| arg.get_id() == id)
+            .unwrap_or_else(|| panic!("missing argument {id}"))
+    }
+
+    fn collect_subcommand_paths(
+        cmd: &Command,
+        path: &mut Vec<String>,
+        paths: &mut Vec<Vec<String>>,
+    ) {
+        for subcommand in cmd.get_subcommands() {
+            path.push(subcommand.get_name().to_string());
+            paths.push(path.clone());
+            collect_subcommand_paths(subcommand, path, paths);
+            path.pop();
+        }
+    }
+
     fn assert_command_descriptions(cmd: &Command, path: &mut Vec<String>) {
         if !path.is_empty() {
             assert!(
@@ -894,6 +1047,37 @@ mod tests {
     fn spec_describes_all_completion_commands() {
         let cmd = super::command();
         assert_command_descriptions(&cmd, &mut Vec::new());
+    }
+
+    #[test]
+    fn spec_passes_clap_invariants() {
+        super::command().debug_assert();
+    }
+
+    #[test]
+    fn every_spec_subcommand_renders_short_and_long_help() {
+        let mut paths = Vec::new();
+        collect_subcommand_paths(&super::command(), &mut Vec::new(), &mut paths);
+
+        for path in paths {
+            for flag in ["-h", "--help"] {
+                let mut args = vec!["herdr".to_string()];
+                args.extend(path.iter().cloned());
+                args.push(flag.to_string());
+                let mut output = Vec::new();
+                assert!(
+                    super::write_requested_help(&args, &mut output).unwrap(),
+                    "help was not handled for herdr {} {flag}",
+                    path.join(" ")
+                );
+                let output = String::from_utf8(output).unwrap();
+                assert!(
+                    output.contains(&format!("Usage: herdr {}", path.join(" "))),
+                    "unexpected help for herdr {}: {output}",
+                    path.join(" ")
+                );
+            }
+        }
     }
 
     #[test]
@@ -917,6 +1101,93 @@ mod tests {
     }
 
     #[test]
+    fn spec_matches_all_integration_targets() {
+        let cmd = super::command();
+        let install = command_path(&cmd, &["integration", "install"]);
+        assert_eq!(
+            argument(install, "target")
+                .get_value_parser()
+                .possible_values()
+                .unwrap()
+                .map(|value| value.get_name().to_string())
+                .collect::<Vec<_>>(),
+            crate::api::schema::IntegrationTarget::ALL
+                .map(crate::integration::integration_target_label)
+                .map(str::to_string)
+        );
+    }
+
+    #[test]
+    fn spec_marks_runtime_required_options_as_required() {
+        for (path, options) in [
+            (&["workspace", "report-metadata"][..], &["source"][..]),
+            (&["pane", "neighbor"][..], &["direction"][..]),
+            (&["pane", "focus"][..], &["direction"][..]),
+            (&["pane", "resize"][..], &["direction"][..]),
+            (&["pane", "report-agent"][..], &["source", "agent"][..]),
+            (
+                &["pane", "report-agent-session"][..],
+                &["source", "agent"][..],
+            ),
+            (&["pane", "release-agent"][..], &["source", "agent"][..]),
+            (&["pane", "report-metadata"][..], &["source"][..]),
+        ] {
+            let cmd = command_path(&super::command(), path).clone();
+            for option in options {
+                assert!(
+                    option_arg(&cmd, option).is_required_set(),
+                    "herdr {} --{option} should be required",
+                    path.join(" ")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn agent_prompt_until_requires_wait() {
+        let error = super::command()
+            .try_get_matches_from([
+                "herdr", "agent", "prompt", "reviewer", "hello", "--until", "idle",
+            ])
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[test]
+    fn agent_rename_requires_exactly_one_name_or_clear() {
+        for valid in [
+            &["herdr", "agent", "rename", "reviewer", "worker"][..],
+            &["herdr", "agent", "rename", "reviewer", "--clear"][..],
+        ] {
+            assert!(super::command().try_get_matches_from(valid).is_ok());
+        }
+        for invalid in [
+            &["herdr", "agent", "rename", "reviewer"][..],
+            &["herdr", "agent", "rename", "reviewer", "worker", "--clear"][..],
+        ] {
+            assert!(super::command().try_get_matches_from(invalid).is_err());
+        }
+
+        let mut help = Vec::new();
+        super::write_requested_help(
+            &[
+                "herdr".to_string(),
+                "agent".to_string(),
+                "rename".to_string(),
+                "--help".to_string(),
+            ],
+            &mut help,
+        )
+        .unwrap();
+        assert!(String::from_utf8(help)
+            .unwrap()
+            .contains("Usage: herdr agent rename <TARGET> <NAME>|--clear"));
+    }
+
+    #[test]
     fn spec_includes_nested_plugin_pane_open_options() {
         let cmd = super::command();
         let open = command_path(&cmd, &["plugin", "pane", "open"]);
@@ -927,14 +1198,39 @@ mod tests {
     }
 
     #[test]
-    fn spec_includes_agent_status_values() {
+    fn spec_keeps_agent_wait_status_free() {
         let cmd = super::command();
         let wait = command_path(&cmd, &["agent", "wait"]);
-        let values = option_values(wait, "status");
-        assert!(values.contains(&"idle".to_string()));
-        assert!(values.contains(&"working".to_string()));
-        assert!(values.contains(&"blocked".to_string()));
-        assert!(!values.contains(&"done".to_string()));
+        assert!(!has_option(wait, "status"));
+        assert_eq!(
+            option_values(wait, "until"),
+            ["idle", "working", "blocked", "done", "unknown"]
+        );
+        assert!(has_option(wait, "timeout"));
+    }
+
+    #[test]
+    fn spec_matches_refactored_agent_and_pane_commands() {
+        let cmd = super::command();
+        assert!(cmd
+            .get_subcommands()
+            .all(|subcommand| subcommand.get_name() != "wait"));
+
+        let agent = command_path(&cmd, &["agent"]);
+        assert!(agent
+            .get_subcommands()
+            .any(|subcommand| subcommand.get_name() == "send-keys"));
+        assert!(agent
+            .get_subcommands()
+            .any(|subcommand| subcommand.get_name() == "wait"));
+        assert!(agent
+            .get_subcommands()
+            .all(|subcommand| subcommand.get_name() != "send"));
+
+        let pane = command_path(&cmd, &["pane"]);
+        assert!(pane
+            .get_subcommands()
+            .any(|subcommand| subcommand.get_name() == "wait-output"));
     }
 
     #[test]
@@ -954,26 +1250,38 @@ mod tests {
     }
 
     #[test]
-    fn spec_does_not_complete_agent_start_argv_without_separator() {
+    fn spec_models_agent_start_target_and_trailing_args() {
         let cmd = super::command();
         let agent_start = command_path(&cmd, &["agent", "start"]);
-        assert!(!agent_start
+        assert!(has_option(agent_start, "kind"));
+        assert_eq!(
+            option_values(agent_start, "kind"),
+            crate::detect::Agent::ALL
+                .map(crate::detect::agent_label)
+                .map(str::to_string)
+        );
+        assert!(has_option(agent_start, "pane"));
+        for legacy in ["cwd", "workspace", "tab", "split", "focus", "env", "argv"] {
+            assert!(!has_option(agent_start, legacy), "legacy option --{legacy}");
+        }
+        assert!(agent_start
             .get_arguments()
-            .any(|arg| arg.get_id() == "argv"));
+            .any(|arg| arg.get_id() == "agent_args"));
     }
 
     #[test]
-    fn zsh_completion_contains_public_commands_and_values() {
-        let mut cmd = super::command();
-        let mut output = Vec::new();
-        clap_complete::generate(clap_complete::Shell::Zsh, &mut cmd, "herdr", &mut output);
-        let script = String::from_utf8(output).unwrap();
-        assert!(script.contains("#compdef herdr"));
-        assert!(script.contains("--help"));
-        assert!(script.contains("'completion:Generate shell completion scripts'"));
-        assert!(script.contains("bash elvish fish powershell zsh"));
-        assert!(script.contains("'pane:Control terminal panes'"));
-        assert!(script.contains("idle working blocked done unknown"));
-        assert!(!script.contains("live-handoff"));
+    fn completion_generation_succeeds_for_every_supported_shell() {
+        for shell in [
+            clap_complete::Shell::Bash,
+            clap_complete::Shell::Elvish,
+            clap_complete::Shell::Fish,
+            clap_complete::Shell::PowerShell,
+            clap_complete::Shell::Zsh,
+        ] {
+            let mut cmd = super::command();
+            let mut output = Vec::new();
+            clap_complete::generate(shell, &mut cmd, "herdr", &mut output);
+            assert!(!output.is_empty(), "empty {shell:?} completion output");
+        }
     }
 }

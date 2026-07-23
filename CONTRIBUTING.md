@@ -69,7 +69,7 @@ If your proposal changes the visual language, interaction model, workflow, persi
 
 The root `README.md`, root `CHANGELOG.md`, and website docs describe the latest released version of herdr. Do not update root `README.md`, root `CHANGELOG.md`, or `website/src/content/docs/` for normal PRs.
 
-If your PR changes user-facing behavior, mention the needed public-doc update in the PR. Update `docs/next/README.md` only when the root README needs to change for the next release. Update the full website-doc mirror under `docs/next/website/src/content/docs/` when website docs need to change for the next release.
+If your PR changes user-facing behavior, mention the needed public-doc update in the PR. Update `docs/next/README.md` only when the root README needs to change for the next release. Update the full website-doc mirror under `docs/next/website/src/content/docs/` when website docs need to change for the next release. Release CI promotes the tagged next docs only after the GitHub Release succeeds; contributors and maintainers do not copy them into stable docs manually.
 
 You do not need to edit the changelog for normal PRs. Maintainers prepare `docs/next/CHANGELOG.md` during release review.
 

@@ -1,0 +1,123 @@
+---
+title: 智能体自动化
+description: 使用 Herdr 的布局、窗格和智能体原语,从脚本或其他智能体协调编码智能体。
+---
+
+Herdr 可以作为编码智能体的自动化层。脚本可以控制智能体,一个智能体也可以给其他智能体分配工作、检查状态并收集结果。关键是为任务选择正确的原语。
+
+## 三种原语
+
+| 原语 | 职责 |
+| --- | --- |
+| 布局（`workspace`、`tab` 和窗格拓扑） | 创建和组织终端位置。 |
+| 窗格 | 控制原始终端:运行命令、发送输入、读取输出和等待输出。 |
+| 智能体 | 按名称或窗格以及生命周期状态控制已识别的编码智能体。 |
+
+无论是否包含智能体,窗格都可以存在。智能体是 Herdr 在窗格中识别出的当前进程。因此,`agent start` 需要一个现有 shell 窗格,绝不会创建、拆分或移动布局。
+
+创建工作区时也会创建第一个标签页和根窗格;创建标签页时会创建它的根窗格。第一个进程应使用返回的窗格 ID,只有布局需要另一个终端时才进行拆分。
+
+创建命令输出 JSON。请从响应中读取 ID,不要猜测:
+
+```bash
+created=$(herdr workspace create --cwd ~/project --label api --no-focus)
+pane_id=$(printf '%s\n' "$created" | jq -r '.result.root_pane.pane_id')
+
+split=$(herdr pane split "$pane_id" --direction right --no-focus)
+review_pane=$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id')
+```
+
+`workspace create` 返回 `.result.workspace`、`.result.tab` 和 `.result.root_pane`;`tab create` 返回 `.result.tab` 和 `.result.root_pane`;`pane split` 把新窗格返回为 `.result.pane`。
+
+把窗格移动到另一个工作区会改变带工作区前缀的窗格 ID。执行 `pane move` 后,请继续使用 `.result.move_result.pane.pane_id`;旧值保留在 `.result.move_result.previous_pane_id`。运行中的进程会保留启动时的 Herdr 环境,但旧的 `HERDR_PANE_ID` 会继续作为该终端的别名,所以 `--current` 仍可安全使用。移动后发起的新命令仍可通过智能体名称解析,但已经进行中的等待会以 `agent_not_running` 结束。
+
+对于 shell、测试、服务器、CI 监视器和其他普通终端进程,使用窗格命令。当 Herdr 需要理解正在运行的是哪个智能体,或它处于 `working`、`blocked`、`done`、`idle`、`unknown` 中的哪个状态时,使用智能体命令。
+
+## 智能体身份与启动
+
+`w1:p2` 这样的窗格 ID 标识终端位置。`reviewer` 这样的智能体名称是该窗格中当前智能体的便捷别名。名称必须匹配 `[a-z][a-z0-9_-]{0,31}`,并在实时智能体中唯一。智能体退出、被释放或被替换时,别名会被清除;它不会永久重命名窗格。
+
+智能体命令既可以接受唯一的实时名称,也可以接受当前托管该智能体的窗格 ID。
+
+可用的 shell 窗格必须停在交互式 shell 提示符,由 shell 自身占用前台,没有正在前台运行的命令、编辑器或智能体。调用 `agent start` 前先让窗格回到提示符。
+
+`--kind` 选择受支持的智能体及其标准可执行文件。支持的 kind 是 `pi`、`claude`、`codex`、`gemini`、`cursor`、`devin`、`agy`、`cline`、`omp`、`mastracode`、`opencode`、`copilot`、`kimi`、`kiro`、`droid`、`amp`、`grok`、`hermes`、`kilo`、`qodercli` 和 `maki`。`--` 后的参数会原样传给该可执行文件。
+
+`agent start` 只有在 Herdr 于同一终端检测到预期智能体,并确认它可接受交互输入后才返回。默认等待启动 30 秒;`--timeout` 必须大于 3000 且不超过 300000 毫秒。
+
+```bash
+herdr agent start reviewer --kind codex --pane "$review_pane" -- -m gpt-5.4
+```
+
+手动启动的智能体也会被自动检测,可以用窗格 ID 指定。当需要一个稳定、易读的目标时,给它命名:
+
+```bash
+herdr agent get w1:p2
+herdr agent rename w1:p2 reviewer
+```
+
+## 选择控制界面
+
+| 目标 | 命令 |
+| --- | --- |
+| 运行并提交 shell 命令 | `pane run` |
+| 发送不带 Enter 的纯文本 | `pane send-text` |
+| 发送终端按键或修饰键组合 | `pane send-keys` |
+| 等待文本或正则表达式 | `pane wait-output` |
+| 在现有窗格中启动受支持的智能体 | `agent start` |
+| 提交提示,并可选择等待 | `agent prompt` |
+| 向智能体交互界面发送按键 | `agent send-keys` |
+| 等待智能体生命周期状态 | `agent wait` |
+
+`agent prompt` 会提交文本和编码后的 Enter,并遵循终端当前的 bracketed paste 模式。即使智能体正在 working 也可以提交。使用 `agent send-keys` 进行 `esc`、`up`、`enter`、`ctrl+c` 等交互;`escape` 也是 `esc` 的别名。只有在明确需要原始终端控制时才使用窗格输入命令。
+
+窗格输入直接指定终端,不关心当前进程。智能体输入会解析实时智能体;如果该智能体已不再控制此窗格,操作会被拒绝。
+
+`agent prompt --wait` 会立即提交提示。智能体从非 working 状态开始时，Herdr 首先要求在五秒内观察到生命周期变化。如果状态序列没有前进，它会返回 `agent_prompt_stalled`，而不是无限等待；调用方设置的 `--timeout` 不超过五秒时，仍返回普通的 `timeout` 错误。观察到活动后，它会等待请求的稳定状态。它不会跟踪单独的轮次。如果智能体已经处于 working，当前轮次的完成可能满足等待。独立的 `agent wait` 会观察当前智能体；如果状态已经匹配，就会立即返回。两者默认匹配 `idle`、`done` 或 `blocked`。可以重复使用 `--until` 接受多个精确状态，例如 `--until idle --until done`；需要 `unknown` 时请明确使用 `--until unknown`。在 `agent prompt` 中，`--until` 必须与 `--wait` 一起使用。
+
+`idle` 表示智能体正等待输入,且其标签页已在聚焦的 Herdr 界面中显示。`done` 是相同的底层 idle 状态,但用于后台工作完成后,直到该标签页获得焦点或 `pane focus` / `agent focus` 指向它。仅通过 CLI 读取不会把它标记为已查看。`blocked` 表示 Herdr 识别到了审批或提问界面。`unknown` 表示智能体存在,但 Herdr 无法可靠判断其生命周期;它不代表工作成功完成。区别重要时,请指定精确的 `--until` 状态。
+
+`pane wait-output` 不解释智能体生命周期。它轮询选定的终端快照并立即进行第一次搜索,所以已经存在的文本也会匹配。默认来源名是 `recent`;匹配时会把最近 80 个已渲染终端行作为未折行输出处理。`--lines` 可以修改这个行数限制;`--regex` 使用 Rust 正则表达式语法并逐行匹配。
+
+在 CLI 中,`pane read` 和 `agent read` 都直接打印终端文本。默认输出去除 ANSI 转义的 UTF-8 文本;来源包含样式时,使用 `--format ansi` 或 `--ansi` 保留终端转义。`detection` 来源始终是纯文本。对 recent 类来源,`--lines N` 会在可选的取消折行之前选择最后 N 个已渲染终端行;省略时默认读取 80 行。对 `visible` 和 `detection`,省略 `--lines` 会返回完整快照,指定时保留按换行分隔的最后 N 行。socket API 在 `.result.read.text` 返回文本。
+
+## 已知注意事项:备用屏幕输出
+
+Claude Code 和 OpenCode 等全屏智能体可能会在终端的备用屏幕中绘制。备用屏幕中的行不会进入 Herdr 的主机回滚缓冲区。`--lines` 只能请求窗格当前屏幕和主机回滚缓冲区中现有的更多行,不能生成缺失的历史。如果增大 `--lines` 后仍没有返回更多回复文本,该窗格很可能正在使用备用屏幕,且那些回复行已不再保留。字体较大或窗格较小时更容易遇到此限制。
+
+可以要求智能体简洁回复、扩大窗格或使用较小字体,也可以使用智能体自身的记录和滚动控件。在智能体内部滚动后,使用 `--source visible` 读取它当前绘制的页面。
+
+在这次读取失败后,可以让智能体把完整回复以 Markdown 格式写入临时目录,只回复文件路径,然后直接读取该文件。仅将此方法用作后备方案;不要在初始提示中要求文件输出。
+
+成功的 `agent start`、`agent prompt` 和 `agent wait` 会在 `.result.agent` 返回当前智能体。`pane wait-output` 返回 `.result.pane_id`、`.result.matched_line` 以及位于 `.result.read` 的匹配快照。
+
+等待命令没有默认超时,可能无限等待。超时或服务器错误会把 JSON 错误写到 stderr 并以状态 1 退出;CLI 语法错误以状态 2 退出。
+
+## 示例
+
+启动辅助智能体,分配工作,并等待该工作结束:
+
+```bash
+split=$(herdr pane split --current --direction right --no-focus)
+review_pane=$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id')
+herdr agent start reviewer --kind codex --pane "$review_pane" -- -m gpt-5.4
+herdr agent prompt reviewer "Review the current diff" --wait --timeout 120000
+herdr agent read reviewer --source recent-unwrapped --lines 120
+```
+
+等待智能体请求输入,检查内容,再操作其交互界面:
+
+```bash
+herdr agent wait reviewer --until blocked --timeout 120000
+herdr agent read reviewer --source recent-unwrapped --lines 80
+herdr agent send-keys reviewer esc
+```
+
+运行普通进程并等待输出,而不把它当作智能体:
+
+```bash
+herdr pane run w1:p3 "just test --watch"
+herdr pane wait-output w1:p3 --regex "passed|failed" --timeout 120000
+```
+
+完整命令和选项列表见 [CLI 参考](/zh-cn/docs/cli-reference/)。Shell 补全也能以交互方式显示同一命令树。

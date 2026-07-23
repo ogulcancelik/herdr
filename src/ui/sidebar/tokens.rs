@@ -168,6 +168,7 @@ mod tests {
             terminal_title: None,
             terminal_title_stripped: None,
             agent_label: Some("pi".into()),
+            agent_kind_label: Some("pi".into()),
             agent: Some(crate::detect::Agent::Pi),
             state: AgentState::Working,
             seen: true,

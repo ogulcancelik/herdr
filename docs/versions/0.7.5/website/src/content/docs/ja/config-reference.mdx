@@ -1,0 +1,27 @@
+---
+title: 設定リファレンス
+description: Herdr の正規の config.toml キーを、型・デフォルト値・許容値つきで一覧します。
+---
+
+import ConfigReference from '../../../components/ConfigReference.astro';
+
+Herdr が `config.toml` から読み取る正規キーを、フラットに一覧して絞り込めます。
+ガイド付きの設定手順や各オプションの背景は[設定](/ja/docs/configuration/)を参照してください。
+
+コメント付きのデフォルト設定全体はいつでも出力できます:
+
+```bash
+herdr --default-config
+```
+
+カスタムコマンドバインディング（`[[keys.command]]`）はユーザー定義のテーブルのため、
+ここではキーごとに掲載していません。
+[カスタムコマンドキーバインド](/ja/docs/configuration/#カスタムコマンドキーバインド)を参照してください。
+
+各キーの説明は現時点では英語です。
+
+<ConfigReference
+  placeholder="キーを絞り込み（例: sidebar, prefix, sound…）"
+  noMatches="一致するキーはありません。"
+  keyCountLabel="キー"
+/>

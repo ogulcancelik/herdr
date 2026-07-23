@@ -1,0 +1,1109 @@
+{
+  "sections": [
+    {
+      "id": "general",
+      "title": "General",
+      "keys": [
+        {
+          "key": "onboarding",
+          "type": "boolean",
+          "default": "unset",
+          "description": "Show first-run setup on startup. Missing or true shows onboarding; continuing from onboarding writes onboarding = false."
+        }
+      ]
+    },
+    {
+      "id": "theme",
+      "title": "Theme",
+      "keys": [
+        {
+          "key": "theme.name",
+          "type": "string",
+          "default": "\"catppuccin\"",
+          "description": "Built-in theme name."
+        },
+        {
+          "key": "theme.auto_switch",
+          "type": "boolean",
+          "default": "false",
+          "description": "Follow host terminal light/dark appearance and switch between theme names."
+        },
+        {
+          "key": "theme.dark_name",
+          "type": "string",
+          "default": "unset",
+          "description": "Theme name used when `auto_switch` selects a dark appearance."
+        },
+        {
+          "key": "theme.light_name",
+          "type": "string",
+          "default": "unset",
+          "description": "Theme name used when `auto_switch` selects a light appearance."
+        },
+        {
+          "key": "theme.custom.accent",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the accent color token on top of the base theme. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.panel_bg",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the panel_bg color token on top of the base theme. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.surface0",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the surface0 color token on top of the base theme. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.surface1",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the surface1 color token on top of the base theme. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.surface_dim",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the surface_dim color token on top of the base theme. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.overlay0",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the overlay0 color token on top of the base theme. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.overlay1",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the overlay1 color token on top of the base theme. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.text",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the text color token on top of the base theme. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.subtext0",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the subtext0 color token on top of the base theme. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.mauve",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the mauve color token on top of the base theme. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.green",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the green color token on top of the base theme. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.yellow",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the yellow color token on top of the base theme. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.red",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the red color token on top of the base theme. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.blue",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the blue color token on top of the base theme. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.teal",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the teal color token on top of the base theme. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.peach",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the peach color token on top of the base theme. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        }
+      ]
+    },
+    {
+      "id": "terminal",
+      "title": "Terminal",
+      "keys": [
+        {
+          "key": "terminal.default_shell",
+          "type": "string",
+          "default": "\"\"",
+          "description": "Executable used for new interactive panes. Empty means SHELL, then /bin/sh."
+        },
+        {
+          "key": "terminal.shell_mode",
+          "type": "enum",
+          "default": "\"auto\"",
+          "description": "Startup mode for new interactive pane shells.",
+          "values": [
+            "auto",
+            "login",
+            "non_login"
+          ]
+        },
+        {
+          "key": "terminal.new_cwd",
+          "type": "enum",
+          "default": "\"follow\"",
+          "description": "CWD policy for new interactive panes, tabs, and workspaces.",
+          "values": [
+            "follow",
+            "home",
+            "current",
+            "path"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "update",
+      "title": "Updates",
+      "keys": [
+        {
+          "key": "update.channel",
+          "type": "enum",
+          "default": "\"stable\" (\"preview\" on Windows)",
+          "description": "Update channel used by background version checks and herdr update. Homebrew, mise, and Nix installs ignore the preview channel.",
+          "values": [
+            "stable",
+            "preview"
+          ]
+        },
+        {
+          "key": "update.version_check",
+          "type": "boolean",
+          "default": "true",
+          "description": "Check herdr.dev for new Herdr versions in the background."
+        },
+        {
+          "key": "update.manifest_check",
+          "type": "boolean",
+          "default": "true",
+          "description": "Check herdr.dev for remote agent-detection manifest updates in the background. Bundled manifests and local overrides still apply."
+        }
+      ]
+    },
+    {
+      "id": "keys",
+      "title": "Keybindings",
+      "keys": [
+        {
+          "key": "keys.prefix",
+          "type": "string",
+          "default": "\"ctrl+b\"",
+          "description": "Prefix key to enter prefix mode (e.g. \"ctrl+b\", \"f12\", \"esc\")."
+        },
+        {
+          "key": "keys.help",
+          "type": "keybinding",
+          "default": "\"prefix+?\"",
+          "description": "Open keybinding help."
+        },
+        {
+          "key": "keys.settings",
+          "type": "keybinding",
+          "default": "\"prefix+s\"",
+          "description": "Open settings."
+        },
+        {
+          "key": "keys.new_workspace",
+          "type": "keybinding",
+          "default": "\"prefix+shift+n\"",
+          "description": "Create a new workspace."
+        },
+        {
+          "key": "keys.new_worktree",
+          "type": "keybinding",
+          "default": "\"prefix+shift+g\"",
+          "description": "Create a Git worktree from the selected workspace."
+        },
+        {
+          "key": "keys.open_worktree",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open an existing Git worktree from the selected workspace. Unset by default."
+        },
+        {
+          "key": "keys.remove_worktree",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Delete the selected managed worktree checkout after confirmation. Unset by default."
+        },
+        {
+          "key": "keys.rename_workspace",
+          "type": "keybinding",
+          "default": "\"prefix+shift+w\"",
+          "description": "Rename the selected workspace."
+        },
+        {
+          "key": "keys.close_workspace",
+          "type": "keybinding",
+          "default": "\"prefix+shift+d\"",
+          "description": "Close the selected workspace."
+        },
+        {
+          "key": "keys.workspace_picker",
+          "type": "keybinding",
+          "default": "\"prefix+w\"",
+          "description": "Open the workspace navigation surface."
+        },
+        {
+          "key": "keys.goto",
+          "type": "keybinding",
+          "default": "\"prefix+g\"",
+          "description": "Open the session navigator."
+        },
+        {
+          "key": "keys.navigate_workspace_up",
+          "type": "keybinding",
+          "default": "\"up\"",
+          "description": "Move workspace selection up in navigate mode."
+        },
+        {
+          "key": "keys.navigate_workspace_down",
+          "type": "keybinding",
+          "default": "\"down\"",
+          "description": "Move workspace selection down in navigate mode."
+        },
+        {
+          "key": "keys.navigate_pane_left",
+          "type": "keybinding",
+          "default": "\"h\"",
+          "description": "Focus the pane to the left in navigate mode. Left arrow is always an alias."
+        },
+        {
+          "key": "keys.navigate_pane_down",
+          "type": "keybinding",
+          "default": "\"j\"",
+          "description": "Focus the pane below in navigate mode."
+        },
+        {
+          "key": "keys.navigate_pane_up",
+          "type": "keybinding",
+          "default": "\"k\"",
+          "description": "Focus the pane above in navigate mode."
+        },
+        {
+          "key": "keys.navigate_pane_right",
+          "type": "keybinding",
+          "default": "\"l\"",
+          "description": "Focus the pane to the right in navigate mode. Right arrow is always an alias."
+        },
+        {
+          "key": "keys.detach",
+          "type": "keybinding",
+          "default": "\"prefix+q\"",
+          "description": "Detach from server/client mode, or exit --no-session mode."
+        },
+        {
+          "key": "keys.reload_config",
+          "type": "keybinding",
+          "default": "\"prefix+shift+r\"",
+          "description": "Reload config.toml in the running app/server."
+        },
+        {
+          "key": "keys.open_notification_target",
+          "type": "keybinding",
+          "default": "\"prefix+o\"",
+          "description": "Focus the currently visible notification target."
+        },
+        {
+          "key": "keys.previous_workspace",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Select the previous workspace. Unset by default."
+        },
+        {
+          "key": "keys.next_workspace",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Select the next workspace. Unset by default."
+        },
+        {
+          "key": "keys.previous_agent",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Focus the previous agent shown in the agent panel. Unset by default."
+        },
+        {
+          "key": "keys.next_agent",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Focus the next agent shown in the agent panel. Unset by default."
+        },
+        {
+          "key": "keys.focus_agent",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Focus an agent by index 1-9. Unset by default."
+        },
+        {
+          "key": "keys.remote_image_paste",
+          "type": "string",
+          "default": "\"ctrl+v\"",
+          "description": "Local-client shortcut that sends a clipboard image to a remote Herdr session."
+        },
+        {
+          "key": "keys.new_tab",
+          "type": "keybinding",
+          "default": "\"prefix+c\"",
+          "description": "Create a new tab in the active workspace."
+        },
+        {
+          "key": "keys.rename_tab",
+          "type": "keybinding",
+          "default": "\"prefix+shift+t\"",
+          "description": "Rename the active tab."
+        },
+        {
+          "key": "keys.previous_tab",
+          "type": "keybinding",
+          "default": "\"prefix+p\"",
+          "description": "Select the previous tab."
+        },
+        {
+          "key": "keys.next_tab",
+          "type": "keybinding",
+          "default": "\"prefix+n\"",
+          "description": "Select the next tab."
+        },
+        {
+          "key": "keys.switch_tab",
+          "type": "keybinding",
+          "default": "\"prefix+1..9\"",
+          "description": "Switch to tab 1-9."
+        },
+        {
+          "key": "keys.switch_workspace",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Switch to workspace 1-9 from prefix mode. Unset by default."
+        },
+        {
+          "key": "keys.close_tab",
+          "type": "keybinding",
+          "default": "\"prefix+shift+x\"",
+          "description": "Close the active tab."
+        },
+        {
+          "key": "keys.rename_pane",
+          "type": "keybinding",
+          "default": "\"prefix+shift+p\"",
+          "description": "Rename the focused pane."
+        },
+        {
+          "key": "keys.edit_scrollback",
+          "type": "keybinding",
+          "default": "\"prefix+e\"",
+          "description": "Open the focused pane scrollback in $EDITOR."
+        },
+        {
+          "key": "keys.copy_mode",
+          "type": "keybinding",
+          "default": "\"prefix+[\"",
+          "description": "Enter keyboard copy mode for the focused pane."
+        },
+        {
+          "key": "keys.focus_pane_left",
+          "type": "keybinding",
+          "default": "\"prefix+h\"",
+          "description": "Focus the pane to the left."
+        },
+        {
+          "key": "keys.focus_pane_down",
+          "type": "keybinding",
+          "default": "\"prefix+j\"",
+          "description": "Focus the pane below."
+        },
+        {
+          "key": "keys.focus_pane_up",
+          "type": "keybinding",
+          "default": "\"prefix+k\"",
+          "description": "Focus the pane above."
+        },
+        {
+          "key": "keys.focus_pane_right",
+          "type": "keybinding",
+          "default": "\"prefix+l\"",
+          "description": "Focus the pane to the right."
+        },
+        {
+          "key": "keys.swap_pane_left",
+          "type": "keybinding",
+          "default": "\"prefix+shift+h\"",
+          "description": "Swap the focused pane with the pane to the left."
+        },
+        {
+          "key": "keys.swap_pane_down",
+          "type": "keybinding",
+          "default": "\"prefix+shift+j\"",
+          "description": "Swap the focused pane with the pane below."
+        },
+        {
+          "key": "keys.swap_pane_up",
+          "type": "keybinding",
+          "default": "\"prefix+shift+k\"",
+          "description": "Swap the focused pane with the pane above."
+        },
+        {
+          "key": "keys.swap_pane_right",
+          "type": "keybinding",
+          "default": "\"prefix+shift+l\"",
+          "description": "Swap the focused pane with the pane to the right."
+        },
+        {
+          "key": "keys.cycle_pane_next",
+          "type": "keybinding",
+          "default": "\"prefix+tab\"",
+          "description": "Cycle to the next pane."
+        },
+        {
+          "key": "keys.cycle_pane_previous",
+          "type": "keybinding",
+          "default": "\"prefix+shift+tab\"",
+          "description": "Cycle to the previous pane."
+        },
+        {
+          "key": "keys.last_pane",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Focus the last focused pane across workspaces and tabs. Unset by default."
+        },
+        {
+          "key": "keys.split_vertical",
+          "type": "keybinding",
+          "default": "\"prefix+v\"",
+          "description": "Split pane vertically (side by side)."
+        },
+        {
+          "key": "keys.split_horizontal",
+          "type": "keybinding",
+          "default": "\"prefix+minus\"",
+          "description": "Split pane horizontally (stacked)."
+        },
+        {
+          "key": "keys.close_pane",
+          "type": "keybinding",
+          "default": "\"prefix+x\"",
+          "description": "Close the focused pane."
+        },
+        {
+          "key": "keys.zoom",
+          "type": "keybinding",
+          "default": "\"prefix+z\"",
+          "description": "Toggle zoom for the focused pane. The legacy key name `fullscreen` is accepted as an alias."
+        },
+        {
+          "key": "keys.resize_mode",
+          "type": "keybinding",
+          "default": "\"prefix+r\"",
+          "description": "Enter resize mode."
+        },
+        {
+          "key": "keys.toggle_sidebar",
+          "type": "keybinding",
+          "default": "\"prefix+b\"",
+          "description": "Toggle sidebar collapse."
+        },
+        {
+          "key": "keys.indexed.tabs",
+          "type": "string",
+          "default": "unset",
+          "description": "Modifier combo for tab shortcuts 1-9. Unset by default."
+        },
+        {
+          "key": "keys.indexed.workspaces",
+          "type": "string",
+          "default": "unset",
+          "description": "Modifier combo for workspace shortcuts 1-9. Unset by default."
+        },
+        {
+          "key": "keys.indexed.agents",
+          "type": "string",
+          "default": "unset",
+          "description": "Modifier combo for agent shortcuts 1-9. Unset by default."
+        }
+      ]
+    },
+    {
+      "id": "ui",
+      "title": "UI and sidebar",
+      "keys": [
+        {
+          "key": "ui.sidebar_width",
+          "type": "integer",
+          "default": "26",
+          "description": "Default expanded sidebar width in columns. Auto-scales based on workspace names."
+        },
+        {
+          "key": "ui.sidebar_min_width",
+          "type": "integer",
+          "default": "18",
+          "description": "Minimum sidebar width (columns) when expanded."
+        },
+        {
+          "key": "ui.sidebar_max_width",
+          "type": "integer",
+          "default": "36",
+          "description": "Maximum sidebar width (columns) when expanded."
+        },
+        {
+          "key": "ui.sidebar_collapsed_mode",
+          "type": "enum",
+          "default": "compact",
+          "description": "Collapsed sidebar presentation.",
+          "values": [
+            "compact",
+            "hidden"
+          ]
+        },
+        {
+          "key": "ui.mobile_width_threshold",
+          "type": "integer",
+          "default": "64",
+          "description": "Terminal width at or below which Herdr uses the mobile single-column layout."
+        },
+        {
+          "key": "ui.mouse_capture",
+          "type": "boolean",
+          "default": "true",
+          "description": "Capture mouse input for Herdr's mouse UI."
+        },
+        {
+          "key": "ui.copy_on_select",
+          "type": "boolean",
+          "default": "true",
+          "description": "Copy text selected with the mouse."
+        },
+        {
+          "key": "ui.host_cursor",
+          "type": "enum",
+          "default": "auto",
+          "description": "Host cursor policy.",
+          "values": [
+            "auto",
+            "native",
+            "drawn"
+          ]
+        },
+        {
+          "key": "ui.right_click_passthrough_modifier",
+          "type": "string",
+          "default": "\"\"",
+          "description": "Modifier that lets right-click gestures pass through to pane apps. Empty disables it. Accepts ctrl, alt, cmd, super, meta, hyper, or a + separated combination; shift is rejected because many terminals reserve Shift+mouse."
+        },
+        {
+          "key": "ui.redraw_on_focus_gained",
+          "type": "boolean",
+          "default": "true",
+          "description": "Force a full host-terminal redraw when the outer terminal regains focus."
+        },
+        {
+          "key": "ui.mouse_scroll_lines",
+          "type": "integer",
+          "default": "3",
+          "description": "Lines to scroll per mouse wheel notch."
+        },
+        {
+          "key": "ui.confirm_close",
+          "type": "boolean",
+          "default": "true",
+          "description": "Ask for confirmation before closing a workspace."
+        },
+        {
+          "key": "ui.prompt_new_tab_name",
+          "type": "boolean",
+          "default": "true",
+          "description": "Ask for a tab name before creating a new tab."
+        },
+        {
+          "key": "ui.pane_borders",
+          "type": "boolean",
+          "default": "true",
+          "description": "Draw borders around split panes."
+        },
+        {
+          "key": "ui.pane_gaps",
+          "type": "boolean",
+          "default": "true",
+          "description": "Keep split panes visually separated instead of sharing divider borders."
+        },
+        {
+          "key": "ui.show_agent_labels_on_pane_borders",
+          "type": "boolean",
+          "default": "false",
+          "description": "Show agent labels in split pane borders when no manual pane label is set."
+        },
+        {
+          "key": "ui.hide_tab_bar_when_single_tab",
+          "type": "boolean",
+          "default": "false",
+          "description": "Hide the tab row when the workspace has one tab."
+        },
+        {
+          "key": "ui.agent_panel_sort",
+          "type": "enum",
+          "default": "\"spaces\"",
+          "description": "Agent sidebar ordering. Saved values are \"spaces\" or \"priority\"; \"workspaces\" is accepted as an alias for \"spaces\".",
+          "values": [
+            "spaces",
+            "priority"
+          ]
+        },
+        {
+          "key": "ui.sidebar.agents.row_gap",
+          "type": "integer",
+          "default": "0",
+          "description": "Blank terminal rows between expanded Agent sidebar entries. Set to 1 to restore the previous spacing."
+        },
+        {
+          "key": "ui.sidebar.agents.rows",
+          "type": "list of token rows",
+          "default": "[[\"state_icon\", \"workspace\", \"tab\"], [\"agent\"]]",
+          "description": "Default expanded Agent sidebar layout. Supports built-in tokens and $name metadata tokens; at most 16 rows and 16 tokens per row."
+        },
+        {
+          "key": "ui.sidebar.agents.rows_by_agent",
+          "type": "table of token rows",
+          "default": "{}",
+          "description": "Complete Agent-row overrides keyed by strict canonical agent id. Agents without an override use ui.sidebar.agents.rows."
+        },
+        {
+          "key": "ui.sidebar.spaces.row_gap",
+          "type": "integer",
+          "default": "0",
+          "description": "Blank terminal rows between expanded Space sidebar entries. Set to 1 to restore the previous spacing. Consecutive indented worktree children remain packed as one group."
+        },
+        {
+          "key": "ui.sidebar.spaces.rows",
+          "type": "list of token rows",
+          "default": "[[\"state_icon\", \"workspace\"], [\"branch\", \"git_status\"]]",
+          "description": "Expanded Space sidebar layout. Supports built-in tokens and $name metadata tokens; at most 16 rows and 16 tokens per row."
+        },
+        {
+          "key": "ui.accent",
+          "type": "color",
+          "default": "\"cyan\"",
+          "description": "Accent color for highlights, borders, and navigation UI. Accepts hex (#89b4fa), named colors (cyan, blue), or RGB (rgb(137,180,250))."
+        }
+      ]
+    },
+    {
+      "id": "notifications",
+      "title": "Notifications",
+      "keys": [
+        {
+          "key": "ui.toast.delivery",
+          "type": "enum",
+          "default": "\"off\"",
+          "description": "Popup notification delivery. off disables popups, herdr shows in-app toasts, terminal asks the outer terminal for a desktop notification, system asks the OS notification service directly.",
+          "values": [
+            "off",
+            "herdr",
+            "terminal",
+            "system"
+          ]
+        },
+        {
+          "key": "ui.toast.delay_seconds",
+          "type": "integer",
+          "default": "1",
+          "description": "Seconds to wait before sending finished or needs-input agent notifications. Herdr notifies only if the pane is still in the same state when the delay expires. 0 is instant; valid values are 0 through 3600."
+        },
+        {
+          "key": "ui.toast.herdr.position",
+          "type": "enum",
+          "default": "\"bottom-right\"",
+          "description": "In-app toast position, relative to the full Herdr frame.",
+          "values": [
+            "top-left",
+            "top-right",
+            "bottom-left",
+            "bottom-right"
+          ]
+        },
+        {
+          "key": "ui.toast.clipboard.enabled",
+          "type": "boolean",
+          "default": "true",
+          "description": "Show the copied-to-clipboard popup after a mouse copy."
+        },
+        {
+          "key": "ui.toast.clipboard.position",
+          "type": "enum",
+          "default": "\"bottom-center\"",
+          "description": "Copied-to-clipboard popup position.",
+          "values": [
+            "top-left",
+            "top-center",
+            "top-right",
+            "bottom-left",
+            "bottom-center",
+            "bottom-right"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sound",
+      "title": "Sound",
+      "keys": [
+        {
+          "key": "ui.sound.enabled",
+          "type": "boolean",
+          "default": "true",
+          "description": "Play sounds when agents change state in background workspaces."
+        },
+        {
+          "key": "ui.sound.path",
+          "type": "path",
+          "default": "unset",
+          "description": "Optional mp3 file path used for all notification sounds. Relative paths are resolved from the config file's directory."
+        },
+        {
+          "key": "ui.sound.done_path",
+          "type": "path",
+          "default": "unset",
+          "description": "Optional mp3 file path for \"done\" notifications. Relative paths are resolved from the config file's directory."
+        },
+        {
+          "key": "ui.sound.request_path",
+          "type": "path",
+          "default": "unset",
+          "description": "Optional mp3 file path for \"request\" notifications. Relative paths are resolved from the config file's directory."
+        },
+        {
+          "key": "ui.sound.agents.pi",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected Pi agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
+        },
+        {
+          "key": "ui.sound.agents.claude",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected Claude Code agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
+        },
+        {
+          "key": "ui.sound.agents.codex",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected Codex agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
+        },
+        {
+          "key": "ui.sound.agents.gemini",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected Gemini CLI agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
+        },
+        {
+          "key": "ui.sound.agents.cursor",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected Cursor Agent CLI agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
+        },
+        {
+          "key": "ui.sound.agents.devin",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected Devin agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
+        },
+        {
+          "key": "ui.sound.agents.agy",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected Agy agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
+        },
+        {
+          "key": "ui.sound.agents.cline",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected Cline agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
+        },
+        {
+          "key": "ui.sound.agents.open_code",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected OpenCode agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
+        },
+        {
+          "key": "ui.sound.agents.github_copilot",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected GitHub Copilot CLI agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
+        },
+        {
+          "key": "ui.sound.agents.kimi",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected Kimi Code CLI agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
+        },
+        {
+          "key": "ui.sound.agents.kiro",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected Kiro agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
+        },
+        {
+          "key": "ui.sound.agents.droid",
+          "type": "enum",
+          "default": "\"off\"",
+          "description": "Sound override for detected Droid agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
+        },
+        {
+          "key": "ui.sound.agents.amp",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected Amp agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
+        },
+        {
+          "key": "ui.sound.agents.grok",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected Grok CLI agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
+        },
+        {
+          "key": "ui.sound.agents.hermes",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected Hermes Agent agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
+        },
+        {
+          "key": "ui.sound.agents.kilo",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected Kilo Code CLI agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
+        },
+        {
+          "key": "ui.sound.agents.qodercli",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected Qoder CLI agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
+        },
+        {
+          "key": "ui.sound.agents.maki",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected Maki agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "session",
+      "title": "Session",
+      "keys": [
+        {
+          "key": "session.resume_agents_on_restore",
+          "type": "boolean",
+          "default": "true",
+          "description": "Resume supported AI-agent panes into their native conversation sessions when restoring a Herdr session."
+        }
+      ]
+    },
+    {
+      "id": "worktrees",
+      "title": "Worktrees",
+      "keys": [
+        {
+          "key": "worktrees.directory",
+          "type": "string",
+          "default": "\"~/.herdr/worktrees\"",
+          "description": "Root directory under which Herdr creates <repo>/<branch-slug> checkouts."
+        }
+      ]
+    },
+    {
+      "id": "remote",
+      "title": "Remote",
+      "keys": [
+        {
+          "key": "remote.manage_ssh_config",
+          "type": "boolean",
+          "default": "true",
+          "description": "Add keepalive fallbacks and private connection reuse for `herdr --remote`. Set false to run plain ssh unchanged."
+        }
+      ]
+    },
+    {
+      "id": "advanced",
+      "title": "Advanced",
+      "keys": [
+        {
+          "key": "advanced.scrollback_limit_bytes",
+          "type": "integer",
+          "default": "10000000",
+          "description": "Maximum scrollback buffer size in bytes retained per pane terminal. The legacy key name `scrollback_lines` is accepted as an alias."
+        }
+      ]
+    },
+    {
+      "id": "experimental",
+      "title": "Experimental",
+      "keys": [
+        {
+          "key": "experimental.allow_nested",
+          "type": "boolean",
+          "default": "false",
+          "description": "Allow launching herdr inside an existing herdr pane."
+        },
+        {
+          "key": "experimental.kitty_graphics",
+          "type": "boolean",
+          "default": "false",
+          "description": "Experimental local Kitty graphics rendering for attached clients."
+        },
+        {
+          "key": "experimental.pane_history",
+          "type": "boolean",
+          "default": "false",
+          "description": "Persist pane screen history to session-history.json."
+        },
+        {
+          "key": "experimental.reveal_hidden_cursor_for_cjk_ime",
+          "type": "boolean",
+          "default": "false",
+          "description": "Expose the focused pane's cursor anchor to the outer terminal even when the pane requested `?25l`, so macOS native input methods keep tracking the candidate window when TUIs paint their own cursor (Claude Code, pi, codex, etc.). Default: false.  When the pane reports no cursor position, falls back to the pane's top-left so a stable IME anchor is always available.  Trade-off when enabled: an extra hardware cursor will be visible in the outer terminal for apps that hide the cursor without painting a replacement (vim normal mode, etc.). See #149."
+        },
+        {
+          "key": "experimental.cjk_ime_agents",
+          "type": "list of strings",
+          "default": "[]",
+          "description": "Restrict `reveal_hidden_cursor_for_cjk_ime` to focused panes whose detected agent matches one of these names (case-insensitive). Empty list means apply to any focused pane. Unknown agent names are ignored; if the list contains no valid names, the reveal does not apply. Accepted names: pi, claude, codex, gemini, cursor, devin, cline, opencode, copilot, kimi, kiro, droid, amp, grok, hermes, kilo, qodercli, qoder, maki."
+        },
+        {
+          "key": "experimental.cjk_ime_cursor_shape",
+          "type": "enum",
+          "default": "\"steady_block\"",
+          "description": "Cursor shape rendered for the IME anchor when `reveal_hidden_cursor_for_cjk_ime` is enabled.",
+          "values": [
+            "block",
+            "steady_block",
+            "underline",
+            "steady_underline",
+            "bar",
+            "steady_bar"
+          ]
+        },
+        {
+          "key": "experimental.switch_ascii_input_source_in_prefix",
+          "type": "boolean",
+          "default": "false",
+          "description": "While prefix mode is active, temporarily switch the macOS host input source to an ASCII-capable keyboard layout so prefix commands are read as ASCII even when a CJK IME is active, then restore the previous input source when prefix mode exits. macOS only; a no-op elsewhere and a best-effort no-op if the switch fails."
+        }
+      ]
+    }
+  ]
+}

@@ -156,7 +156,35 @@ file: ../../../public/assets/logo.svg
         self.assertIn("file: ../../../../public/assets/logo.svg", output)
         self.assertIn("from '../../../components/ConfigReference.astro'", output)
         self.assertIn("from '../../../../components/LocaleWidget.astro'", output)
-        self.assertIn("Preview docs describe unreleased preview builds", output)
+        self.assertIn("Next docs describe unreleased work", output)
+        self.assertIn("edit/master/docs/next/website/src/content/docs/", output)
+
+    def test_version_docs_rewrite_links_and_source_paths(self):
+        source = """---
+title: Install Herdr
+---
+
+import ConfigReference from '../../components/ConfigReference.astro';
+
+[Install](/docs/install/)
+[Skill](https://github.com/ogulcancelik/herdr/blob/master/SKILL.md)
+file: ../../../public/assets/logo.svg
+"""
+        output = subprocess.check_output(
+            [
+                "node",
+                "website/scripts/prepare-docs.mjs",
+                "--rewrite-version-doc-fixture",
+                "0.7.4",
+            ],
+            input=source,
+            text=True,
+        )
+        self.assertIn("[Install](/docs/0.7.4/install/)", output)
+        self.assertIn("file: ../../../../../public/assets/logo.svg", output)
+        self.assertIn("from '../../../../components/ConfigReference.astro'", output)
+        self.assertIn("blob/v0.7.4/docs/next/website/src/content/docs/index.mdx", output)
+        self.assertIn("blob/v0.7.4/SKILL.md", output)
 
 
 class ConventionalCommitTests(unittest.TestCase):

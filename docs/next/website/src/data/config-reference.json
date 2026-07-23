@@ -641,6 +641,12 @@
           "description": "Ask for a tab name before creating a new tab."
         },
         {
+          "key": "ui.prompt_new_workspace_name",
+          "type": "boolean",
+          "default": "false",
+          "description": "Ask for a workspace name before interactive TUI creation."
+        },
+        {
           "key": "ui.pane_borders",
           "type": "boolean",
           "default": "true",

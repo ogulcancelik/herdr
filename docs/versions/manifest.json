@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "current": "0.7.5",
+  "versions": [
+    {
+      "version": "0.7.5",
+      "tag": "v0.7.5",
+      "source": "website/src/content/docs"
+    },
+    {
+      "version": "0.7.4",
+      "tag": "v0.7.4",
+      "source": "website/src/content/docs"
+    },
+    {
+      "version": "0.7.3",
+      "tag": "v0.7.3",
+      "source": "website/src/content/docs"
+    },
+    {
+      "version": "0.7.2",
+      "tag": "v0.7.2",
+      "source": "website/src/content/docs"
+    },
+    {
+      "version": "0.7.1",
+      "tag": "v0.7.1",
+      "source": "website/src/content/docs"
+    },
+    {
+      "version": "0.7.0",
+      "tag": "v0.7.0",
+      "source": "website/src/content/docs"
+    },
+    {
+      "version": "0.6.10",
+      "tag": "v0.6.10",
+      "source": "website/src/content/docs"
+    },
+    {
+      "version": "0.6.9",
+      "tag": "v0.6.9",
+      "source": "website/src/content/docs"
+    },
+    {
+      "version": "0.6.8",
+      "tag": "v0.6.8",
+      "source": "website/src/content/docs"
+    },
+    {
+      "version": "0.6.7",
+      "tag": "v0.6.7",
+      "source": "website/src/content/docs"
+    },
+    {
+      "version": "0.6.6",
+      "tag": "v0.6.6",
+      "source": "website/src/content/docs"
+    },
+    {
+      "version": "0.6.5",
+      "tag": "v0.6.5",
+      "source": "website/src/content/docs"
+    },
+    {
+      "version": "0.6.4",
+      "tag": "v0.6.4",
+      "source": "website/src/content/docs"
+    },
+    {
+      "version": "0.6.3",
+      "tag": "v0.6.3",
+      "source": "website/src/content/docs"
+    },
+    {
+      "version": "0.6.2",
+      "tag": "v0.6.2",
+      "source": "website/src/content/docs"
+    },
+    {
+      "version": "0.6.1",
+      "tag": "v0.6.1",
+      "source": "website/src/content/docs"
+    },
+    {
+      "version": "0.6.0",
+      "tag": "v0.6.0",
+      "source": "website/src/content/docs"
+    },
+    {
+      "version": "0.5.12",
+      "tag": "v0.5.12",
+      "source": "website/src/content/docs"
+    },
+    {
+      "version": "0.5.11",
+      "tag": "v0.5.11",
+      "source": "website/src/content/docs"
+    }
+  ]
+}

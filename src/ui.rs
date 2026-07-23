@@ -17,6 +17,7 @@ mod scrollbar;
 mod settings;
 mod sidebar;
 mod status;
+mod tab_surface;
 mod tabs;
 mod text;
 mod widgets;
@@ -39,9 +40,7 @@ use self::navigator::render_navigator_overlay;
 pub(crate) use self::onboarding::onboarding_welcome_continue_rect;
 use self::onboarding::render_onboarding_overlay;
 pub(crate) use self::panes::popup_pane_rects;
-use self::panes::{
-    compute_pane_infos, render_panes, render_popup_pane, resize_popup_pane, resize_tab_panes,
-};
+use self::panes::{render_empty, render_popup_pane, resize_popup_pane};
 pub(crate) use self::release_notes::{
     product_announcement_display_lines, release_notes_close_button_rect,
     release_notes_display_lines, release_notes_wrapped_line_count, PRODUCT_ANNOUNCEMENT_MODAL_SIZE,
@@ -57,6 +56,9 @@ use self::sidebar::{render_sidebar, render_sidebar_collapsed};
 use self::status::{
     copy_feedback_rect, render_config_diagnostic, render_copy_feedback, render_toast_notification,
     toast_notification_rect,
+};
+pub(crate) use self::tab_surface::{
+    compute_tab_surface, render_tab_surface, resize_tab_surface, TabSurfaceLayout,
 };
 use self::tabs::render_tab_bar;
 pub(crate) use self::{
@@ -74,12 +76,12 @@ pub(crate) use self::{
     sidebar::{
         agent_entry_gap, agent_entry_height_in_body, agent_panel_body_rect, agent_panel_entries,
         agent_panel_scroll_for_target, agent_panel_scroll_metrics, agent_panel_scrollbar_rect,
-        agent_panel_toggle_rect, collapsed_sidebar_sections, collapsed_sidebar_toggle_rect,
-        compute_workspace_card_areas, expanded_sidebar_sections, expanded_sidebar_toggle_rect,
-        normalized_workspace_scroll, sidebar_section_divider_rect, workspace_drop_indicator_row,
-        workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect,
-        workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
-        WorkspaceListEntry,
+        agent_panel_toggle_rect, all_agent_panel_entries, collapsed_sidebar_sections,
+        collapsed_sidebar_toggle_rect, compute_workspace_card_areas, expanded_sidebar_sections,
+        expanded_sidebar_toggle_rect, normalized_workspace_scroll, sidebar_section_divider_rect,
+        workspace_drop_indicator_row, workspace_list_entries, workspace_list_entries_expanded,
+        workspace_list_rect, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
+        workspace_parent_group_state, AgentPanelEntry, WorkspaceListEntry,
     },
 };
 pub(crate) use self::{
@@ -89,6 +91,7 @@ pub(crate) use self::{
         mobile_switcher_workspace_doc_range, MobileSwitcherTarget,
     },
     panes::{apply_pane_chrome, pane_inner_rect, pane_is_scrolled_back},
+    tab_surface::{tab_surface_cursor, tab_surface_hyperlinks, TabSurfaceView},
     tabs::compute_tab_bar_view,
     widgets::{centered_popup_rect, modal_stack_areas},
 };
@@ -168,7 +171,7 @@ fn resize_background_tab_panes_to_area(
             if app.active == Some(ws_idx) && tab_idx == ws.active_tab_index() {
                 continue;
             }
-            resize_tab_panes(app, terminal_runtimes, tab, terminal_area, cell_size);
+            resize_tab_surface(app, terminal_runtimes, tab, terminal_area, cell_size);
         }
     }
 }
@@ -185,7 +188,7 @@ fn resize_background_tab_panes_for_desktop(
             if app.active == Some(ws_idx) && tab_idx == ws.active_tab_index() {
                 continue;
             }
-            resize_tab_panes(app, terminal_runtimes, tab, terminal_area, cell_size);
+            resize_tab_surface(app, terminal_runtimes, tab, terminal_area, cell_size);
         }
     }
 }
@@ -269,19 +272,10 @@ fn compute_view_internal(
         .unwrap_or_default();
     app.tab_scroll = tab_bar_view.scroll;
 
-    let split_borders = app
-        .active
-        .and_then(|i| app.workspaces.get(i))
-        .map(|ws| {
-            if ws.zoomed {
-                Vec::new()
-            } else {
-                ws.layout.splits(terminal_area)
-            }
-        })
-        .unwrap_or_default();
-
-    let pane_infos = compute_pane_infos(
+    let TabSurfaceLayout {
+        pane_infos,
+        split_borders,
+    } = compute_tab_surface(
         app,
         terminal_runtimes,
         terminal_area,
@@ -347,19 +341,10 @@ fn compute_mobile_view(
         app.mobile_switcher_scroll = app.mobile_switcher_scroll.min(max_scroll);
     }
 
-    let split_borders = app
-        .active
-        .and_then(|i| app.workspaces.get(i))
-        .map(|ws| {
-            if ws.zoomed {
-                Vec::new()
-            } else {
-                ws.layout.splits(terminal_area)
-            }
-        })
-        .unwrap_or_default();
-
-    let pane_infos = compute_pane_infos(
+    let TabSurfaceLayout {
+        pane_infos,
+        split_borders,
+    } = compute_tab_surface(
         app,
         terminal_runtimes,
         terminal_area,
@@ -425,7 +410,15 @@ pub fn render_with_runtime_registry(
     if app.view.layout != ViewLayout::Mobile {
         render_tab_bar(app, frame, tab_bar_area);
     }
-    render_panes(app, terminal_runtimes, frame, terminal_area);
+    if app
+        .active
+        .and_then(|ws_idx| app.workspaces.get(ws_idx))
+        .is_some()
+    {
+        render_tab_surface(app, terminal_runtimes, app.view.tab_surface(), frame);
+    } else {
+        render_empty(app, frame, terminal_area);
+    }
 
     // Ambient notifications sit above panes, but below interactive overlays.
     render_notifications(app, frame, terminal_area);
@@ -442,7 +435,9 @@ pub fn render_with_runtime_registry(
         Mode::Prefix => render_prefix_overlay(app, frame, terminal_area),
         Mode::Copy => render_copy_mode_overlay(app, frame, terminal_area),
         Mode::Resize => render_resize_overlay(app, frame, terminal_area),
-        Mode::ConfirmClose => render_confirm_close_overlay(app, frame, terminal_area),
+        Mode::ConfirmClose => {
+            render_confirm_close_overlay(app, terminal_runtimes, frame, terminal_area)
+        }
         Mode::ContextMenu => {
             render_context_menu(app, frame);
         }
@@ -629,6 +624,26 @@ mod tests {
             ),
             bottom_center_toast.height
         );
+    }
+
+    #[test]
+    fn workspace_creation_dialog_renders_new_workspace_title() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.mode = Mode::RenameWorkspace;
+        app.pending_workspace_create_cwd = Some("/tmp/project".into());
+        app.name_input = "project".into();
+
+        let area = Rect::new(0, 0, 80, 20);
+        compute_view(&mut app, area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let screen = (0..area.height)
+            .map(|row| buffer_row_text(terminal.backend().buffer(), area, row))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(screen.contains("new workspace"), "{screen}");
+        assert!(screen.contains("project"), "{screen}");
     }
 
     #[tokio::test]

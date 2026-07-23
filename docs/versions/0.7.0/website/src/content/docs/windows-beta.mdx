@@ -1,0 +1,100 @@
+---
+title: Windows beta
+description: Native Windows support status, supported workflows, and known limitations.
+---
+
+Native Windows support is experimental beta.
+
+Herdr on Windows uses ConPTY and Windows process/runtime behavior instead of the Unix PTY model Herdr was originally built around. Some Herdr features map cleanly to Windows, and some do not. This preview is not a commitment that every Linux/macOS feature will become fully supported on Windows.
+
+The goal of the beta is to learn from real use: install success, pane reliability, agent workflows, bug volume, missing features, and whether Windows users are getting enough value from Herdr. Based on that feedback, Windows support may graduate to stable, stay preview-only while it matures, or be reduced if the maintenance cost is not justified.
+
+Install native Windows beta builds with PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://herdr.dev/install.ps1 | iex"
+```
+
+Windows beta builds ship only through the preview channel. The Windows installer defaults to preview, writes `channel = "preview"` to Herdr's config, stores releases under `%USERPROFILE%\.herdr\packages\standalone\releases`, points `%LOCALAPPDATA%\Programs\Herdr\bin` at the current release, and keeps a small number of older releases so running processes do not block updates.
+
+For internal beta testing, `HERDR_MANIFEST_URL` can point the installer at a custom manifest instead of Herdr's stable or preview manifest.
+
+## Supported in beta
+
+| Capability | Status |
+| --- | --- |
+| Local persistent sessions | beta |
+| Native panes through ConPTY | beta |
+| Windows Terminal / PowerShell app attach | beta |
+| `cmd.exe` panes | beta |
+| Startup cwd and workspace labels | beta |
+| Pane launch cwd | beta |
+| Agent command discovery | beta |
+| Agent self-report integrations | beta |
+| Agent process-tree detection | beta |
+| Git/worktree detection from known cwd | beta |
+| Plugins | preview |
+| Pane screen history | beta |
+| Nested launch override | beta |
+
+Windows agent process detection scans descendants of the pane shell and recognizes direct agents plus common command wrappers. It is useful for Codex, Claude, and similar agents, but it is not the same as Unix foreground process-group detection.
+
+Plugins support `windows` as a manifest platform in preview. GitHub install, local link, build commands, actions, events, and plugin panes are best effort on Windows. Commands are argv commands and must be Windows-compatible; Node package shims such as `npm`, `bun`, and `node` are expected to work when they are on `PATH`, while Unix-only examples using `sh` or Bash need Windows-specific alternatives. Platform filters skip unsupported build commands and return `platform_unsupported` for unsupported actions or panes.
+
+## Partial support
+
+| Capability | Status |
+| --- | --- |
+| Live cwd after shell `cd` | partial |
+| Live cwd via shell integration/OSC7 | beta |
+| Clipboard image paste to agents | unverified |
+| CJK hidden-cursor reveal | beta |
+| Kitty graphics rendering | unverified |
+
+Herdr can launch panes in the right directory and can create the initial workspace from the directory where you started Herdr. PowerShell directory changes after startup are different: the process field Herdr can inspect does not reliably track later logical `cd` changes. Use Herdr integrations or prompt shell integration for live cwd reporting.
+
+Windows Terminal may support image paste paths for specific agents, but Herdr's own clipboard-image reader is not wired on Windows yet. Treat `alt+v` image paste as unverified until the Windows clipboard bridge is implemented and tested. Remote clipboard image bridging is separate and remains tied to Unix/macOS `herdr --remote`.
+
+Kitty graphics remains experimental and is not claimed as Windows-supported yet. Leave `experimental.kitty_graphics = false` unless you are specifically testing image rendering in Windows Terminal.
+
+## Copy and paste
+
+Herdr's pane text copy works on Windows beta. Drag-select text inside a pane to copy through Herdr.
+
+For paste, use `ctrl+shift+v` in Windows Terminal, or hold `shift` and right-click to use the outer terminal paste action instead of sending the click through Herdr.
+
+## Not supported on Windows beta
+
+| Capability | Status |
+| --- | --- |
+| Direct terminal attach | unsupported |
+| `herdr --remote` from the Windows binary | unsupported |
+| Live server handoff | unsupported |
+| Unix file-descriptor handoff | unsupported |
+| Unix foreground process groups | unsupported |
+| Remote clipboard image bridge | unsupported |
+| Prefix input-source switching | unsupported |
+| Signed binary / SmartScreen avoidance | unsupported |
+
+For remote work from Windows, SSH into the server and run `herdr` there:
+
+```powershell
+ssh you@server
+herdr
+```
+
+That mode runs Herdr on the remote host. Native Windows `herdr --remote` is not part of the beta.
+
+Windows updates run through the Windows installer and update the versioned install junction. Restart running Herdr sessions after updating. Live handoff is Unix-only.
+
+## Reporting Windows beta issues
+
+Include:
+
+- Herdr version.
+- Windows version.
+- Terminal app.
+- Shell, such as PowerShell or cmd.
+- Whether you used a named `HERDR_SESSION`.
+- Relevant Herdr logs.
+- Exact steps to reproduce.

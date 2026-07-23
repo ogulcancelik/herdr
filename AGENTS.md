@@ -154,9 +154,9 @@ Stable public docs live in `website/src/content/docs/`. They are the currently r
 
 Unreleased docs live in `docs/next/website/src/content/docs/`. Update those when a user-facing change needs docs before the next release. `docs/next/README.md` and `docs/next/CHANGELOG.md` stage root README and changelog changes.
 
-The website build runs `website/scripts/prepare-docs.mjs`. It keeps stable docs at `/docs/` and generates preview docs at `/docs/preview/` from `docs/next/website/src/content/docs/`. Do not edit generated `website/src/content/docs/preview/`.
+The website build runs `website/scripts/prepare-docs.mjs`. It keeps stable docs at `/docs/`, generates next docs at `/docs/preview/` from `docs/next/website/src/content/docs/`, and generates immutable release docs from `docs/versions/`. Do not edit generated `website/src/content/docs/preview/` or `website/src/content/docs/_versions/`.
 
-During release review, copy approved next docs into the stable docs and run `just release-docs-check`. Normal feature/fix work should not edit root `README.md`, root `CHANGELOG.md`, or `website/latest.json` unless explicitly requested.
+During release review, finalize `docs/next` and run `just release-docs-check`. Do not copy next docs into the stable website manually. After the GitHub Release succeeds, release CI snapshots the tagged next docs, promotes them to stable, updates `latest.json`, and deploys them together. Normal feature/fix work should not edit root `README.md`, root `CHANGELOG.md`, stable website docs, or `website/latest.json` unless explicitly requested.
 
 Put local PRDs, planning notes, and exploratory specs under `.local/prd/`; `.local/` is ignored and locally controlled.
 
@@ -217,7 +217,7 @@ just check
 just release 0.x.y
 ```
 
-Before stable release, run `/pre-release-audit`, finalize `docs/next`, copy approved docs into the stable docs/root files, and let `just release-docs-check` verify the sync. `just release` prepares the release commit, tags it, pushes the tag, and GitHub Actions builds binaries, creates the GitHub release, closes released issues, and updates `website/latest.json`.
+Before stable release, run `/pre-release-audit`, finalize `docs/next`, and let `just release-docs-check` validate the staged docs and website build. `just release` prepares the changelog and release commit, tags it, and pushes the tag. GitHub Actions builds binaries, creates the GitHub release, closes released issues, snapshots and promotes the tagged docs, and updates `website/latest.json`.
 
 The release workflows must publish these four assets:
 

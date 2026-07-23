@@ -1,0 +1,65 @@
+---
+title: 智能体技能文件
+description: 为 Claude Code 或其他编程智能体安装 Herdr 使用说明。
+---
+
+Herdr 提供了一个可复用的智能体技能文件: [`SKILL.md`](https://github.com/ogulcancelik/herdr/blob/master/SKILL.md)。
+
+把这个文件安装到任何支持可复用技能或自定义指令的编程智能体中。这份技能教智能体如何在 Herdr 窗格内部控制 Herdr。
+
+Herdr 还提供了另一份用途不同的指南: [`herdr.dev/agent-guide.md`](https://herdr.dev/agent-guide.md),用于让智能体帮助人类学习、安装或排查 Herdr。技能是给操作 Herdr 的智能体用的;指南是给教人类的智能体用的。
+
+## 这份技能做什么
+
+这份技能告诉智能体: 当 `HERDR_ENV=1` 已设置时,使用 `herdr` CLI。这意味着智能体运行在 Herdr 管理的窗格内,可以安全地与本地 Herdr socket 通信。
+
+安装技能后,智能体可以:
+
+- 查看工作区、标签页、窗格和相邻的智能体
+- 分割窗格并在不抢占焦点的情况下运行命令
+- 读取窗格输出和最近的日志
+- 等待服务器、测试或另一个智能体完成
+- 在相邻窗格中启动辅助智能体
+
+这份技能不是独立的应用或服务,它只是一份给智能体看的 markdown 指令文件。
+
+## 安装
+
+用 `npx skills` 安装技能:
+
+```bash
+npx skills add ogulcancelik/herdr --skill herdr -g
+```
+
+`-g` 参数为受支持的智能体全局安装。省略 `-g` 则安装到当前项目。
+
+以仓库中的副本作为手动兜底和事实来源:
+
+```text
+https://github.com/ogulcancelik/herdr/blob/master/SKILL.md
+```
+
+对于有技能系统的智能体,把这个文件安装为名为 `herdr` 的技能。对于没有技能系统的智能体,把文件内容粘贴到智能体的项目指令或用户指令中。
+
+安装完成后,在 Herdr 内启动智能体:
+
+```bash
+herdr
+claude
+```
+
+也可以在 Herdr 窗格里使用任何其他编程智能体。重点是智能体进程要运行在 Herdr 内部,这样 `HERDR_ENV=1` 才可用。
+
+## 安全规则
+
+这份技能以一条护栏开头: 如果 `HERDR_ENV=1` 未设置,智能体应当停下来,并说明自己没有运行在 Herdr 管理的窗格内。
+
+这可以防止 Herdr 外部的智能体试图控制一个不属于它的会话。
+
+## 面向智能体的参考
+
+完整的命令指南就在技能文件本身。它涵盖窗格 ID、`pane split`、`pane run`、`pane read`、`wait output`、`wait agent-status`、工作区和标签页命令,以及协作配方。
+
+在这里阅读源文件:
+
+[在 GitHub 上打开 `SKILL.md` →](https://github.com/ogulcancelik/herdr/blob/master/SKILL.md)

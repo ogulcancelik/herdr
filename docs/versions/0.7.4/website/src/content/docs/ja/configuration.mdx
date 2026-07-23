@@ -1,0 +1,448 @@
+---
+title: 設定
+description: Herdr のキーバインド、テーマ、サイドバーの挙動、通知、高度なオプションを設定します。
+---
+
+Herdr は設定ファイルなしで動作します。キー、テーマ、サイドバーのレイアウト、通知、高度な挙動をカスタマイズしたい場合に追加してください。
+
+設定やキーバインドを探していますか？すべてのキー、型、デフォルト値、許容値は[設定リファレンス](/docs/config-reference/)で検索できます。このページでは、セットアップ、一般的なレシピ、リファレンスの一行だけでは説明しきれない設定構造を中心に説明します。
+
+## 設定ファイル
+
+Herdr は次の場所から設定を読み込みます:
+
+```text
+Linux and macOS: ~/.config/herdr/config.toml
+Windows:          %APPDATA%\herdr\config.toml
+```
+
+システム上で解決された設定ファイルのパスは、`herdr --help` で確認できます。
+
+完全なデフォルト設定を表示します:
+
+```bash
+herdr --default-config
+```
+
+完全な出発点が欲しい場合は、これを設定として保存してください:
+
+```bash
+herdr --default-config > ~/.config/herdr/config.toml
+```
+
+設定値が無効な場合、Herdr は安全なデフォルト値にフォールバックし、起動時に警告を表示します。
+
+`onboarding` が存在しないか true の場合、Herdr は初回セットアップを表示します。オンボーディングから先へ進むと `onboarding = false` が書き込まれ、設定のインテグレーションタブが開きます。セットアップ後にこのフローをスキップしたい場合に設定してください。
+
+```toml
+onboarding = false
+```
+
+## 設定のリロード
+
+`config.toml` を編集した後、実行中のサーバーをリロードします:
+
+```bash
+herdr server reload-config
+```
+
+Herdr のグローバルメニューを開いて `reload config` を選ぶこともできます。
+
+リロードは、ペインを再起動せずにほとんどの UI 設定を適用します。起動時のみの設定には引き続き再起動が必要です。
+
+## ターミナルのデフォルト
+
+新しく作成される対話型ペインに Herdr が使う実行ファイルを設定します:
+
+```toml
+[terminal]
+default_shell = "nu"
+```
+
+未設定または空の場合、Herdr は `$SHELL`、次に Unix では `/bin/sh`、Windows では PowerShell を使います。これは実行ファイル名またはパスであり、シェルのコマンドラインではありません。既存のペインは再作成されるまで現在のシェルを保ちます。カスタムコマンドキーバインドの文字列は、Unix ではペインコマンドに `/bin/sh -c`、デタッチコマンドに `/bin/sh -lc` を通して実行され、Windows では `cmd.exe /d /c` を通して実行されます。
+
+新しく作成される対話型ペインのシェルの起動方法を設定します:
+
+```toml
+[terminal]
+shell_mode = "auto"
+```
+
+`shell_mode = "auto"` は macOS でログインシェルを起動するため、`/usr/libexec/path_helper` のようなログイン時のみの PATH 設定や Homebrew のシェル初期化が新しいペインで実行されます。他のプラットフォームでは、既存の非ログインシェルの挙動を保ちます。ログインシェルでの起動を強制するには `"login"` を、無効にするには `"non_login"` を使ってください。コマンドペイン、デタッチされたカスタムコマンドキーバインド、明示的な argv 起動は、既存のコマンド実行経路を保ちます。
+
+新しいペイン、タブ、ワークスペースの作業ディレクトリポリシーを設定します:
+
+```toml
+[terminal]
+new_cwd = "follow"
+```
+
+`new_cwd = "follow"` はデフォルトの挙動を保ち、元のペインまたはワークスペースを継承します。元のワークスペースがない場合、Herdr は `$HOME` で起動します。常に `$HOME` で起動するには `"home"` を、Herdr のプロセスディレクトリを使うには `"current"` を、または `"~/Projects"` のような固定パスを使ってください。CLI またはソケット API から明示的に指定された `--cwd` の値は引き続き優先されます。
+
+## Worktree
+
+サイドバーから作成される Git worktree チェックアウトに Herdr が使うルートディレクトリを設定します:
+
+```toml
+[worktrees]
+directory = "~/.herdr/worktrees"
+```
+
+Herdr は `<directory>/<repo>/<branch-slug>` の下にチェックアウトを作成します。隣接ディレクトリ方式のチェックアウトには、`~/Projects/herdr-worktrees` のようなディレクトリを設定してください。相対値は、アプリが設定を適用するときに絶対パスへ解決されます。
+
+worktree アクションは Git ワークスペースの行から使えます。`New worktree` はチェックアウトを作成し、入力したブランチがすでに存在する場合は既存のローカルブランチをチェックアウトし、存在しない場合はブランチを作成します。その後、新しい Herdr ワークスペースとして開き、元のワークスペースの下にグループ化します。`Open worktree...` はそのリポジトリにある既存の Git worktree チェックアウトを一覧表示します。すでに開いているチェックアウトを選ぶとそこへフォーカスし、閉じているチェックアウトを選ぶと同じグループで開きます。
+
+グループ化された worktree も通常の Herdr ワークスペースと同様に動作します。フォーカス、名前変更、クローズができ、それぞれ独自のタブとペインを持ちます。親の行は元のワークスペースです。親の行を閉じると Herdr のグループ全体が閉じますが、チェックアウトのフォルダーやブランチは削除されません。
+
+worktree チェックアウトの削除は明示的に行います。グループ化された子ワークスペースで `Delete worktree checkout...` を使うと `git worktree remove` が実行されます。Herdr はまず Git に安全な削除を要求します。チェックアウトに変更済みまたは未追跡のファイルがあり Git が拒否した場合、Herdr は強制削除を実行する前にもう一度確認します。ブランチは削除されません。
+
+## リモートアタッチ
+
+リモートアタッチは、デフォルトで一時的なキープアライブと接続再利用のフォールバックを使って SSH 接続を管理します。
+
+```toml
+[remote]
+manage_ssh_config = true
+```
+
+有効な場合、`herdr --remote` は最初に `~/.ssh/config` と `/etc/ssh/ssh_config` を取り込み、その後にフォールバックの `ServerAliveInterval` と `ServerAliveCountMax` の値を加えた、プライベートな一時 SSH 設定を書き込みます。ユーザー自身のキープアライブ設定が優先されます。Herdr は、最初に認証した接続を再利用するため、アタッチごとにプライベートな OpenSSH コントロールソケットも使います。Herdr が生成した設定やコントロールソケットを使わず、通常の `ssh` でリモートアタッチを実行するには `manage_ssh_config = false` を設定してください。
+
+## キーバインド
+
+プレフィックスの導入ガイドと検証済みのプレフィックスなし構成については、[キーボード](/docs/keyboard/)を参照してください。
+
+Herdr には tmux に似たプレフィックスモードがあります。デフォルトのプレフィックスは `ctrl+b` です。キーバインド文字列は明示的です。`prefix+n` は設定されたプレフィックスを押してから `n` を押すという意味で、`ctrl+alt+n` はターミナルモードの直接ショートカットです。
+
+小さなキーバインドの上書きは次のようになります:
+
+```toml
+[keys]
+prefix = "ctrl+b"
+goto = "prefix+g"
+new_tab = "prefix+c"
+next_tab = "prefix+n"
+previous_tab = "prefix+p"
+focus_pane_left = "prefix+h"
+navigate_workspace_down = "j"
+navigate_pane_down = "ctrl+j"
+split_horizontal = "prefix+minus"
+```
+
+デフォルトのキーマップはプレフィックス優先なので、Herdr がシェル、エディタ、tmux、ターミナルアプリから入力を奪うことはありません。[設定リファレンス](/docs/config-reference/)で `keys.` を検索すると、すべてのアクションとデフォルトのバインドを確認できます。`prefix+?` で開くアプリ内ヘルプパネルには、現在有効なバインドが表示されます。
+
+1 つのアクションに複数のショートカットが必要な場合、バインドを配列にすることもできます:
+
+```toml
+[keys]
+next_tab = ["prefix+n", "ctrl+alt+]"]
+```
+
+任意のアクションはデフォルトでは未設定です。プレフィックスモードの挙動には `prefix+` でバインドし、意図的に直接ショートカットにする場合は明示的な修飾キーコードを使ってください。
+
+キー文字列には、通常のキー、`ctrl+a`、`shift+n`、`alt+1`、`cmd+k` のような修飾キーの組み合わせ、`enter`、`tab`、`esc`、`left`、`right`、`up`、`down` のような特殊キーが使えます。`minus`、`comma`、`ampersand`、`plus`、`backtick` のような名前付き記号も使えます。`n` のような通常の印字可能キーの直接バインドは入力を妨げるため危険です。意図的に直接バインドするのでなければ `prefix+n` を使ってください。`navigate_workspace_*` と `navigate_pane_*` のフィールドはナビゲートモード専用で、`j` や `k` のような通常のキーを使えます。これらには `prefix+`、`esc`、`enter`、`tab`、`shift+tab`、`left`、`right`、修飾なしの `1` から `9` は使えません。左右の矢印キーは、左ペインと右ペインへのナビゲーションの恒久的なエイリアスです。これらのナビゲートモードショートカットは、`focus_pane_down = "prefix+j"` のような一般アクションのバインドから独立しています。両方に同じキーが使われている場合、ナビゲートモードが開いている間はナビゲートモードのショートカットが優先されます。Alt、Cmd/Super、修飾キー付き記号は、ターミナルと tmux の設定に依存します。
+
+古いカスタムキーバインドを使っていて新しいデフォルトが欲しい場合は、`herdr config reset-keys` を実行してください。Herdr は `config.toml` をバックアップし、`[keys]` と `[[keys.command]]` を削除し、再起動または `herdr server reload-config` の後に組み込みの v2 デフォルトを使います。
+
+## インデックス付きジャンプ
+
+インデックス付きキーバインドは、通常のキーバインドフィールドで `1..9` を使います:
+
+```toml
+[keys]
+switch_tab = "prefix+1..9"
+switch_workspace = "prefix+shift+1..9"
+focus_agent = "prefix+alt+1..9"
+```
+
+レガシーな `[keys.indexed]` テーブルは互換性のために引き続きパースされますが、新しい設定では明示的なアクションフィールドを使ってください。
+
+## カスタムコマンドキーバインド
+
+カスタムコマンドも同じキーバインド構文を使います。
+
+```toml
+[[keys.command]]
+key = "prefix+alt+g"
+type = "popup"
+command = "lazygit"
+description = "run lazygit"
+width = "80%"
+height = "80%"
+```
+
+`type = "popup"` は、タブレイアウトを変更せずにセッションモーダルなポップアップを開きます。
+ポップアップは、コマンドが終了するまで Escape を含むすべてのターミナル入力を受け取ります。
+`width` と `height` は任意です。省略するとデフォルトの半分のサイズになり、数値ならターミナルセル数、`"80%"` のような文字列ならターミナル領域に対する割合を指定できます。
+寸法にはポップアップの枠が含まれ、小さすぎる値は最小サイズに制限されます。
+ポップアップコマンドは `HERDR_PANE_ID` を受け取りません。背後のタイルペインには `HERDR_ACTIVE_PANE_ID` を使ってください。
+
+Unix と macOS では、分割やタブを追加せずに一時的なターミナルを開くこともできます:
+
+```toml
+[[keys.command]]
+key = "prefix+t"
+type = "popup"
+command = "exec \"${SHELL:-sh}\""
+description = "open scratch terminal"
+width = "80%"
+height = "80%"
+```
+
+Windows では、代わりに `command = "powershell.exe -NoLogo"` のようなシェルコマンドを使ってください。
+シェルを終了するとポップアップが閉じ、タイル表示に戻ります。
+
+`type = "pane"` は一時的なペインを開き、コマンドの終了時に閉じます。
+
+`type = "shell"` はバックグラウンドでデタッチ実行します。
+
+`type = "plugin_action"` はインストール済みプラグインのアクション id を呼び出します。アクション id がグローバルに一意でない場合は修飾 id を使ってください:
+
+```toml
+[[keys.command]]
+key = "prefix+l"
+type = "plugin_action"
+command = "example.layout.apply"
+description = "apply layout"
+```
+
+任意で `description` を指定できます。指定すると、キーバインドヘルプパネル（`prefix+?` で開く）に、デフォルトの `'custom command'` ラベルの代わりに表示されます。
+
+カスタムコマンドは、利用可能な場合に `HERDR_SOCKET_PATH`、`HERDR_BIN_PATH`、`HERDR_ACTIVE_WORKSPACE_ID`、`HERDR_ACTIVE_TAB_ID`、`HERDR_ACTIVE_PANE_ID`、`HERDR_ACTIVE_PANE_CWD` を受け取ります。Herdr が検出できる場合、シェルコマンドはフォーカス中のペインの作業ディレクトリから実行されます。
+
+Windows では、カスタムコマンド文字列に `cmd.exe /d /c` が使われるため、環境変数には `%HERDR_BIN_PATH%` 構文を使います。PowerShell 構文を実行するには、たとえば `powershell.exe -NoProfile -Command "..."` のように明示的に呼び出してください。
+
+## テーマ
+
+組み込みテーマを選びます:
+
+```toml
+[theme]
+name = "catppuccin"
+```
+
+すべての組み込みテーマは、[設定リファレンス](/docs/config-reference/)で `theme.name` を検索してください。Herdr の UI 色をホストターミナルの ANSI パレットに従わせたいときは `terminal` を使ってください。
+
+ホストターミナルがライト/ダークの外観変更を報告したときに、Herdr が自身の UI テーマを切り替えるようにするには、テーマの自動切り替えを有効にします:
+
+```toml
+[theme]
+name = "catppuccin"
+auto_switch = true
+light_name = "catppuccin-latte"
+dark_name = "catppuccin"
+```
+
+`auto_switch` のデフォルトは `false` なので、既存のテーマ設定は手動の挙動を保ちます。`light_name` または `dark_name` を省略すると、設定された `name` に対応する組み込みの姉妹テーマが存在する場合はそれを使います。たとえば `tokyo-night`/`tokyo-night-day` や `gruvbox`/`gruvbox-light` です。設定画面でテーマを手動選択すると `auto_switch` は無効になります。
+
+個々の色を上書きできます:
+
+```toml
+[theme.custom]
+panel_bg = "reset"
+accent = "#a6e3a1"
+green = "#a6e3a1"
+blue = "#89b4fa"
+red = "#f38ba8"
+yellow = "#f9e2af"
+```
+
+色の値には、hex、名前付きの色、`rgb(r,g,b)`、または `reset`、`default`、`none`、`transparent` のようなリセットエイリアスが使えます。
+
+## UI とサイドバー
+
+サイドバーは Herdr のメインダッシュボードです。サイズ、折りたたみモード、Agent パネルの並び順、マウスの挙動、ペインの境界線、その他の表示設定については、[設定リファレンス](/docs/config-reference/)で `ui.` を検索してください。
+
+### サイドバーの行レイアウト
+
+展開されたデスクトップサイドバーでは、`rows` の各内側の配列が 1 行として描画されます。完全なデフォルトレイアウトは次のとおりです:
+
+```toml
+[ui.sidebar.agents]
+row_gap = 0
+rows = [
+  ["state_icon", "workspace", "tab"],
+  ["agent"],
+]
+
+[ui.sidebar.spaces]
+row_gap = 0
+rows = [
+  ["state_icon", "workspace"],
+  ["branch", "git_status"],
+]
+```
+
+Agent の行では、次の組み込みトークンを使えます:
+
+- `state_icon` — エージェントの意味的な状態を示す色付きアイコン。
+- `state_text` — `idle`、`working`、`blocked`、`done`、`unknown`。報告された表示ラベルがある場合はそれも含みます。
+- `workspace` — ワークスペース名。
+- `tab` — 利用可能な場合はタブ名。
+- `pane` — 利用可能な場合はペイン名。
+- `agent` — 検出または報告されたエージェントの表示名。
+- `terminal_title` — 安全性のための正規化後の最新の OSC 0/2 ターミナルタイトル。
+- `terminal_title_stripped` — 認識された先頭のアクティビティまたはスピナーのグリフ 1 つと、それに続く空白を除去したターミナルタイトル。
+- `$name` — `name` という名前のカスタムペインメタデータ。
+
+Space の行では、次の組み込みトークンを使えます:
+
+- `state_icon` — Space 内で集約されたエージェント状態を示す色付きアイコン。
+- `state_text` — Space 内で集約されたエージェント状態のテキスト。
+- `workspace` — ワークスペース名。
+- `branch` — 利用可能な場合は Git ブランチ。
+- `git_status` — 0 でない場合は Git の ahead と behind の件数。
+- `$name` — `name` という名前のカスタムワークスペースメタデータ。
+
+トークンは設定された順序で描画されます。Herdr は通常、隣接する値を ` · ` で区切り、`state_icon` の後には空白を 1 つ入れます。値がない場合、その値と区切りは表示されません。すべてのトークンに値がない行は表示されません。各レイアウトは最大 16 行、各行は最大 16 トークンです。
+
+`row_gap` は、Agent パネルと Space パネルごとに、エントリ間の空白行数を指定します。デフォルトは `0` で、エントリを詰めて表示します。以前の間隔に戻すには `1` に設定します。`rows` で定義したコンテンツ行の間隔には影響しません。連続するインデントされた worktree の子は、1 つの Space グループとして詰めて表示されます。
+
+既知のエージェントについて Agent の完全なレイアウトを上書きするには、`rows_by_agent` を使います:
+
+```toml
+[ui.sidebar.agents]
+rows = [
+  ["state_icon", "agent", "state_text"],
+  ["workspace", "tab"],
+]
+
+[ui.sidebar.agents.rows_by_agent]
+claude = [
+  ["state_icon", "agent", "state_text"],
+  ["terminal_title_stripped"],
+  ["workspace", "tab"],
+]
+```
+
+上書きは `rows` を置き換えるもので、拡張するものではありません。上書きのキーには、`claude`、`codex`、`pi` のような大文字と小文字を区別する正規エージェント ID を使います。`claude-code` のような検出エイリアスは使えません。カスタム報告されたエージェントを含め、上書きがないエージェントには `rows` が使われます。
+
+カスタム `$name` トークンは動的な値であり、リテラルテキストではありません。トークンをレイアウトに追加してから、スクリプトまたはプラグインで値を報告します:
+
+```toml
+[ui.sidebar.agents]
+rows = [
+  ["state_icon", "agent", "$model"],
+  ["$summary"],
+  ["workspace", "tab"],
+]
+```
+
+```bash
+herdr pane report-metadata <pane_id> \
+  --source my-agent-hook \
+  --token model=opus \
+  --token summary="reviewing authentication"
+```
+
+カスタム Space トークンには、同じ方法で `herdr workspace report-metadata` を使います。報告されていないカスタムトークンは表示されません。メタデータの報告元が提供できるのは値だけで、行やスタイルは選べません。値のクリア、シーケンス、有効期限については、[CLI リファレンス: report metadata](/docs/cli-reference/#panes)を参照してください。
+
+サイドバーの行設定は、展開されたデスクトップサイドバーにだけ適用されます。折りたたみ表示とモバイル表示はコンパクトなレイアウトを保ちます。
+
+## 通知
+
+Herdr は、バックグラウンドのエージェントが完了したり入力を必要としたりしたときに通知できます:
+
+```toml
+[ui.toast]
+delivery = "herdr"
+delay_seconds = 1
+
+[ui.toast.herdr]
+position = "bottom-right"
+```
+
+アプリ内トーストには `herdr`、SSH 越しでも使いやすい外側のターミナル通知には `terminal`、ローカル OS の通知サービスには `system`、ポップアップを無効にするには `off` を選びます。Herdr はアクティブなタブのポップアップを抑制します。位置、遅延の挙動、クリップボードのフィードバック設定については、[設定リファレンス](/docs/config-reference/)で `ui.toast` を検索してください。
+
+## サウンド
+
+サウンド通知はローカルの Herdr クライアントで再生されます。カスタムサウンドは mp3 ファイルでなければなりません。相対パスは設定ファイルのディレクトリから解決されます。
+
+```toml
+[ui.sound]
+path = "sounds/notification.mp3"
+done_path = "sounds/done.mp3"
+request_path = "sounds/request.mp3"
+```
+
+`path` はすべてのサウンド通知に 1 つの音を設定します。`done_path` と `request_path` は、完了音と入力要求音だけを上書きします。
+
+エージェント別のサウンド上書きには `default`、`on`、`off` を指定できます。キーには `claude`、`codex`、`devin`、`droid` のような検出されたエージェントラベルを使います。Droid はデフォルトでミュートされています。
+
+```toml
+[ui.sound.agents]
+droid = "off"
+claude = "on"
+```
+
+## 高度な設定
+
+スクロールバックの上限、ネストされた起動、その他の高度な設定や実験的設定については、[設定リファレンス](/docs/config-reference/)を検索してください。ペイン画面履歴を有効にする前に、[セッション状態と復元](/docs/session-state/)を参照してください。このガイドでは、ペインの内容を保存する場合のセキュリティ上のトレードオフを説明しています。
+
+## Kitty graphics
+
+アタッチされたローカルクライアントでの Kitty graphics の描画は実験的機能で、デフォルトでは無効です:
+
+```toml
+[experimental]
+kitty_graphics = true
+```
+
+ターミナルの画像表示をテストする場合にのみ有効にしてください。
+
+## Agent セッション復元
+
+Herdr はデフォルトで、サーバーの再起動後に対応する Agent の会話を再開します:
+
+```toml
+[session]
+resume_agents_on_restore = true
+```
+
+公式インテグレーションからの有効なネイティブセッション参照を持つペインだけが再開できます。その他のペインは通常のシェルとして復元されます。対応する Agent と永続化の挙動については、[セッション状態と復元](/docs/session-state/)を参照してください。
+
+## IME カーソルトラッキング
+
+macOS では、ハードウェアカーソルを隠す AI Agent TUI によって、ネイティブ入力メソッドの変換候補ウィンドウがフォーカス中のペインを追跡できなくなることがあります。これらのペインでカーソルアンカーを表示するには、次のように設定します:
+
+```toml
+[experimental]
+reveal_hidden_cursor_for_cjk_ime = true
+cjk_ime_agents = ["claude", "pi", "codex"]
+```
+
+`cjk_ime_agents` で対象を限定すると、関係のないアプリケーションに余分なハードウェアカーソルが表示されるのを避けられます。使用できる Agent 名とカーソル形状については、[設定リファレンス](/docs/config-reference/)でこれらのキーを検索してください。
+
+## プレフィックス入力ソースの切り替え
+
+macOS では、プレフィックスコマンドとプレフィックスから起動したモードがアクティブな間、Herdr がシステムの ASCII 対応入力ソースへ一時的に切り替えるようにできます:
+
+```toml
+[experimental]
+switch_ascii_input_source_in_prefix = true
+```
+
+ターミナル入力に戻るかテキストフィールドに入ると、Herdr は以前の入力ソースを復元します。この設定は他のプラットフォームには影響しません。
+
+## 環境変数
+
+| 変数 | 目的 |
+| --- | --- |
+| `HERDR_CONFIG_PATH` | 設定ファイルのパスを上書きする。 |
+| `HERDR_SESSION` | CLI コマンドで名前付きセッションを選択する。 |
+| `HERDR_SOCKET_PATH` | 低レベルなソケットパスを上書きする。 |
+| `HERDR_LOG` | ログフィルタリングを設定する。例: `HERDR_LOG=herdr=debug`。 |
+| `HERDR_DISABLE_SOUND` | `[ui.sound] enabled = true` でも音の再生を無効にする。 |
+
+## ログ
+
+ログは、起動時の警告、インテグレーションの状態、ソケット API の挙動を診断するときに役立ちます。
+
+主なログファイル:
+
+```text
+~/.config/herdr/herdr.log
+~/.config/herdr/herdr-client.log
+~/.config/herdr/herdr-server.log
+```
+
+ログは自動的にローテーションされます。問題を報告するときは、現在のログとローテーションされた関連ファイルを含めてください。

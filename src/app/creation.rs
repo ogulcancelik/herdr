@@ -30,6 +30,24 @@ pub(crate) fn resolve_new_terminal_cwd(
     }
 }
 
+pub(super) fn launch_cwd_for_terminal(
+    terminal_id: &crate::terminal::TerminalId,
+    terminals: &std::collections::HashMap<
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalState,
+    >,
+    terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+) -> Option<PathBuf> {
+    terminal_runtimes
+        .get(terminal_id)
+        .and_then(|runtime| runtime.follow_cwd())
+        .or_else(|| {
+            terminals
+                .get(terminal_id)
+                .map(|terminal| terminal.cwd.clone())
+        })
+}
+
 impl App {
     pub(super) fn seed_cwd_from_workspace(&self, ws_idx: usize) -> Option<PathBuf> {
         self.state
@@ -38,15 +56,17 @@ impl App {
             .resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)
     }
 
-    pub(super) fn follow_cwd_for_pane_in_workspace(
+    pub(super) fn launch_cwd_for_pane_in_workspace(
         &self,
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
     ) -> Option<PathBuf> {
-        let ws = self.state.workspaces.get(ws_idx)?;
-        let tab_idx = ws.find_tab_index_for_pane(pane_id)?;
-        ws.tabs.get(tab_idx)?.follow_cwd_for_pane(
-            pane_id,
+        let workspace = self.state.workspaces.get(ws_idx)?;
+        let tab = workspace
+            .tabs
+            .get(workspace.find_tab_index_for_pane(pane_id)?)?;
+        launch_cwd_for_terminal(
+            tab.terminal_id(pane_id)?,
             &self.state.terminals,
             &self.terminal_runtimes,
         )
@@ -54,7 +74,7 @@ impl App {
 
     pub(super) fn focused_pane_cwd_in_workspace(&self, ws_idx: usize) -> Option<PathBuf> {
         let pane_id = self.state.workspaces.get(ws_idx)?.focused_pane_id()?;
-        self.follow_cwd_for_pane_in_workspace(ws_idx, pane_id)
+        self.launch_cwd_for_pane_in_workspace(ws_idx, pane_id)
     }
 
     pub(super) fn resolve_new_terminal_cwd(&self, follow_cwd: Option<PathBuf>) -> PathBuf {
@@ -74,6 +94,33 @@ impl App {
                 .get(self.state.selected)
                 .map(|_| self.state.selected)
         })
+    }
+
+    pub(super) fn begin_tui_workspace_create(&mut self, request_id: &'static str) {
+        if self.state.prompt_new_workspace_name {
+            let follow_cwd = self.workspace_creation_source().and_then(|ws_idx| {
+                self.focused_pane_cwd_in_workspace(ws_idx)
+                    .or_else(|| self.seed_cwd_from_workspace(ws_idx))
+            });
+            let cwd = self.resolve_new_terminal_cwd(follow_cwd);
+            super::input::open_new_workspace_dialog(&mut self.state, cwd);
+            return;
+        }
+
+        self.runtime_workspace_create(
+            request_id,
+            crate::api::schema::WorkspaceCreateParams {
+                cwd: None,
+                focus: true,
+                label: None,
+                env: Default::default(),
+            },
+        );
+        self.state.mode = if self.state.active.is_some() {
+            Mode::Terminal
+        } else {
+            Mode::Navigate
+        };
     }
 
     /// Create a workspace with a real PTY (needs event_tx).

@@ -1,0 +1,77 @@
+---
+title: Herdr ドキュメント
+description: AI コーディングエージェントのためのターミナルワークスペースマネージャー。
+template: splash
+hero:
+  tagline: "Herdr のインストール、学習、設定。あなたに合ったパスから始めましょう — マルチプレクサの経験は不要です。"
+  image:
+    file: ../../../../public/assets/logo.svg
+  actions:
+    - text: Herdr をインストール
+      link: /ja/docs/install/
+    - text: クイックスタート
+      link: /ja/docs/quick-start/
+      variant: secondary
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## パスを選ぶ
+
+<CardGrid>
+  <Card title="ターミナルマルチプレクサは初めて?">
+    ショートカットを覚えなくても始められます。Herdr はマウスファーストです。ペインをクリックし、境界をドラッグし、右クリックメニューから分割や切り替えができます。
+
+    [クイックスタート →](/ja/docs/quick-start/)
+  </Card>
+  <Card title="tmux や zellij から乗り換え?">
+    モデルはすでにご存じのとおりです。プレフィックスは `ctrl+b`、ペインは永続化され、デタッチと再アタッチは期待どおりに動作します。
+
+    [コンセプト →](/ja/docs/concepts/) · [キーバインド →](/ja/docs/configuration/#キーバインド)
+  </Card>
+</CardGrid>
+
+## またはエージェントに案内してもらう
+
+すでに AI コーディングエージェントを使っていますか? オンボーディングはエージェントに任せましょう。このプロンプトを貼り付けてください:
+
+```text
+Help me understand and set up Herdr. Read https://herdr.dev/agent-guide.md first, then walk me through it step by step.
+```
+
+このガイドはエージェントに Herdr のコンセプト、セットアップ、設定、よくある問題の解決方法を教えるので、エージェントの回答が即興ではなく正確なままになります。
+
+## コアガイド
+
+<CardGrid>
+  <Card title="エージェント">
+    対応エージェント、検出の挙動、インテグレーション、カスタムラベル、ダイレクトアタッチについて。
+
+    [エージェントを理解する →](/ja/docs/agents/)
+  </Card>
+  <Card title="セッション状態">
+    デタッチ、再起動時の復元、ペイン履歴のリプレイ、エージェントネイティブの resume、ライブハンドオフについて。
+
+    [状態管理の方式を比較する →](/ja/docs/session-state/)
+  </Card>
+  <Card title="設定">
+    キーバインド、テーマ、サイドバーの挙動、通知、スクロールバック、高度なオプションを設定します。
+
+    [Herdr を設定する →](/ja/docs/configuration/)
+  </Card>
+  <Card title="API">
+    CLI とローカルソケット API を通じて、スクリプト・ツール・エージェントから Herdr を制御します。
+
+    [API ガイドを読む →](/ja/docs/socket-api/)
+  </Card>
+  <Card title="プラグイン">
+    マニフェストのアクションとイベントフックを備えた、ローカル実行型ワークフロープラグインを作成します。
+
+    [プラグインを書く →](/ja/docs/plugins/)
+  </Card>
+  <Card title="マーケットプレイス">
+    今すぐ GitHub からプラグインを共有し、リポジトリにトピックを付けてマーケットプレイス公開時に掲載されるようにしましょう。
+
+    [プラグインを公開する →](/ja/docs/marketplace/)
+  </Card>
+</CardGrid>

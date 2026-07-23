@@ -822,6 +822,7 @@ fi
     script.push_str(
         r#"if [ -n "$home" ]; then
     emit "$home/.local/share/mise/installs/herdr/$version/bin/herdr"
+    emit "$home/.local/share/mise/installs/herdr/$version/herdr"
     emit "$home/.local/share/mise/installs/github-ogulcancelik-herdr/$version/herdr"
     emit "$home/.nix-profile/bin/herdr"
 fi
@@ -841,6 +842,16 @@ fn remote_binary_on_path_any(
     remote_herdr: &RemoteHerdr,
 ) -> io::Result<Option<RemoteHerdr>> {
     let output = ssh.user_shell_output("command -v herdr")?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(candidate) = remote_herdr_from_path_discovery(remote_herdr, &stdout) {
+            return Ok(Some(candidate));
+        }
+    }
+
+    // Non-POSIX login shells such as xonsh reject `command -v`; retry through
+    // /bin/sh while retaining the login-shell probe for shell-initialized PATHs.
+    let output = ssh.sh_output("command -v herdr\n")?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -1449,7 +1460,7 @@ fn download_release_asset(platform: &RemotePlatform) -> io::Result<InstallSource
 
     let dir = private_download_dir(&asset_key)?;
     let path = dir.join("herdr.tmp");
-    let status = Command::new("curl")
+    let status = crate::noninteractive_process::curl_command()
         .args(["-sfL", "--max-time", "120", "-o"])
         .arg(&path)
         .arg(&asset.url)
@@ -1473,7 +1484,7 @@ fn download_release_asset(platform: &RemotePlatform) -> io::Result<InstallSource
 }
 
 fn fetch_remote_manifest(url: &str) -> io::Result<Vec<u8>> {
-    let output = Command::new("curl")
+    let output = crate::noninteractive_process::curl_command()
         .args([
             "-sfL",
             "--retry",
@@ -2519,6 +2530,7 @@ mod tests {
         assert!(
             script.contains("emit \"$home/.local/share/mise/installs/herdr/$version/bin/herdr\"")
         );
+        assert!(script.contains("emit \"$home/.local/share/mise/installs/herdr/$version/herdr\""));
         assert!(script.contains(
             "emit \"$home/.local/share/mise/installs/github-ogulcancelik-herdr/$version/herdr\""
         ));

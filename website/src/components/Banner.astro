@@ -1,4 +1,7 @@
 ---
+import versions from '../data/docs-versions.json';
+import { docsRoute, docsTargetHref } from '../docs-path';
+
 const { entry, locale, isFallback } = Astro.locals.starlightRoute;
 const { banner } = entry.data;
 
@@ -8,9 +11,24 @@ const translationNotices = {
   'zh-cn': `本页面的翻译由 LLM 生成。如果你发现翻译有误,请<a href="${issuesUrl}">在 GitHub 上提交 issue</a> 告诉我们。`,
 };
 const translationNotice = locale && !isFallback ? translationNotices[locale] : undefined;
+const docs = docsRoute(Astro.url.pathname);
+const archivedVersion =
+  docs.target !== 'stable' && docs.target !== 'preview' && docs.target !== versions.current
+    ? docs.target
+    : undefined;
+const latestHref = docsTargetHref(docs, 'stable', versions.scopes);
+const archivedNotices = {
+  root: `This page documents Herdr ${archivedVersion}. <a href="${latestHref}">Switch to the latest release.</a>`,
+  ja: `このページは Herdr ${archivedVersion} のドキュメントです。<a href="${latestHref}">最新版に切り替えてください。</a>`,
+  'zh-cn': `本页面是 Herdr ${archivedVersion} 的文档。<a href="${latestHref}">切换到最新版本。</a>`,
+};
+const archivedNotice = archivedVersion ? archivedNotices[locale ?? 'root'] : undefined;
 ---
 
 {banner && <div class="sl-banner" data-pagefind-ignore set:html={banner.content} />}
+{archivedNotice && (
+  <div class="version-notice" data-pagefind-ignore set:html={archivedNotice} />
+)}
 {translationNotice && (
   <div class="translation-notice" data-pagefind-ignore set:html={translationNotice} />
 )}
@@ -31,7 +49,8 @@ const translationNotice = locale && !isFallback ? translationNotices[locale] : u
 			color: var(--__sl-banner-text);
 		}
 
-		.translation-notice {
+		.translation-notice,
+		.version-notice {
 			padding: 0.5rem var(--sl-nav-pad-x);
 			background-color: var(--sl-color-bg-nav);
 			border-bottom: 1px solid var(--sl-color-hairline);
@@ -41,8 +60,16 @@ const translationNotice = locale && !isFallback ? translationNotices[locale] : u
 			text-align: center;
 			text-wrap: balance;
 		}
+		.version-notice {
+			background-color: var(--sl-color-orange-low);
+			border-bottom-color: var(--sl-color-orange);
+			color: var(--sl-color-orange-high);
+		}
 		.translation-notice :global(a) {
 			color: var(--sl-color-text-accent);
+		}
+		.version-notice :global(a) {
+			color: var(--sl-color-orange-high);
 		}
 	}
 </style>

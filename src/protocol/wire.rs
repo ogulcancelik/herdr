@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 16;
+pub const PROTOCOL_VERSION: u32 = 18;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -115,6 +115,9 @@ pub enum ClientInputEvent {
         code: ClientKeyCode,
         modifiers: u8,
         kind: ClientKeyKind,
+    },
+    Text {
+        codepoint: char,
     },
     Mouse {
         kind: ClientMouseKind,
@@ -251,7 +254,7 @@ impl ClientMouseKind {
 }
 
 impl ClientInputEvent {
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     pub(crate) fn from_crossterm(event: crossterm::event::Event) -> Option<Self> {
         match event {
             crossterm::event::Event::Key(key) => Some(Self::Key {
@@ -284,6 +287,13 @@ impl ClientInputEvent {
                     crossterm::event::KeyModifiers::from_bits_truncate(*modifiers),
                 )
                 .with_kind(kind.to_crossterm()),
+            ),
+            Self::Text { codepoint } => crate::raw_input::RawInputEvent::Key(
+                crate::input::TerminalKey::new(
+                    crossterm::event::KeyCode::Char(*codepoint),
+                    crossterm::event::KeyModifiers::empty(),
+                )
+                .as_text_commit(),
             ),
             Self::Mouse {
                 kind,
@@ -654,6 +664,12 @@ pub enum ServerMessage {
     /// Whether the client should currently capture host mouse input.
     MouseCapture {
         /// True when Herdr mouse UI is enabled or the focused pane app requests mouse reporting.
+        enabled: bool,
+    },
+
+    /// Whether the focused terminal requests Kitty report-all keyboard input.
+    KittyKeyboardReportAll {
+        /// True only while the focused pane requests `REPORT_ALL_KEYS_AS_ESCAPE_CODES`.
         enabled: bool,
     },
 
@@ -1406,6 +1422,15 @@ mod tests {
     #[test]
     fn server_mouse_capture_roundtrip() {
         let msg = ServerMessage::MouseCapture { enabled: true };
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ServerMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn server_kitty_keyboard_report_all_roundtrip() {
+        let msg = ServerMessage::KittyKeyboardReportAll { enabled: true };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ServerMessage, _) =
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();

@@ -1,0 +1,121 @@
+---
+title: エージェント自動化
+description: Herdr のレイアウト、ペイン、エージェントの各プリミティブを使い、スクリプトや別のエージェントからコーディングエージェントを連携させます。
+---
+
+Herdr はコーディングエージェントの自動化レイヤーとして使えます。スクリプトから制御することも、ひとつのエージェントから別のエージェントへ作業を渡し、状態を確認して結果を集めることもできます。重要なのは、目的に合うプリミティブを選ぶことです。
+
+## 3 つのプリミティブ
+
+| プリミティブ | 責務 |
+| --- | --- |
+| レイアウト（`workspace`、`tab`、ペイン構成） | ターミナルの場所を作成し、整理する。 |
+| ペイン | 生のターミナルを制御する。コマンド実行、入力送信、出力読み取り、出力待機を行う。 |
+| エージェント | 認識済みコーディングエージェントを、名前またはペインとライフサイクル状態に基づいて制御する。 |
+
+ペインは、エージェントが入っていなくても存在します。エージェントは、ペイン内で現在実行されていると Herdr が認識したプロセスです。そのため `agent start` には既存のシェルペインが必要で、レイアウトの作成、分割、移動は行いません。
+
+ワークスペースを作成すると最初のタブとルートペインも作られ、タブを作成するとそのルートペインも作られます。最初のプロセスには返されたペイン ID を使い、そのレイアウトに別のターミナルが必要なときだけ分割します。
+
+作成コマンドは JSON を出力します。ID を推測せず、レスポンスから取得してください:
+
+```bash
+created=$(herdr workspace create --cwd ~/project --label api --no-focus)
+pane_id=$(printf '%s\n' "$created" | jq -r '.result.root_pane.pane_id')
+
+split=$(herdr pane split "$pane_id" --direction right --no-focus)
+review_pane=$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id')
+```
+
+`workspace create` は `.result.workspace`、`.result.tab`、`.result.root_pane` を返します。`tab create` は `.result.tab` と `.result.root_pane` を返し、`pane split` は新しいペインを `.result.pane` として返します。
+
+ペインを別のワークスペースへ移動すると、ワークスペース修飾付きのペイン ID が変わります。`pane move` の後は `.result.move_result.pane.pane_id` を使い、以前の値が必要なら `.result.move_result.previous_pane_id` を参照してください。実行中プロセスは起動時の Herdr 環境を保ちますが、以前の `HERDR_PANE_ID` はそのターミナルの別名として残るため、`--current` は引き続き安全に使えます。移動後に始めるコマンドはエージェント名で解決できますが、すでに進行中の待機は `agent_not_running` で終了します。
+
+シェル、テスト、サーバー、CI ウォッチャーなどの通常のターミナルプロセスにはペインコマンドを使います。どのエージェントが動いているか、または状態が `working`、`blocked`、`done`、`idle`、`unknown` のどれかを Herdr に判断させる場合はエージェントコマンドを使います。
+
+## エージェントの識別子と起動
+
+`w1:p2` のようなペイン ID はターミナルの場所を識別します。`reviewer` のようなエージェント名は、そのペインに現在いるエージェントの扱いやすい別名です。名前は `[a-z][a-z0-9_-]{0,31}` に一致し、ライブエージェント間で一意でなければなりません。エージェントが終了、解放、または置換されると別名は消えます。ペイン自体の恒久的な名前ではありません。
+
+エージェントコマンドは、一意なライブ名、または現在そのエージェントをホストしているペイン ID のどちらでも指定できます。
+
+利用可能なシェルペインとは、対話シェルのプロンプトに戻っており、フォアグラウンドをシェル自身が所有し、フォアグラウンドのコマンド、エディタ、エージェントが動いていないペインです。`agent start` の前にプロンプトへ戻してください。
+
+`--kind` は対応済みエージェントとその標準実行ファイルを選びます。対応する kind は `pi`、`claude`、`codex`、`gemini`、`cursor`、`devin`、`agy`、`cline`、`omp`、`mastracode`、`opencode`、`copilot`、`kimi`、`kiro`、`droid`、`amp`、`grok`、`hermes`、`kilo`、`qodercli`、`maki` です。`--` より後の引数は、その実行ファイルへそのまま渡されます。
+
+`agent start` は、同じターミナルで期待したエージェントを検出し、対話入力の準備ができたと Herdr が判断してから返ります。起動待機はデフォルトで 30 秒です。`--timeout` は 3000 より大きく 300000 以下のミリ秒で指定します。
+
+```bash
+herdr agent start reviewer --kind codex --pane "$review_pane" -- -m gpt-5.4
+```
+
+手動で起動したエージェントも自動検出され、ペイン ID で指定できます。人が読みやすい安定した対象名が必要なら名前を付けます:
+
+```bash
+herdr agent get w1:p2
+herdr agent rename w1:p2 reviewer
+```
+
+## 操作面を選ぶ
+
+| 目的 | コマンド |
+| --- | --- |
+| シェルコマンドを実行して送信する | `pane run` |
+| Enter を付けずに文字列を送る | `pane send-text` |
+| ターミナルキーや修飾キーの組み合わせを送る | `pane send-keys` |
+| 文字列や正規表現を待つ | `pane wait-output` |
+| 既存のペインで対応済みエージェントを起動する | `agent start` |
+| プロンプトを送信し、必要なら完了を待つ | `agent prompt` |
+| エージェントの対話 UI にキーを送る | `agent send-keys` |
+| エージェントのライフサイクル状態を待つ | `agent wait` |
+
+`agent prompt` は文字列とエンコード済み Enter を送信し、ターミナルの現在の bracketed paste モードを尊重します。working 中のエージェントにも送信できます。`esc`、`up`、`enter`、`ctrl+c` のような操作には `agent send-keys` を使います。`escape` も `esc` のエイリアスとして使えます。意図的に生のターミナルを操作したい場合は、ペイン入力コマンドを使ってください。
+
+ペイン入力は、現在のプロセスに関係なくターミナルを指定します。エージェント入力はライブエージェントを解決し、そのエージェントがペインを制御しなくなっていれば操作を拒否します。
+
+`agent prompt --wait` はプロンプトをすぐ送信します。エージェントが non-working 状態から始まる場合、Herdr はまず 5 秒以内にライフサイクル変化が観測されることを要求します。状態シーケンスが進まなければ、無期限に待たず `agent_prompt_stalled` を返します。呼び出し側の `--timeout` が 5 秒以下なら、通常の `timeout` エラーを返します。活動を観測した後、要求された安定状態を待ちます。個々のターンは追跡しません。エージェントがすでに working の場合、進行中ターンの完了が待機を満たすことがあります。単独の `agent wait` は現在のエージェントを監視し、すでに状態が一致していれば即座に返ります。どちらもデフォルトでは `idle`、`done`、`blocked` を待ちます。複数の正確な状態を許可するには、`--until idle --until done` のように `--until` を繰り返します。`unknown` が必要な場合は `--until unknown` を明示してください。`agent prompt` では `--until` に `--wait` が必要です。
+
+`idle` は、エージェントが入力待ちで、そのタブがフォーカス中の Herdr UI ですでに表示済みであることを示します。`done` は同じ基礎的な idle 状態ですが、バックグラウンド作業が完了してから、そのタブをフォーカスするか `pane focus` / `agent focus` で対象にするまで使われます。CLI で読み取るだけでは表示済みになりません。`blocked` は承認または質問 UI を Herdr が認識した状態です。`unknown` はエージェントが存在するもののライフサイクルを確実に分類できない状態で、成功完了を意味しません。違いが重要なら正確な `--until` を指定してください。
+
+`pane wait-output` はエージェントのライフサイクルを解釈しません。選択したターミナルスナップショットをポーリングし、最初にすぐ検索するため、すでに存在する文字列も一致します。デフォルトのソース名は `recent` で、直近 80 行の描画済みターミナル行を折り返し前の出力として扱います。`--lines` でその行数を変更でき、`--regex` は Rust の正規表現構文で 1 行ずつ一致します。
+
+CLI では、`pane read` と `agent read` のどちらもターミナルテキストを直接出力します。デフォルトは ANSI エスケープを除去した UTF-8 テキストです。ソースに装飾が含まれる場合、`--format ansi` または `--ansi` でエスケープを残します。`detection` ソースは常にプレーンテキストです。recent 系ソースでは、`--lines N` は折り返し解除の前に末尾の N 描画行を選び、省略時は 80 行です。`visible` と `detection` では、省略時にスナップショット全体を返し、指定時は改行で区切られた末尾 N 行を返します。socket API ではテキストを `.result.read.text` に返します。
+
+## 既知の注意点: 代替画面の出力
+
+Claude Code や OpenCode などの全画面エージェントは、ターミナルの代替画面に描画することがあります。代替画面の行は Herdr のホスト側スクロールバックには入りません。応答が表示中のペインを超えると、アプリが表示しなくなった行を `recent` や `recent-unwrapped` で復元することはできません。`--lines` を増やしても、その履歴は取得できません。フォントが大きい場合やペインが小さい場合は、より起こりやすくなります。
+
+エージェントに簡潔な応答を求めるか、ペインを広げる、フォントを小さくする、またはエージェント自身のトランスクリプトやスクロール操作を使ってください。エージェント内でスクロールした後、`--source visible` を使うと、現在描画されているページを読み取れます。
+
+成功した `agent start`、`agent prompt`、`agent wait` は現在のエージェントを `.result.agent` に返します。`pane wait-output` は `.result.pane_id`、`.result.matched_line`、一致したスナップショット `.result.read` を返します。
+
+wait コマンドにはデフォルトのタイムアウトがなく、無期限に待機できます。タイムアウトやサーバーエラーでは JSON エラーを stderr に出して終了コード 1、CLI 構文エラーでは終了コード 2 を返します。
+
+## レシピ
+
+補助エージェントを起動して作業を渡し、その作業が落ち着くまで待ちます:
+
+```bash
+split=$(herdr pane split --current --direction right --no-focus)
+review_pane=$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id')
+herdr agent start reviewer --kind codex --pane "$review_pane" -- -m gpt-5.4
+herdr agent prompt reviewer "Review the current diff" --wait --timeout 120000
+herdr agent read reviewer --source recent-unwrapped --lines 120
+```
+
+エージェントが入力を求めるまで待ち、内容を確認して対話 UI を操作します:
+
+```bash
+herdr agent wait reviewer --until blocked --timeout 120000
+herdr agent read reviewer --source recent-unwrapped --lines 80
+herdr agent send-keys reviewer esc
+```
+
+通常のプロセスを実行し、エージェントとして扱わずに出力を待ちます:
+
+```bash
+herdr pane run w1:p3 "just test --watch"
+herdr pane wait-output w1:p3 --regex "passed|failed" --timeout 120000
+```
+
+コマンドとオプションの完全な一覧は [CLI リファレンス](/ja/docs/cli-reference/) を参照してください。シェル補完でも同じコマンドツリーを対話的に確認できます。

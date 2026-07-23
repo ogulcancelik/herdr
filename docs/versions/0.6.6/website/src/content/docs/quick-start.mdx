@@ -1,0 +1,90 @@
+---
+title: Quick start
+description: Create your first Herdr workspace and run agents in persistent terminal panes.
+---
+
+Start Herdr from any project directory:
+
+```bash
+herdr
+```
+
+Herdr launches or attaches to your default background session. You do not manage sockets. If you detach, agents keep running.
+
+For the local, SSH, and `herdr --remote` workflows, see [How to work with Herdr](/docs/how-to-work/).
+
+## Create a workspace
+
+Press `prefix+shift+n` to create a workspace. A workspace is a project-level container for tabs, panes, and agents.
+
+Give each active project its own workspace. This keeps agent state readable in the sidebar.
+
+## Run an agent
+
+Start your agent in the root pane.
+
+```bash
+pi
+```
+
+Herdr detects supported agents automatically. The sidebar shows whether each agent is `working`, `blocked`, `done`, or `idle`.
+
+## Keyboard control
+
+Press `ctrl+b` to enter prefix mode, then press an action key.
+
+Common actions:
+
+| Action | Key |
+| --- | --- |
+| Split right | `prefix+v` |
+| Split down | `prefix+minus` |
+| New tab | `prefix+c` |
+| Next / previous tab | `prefix+n` / `prefix+p` |
+| Workspace navigation | `prefix+w` |
+| New workspace | `prefix+shift+n` |
+| Detach client | `prefix+q` |
+
+After detaching, run `herdr` again to reattach to the same session.
+
+## Use the mouse
+
+Herdr is mouse-native. You can click panes, tabs, workspaces, and agents; drag borders; drag-select text to copy it to your clipboard; double-click a token to copy it directly; and use right-click menus. Copying does not require Ctrl+C.
+
+Ctrl-click opens pane links when your terminal sends the modified click to Herdr. This works for OSC 8 hyperlinks and visible `http://` or `https://` URLs. The portable terminal-native fallback is Shift-Ctrl-click on Linux or Shift-Cmd-click on macOS.
+
+## Copy from the keyboard
+
+Press `prefix+[` to enter copy mode for the focused pane. Use `h/j/k/l`, `w/b/e`, and `{`/`}` to move, `v` or Space to start a selection, `y` or Enter to copy it, and `q` or Esc to leave without copying.
+
+## Manage named sessions
+
+Named sessions are separate Herdr server namespaces. Use them when you want fully separate runtime state.
+
+```bash
+herdr session list
+herdr session attach work
+herdr session attach side-project
+herdr session stop work
+herdr session delete side-project
+```
+
+Workspaces are usually enough. Use named sessions when you need isolation between sets of panes, sockets, and persistent state.
+
+## Attach from another machine
+
+Run Herdr where the work lives. If the code and credentials are on a server, either SSH there and run Herdr like a terminal multiplexer:
+
+```bash
+ssh you@server
+herdr
+```
+
+Or attach from your local terminal through SSH:
+
+```bash
+herdr --remote workbox
+herdr --remote ssh://you@server:2222
+```
+
+For repeat targets, put the host in your SSH config. See [How to work with Herdr](/docs/how-to-work/) for the full model.

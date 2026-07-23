@@ -4,7 +4,7 @@ use std::{
     fmt, fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{agent_label, parse_agent_label, Agent};
 
-pub(crate) const MANIFEST_ENGINE_VERSION: u32 = 2;
+pub(crate) const MANIFEST_ENGINE_VERSION: u32 = 3;
 const DEFAULT_CATALOG_URL: &str = "https://herdr.dev/agent-detection/index.toml";
 const CATALOG_URL_ENV: &str = "HERDR_AGENT_DETECTION_MANIFEST_CATALOG_URL";
 const MAX_FETCH_BYTES: usize = 256 * 1024;
@@ -470,7 +470,7 @@ fn catalog_url() -> String {
 
 fn fetch_text(url: &str) -> Result<String, String> {
     let max_fetch_bytes = MAX_FETCH_BYTES.to_string();
-    let mut child = Command::new("curl")
+    let mut child = crate::noninteractive_process::curl_command()
         .args([
             "-sfL",
             "--retry",

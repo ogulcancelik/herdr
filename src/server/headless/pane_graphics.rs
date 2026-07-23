@@ -121,6 +121,7 @@ impl HeadlessServer {
                 frame_pane_graphics_for_client(crate::kitty_graphics::encode_local_pane_graphics(
                     &self.app.state,
                     &self.app.terminal_runtimes,
+                    self.app.state.view.tab_surface(),
                     cell_size,
                     &mut next_graphics_cache,
                 ));

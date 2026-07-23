@@ -1,0 +1,132 @@
+---
+title: 永続化とリモートアクセス
+description: Herdr からのデタッチ、あとからの再アタッチ、名前付きセッション、SSH 越しの接続。
+---
+
+Herdr はペインをバックグラウンドサーバーで動かし続けます。ターミナルクライアントはデタッチして、あとで再接続できます。
+
+ローカル、SSH、`herdr --remote` の各ワークフローについては [Herdr での作業の進め方](/ja/docs/how-to-work/)を参照してください。
+
+## デタッチと再アタッチ
+
+`ctrl+b q` でクライアントをデタッチします。ペインとエージェントは動き続けます。再度 `herdr` を実行すると再アタッチします。セッションとそのペインを停止するには `herdr server stop` を使います。
+
+サーバーの完全停止後に Herdr が再起動すると、保存されたセッションの形を復元します。デタッチ、サーバー再起動、画面履歴リプレイ、エージェントネイティブのセッション復元、ライブハンドオフでそれぞれ何が生き残るかは[セッション状態と復元](/ja/docs/session-state/)を参照してください。
+
+## 名前付きセッション
+
+独立した Herdr サーバーが欲しいときは名前付きセッションを使います。
+
+```bash
+herdr session list
+herdr session attach work
+herdr session attach side-project
+herdr session stop work
+herdr session delete side-project
+```
+
+名前付きセッションは独自のペイン、タブ、ワークスペース、ソケット、ランタイム状態を持ちます。グローバル設定ファイルは共有されます。
+
+スクリプトでは `--json` を使ってください:
+
+```bash
+herdr session list --json
+herdr session stop work --json
+herdr session delete side-project --json
+```
+
+## SSH 越しのリモートアタッチ
+
+リモートモードは 2 つあり、[Herdr での作業の進め方](/ja/docs/how-to-work/)で比較しています。tmux スタイルの方法では、サーバーに SSH してそこで `herdr` を実行します。もうひとつは、ローカルマシンから SSH 越しにアタッチする方法です:
+
+```bash
+herdr --remote workbox
+herdr --remote ssh://you@server:2222
+```
+
+このモードでは、ローカルの Herdr はシンクライアントです。SSH 越しに接続し、リモートの Herdr サーバーを起動またはアタッチして、UI をローカルターミナルにストリーミングします。クライアントがローカルで動くため、Herdr は画像クリップボードの貼り付けのようなローカルデスクトップ機能をリモートセッションにブリッジできます。画像をリモートの一時ファイルにコピーし、そのパスを貼り付けます。
+
+デフォルトでは、`herdr --remote` はそのアタッチにローカルの Herdr キーバインドを使います。リモートサーバーの設定が異なっていても、ローカルの操作感覚を維持できます。ローカルキーバインドはアタッチ時のスナップショットなので、ローカルのキーバインドを編集したらデタッチして再アタッチしてください。リモートサーバーの設定を使いたい場合は `--remote-keybindings server` を使います。ローカルのカスタムコマンドキーバインドは送信されません。それらのコマンドはリモートホスト上で実行されてしまうからです。
+
+繰り返し接続する相手は SSH config を使ってください:
+
+```text
+Host workbox
+  HostName server.example.com
+  User you
+  Port 2222
+```
+
+その後はこれでアタッチできます:
+
+```bash
+herdr --remote workbox
+```
+
+リモートアタッチは x86_64 と aarch64 の Linux および macOS ホストをサポートします。Herdr はリモートのプラットフォームを確認し、リモートの `PATH` 上にある一致する `herdr` を優先し、次に `~/.local/bin/herdr` を確認します。一致するバイナリがない場合、対話的な実行では `~/.local/bin/herdr` へのインストールを提案します。非対話的な実行はホストを変更せずに失敗します。`~/.local/bin` がリモートの `PATH` にない場合、Herdr はインストール後に警告します。
+
+ネイティブ Windows の `herdr --remote` は Windows ベータの範囲外です。Windows からはサーバーに SSH してそこで `herdr` を実行してください。
+
+デフォルトでは、`herdr --remote` はあなたの SSH config を最初に include し、その後にフォールバックのキープアライブ設定を加えた一時的な SSH config を通してブリッジを実行します。既存のユーザーのキープアライブ設定が優先されます。Herdr が生成するブリッジ設定を使わず素の `ssh` を使うには `[remote].manage_ssh_config = false` を設定してください。
+
+デフォルトでは、実行中のリモートサーバーの置き換えや再起動が必要な場合、リモートアタッチは通常の再起動/停止フローを使います。対応する実行中リモートサーバーで実験的なライブハンドオフにオプトインするには `--handoff` を渡します:
+
+```bash
+herdr --remote workbox --handoff
+```
+
+先にサーバーへ SSH してそこで `herdr` を実行した場合、Herdr は完全にサーバー上で動きます。このモードは便利でシンプルですが、通常のターミナルテキスト貼り付けを超えてローカルデスクトップのクリップボードにはアクセスできません。
+
+ローカルとリモートのプラットフォームが一致する場合、直接インストールでは Herdr は現在のローカルバイナリをコピーできます。Homebrew、mise、Nix のインストールの場合、またはプラットフォームが異なる場合は、`https://herdr.dev/latest.json` から現在のクライアントバージョンに一致するリリースアセットをダウンロードします。
+
+ローカルビルドやカスタムバイナリの場合は、リモートアタッチの前に `HERDR_REMOTE_BINARY` にローカルファイルパスを設定してください。
+
+```bash
+HERDR_REMOTE_BINARY=target/release/herdr herdr --remote workbox
+```
+
+## リモートの名前付きセッション
+
+リモートホスト上の名前付きセッションにアタッチするには、`--remote` と一緒に `--session` を使います:
+
+```bash
+herdr --remote workbox --session agents
+```
+
+## ダイレクトターミナルアタッチ
+
+完全な Herdr アタッチはワークスペース UI 全体を開きます。ダイレクトアタッチは、サーバーが所有するターミナルをひとつだけ、現在のターミナルに開きます。
+
+ダイレクトターミナルアタッチは Windows ベータでは Unix 専用です。
+
+エージェントターゲットでアタッチ:
+
+```bash
+herdr agent attach reviewer
+```
+
+ターミナル ID でアタッチ:
+
+```bash
+herdr terminal attach term_abc123
+```
+
+ダイレクトアタッチは、現在レンダリングされているターミナル状態をストリーミングし、その後ライブの ANSI フレームを流します。入力はそのターミナルに直接送られます。
+
+`ctrl+b q` でデタッチします。リテラルの `ctrl+b` は `ctrl+b ctrl+b` で送ります。
+
+ひとつのターミナルの入力とリサイズを所有できる書き込み可能なダイレクトアタッチクライアントはひとつだけです。既存の所有者を置き換えるには `--takeover` を使います:
+
+```bash
+herdr terminal attach term_abc123 --takeover
+```
+
+## シングルプロセスの逃げ道
+
+バックグラウンドのサーバー/クライアント分離なしで Herdr を実行するには `--no-session` を使います:
+
+```bash
+herdr --no-session
+```
+
+これは主にデバッグや互換性のための逃げ道です。デフォルトの永続セッションモードが通常の使い方です。

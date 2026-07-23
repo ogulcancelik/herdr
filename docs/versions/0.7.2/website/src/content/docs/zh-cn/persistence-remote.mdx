@@ -1,0 +1,132 @@
+---
+title: 持久化与远程访问
+description: 从 Herdr 分离、稍后重新连接、使用命名会话,以及通过 SSH 连接。
+---
+
+Herdr 让窗格在后台服务器中持续运行。你的终端客户端可以分离,稍后再重新连接。
+
+关于本地、SSH 和 `herdr --remote` 工作流,参见[使用 Herdr 的工作方式](/zh-cn/docs/how-to-work/)。
+
+## 分离与重新连接
+
+用 `ctrl+b q` 分离客户端;窗格和智能体继续运行。再次运行 `herdr` 即可重新连接。用 `herdr server stop` 停止会话及其窗格。
+
+在服务器完全停止后再次启动时,Herdr 会恢复保存的会话形态。关于分离、服务器重启、屏幕历史回放、智能体原生会话恢复和实时交接各自能保留什么,参见[会话状态与恢复](/zh-cn/docs/session-state/)。
+
+## 命名会话
+
+需要相互独立的 Herdr 服务器时,使用命名会话。
+
+```bash
+herdr session list
+herdr session attach work
+herdr session attach side-project
+herdr session stop work
+herdr session delete side-project
+```
+
+命名会话拥有自己的窗格、标签页、工作区、socket 和运行时状态。它仍然共享同一个全局配置文件。
+
+脚本中使用 `--json`:
+
+```bash
+herdr session list --json
+herdr session stop work --json
+herdr session delete side-project --json
+```
+
+## 通过 SSH 远程连接
+
+远程模式有两种;[使用 Herdr 的工作方式](/zh-cn/docs/how-to-work/)对它们做了比较。tmux 风格的路径是 SSH 到服务器并在那里运行 `herdr`。另一种是从本地机器通过 SSH 连接:
+
+```bash
+herdr --remote workbox
+herdr --remote ssh://you@server:2222
+```
+
+这种模式下,你本地的 Herdr 是瘦客户端。它通过 SSH 连接,启动或连接远程 Herdr 服务器,并把 UI 流式传回本地终端。因为客户端在本地运行,Herdr 可以把图像剪贴板粘贴等本地桌面功能桥接到远程会话: 把图像复制到远程临时文件,再粘贴该路径。
+
+默认情况下,`herdr --remote` 在这次连接中使用你本地的 Herdr 按键绑定。即使远程服务器的配置不同,也能保持本地的肌肉记忆。本地按键绑定是连接时的快照;编辑本地按键绑定后请分离再重连。想改用远程服务器配置时,使用 `--remote-keybindings server`。本地的自定义命令按键绑定不会被发送,因为那些命令会在远程主机上执行。
+
+对于经常连接的目标,使用你的 SSH 配置:
+
+```text
+Host workbox
+  HostName server.example.com
+  User you
+  Port 2222
+```
+
+然后这样连接:
+
+```bash
+herdr --remote workbox
+```
+
+远程连接支持 x86_64 和 aarch64 的 Linux 与 macOS 主机。Herdr 会检查远程平台,优先使用远程 `PATH` 上已有的匹配 `herdr`,然后检查 `~/.local/bin/herdr`。如果没有匹配的二进制文件,交互式运行会询问是否安装到 `~/.local/bin/herdr`;非交互式运行则直接失败,不会修改主机。如果 `~/.local/bin` 不在远程 `PATH` 上,Herdr 会在安装后发出警告。
+
+Windows 原生的 `herdr --remote` 不在 Windows 测试版范围内。在 Windows 上请 SSH 到服务器并在那里运行 `herdr`。
+
+默认情况下,`herdr --remote` 通过一个临时 SSH 配置运行桥接: 先包含你的 SSH 配置,再补充兜底的保活设置。已有的用户保活设置优先。设置 `[remote].manage_ssh_config = false` 可以不用 Herdr 生成的桥接配置,而使用普通 `ssh`。
+
+默认情况下,如果需要替换或重启运行中的远程服务器,远程连接使用常规的重启/停止流程。要对受支持的运行中远程服务器启用实验性实时交接,加上 `--handoff`:
+
+```bash
+herdr --remote workbox --handoff
+```
+
+如果你先 SSH 到服务器再在那里运行 `herdr`,Herdr 就完全运行在服务器上。这种模式简单实用,但除了普通的终端文本粘贴之外,它无法访问你本地桌面的剪贴板。
+
+当本地和远程平台一致时,对于直接安装,Herdr 可以直接复制当前本地二进制文件。对于 Homebrew、mise 和 Nix 安装,或平台不一致时,它会从 `https://herdr.dev/latest.json` 下载与当前客户端版本匹配的发布产物。
+
+对于本地构建或自定义二进制文件,在远程连接前设置 `HERDR_REMOTE_BINARY` 指向本地文件路径。
+
+```bash
+HERDR_REMOTE_BINARY=target/release/herdr herdr --remote workbox
+```
+
+## 远程命名会话
+
+用 `--session` 搭配 `--remote` 连接远程主机上的命名会话:
+
+```bash
+herdr --remote workbox --session agents
+```
+
+## 直接终端附加
+
+完整的 Herdr 连接会打开整个工作区 UI。直接附加则在你当前的终端中打开一个由服务器拥有的终端。
+
+在 Windows 测试版中,直接终端附加仅限 Unix。
+
+按智能体目标附加:
+
+```bash
+herdr agent attach reviewer
+```
+
+按终端 ID 附加:
+
+```bash
+herdr terminal attach term_abc123
+```
+
+直接附加先流式传输当前渲染的终端状态,然后是实时 ANSI 帧。输入直接进入该终端。
+
+用 `ctrl+b q` 分离。用 `ctrl+b ctrl+b` 发送字面的 `ctrl+b`。
+
+一个终端只能有一个可写的直接附加客户端拥有输入和调整尺寸的权限。用 `--takeover` 替换现有的所有者:
+
+```bash
+herdr terminal attach term_abc123 --takeover
+```
+
+## 单进程逃生舱
+
+用 `--no-session` 在没有后台服务器/客户端分离的情况下运行 Herdr:
+
+```bash
+herdr --no-session
+```
+
+这主要是调试或兼容性的逃生舱。默认的持久会话模式才是常规路径。

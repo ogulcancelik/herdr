@@ -218,7 +218,7 @@ fn git_ahead_behind_between(
     upstream_oid: &str,
 ) -> Option<(usize, usize)> {
     let range = format!("{head_oid}...{upstream_oid}");
-    let output = std::process::Command::new("git")
+    let output = crate::noninteractive_process::command("git")
         .arg("-C")
         .arg(cwd)
         .args(["rev-list", "--left-right", "--count", &range])

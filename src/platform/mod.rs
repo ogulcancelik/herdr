@@ -26,18 +26,28 @@ pub enum Signal {
 }
 
 pub(crate) fn detached_custom_command_process(command: &str) -> std::process::Command {
-    detached_custom_command_process_platform(command)
+    let mut process = detached_custom_command_process_platform(command);
+    configure_background_command(&mut process);
+    process
 }
 
 pub(crate) fn pane_custom_command_pty_builder(command: &str) -> portable_pty::CommandBuilder {
     pane_custom_command_pty_builder_platform(command)
 }
 
+pub(crate) fn configure_background_command(command: &mut std::process::Command) {
+    configure_background_command_platform(command);
+}
+
+#[cfg(not(windows))]
+fn configure_background_command_platform(_command: &mut std::process::Command) {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PlatformCapabilities {
     pub(crate) live_handoff: bool,
     pub(crate) remote_attach: bool,
     pub(crate) direct_terminal_attach: bool,
+    pub(crate) preserve_legacy_doubled_escape_input: bool,
 }
 
 pub(crate) const fn capabilities() -> PlatformCapabilities {
@@ -45,6 +55,7 @@ pub(crate) const fn capabilities() -> PlatformCapabilities {
         live_handoff: cfg!(unix),
         remote_attach: cfg!(unix),
         direct_terminal_attach: cfg!(unix),
+        preserve_legacy_doubled_escape_input: cfg!(target_os = "macos"),
     }
 }
 
@@ -148,6 +159,90 @@ mod fallback;
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub use fallback::*;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn available_pane_shell_from_job(child_pid: u32, job: ForegroundJob) -> Option<String> {
+    if job.process_group_id != child_pid
+        || job.processes.iter().any(|process| process.pid != child_pid)
+    {
+        return None;
+    }
+    job.processes
+        .into_iter()
+        .find(|process| process.pid == child_pid)
+        .map(|process| process.name)
+        .filter(|name| is_pane_shell_process_name(name))
+}
+
+fn normalized_process_name(name: &str) -> String {
+    name.rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .trim_start_matches('-')
+        .trim_end_matches(".exe")
+        .to_ascii_lowercase()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn is_powershell_process_name(name: &str) -> bool {
+    matches!(
+        normalized_process_name(name).as_str(),
+        "pwsh" | "powershell"
+    )
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn interactive_unix_shell_command(
+    argv: &[String],
+    shell_name: &str,
+    quote_posix_arg: fn(&str) -> String,
+) -> Option<String> {
+    let quote = if is_powershell_process_name(shell_name) {
+        quote_powershell_arg
+    } else {
+        quote_posix_arg
+    };
+    let mut parts = argv.iter();
+    let mut command = quote(parts.next()?);
+    for part in parts {
+        command.push(' ');
+        command.push_str(&quote(part));
+    }
+    Some(command)
+}
+
+pub(crate) fn quote_powershell_arg(value: &str) -> String {
+    if !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'_' | b'-' | b'.' | b'/' | b':' | b'+' | b'=')
+        })
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+pub(crate) fn is_pane_shell_process_name(name: &str) -> bool {
+    let normalized = normalized_process_name(name);
+    matches!(
+        normalized.as_str(),
+        "sh" | "bash"
+            | "dash"
+            | "zsh"
+            | "fish"
+            | "ksh"
+            | "mksh"
+            | "csh"
+            | "tcsh"
+            | "elvish"
+            | "xonsh"
+            | "nu"
+            | "pwsh"
+            | "powershell"
+            | "cmd"
+    )
+}
+
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn process_agent_hint(_pid: u32) -> Option<crate::detect::Agent> {
     None
@@ -218,6 +313,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pane_shell_process_names_reject_exec_replacement_programs() {
+        for shell in ["bash", "-zsh", "/bin/fish", "pwsh", "powershell.exe"] {
+            assert!(is_pane_shell_process_name(shell), "{shell}");
+        }
+        for program in ["vim", "nvim", "cargo", "test-runner", "opencode"] {
+            assert!(!is_pane_shell_process_name(program), "{program}");
+        }
+    }
+
+    #[test]
     fn detached_custom_command_preserves_unix_login_shell_flag() {
         let cmd = detached_custom_command_process("echo hello");
         assert_eq!(cmd.get_program(), std::ffi::OsStr::new("/bin/sh"));
@@ -258,6 +363,28 @@ mod tests {
     fn parse_agent_env_hint_ignores_missing_or_unknown_agents() {
         assert_eq!(parse_agent_env_hint(b"PATH=/bin\0TERM=xterm\0"), None);
         assert_eq!(parse_agent_env_hint(b"HERDR_AGENT=not-an-agent\0"), None);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn interactive_shell_command_quotes_for_posix_and_powershell() {
+        let argv = vec![
+            "pi".into(),
+            String::new(),
+            "two words".into(),
+            "a'b".into(),
+            "$HOME".into(),
+            "semi;colon".into(),
+            "@options".into(),
+        ];
+        assert_eq!(
+            interactive_shell_command(&argv, "bash").as_deref(),
+            Some("pi '' 'two words' 'a'\\''b' '$HOME' 'semi;colon' @options")
+        );
+        assert_eq!(
+            interactive_shell_command(&argv, "pwsh").as_deref(),
+            Some("pi '' 'two words' 'a''b' '$HOME' 'semi;colon' '@options'")
+        );
     }
 
     #[test]

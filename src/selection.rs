@@ -4,8 +4,8 @@
 //!
 //!   MouseDown in pane → Anchor recorded (no visual yet)
 //!   MouseDrag         → Selection becomes active, cells highlighted
-//!   MouseUp           → Text extracted, copied via OSC 52, highlight stays
-//!   Next click / key  → Selection cleared
+//!   MouseUp           → Selection finalized; optionally copied by the caller
+//!   Next click / key  → A retained selection is cleared
 //!
 //! Double-click copy also briefly highlights the selected word.
 //!
@@ -25,8 +25,8 @@ enum Phase {
     Anchored,
     /// Mouse has moved from the anchor point. Cells are being highlighted.
     Dragging,
-    /// Mouse released after dragging. Selection is visible and text
-    /// has been copied to clipboard. Cleared on next interaction.
+    /// Mouse released after dragging. Selection is visible and the gesture is
+    /// complete. Clipboard policy is owned by the caller.
     Done,
 }
 
@@ -159,8 +159,8 @@ impl Selection {
         self.phase == Phase::Dragging || self.phase == Phase::Done
     }
 
-    /// Whether this selection was already finalized and copied.
-    pub fn is_done(&self) -> bool {
+    /// Whether this selection was already finalized.
+    pub fn is_finalized(&self) -> bool {
         self.phase == Phase::Done
     }
 

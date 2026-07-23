@@ -2,9 +2,18 @@ use std::path::{Path, PathBuf};
 
 const PLUGIN_CONFIG_PATH_COMPONENT_MAX_CHARS: usize = 120;
 
+pub(crate) fn managed_plugins_dir() -> PathBuf {
+    crate::config::config_dir().join("plugins")
+}
+
+pub(crate) fn managed_checkout_path(plugin_id: &str) -> PathBuf {
+    managed_plugins_dir()
+        .join("github")
+        .join(crate::api::schema::plugin_managed_path_component(plugin_id))
+}
+
 pub(crate) fn plugin_config_dir(plugin_id: &str) -> PathBuf {
-    crate::config::config_dir()
-        .join("plugins")
+    managed_plugins_dir()
         .join("config")
         .join(plugin_config_path_component(plugin_id))
 }
@@ -37,7 +46,7 @@ fn ensure_plugin_config_dir(plugin_id: &str) -> std::io::Result<()> {
 }
 
 fn legacy_plugin_config_dirs(plugin_id: &str) -> Vec<PathBuf> {
-    let plugins_dir = crate::config::config_dir().join("plugins");
+    let plugins_dir = managed_plugins_dir();
     let old_unhashed =
         (!matches!(plugin_id, "config" | "github")).then(|| plugins_dir.join(plugin_id));
     let current_hashed =

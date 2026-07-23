@@ -1,0 +1,318 @@
+---
+title: プラグイン
+description: マニフェストのアクション、イベントフック、ペインを備えたローカル Herdr プラグインを作成します。
+---
+
+Herdr プラグインは、共有可能で実行可能なワークフローパッケージです。プラグインは
+Bash スクリプト、JavaScript アプリ、Lua スクリプト、Rust バイナリ、その他マシンで
+実行できる任意の argv コマンドにできます。Herdr はホスト側の面を担います:
+インストール、マニフェスト検証、キーバインド、ターミナルペイン、イベント、
+呼び出しコンテキスト、ソケットアクセスです。プラグインは自分の実装言語、依存関係、
+ファイル、永続状態を担います。
+
+プラグインは Herdr を軽量に保つために存在します。コアはターミナルワークスペース、
+ペイン、エージェント、安定した CLI/ソケット API に集中し続けます。プラグインは
+その既存の拡張面を、あらゆるワークフローを Herdr 本体に追加することなく、
+誰もが作成・インストール・共有できる再利用可能なワークフローに変えます。
+
+プラグインは SDK インテグレーションではありません。`herdr-plugin.toml`
+マニフェストと、Herdr が起動できるコマンドを持つディレクトリです。Herdr は
+マニフェストを検証し、ランタイムコンテキストを注入し、宣言されたコマンドを起動し、
+ログを記録します。コマンドはさらに作業が必要なときに、CLI またはソケット経由で
+Herdr を呼び出します。
+
+独立したプラグイン SDK や制限付きコマンドセットはありません。Herdr CLI 全体が
+プラグイン API です: [CLI リファレンス](/ja/docs/cli-reference/)のすべてのコマンドを
+プラグインから使えます。自分で `herdr ...` として実行できるものは、プラグインも
+実行できます。ほとんどのプラグインは、実行中の Herdr バイナリを指す
+`HERDR_BIN_PATH` を通じて Herdr を呼び出すべきです。これにより、Unix ソケットと
+Windows 名前付きパイプの両方でプラグインの移植性が保たれます。生の JSON リクエストを
+自分で送りたいときは[ソケット API](/ja/docs/socket-api/)を使ってください。
+
+ランタイムでのアクション登録と、ターミナル以外のネイティブなプラグイン UI は
+プラグイン v1 の範囲外です。アクション、イベントフック、ペイン、リンクハンドラーは
+すべてマニフェストで宣言します。
+
+## 信頼とセキュリティ
+
+プラグインはあなたのマシンで動く普通のコードです。インストールまたはリンクすると、
+そのビルドコマンドとランタイムコマンドはあなたのユーザーとして、あなたの環境で
+実行され、Herdr CLI 全体を呼び出せます — エディタ、シェル、コーディングエージェントに
+追加する拡張機能と同じです。この開放性こそが狙いであり、少しの判断力があれば
+安全に保てます。
+
+信頼できる作者とリポジトリからプラグインをインストールし、新しいプラグインが
+何をするのか先に目を通してください: `herdr-plugin.toml` マニフェストと、実行される
+スクリプトやバイナリです。`herdr plugin install` は対話的なターミナルでソースと
+実行されるコマンドのプレビューを表示するので、確定する前に確認できます。すでに
+信頼しているソースには `--yes` を使い、特定のリビジョンが欲しいときは `--ref` で
+固定してください。
+
+Herdr はマニフェストを検証し、各プラグインの設定と状態を専用ディレクトリに
+保ちますが、プラグインの動作をレビューしたりサンドボックス化したりはしません。
+サードパーティのプラグインは Herdr ではなく作者のものです。検証と実行の判断は
+あなた自身に委ねられます。
+
+## マニフェスト
+
+マニフェストは Herdr とプラグインの間の契約です。パッケージのメタデータ、対応
+プラットフォーム、任意のビルドコマンド、Herdr が実行できるエントリーポイントを
+宣言します。
+
+```toml
+id = "example.layout"
+name = "Layout"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Apply project layouts"
+platforms = ["linux", "macos", "windows"]
+
+[[build]]
+command = ["npm", "ci"]
+
+[[build]]
+command = ["npm", "run", "build"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "apply"
+title = "Apply layout"
+contexts = ["workspace"]
+command = ["node", "dist/apply.js"]
+
+[[events]]
+on = "worktree.created"
+command = ["herdr", "workspace", "list"]
+
+[[panes]]
+id = "board"
+title = "Project board"
+placement = "overlay"
+command = ["herdr-board"]
+
+[[link_handlers]]
+id = "github-issue"
+title = "Open GitHub issue"
+pattern = "^https://github\\.com/[^/]+/[^/]+/(issues|pull)/[0-9]+$"
+action = "apply"
+```
+
+トップレベルの `id`、`name`、`version`、`min_herdr_version` は必須です。
+`min_herdr_version` には、プラグインが使うプラグイン API、イベント名、
+マニフェストフィールドをサポートする最も古い Herdr バージョンを設定してください。
+プラグインの最低バージョンが現在のバイナリより新しい場合、Herdr はリンクや
+インストールを拒否します。`description` は任意です。プラグイン id には ASCII の
+英字、数字、ドット、コロン、アンダースコア、ハイフンが使えます。
+
+アクション id、ペイン id、リンクハンドラー id はプラグイン内部のローカル id です。
+ASCII の英字、数字、コロン、アンダースコア、ハイフンが使えますが、ドットは
+使えません。各 id の種類はプラグイン内で一意でなければなりません。グローバルに
+一意な名前が必要なとき、Herdr はアクション id を `plugin.id.action` の形に修飾します。
+
+プラグインが動作する場所は `platforms = ["linux", "macos", "windows"]` で宣言します。
+ビルドコマンド、アクション、イベントフック、ペイン、リンクハンドラーも独自の
+`platforms` を宣言でき、項目レベルの platforms はトップレベルのリストを
+上書きします。トップレベルの `platforms` がないローカルプラグインは警告付きで
+リンクされます。
+
+`command` の値は argv 配列です。Herdr はこれをシェル経由で実行しないため、
+コマンド自身がシェルを起動しない限りシェル展開はありません。言語固有の挙動は
+スクリプトやバイナリの側に置いてください。
+
+## 最初のプラグイン
+
+`herdr-plugin.toml` と実行可能なスクリプトまたはプログラムをひとつ含む
+ディレクトリから始めます:
+
+```text
+my-plugin/
+  herdr-plugin.toml
+  index.js
+```
+
+```toml
+id = "example.workspace-tools"
+name = "Workspace Tools"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Small workspace helpers"
+platforms = ["linux", "macos", "windows"]
+
+[[actions]]
+id = "list-workspaces"
+title = "List workspaces"
+contexts = ["workspace"]
+command = ["node", "index.js"]
+```
+
+コマンドの中からは `HERDR_BIN_PATH` で Herdr を呼び出します:
+
+```js
+const { spawnSync } = require("node:child_process");
+
+const herdr = process.env.HERDR_BIN_PATH ?? "herdr";
+const result = spawnSync(herdr, ["workspace", "list"], {
+  encoding: "utf8",
+  stdio: ["ignore", "pipe", "pipe"],
+});
+
+process.stdout.write(result.stdout);
+process.stderr.write(result.stderr);
+process.exit(result.status ?? 1);
+```
+
+この例は Node を使っていますが、プラグインに Node は必須ではありません。
+マニフェストは Bash、PowerShell、Python、Rust、Go、Lua、Bun など、ユーザーの
+マシンで使える任意のコマンドを起動できます。
+
+## インストールとリンク
+
+サンプルプラグインをインストールします:
+
+```bash
+herdr plugin install ogulcancelik/herdr-plugin-examples/agent-telegram-notify
+herdr plugin config-dir examples.agent-telegram-notify
+herdr plugin list
+herdr plugin action list --plugin examples.agent-telegram-notify
+```
+
+ローカルでプラグインを作成しているときは、代わりに作業ディレクトリをリンクします:
+
+```bash
+herdr plugin link /path/to/plugin
+herdr plugin config-dir example.layout
+herdr plugin action list --plugin example.layout
+herdr plugin action invoke example.layout.apply
+herdr plugin pane open --plugin example.layout --entrypoint board
+herdr plugin log list --plugin example.layout
+```
+
+`plugin install` は `owner/repo/subdir` のような GitHub 省略記法のみを受け付けます。
+`git` でクローンし、対話的なターミナルではプレビューを表示し、サポートされる
+ビルドコマンドを実行し、チェックアウトを Herdr 管理のプラグインデータの下に保存して
+登録します。非対話的なインストールには `--yes` を使ってください。GitHub 管理の
+プラグインを再インストールすると、その管理チェックアウトが置き換えられます。
+ローカルにリンクされたプラグインへの上書きインストールは拒否されます。先に
+ローカルプラグインを unlink または uninstall してください。`plugin install` と
+`plugin link` はプラグインの設定・状態ディレクトリを作成し、
+`plugin config-dir <id>` はセットアップドキュメントやシェルスクリプト向けに
+設定ディレクトリを表示します。
+
+`plugin uninstall <id-or-source>` はプラグインの登録を解除します。GitHub 管理の
+インストールでは管理チェックアウトも削除し、プラグイン id と、install で使うのと
+同じ `owner/repo[/subdir...]` 省略記法の両方を受け付けます。`plugin unlink <id>` は
+登録解除のみを行いファイルには触れないため、ローカル開発に便利です。v1 に独立した
+`plugin update` はありません。管理プラグインを更新するには GitHub から
+再インストールしてください。
+
+サンプル集のリポジトリは `ogulcancelik/herdr-plugin-examples` です。
+`agent-telegram-notify`、`github-link-preview`、`dev-layout-bootstrap` を含む
+独立したサンプルプラグインがサブディレクトリに入っています。これらはコピーする
+ためのサンプルであり、メンテナンスされる公式プラグインではありません。
+
+## ビルドコマンド
+
+ビルドコマンドは GitHub からの `plugin install` 中、確認の後、Herdr がプラグインを
+登録する前に実行されます。ビルドコマンドが失敗するとインストールは中止され、
+プラグインは登録されません。`plugin link` はビルドコマンドを実行しません。
+ローカルの作者は自分で作業ツリーをビルドします。ビルドコマンドはファイルを生成して
+構いませんが、インストールプレビュー後に `herdr-plugin.toml` を変更すると
+インストールは中止されます。ビルド失敗時には、プラグイン id、ビルドのインデックス、
+作業ディレクトリ、コマンド、終了ステータスまたは spawn エラー、上限付きの
+stdout/stderr が、ツールの出力を解釈せずに表示されます。
+
+ビルドコマンドも素の argv コマンドですが、ランタイムのプラグインコンテキストや
+Herdr のソケット環境変数は受け取りません。プラグインの作者は `cargo`、`npm`、
+`bun`、`lua` といった必要なシステムツールをドキュメントに書いてください。Herdr は
+ビルドの失敗を報告しますが、足りないツールチェーンをインストールすることはありません。
+
+## コマンドと環境
+
+ランタイムコマンドは、プラグインディレクトリを作業ディレクトリとして実行されます。
+Herdr は `HERDR_SOCKET_PATH`、`HERDR_BIN_PATH`、`HERDR_ENV=1`、
+`HERDR_PLUGIN_ID`、`HERDR_PLUGIN_ROOT`、`HERDR_PLUGIN_CONFIG_DIR`、
+`HERDR_PLUGIN_STATE_DIR`、`HERDR_PLUGIN_CONTEXT_JSON`、そして利用可能なら
+`HERDR_WORKSPACE_ID`、`HERDR_TAB_ID`、`HERDR_PANE_ID` を注入します。アクション
+コマンドは加えて `HERDR_PLUGIN_ACTION_ID` を受け取ります。イベントフックは
+`HERDR_PLUGIN_EVENT` と `HERDR_PLUGIN_EVENT_JSON` を、ペインコマンドは
+`HERDR_PLUGIN_ENTRYPOINT_ID` を受け取ります。
+
+`HERDR_PLUGIN_ROOT` は、インストールまたはリンクされたプラグインディレクトリです。
+GitHub からインストールされたプラグインのルートは管理されたソースチェックアウト
+なので、そこにユーザーの認証情報や永続状態を保存しないでください。`.env` ファイルの
+ようなユーザーが編集する設定は `HERDR_PLUGIN_CONFIG_DIR` の下に、ローカルの
+ランタイム状態は `HERDR_PLUGIN_STATE_DIR` の下に置いてください。Herdr はこれらの
+ディレクトリを作成し、レガシーなプラグイン設定の場所が存在すれば
+`HERDR_PLUGIN_CONFIG_DIR` に初期内容を移しますが、その中身の検証、同期、削除は
+しません。ファイル形式とライフサイクルはプラグインが所有します。
+
+`HERDR_PLUGIN_CONTEXT_JSON` には、その呼び出しで利用可能な場合、ワークスペース、
+タブ、フォーカス中のペイン、worktree、エージェント、選択テキスト、クリックされた
+URL、リンクハンドラーのフィールドが含まれます。シェルプラグインは、よく使う id は
+個別の環境変数から読み、完全な形が必要ならコンテキスト JSON をパースできます。
+
+Node、PowerShell、Bash など別のランタイムから移植性を保って Herdr を呼び出す必要が
+あるときは `HERDR_BIN_PATH` を使ってください。`HERDR_SOCKET_PATH` の背後にある生の
+ソケットトランスポートは OS 固有です: Unix クライアントは Unix ソケットパスに、
+Windows クライアントは名前付きパイプに接続します。`HERDR_BIN_PATH` を通じた CLI
+呼び出しなら、そのトランスポートの違いを気にせずに済みます。利用可能なコマンドは
+[CLI リファレンス](/ja/docs/cli-reference/)、生のリクエスト形式は
+[ソケット API](/ja/docs/socket-api/)を参照してください。
+
+## ペイン
+
+マニフェストのペイン `placement` のデフォルトは `overlay` で、アクティブなペインの
+上に一時的なズームオーバーレイを開き、閉じるときに以前のフォーカスとズームを
+復元します。`plugin.pane.open` リクエストは、マニフェストの placement を
+`overlay`、`split`、`tab`、`zoomed` で上書きできます。
+
+プラグインペインは、開いた後は通常の Herdr ペインです。プラグインはソケットや CLI を
+通じて `pane.move`、`pane.swap`、`pane.resize`、`pane.zoom` といった標準のペイン
+API を呼び出せます。ペインがタブやワークスペースをまたいで移動しても、Herdr は
+プラグインペインの所有権を元のペインに結び付けたまま維持します。
+
+Windows では、ビルドコマンド、アクションコマンド、イベントコマンドは、素の
+コマンドが `PATH` にあれば `npm.cmd`、`bun.cmd`、`pnpm.cmd` のような一般的な
+`PATHEXT` shim を解決します。ペインコマンドは Herdr の通常の Windows ペイン
+ランチャーを使うため、引き続き有効な Windows の argv コマンドでなければなりません。
+
+## キーバインド
+
+インストール済みプラグインのアクションにキーを割り当てます:
+
+```toml
+[[keys.command]]
+key = "prefix+l"
+type = "plugin_action"
+command = "example.layout.apply"
+description = "apply layout"
+```
+
+## リンクハンドラー
+
+`[[link_handlers]]` を使うと、マッチしたターミナル URL への修飾キー付きクリックを、
+ブラウザで URL を開く代わりにプラグインのアクションにルーティングできます。
+修飾キー付きクリックの修飾キーは macOS を含むすべてのプラットフォームで Control
+です。キャプチャされたターミナルのマウスレポートは、Command/Super を通常のクリックと
+区別して伝えないからです。`pattern` はクリックされた URL に対してマッチする Rust の
+正規表現で、`action` には同じプラグインが宣言したアクション名を指定します。リンク
+ハンドラーのアクションは `HERDR_PLUGIN_CONTEXT_JSON` で
+`invocation_source = "link_click"`、`clicked_url`、`link_handler_id` を受け取ります。
+シェルプラグインは `HERDR_PLUGIN_CLICKED_URL` と `HERDR_PLUGIN_LINK_HANDLER_ID` も
+読めます。ハンドラーは各プラグイン内でマニフェストの順にチェックされます。
+
+## ストレージ
+
+v1 には Herdr が管理するプラグインストレージ API はありません。永続状態が必要な
+プラグインは、自分のファイルやデータベースを持ってください。
+
+## マーケットプレイス
+
+コミュニティ製プラグインは[マーケットプレイス](/plugins/)で探せます。これは
+GitHub トピック `herdr-plugin` が付いた公開 GitHub リポジトリの自動インデックスです。
+プラグインは普通の GitHub リポジトリのままです: `herdr-plugin.toml` を含めて公開し、
+`herdr plugin install owner/repo[/subdir]` を共有してください。
+
+プラグインを掲載するには、公開リポジトリに GitHub トピック `herdr-plugin` を
+追加します。インデックスは 30 分ごとに更新されます。発見の仕組みは
+[マーケットプレイス](/ja/docs/marketplace/)を参照してください。

@@ -50,6 +50,7 @@ website-build:
 # Test bundled agent integration assets
 integration-assets-test:
     bun test src/integration/assets/herdr-agent-state.test.ts
+    bun test src/integration/assets/opencode/herdr-agent-state.test.ts
 
 # Run plugin marketplace Worker tests
 plugin-marketplace-test:
@@ -63,16 +64,12 @@ build-libghostty-vt:
 release-docs-check:
     python3 scripts/agent_detection_manifest_check.py --require-website
     python3 scripts/config_reference_check.py
-    @if ! diff -u website/src/data/config-reference.json docs/next/website/src/data/config-reference.json; then \
-        echo "error: stable config reference differs from docs/next; finalize it before releasing"; \
+    node website/scripts/docs-versions.mjs check
+    @test -f docs/next/README.md
+    @if ! diff -u CHANGELOG.md docs/next/CHANGELOG.md; then \
+        echo "error: CHANGELOG.md differs from docs/next/CHANGELOG.md; finalize release notes before releasing"; \
         exit 1; \
     fi
-    @for file in README.md CHANGELOG.md; do \
-        if ! diff -u "$file" "docs/next/$file"; then \
-            echo "error: $file differs from docs/next/$file; finalize release docs before releasing"; \
-            exit 1; \
-        fi; \
-    done
     @for file in CONFIGURATION.md INTEGRATIONS.md SOCKET_API.md; do \
         if [ -e "$file" ]; then \
             echo "error: $file was replaced by website docs; remove the root copy"; \
@@ -80,43 +77,25 @@ release-docs-check:
         fi; \
     done
     @test -d docs/next/website/src/content/docs
-    @for file in $(find website/src/content/docs -path '*/preview' -prune -o -type f -name '*.mdx' -print); do \
-        relative="${file#website/src/content/docs/}"; \
-        staged="docs/next/website/src/content/docs/$relative"; \
-        if [ ! -f "$staged" ]; then \
-            echo "error: $staged is missing; docs/next/website/src/content/docs must mirror website/src/content/docs"; \
-            exit 1; \
-        fi; \
-        if ! diff -u "$file" "$staged"; then \
-            echo "error: $file differs from $staged; finalize website docs before releasing"; \
-            exit 1; \
-        fi; \
-    done
-    @for file in $(find docs/next/website/src/content/docs -type f -name '*.mdx' -print); do \
-        relative="${file#docs/next/website/src/content/docs/}"; \
-        released="website/src/content/docs/$relative"; \
-        if [ ! -f "$released" ]; then \
-            echo "error: $file has no matching released website doc"; \
-            exit 1; \
-        fi; \
-    done
-    @for file in website/src/content/docs/*.mdx; do \
+    @for file in docs/next/website/src/content/docs/*.mdx; do \
         for locale in ja zh-cn; do \
-            translated="website/src/content/docs/$locale/$(basename "$file")"; \
+            translated="docs/next/website/src/content/docs/$locale/$(basename "$file")"; \
             if [ ! -f "$translated" ]; then \
-                echo "error: $translated is missing; translate stable docs before releasing"; \
+                echo "error: $translated is missing; translate next docs before releasing"; \
                 exit 1; \
             fi; \
         done; \
     done
-    @for file in website/src/content/docs/ja/*.mdx website/src/content/docs/zh-cn/*.mdx; do \
-        released="website/src/content/docs/$(basename "$file")"; \
-        if [ ! -f "$released" ]; then \
+    @for file in docs/next/website/src/content/docs/ja/*.mdx docs/next/website/src/content/docs/zh-cn/*.mdx; do \
+        staged="docs/next/website/src/content/docs/$(basename "$file")"; \
+        if [ ! -f "$staged" ]; then \
             echo "error: $file has no matching english doc; remove the stale translation"; \
             exit 1; \
         fi; \
     done
+    python3 scripts/docs_translation_parity.py --docs-root docs/next/website/src/content/docs
     python3 scripts/docs_translation_parity.py --docs-root website/src/content/docs
+    just website-build
 
 # Prepare the release commit without tagging or pushing (usage: just release-prepare 0.1.1)
 release-prepare version:

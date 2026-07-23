@@ -191,10 +191,18 @@ struct WindowsInputMapper {
     win32_input: WindowsWin32InputModeFramer,
 }
 
-#[derive(Default)]
 struct WindowsInputPump {
     framer: crate::raw_input::RawInputFramer,
     paste_from_win32_key_records: bool,
+}
+
+impl Default for WindowsInputPump {
+    fn default() -> Self {
+        Self {
+            framer: crate::raw_input::RawInputFramer::for_host_input(),
+            paste_from_win32_key_records: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -381,6 +389,7 @@ impl WindowsInputMapper {
                 key_down = key.key_down,
                 repeat_count = key.repeat_count,
                 virtual_key_code = key.virtual_key_code,
+                virtual_scan_code = key.virtual_scan_code,
                 unicode = key.unicode,
                 control_key_state = key.control_key_state,
                 "windows input trace: console key record"
@@ -444,8 +453,11 @@ impl WindowsInputMapper {
             return false;
         }
 
+        // Physical Escape carries a scan code. Scan-code-zero Escape can
+        // introduce raw VT reports and must stay in the framer.
         let bare_escape = modifiers.is_empty()
-            && (key.virtual_key_code == 0x1b || (key.virtual_key_code == 0 && key.unicode == 0x1b));
+            && ((key.virtual_key_code == 0x1b && key.virtual_scan_code == 0)
+                || (key.virtual_key_code == 0 && key.unicode == 0x1b));
         let ctrl_bracket = key.virtual_key_code == 0xdb
             && key.unicode == 0x1b
             && modifiers == crossterm::event::KeyModifiers::CONTROL;
@@ -610,6 +622,12 @@ impl WindowsInputMapper {
         kind: crate::protocol::ClientKeyKind,
     ) -> Option<crate::protocol::ClientInputEvent> {
         let modifiers = windows_key_modifiers(key.control_key_state);
+        if key.virtual_key_code == 0 {
+            let codepoint = self.utf16_unit_to_char(key.unicode)?;
+            if !codepoint.is_control() {
+                return Some(crate::protocol::ClientInputEvent::Text { codepoint });
+            }
+        }
         if modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
             && key.unicode == 0x000a
             && (key.virtual_key_code == 0x4a || key.virtual_scan_code == 0x24)
@@ -1208,6 +1226,25 @@ mod tests {
     }
 
     #[test]
+    fn vti_win32_input_mode_marks_ime_commit_as_text() {
+        for control_key_state in [0, 0x0010, 0x0008] {
+            let records = win32_input_mode_encoded_record(WindowsKeyRecord {
+                key_down: true,
+                repeat_count: 1,
+                virtual_key_code: 0,
+                virtual_scan_code: 0,
+                unicode: '你' as u16,
+                control_key_state,
+            });
+
+            assert_eq!(
+                translate(records),
+                vec![crate::protocol::ClientInputEvent::Text { codepoint: '你' }]
+            );
+        }
+    }
+
+    #[test]
     fn vti_win32_input_mode_decoded_paste_flag_clears_after_raw_completion() {
         let mut records = win32_input_mode_encoded_key_bytes(b"\x1b[200~");
         records.extend("one\x1b[201~".chars().map(key_char));
@@ -1330,11 +1367,26 @@ mod tests {
     }
 
     #[test]
-    fn vti_escape_key_record_flushes_to_escape_after_idle() {
+    fn vti_scan_code_zero_escape_key_record_flushes_after_idle() {
         let mut translator = WindowsInputTranslator::default();
-        assert!(translator.translate(key_vk(0x1b, 0)).is_empty());
+        assert!(translator
+            .translate(key_vk_with_scan_unicode(0x1b, 0, '\0', 0))
+            .is_empty());
         assert_eq!(
             translator.idle(),
+            vec![crate::protocol::ClientInputEvent::Key {
+                code: crate::protocol::ClientKeyCode::Esc,
+                modifiers: 0,
+                kind: crate::protocol::ClientKeyKind::Press,
+            }]
+        );
+    }
+
+    #[test]
+    fn vti_physical_escape_key_record_is_immediately_semantic() {
+        let mut translator = WindowsInputTranslator::default();
+        assert_eq!(
+            translator.translate(key_vk_with_scan_unicode(0x1b, 0x01, '\x1b', 0)),
             vec![crate::protocol::ClientInputEvent::Key {
                 code: crate::protocol::ClientKeyCode::Esc,
                 modifiers: 0,
@@ -1667,11 +1719,7 @@ mod tests {
         assert_eq!(
             translate(records),
             vec![
-                crate::protocol::ClientInputEvent::Key {
-                    code: crate::protocol::ClientKeyCode::Char('a'),
-                    modifiers: 0,
-                    kind: crate::protocol::ClientKeyKind::Press,
-                },
+                crate::protocol::ClientInputEvent::Text { codepoint: 'a' },
                 crate::protocol::ClientInputEvent::Key {
                     code: crate::protocol::ClientKeyCode::Char('a'),
                     modifiers: 0,
@@ -1744,8 +1792,8 @@ mod tests {
     }
 
     #[test]
-    fn vti_escape_key_record_without_unicode_starts_mouse_sequence() {
-        let records = [key_vk(0x1b, 0)]
+    fn vti_scan_code_zero_escape_starts_mouse_sequence() {
+        let records = [key_vk_with_scan_unicode(0x1b, 0, '\0', 0)]
             .into_iter()
             .chain("[<35;48;26M".chars().map(key_char));
 
@@ -1756,6 +1804,44 @@ mod tests {
                 column: 47,
                 row: 25,
                 modifiers: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn vti_nonzero_scan_escape_is_immediately_semantic() {
+        let mut translator = WindowsInputTranslator::default();
+        assert_eq!(
+            translator.translate(key_vk_with_scan_unicode(0x1b, 0x02, '\0', 0)),
+            vec![crate::protocol::ClientInputEvent::Key {
+                code: crate::protocol::ClientKeyCode::Esc,
+                modifiers: 0,
+                kind: crate::protocol::ClientKeyKind::Press,
+            }]
+        );
+    }
+
+    #[test]
+    fn vti_win32_input_mode_physical_escape_is_immediately_semantic() {
+        let records = win32_input_mode_encoded_record(WindowsKeyRecord {
+            key_down: true,
+            repeat_count: 1,
+            virtual_key_code: 0x1b,
+            virtual_scan_code: 0x01,
+            unicode: 0x1b,
+            control_key_state: 0,
+        });
+        let mut translator = WindowsInputTranslator::default();
+
+        assert_eq!(
+            records
+                .into_iter()
+                .flat_map(|record| translator.translate(record))
+                .collect::<Vec<_>>(),
+            vec![crate::protocol::ClientInputEvent::Key {
+                code: crate::protocol::ClientKeyCode::Esc,
+                modifiers: 0,
+                kind: crate::protocol::ClientKeyKind::Press,
             }]
         );
     }

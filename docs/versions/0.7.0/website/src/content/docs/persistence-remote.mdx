@@ -1,0 +1,132 @@
+---
+title: Persistence and remote access
+description: Detach from Herdr, reattach later, use named sessions, and connect over SSH.
+---
+
+Herdr keeps panes running in a background server. Your terminal client can detach and reconnect later.
+
+For the local, SSH, and `herdr --remote` workflows, see [How to work with Herdr](/docs/how-to-work/).
+
+## Detach and reattach
+
+Detach the client with `ctrl+b q`; panes and agents keep running. Reattach by running `herdr` again. Stop the session and its panes with `herdr server stop`.
+
+When Herdr starts again after a full server stop, it restores the saved session shape. For what survives detach, server restart, screen history replay, native agent session restore, and live handoff, see [Session state and restore](/docs/session-state/).
+
+## Named sessions
+
+Use named sessions when you want independent Herdr servers.
+
+```bash
+herdr session list
+herdr session attach work
+herdr session attach side-project
+herdr session stop work
+herdr session delete side-project
+```
+
+A named session has its own panes, tabs, workspaces, sockets, and runtime state. It still shares the same global config file.
+
+Use `--json` for scripts:
+
+```bash
+herdr session list --json
+herdr session stop work --json
+herdr session delete side-project --json
+```
+
+## Remote attach over SSH
+
+There are two remote modes; [How to work with Herdr](/docs/how-to-work/) compares them. SSH to the server and run `herdr` there for the tmux-style path. Or attach through SSH from your local machine:
+
+```bash
+herdr --remote workbox
+herdr --remote ssh://you@server:2222
+```
+
+In this mode your local Herdr is a thin client. It connects over SSH, starts or attaches to the remote Herdr server, and streams the UI back to your local terminal. Because the client runs locally, Herdr can bridge local desktop features such as image clipboard paste into the remote session by copying the image to a remote temp file and pasting that path.
+
+By default, `herdr --remote` uses your local Herdr keybindings for that attach. This keeps local muscle memory even when the remote server has different config. The local keybindings are a snapshot from attach time; detach and reattach after editing local keybindings. Use `--remote-keybindings server` when you want the remote server config instead. Local custom command keybindings are not sent, because those commands would run on the remote host.
+
+For repeat targets, use your SSH config:
+
+```text
+Host workbox
+  HostName server.example.com
+  User you
+  Port 2222
+```
+
+Then attach with:
+
+```bash
+herdr --remote workbox
+```
+
+Remote attach supports Linux and macOS hosts on x86_64 and aarch64. Herdr checks the remote platform, prefers a matching `herdr` already on the remote `PATH`, then checks `~/.local/bin/herdr`. If no matching binary exists, interactive runs prompt to install one to `~/.local/bin/herdr`; non-interactive runs fail instead of modifying the host. If `~/.local/bin` is not on the remote `PATH`, Herdr warns after install.
+
+Native Windows `herdr --remote` is not part of the Windows beta. From Windows, SSH into the server and run `herdr` there.
+
+By default, `herdr --remote` runs the bridge through a temporary SSH config that includes your SSH config first, then adds fallback keepalive settings. Existing user keepalive settings win. Set `[remote].manage_ssh_config = false` to use plain `ssh` without Herdr's generated bridge config.
+
+By default, remote attach uses the normal restart/stop flow if it needs to replace or restart a running remote server. To opt into experimental live handoff for a supported running remote server, pass `--handoff`:
+
+```bash
+herdr --remote workbox --handoff
+```
+
+If you SSH into the server first and run `herdr` there, Herdr runs entirely on the server. That mode is useful and simple, but it cannot access your local desktop clipboard beyond normal terminal text paste.
+
+When your local and remote platforms match, Herdr can copy the current local binary for direct installs. For Homebrew, mise, and Nix installs, or when the platforms differ, it downloads the matching release asset for the current client version from `https://herdr.dev/latest.json`.
+
+For local builds or custom binaries, set `HERDR_REMOTE_BINARY` to a local file path before running remote attach.
+
+```bash
+HERDR_REMOTE_BINARY=target/release/herdr herdr --remote workbox
+```
+
+## Remote named sessions
+
+Use `--session` with `--remote` to attach to a named session on the remote host:
+
+```bash
+herdr --remote workbox --session agents
+```
+
+## Direct terminal attach
+
+Full Herdr attach opens the whole workspace UI. Direct attach opens one server-owned terminal in your current terminal.
+
+Direct terminal attach is Unix-only in the Windows beta.
+
+Attach by agent target:
+
+```bash
+herdr agent attach reviewer
+```
+
+Attach by terminal ID:
+
+```bash
+herdr terminal attach term_abc123
+```
+
+Direct attach streams the current rendered terminal state, then live ANSI frames. Input goes straight to that terminal.
+
+Detach with `ctrl+b q`. Send a literal `ctrl+b` with `ctrl+b ctrl+b`.
+
+Only one writable direct attach client owns input and resize for a terminal. Use `--takeover` to replace an existing owner:
+
+```bash
+herdr terminal attach term_abc123 --takeover
+```
+
+## Single-process escape hatch
+
+Use `--no-session` to run Herdr without the background server/client split:
+
+```bash
+herdr --no-session
+```
+
+This is mainly an escape hatch for debugging or compatibility. The default persistent session mode is the normal path.

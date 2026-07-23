@@ -4,6 +4,8 @@ use std::{
     mem::{size_of, MaybeUninit},
     path::PathBuf,
     ptr::{copy_nonoverlapping, null_mut},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use windows_sys::{
@@ -28,8 +30,8 @@ use windows_sys::{
             Ole::CF_UNICODETEXT,
             Threading::{
                 GetCurrentProcess, GetExitCodeProcess, OpenProcess, TerminateProcess,
-                DETACHED_PROCESS, PROCESS_BASIC_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
-                PROCESS_VM_READ,
+                CREATE_NO_WINDOW, DETACHED_PROCESS, PROCESS_BASIC_INFORMATION,
+                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
             },
         },
         UI::Shell::{CommandLineToArgvW, ShellExecuteW},
@@ -39,6 +41,21 @@ use windows_sys::{
 use super::{ClipboardImage, ForegroundJob, Signal};
 
 const STILL_ACTIVE: u32 = 259;
+const FOREGROUND_PROCESS_SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(250);
+
+#[derive(Debug)]
+struct CachedProcessSnapshot {
+    built_at: Instant,
+    entries: Arc<Vec<WindowsProcessEntry>>,
+}
+
+#[derive(Debug)]
+struct ProcessSnapshotCache {
+    cached: Option<CachedProcessSnapshot>,
+}
+
+static FOREGROUND_PROCESS_SNAPSHOT_CACHE: Mutex<ProcessSnapshotCache> =
+    Mutex::new(ProcessSnapshotCache { cached: None });
 
 pub(crate) fn should_draw_host_cursor_by_default() -> bool {
     true
@@ -60,6 +77,71 @@ fn raw_command_shell(comspec: Option<std::ffi::OsString>) -> std::ffi::OsString 
     comspec
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| r"C:\Windows\System32\cmd.exe".into())
+}
+
+pub(crate) fn interactive_shell_command(argv: &[String], shell_name: &str) -> Option<String> {
+    let shell_name = shell_name.to_ascii_lowercase();
+    let powershell = shell_name.contains("powershell") || shell_name.contains("pwsh");
+    let script = powershell_agent_script(argv)?;
+    if powershell {
+        Some(script)
+    } else {
+        Some(cmd_encoded_powershell_command(&script))
+    }
+}
+
+fn powershell_agent_script(argv: &[String]) -> Option<String> {
+    let (program, args) = argv.split_first()?;
+    let command_line = args
+        .iter()
+        .map(|arg| quote_windows_command_line_arg(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(format!(
+        "$p=Start-Process -FilePath {} -ArgumentList {} -NoNewWindow -Wait -PassThru",
+        super::quote_powershell_arg(program),
+        super::quote_powershell_arg(&command_line),
+    ))
+}
+
+fn quote_windows_command_line_arg(value: &str) -> String {
+    if !value.is_empty()
+        && !value
+            .chars()
+            .any(|ch| matches!(ch, ' ' | '\t' | '\n' | '\x0b' | '"'))
+    {
+        return value.to_string();
+    }
+
+    let mut quoted = String::from("\"");
+    let mut backslashes = 0;
+    for ch in value.chars() {
+        if ch == '\\' {
+            backslashes += 1;
+            continue;
+        }
+        if ch == '"' {
+            quoted.push_str(&"\\".repeat(backslashes * 2 + 1));
+        } else {
+            quoted.push_str(&"\\".repeat(backslashes));
+        }
+        backslashes = 0;
+        quoted.push(ch);
+    }
+    quoted.push_str(&"\\".repeat(backslashes * 2));
+    quoted.push('"');
+    quoted
+}
+
+fn cmd_encoded_powershell_command(script: &str) -> String {
+    use base64::Engine as _;
+
+    let utf16 = script
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
+    format!("powershell.exe -NoLogo -NoProfile -EncodedCommand {encoded}")
 }
 
 pub(crate) fn detached_custom_command_process_platform(command: &str) -> std::process::Command {
@@ -129,6 +211,12 @@ fn scrollback_editor_argv_with_env(
     Ok(argv)
 }
 
+pub(crate) fn configure_background_command_platform(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
 pub fn detach_server_daemon_command(command: &mut std::process::Command) {
     use std::os::windows::process::CommandExt;
 
@@ -149,8 +237,25 @@ pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
     select_pane_foreground_job(child_pid, &entries)
 }
 
+pub(crate) fn available_pane_shell(child_pid: u32) -> Option<String> {
+    available_pane_shell_from_snapshot(child_pid, &snapshot_processes())
+}
+
+fn available_pane_shell_from_snapshot(
+    child_pid: u32,
+    entries: &[WindowsProcessEntry],
+) -> Option<String> {
+    let shell = entries.iter().find(|entry| entry.pid == child_pid)?;
+    if !super::is_pane_shell_process_name(&shell.name) {
+        return None;
+    }
+    descendant_entries(child_pid, entries)
+        .is_empty()
+        .then(|| shell.name.clone())
+}
+
 pub fn foreground_group_leader_job(process_group_id: u32) -> Option<ForegroundJob> {
-    let entries = snapshot_processes();
+    let entries = cached_foreground_processes();
     let entry = entries.iter().find(|entry| entry.pid == process_group_id)?;
     Some(ForegroundJob {
         process_group_id,
@@ -159,7 +264,8 @@ pub fn foreground_group_leader_job(process_group_id: u32) -> Option<ForegroundJo
 }
 
 pub fn foreground_process_group_id(child_pid: u32) -> Option<u32> {
-    foreground_job(child_pid).map(|job| job.process_group_id)
+    let entries = cached_foreground_processes();
+    select_pane_foreground_job(child_pid, &entries).map(|job| job.process_group_id)
 }
 
 pub fn process_cwd(pid: u32) -> Option<PathBuf> {
@@ -328,6 +434,34 @@ fn snapshot_processes() -> Vec<WindowsProcessEntry> {
         ok = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
     }
     output
+}
+
+fn cached_foreground_processes() -> Arc<Vec<WindowsProcessEntry>> {
+    let mut cache = FOREGROUND_PROCESS_SNAPSHOT_CACHE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    cache.snapshot(FOREGROUND_PROCESS_SNAPSHOT_CACHE_TTL, snapshot_processes)
+}
+
+impl ProcessSnapshotCache {
+    fn snapshot(
+        &mut self,
+        max_age: Duration,
+        build: impl FnOnce() -> Vec<WindowsProcessEntry>,
+    ) -> Arc<Vec<WindowsProcessEntry>> {
+        if let Some(cached) = &self.cached {
+            if cached.built_at.elapsed() < max_age {
+                return Arc::clone(&cached.entries);
+            }
+        }
+
+        let entries = Arc::new(build());
+        self.cached = Some(CachedProcessSnapshot {
+            built_at: Instant::now(),
+            entries: Arc::clone(&entries),
+        });
+        entries
+    }
 }
 
 fn process_command_line(pid: u32) -> Option<String> {
@@ -656,49 +790,193 @@ mod tests {
     use std::{
         fs,
         process::{Command, Stdio},
+        sync::Arc,
         thread,
         time::{Duration, Instant},
     };
 
-    use windows_sys::Win32::System::Console::{AllocConsole, FreeConsole, GetConsoleWindow};
-
-    const DETACHED_CONSOLE_TEST_CHILD_ENV: &str = "HERDR_TEST_DETACHED_CONSOLE_CHILD";
+    use windows_sys::Win32::System::Console::{
+        AllocConsole, FreeConsole, GetConsoleProcessList, GetConsoleWindow,
+    };
 
     #[test]
-    fn server_daemon_command_does_not_inherit_console() {
-        if std::env::var_os(DETACHED_CONSOLE_TEST_CHILD_ENV).is_some() {
-            assert!(unsafe { GetConsoleWindow() }.is_null());
+    fn cmd_agent_command_encodes_edge_arguments_without_cmd_expansion() {
+        use base64::Engine as _;
+
+        assert_eq!(super::super::quote_powershell_arg("@options"), "'@options'");
+        let argv = vec![
+            "pi".into(),
+            String::new(),
+            "two words".into(),
+            "100%".into(),
+            "wow!".into(),
+            "a'b".into(),
+        ];
+        let command = super::interactive_shell_command(&argv, "cmd.exe").unwrap();
+        let encoded = command.split_whitespace().last().unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        let utf16 = bytes
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            String::from_utf16(&utf16).unwrap(),
+            "$p=Start-Process -FilePath pi -ArgumentList '\"\" \"two words\" 100% wow! a''b' -NoNewWindow -Wait -PassThru"
+        );
+    }
+
+    #[test]
+    fn windows_shells_round_trip_agent_arguments_through_a_real_command() {
+        let base = std::env::temp_dir().join(format!(
+            "herdr-agent-argv-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        let helper = base.join("pi.cmd");
+        fs::write(
+            &helper,
+            "@echo off\r\n>\"%HERDR_ARGV_CAPTURE%\" (\r\necho(%~1\r\necho(%~2\r\necho(%~3\r\necho(%~4\r\necho(%~5\r\necho(%~6\r\n)\r\n",
+        )
+        .unwrap();
+        let argv = vec![
+            "pi".into(),
+            String::new(),
+            "two words".into(),
+            "100%".into(),
+            "wow!".into(),
+            "a'b".into(),
+            "@options".into(),
+        ];
+        let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+        let path = format!("{};{}", base.display(), inherited_path.to_string_lossy());
+
+        for shell in ["powershell.exe", "cmd.exe"] {
+            let capture = base.join(format!("{shell}.txt"));
+            let command = super::interactive_shell_command(&argv, shell).unwrap();
+            let status = if shell == "cmd.exe" {
+                Command::new("cmd.exe")
+                    .args(["/d", "/c", &command])
+                    .env("PATH", &path)
+                    .env("HERDR_ARGV_CAPTURE", &capture)
+                    .status()
+                    .unwrap()
+            } else {
+                Command::new("powershell.exe")
+                    .args(["-NoLogo", "-NoProfile", "-Command", &command])
+                    .env("PATH", &path)
+                    .env("HERDR_ARGV_CAPTURE", &capture)
+                    .status()
+                    .unwrap()
+            };
+            assert!(status.success(), "{shell} command failed");
+            assert_eq!(
+                fs::read_to_string(capture).unwrap().replace("\r\n", "\n"),
+                "\ntwo words\n100%\nwow!\na'b\n@options\n"
+            );
+        }
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    const CONSOLE_TEST_CHILD_ENV: &str = "HERDR_TEST_CONSOLE_CHILD_MODE";
+    const CONSOLE_TEST_PARENT_PID_ENV: &str = "HERDR_TEST_CONSOLE_PARENT_PID";
+
+    fn console_process_ids() -> Vec<u32> {
+        let mut process_ids = vec![0; 8];
+        loop {
+            let count = unsafe {
+                GetConsoleProcessList(process_ids.as_mut_ptr(), process_ids.len() as u32)
+            } as usize;
+            if count == 0 {
+                return Vec::new();
+            }
+            if count <= process_ids.len() {
+                process_ids.truncate(count);
+                return process_ids;
+            }
+            process_ids.resize(count, 0);
+        }
+    }
+
+    #[test]
+    fn windows_background_and_server_daemon_commands_do_not_have_consoles() {
+        if let Some(mode) = std::env::var_os(CONSOLE_TEST_CHILD_ENV) {
+            assert!(
+                unsafe { GetConsoleWindow() }.is_null(),
+                "{} child opened or inherited a console window",
+                mode.to_string_lossy()
+            );
+            let parent_pid = std::env::var(CONSOLE_TEST_PARENT_PID_ENV)
+                .expect("console test parent pid")
+                .parse::<u32>()
+                .expect("numeric console test parent pid");
+            assert!(
+                !console_process_ids().contains(&parent_pid),
+                "{} child inherited the parent console",
+                mode.to_string_lossy()
+            );
             return;
         }
 
-        let allocated_console = if unsafe { GetConsoleWindow() }.is_null() {
+        let allocated_console = if console_process_ids().is_empty() {
             assert_ne!(unsafe { AllocConsole() }, 0, "allocate test console");
             true
         } else {
             false
         };
 
+        let parent_pid = std::process::id().to_string();
         let test_exe = std::env::current_exe().expect("resolve test executable");
-        let mut child = Command::new(test_exe);
-        child
-            .arg("server_daemon_command_does_not_inherit_console")
-            .env(DETACHED_CONSOLE_TEST_CHILD_ENV, "1")
+        let configurations: [(&str, fn(&mut Command)); 2] = [
+            ("background", super::configure_background_command_platform),
+            ("server daemon", super::detach_server_daemon_command),
+        ];
+        for (mode, configure) in configurations {
+            let mut child = Command::new(&test_exe);
+            child
+                .arg("windows_background_and_server_daemon_commands_do_not_have_consoles")
+                .env(CONSOLE_TEST_CHILD_ENV, mode)
+                .env(CONSOLE_TEST_PARENT_PID_ENV, &parent_pid)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            configure(&mut child);
+
+            let status = child.status().expect("spawn console isolation test child");
+            assert!(
+                status.success(),
+                "{mode} child opened or inherited a console"
+            );
+        }
+
+        let command = format!(
+            r#""{}" windows_background_and_server_daemon_commands_do_not_have_consoles"#,
+            test_exe.display()
+        );
+        let status = crate::platform::detached_custom_command_process(&command)
+            .env(CONSOLE_TEST_CHILD_ENV, "detached custom command descendant")
+            .env(CONSOLE_TEST_PARENT_PID_ENV, &parent_pid)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        super::detach_server_daemon_command(&mut child);
+            .stderr(Stdio::null())
+            .status()
+            .expect("spawn detached custom command test child");
+        assert!(
+            status.success(),
+            "detached custom command descendant opened or inherited a console"
+        );
 
-        let status = child.status().expect("spawn detached test child");
         if allocated_console {
             unsafe {
                 FreeConsole();
             }
         }
-
-        assert!(
-            status.success(),
-            "detached child inherited the test console"
-        );
     }
 
     fn argv_strings(argv: &[std::ffi::OsString]) -> Vec<String> {
@@ -815,6 +1093,34 @@ mod tests {
         assert_eq!(job.process_group_id, 20);
         assert_eq!(job.processes.len(), 1);
         assert_eq!(job.processes[0].name, "codex.exe");
+    }
+
+    #[test]
+    fn windows_foreground_process_snapshot_is_shared_within_ttl() {
+        let mut cache = super::ProcessSnapshotCache { cached: None };
+        let mut builds = 0;
+        let mut first_build_completed_at = None;
+
+        let first = cache.snapshot(Duration::from_secs(60), || {
+            builds += 1;
+            let entries = vec![test_entry(10, 1, "powershell.exe", &["powershell.exe"])];
+            first_build_completed_at = Some(Instant::now());
+            entries
+        });
+        assert!(cache.cached.as_ref().unwrap().built_at >= first_build_completed_at.unwrap());
+        let second = cache.snapshot(Duration::from_secs(60), || {
+            builds += 1;
+            Vec::new()
+        });
+        let refreshed = cache.snapshot(Duration::ZERO, || {
+            builds += 1;
+            vec![test_entry(20, 1, "pwsh.exe", &["pwsh.exe"])]
+        });
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&second, &refreshed));
+        assert_eq!(builds, 2);
+        assert_eq!(refreshed[0].pid, 20);
     }
 
     #[test]
@@ -935,6 +1241,27 @@ mod tests {
 
         assert_eq!(job.process_group_id, 10);
         assert_eq!(job.processes[0].name, "powershell.exe");
+    }
+
+    #[test]
+    fn windows_shell_is_available_only_without_descendants() {
+        let shell_only = vec![test_entry(10, 1, "powershell.exe", &["powershell.exe"])];
+        assert_eq!(
+            super::available_pane_shell_from_snapshot(10, &shell_only).as_deref(),
+            Some("powershell.exe")
+        );
+
+        let busy = vec![
+            test_entry(10, 1, "powershell.exe", &["powershell.exe"]),
+            test_entry(20, 10, "git.exe", &["git.exe", "status"]),
+        ];
+        assert_eq!(super::available_pane_shell_from_snapshot(10, &busy), None);
+
+        let replaced = vec![test_entry(10, 1, "vim.exe", &["vim.exe"])];
+        assert_eq!(
+            super::available_pane_shell_from_snapshot(10, &replaced),
+            None
+        );
     }
 
     #[test]

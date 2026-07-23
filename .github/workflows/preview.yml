@@ -368,7 +368,19 @@ jobs:
           git config user.email "285672167+kangal-bot@users.noreply.github.com"
           git add website/preview.json
           git diff --cached --quiet || git commit -m "docs: update preview manifest"
-          git push "https://x-access-token:${KANGAL_GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:master
+          remote="https://x-access-token:${KANGAL_GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          for attempt in 1 2 3; do
+            git pull --rebase "$remote" master
+            if git push "$remote" HEAD:master; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "master changed during preview publishing; retrying ($attempt/3)"
+              sleep $((attempt * 2))
+            fi
+          done
+          echo "failed to publish preview manifest after 3 attempts" >&2
+          exit 1
 
       - name: Mark preview-released issues
         continue-on-error: true

@@ -1,0 +1,285 @@
+---
+title: 插件
+description: 编写带有清单动作、事件钩子和窗格的本地 Herdr 插件。
+---
+
+Herdr 插件是可分享、可执行的工作流包。插件可以是 Bash 脚本、JavaScript
+应用、Lua 脚本、Rust 二进制,或你机器上能运行的任何 argv 命令。Herdr
+负责宿主侧: 安装、清单校验、按键绑定、终端窗格、事件、调用上下文和
+socket 访问。插件负责自己的实现语言、依赖、文件和持久状态。
+
+插件的存在是为了让 Herdr 保持精简。核心继续专注于终端工作区、窗格、
+智能体和稳定的 CLI/socket API。插件把这套已有的扩展面变成可复用的
+工作流,让大家可以构建、安装和分享,而不必把每种工作流都塞进 Herdr 本体。
+
+插件不是 SDK 集成。它是一个带 `herdr-plugin.toml` 清单和 Herdr 可启动
+命令的目录。Herdr 校验清单、注入运行时上下文、启动声明的命令并记录日志。
+命令在需要做更多工作时,通过 CLI 或 socket 回调 Herdr。
+
+没有单独的插件 SDK,也没有受限的命令集。整个 Herdr CLI 就是插件 API:
+[CLI 参考](/zh-cn/docs/cli-reference/)中的每条命令插件都能用,你自己能以
+`herdr ...` 运行的任何东西,插件也能运行。大多数插件应通过指向运行中
+Herdr 二进制的 `HERDR_BIN_PATH` 调用 Herdr,这样插件在 Unix socket 和
+Windows 命名管道之间保持可移植。想自己发送原始 JSON 请求时,使用
+[socket API](/zh-cn/docs/socket-api/)。
+
+运行时动作注册和非终端的原生插件 UI 不在插件 v1 范围内。动作、事件钩子、
+窗格和链接处理器都在清单中声明。
+
+## 信任与安全
+
+插件是运行在你机器上的普通代码。安装或链接一个插件时,它的构建和运行时
+命令以你的用户身份、在你的环境中执行,并且可以调用完整的 Herdr CLI —
+和你给编辑器、shell 或编程智能体添加的任何扩展一样。这种开放性正是设计
+初衷,加上一点判断力就能保持安全。
+
+从你信任的作者和仓库安装插件,并先大致看看新插件做什么: `herdr-plugin.toml`
+清单,以及它运行的脚本或二进制。`herdr plugin install` 在交互式终端中会
+展示来源和将要运行的命令的预览,你可以在确认前审查。对已经信任的来源用
+`--yes`,想固定某个特定版本时用 `--ref`。
+
+Herdr 校验清单,并把每个插件的配置和状态放在各自的目录中,但它不会审查
+或沙箱化插件的行为。第三方插件来自它们的作者,而不是 Herdr,审查与运行
+由你自行决定。
+
+## 清单
+
+清单是 Herdr 和插件之间的契约。它声明包元数据、支持的平台、可选的构建
+命令,以及 Herdr 可以运行的入口点。
+
+```toml
+id = "example.layout"
+name = "Layout"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Apply project layouts"
+platforms = ["linux", "macos", "windows"]
+
+[[build]]
+command = ["npm", "ci"]
+
+[[build]]
+command = ["npm", "run", "build"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "apply"
+title = "Apply layout"
+contexts = ["workspace"]
+command = ["node", "dist/apply.js"]
+
+[[events]]
+on = "worktree.created"
+command = ["herdr", "workspace", "list"]
+
+[[panes]]
+id = "board"
+title = "Project board"
+placement = "overlay"
+command = ["herdr-board"]
+
+[[link_handlers]]
+id = "github-issue"
+title = "Open GitHub issue"
+pattern = "^https://github\\.com/[^/]+/[^/]+/(issues|pull)/[0-9]+$"
+action = "apply"
+```
+
+顶层的 `id`、`name`、`version` 和 `min_herdr_version` 是必填项。
+把 `min_herdr_version` 设为支持你插件所用的插件 API、事件名和清单字段的
+最老 Herdr 版本。当插件的最低版本比当前二进制更新时,Herdr 会拒绝链接
+或安装。`description` 可选。插件 id 可以使用 ASCII 字母、数字、点、
+冒号、下划线和连字符。
+
+动作 id、窗格 id 和链接处理器 id 是插件内部的本地 id。它们可以使用
+ASCII 字母、数字、冒号、下划线和连字符,但不能用点。每种 id 在插件内
+必须唯一。当需要全局唯一名称时,Herdr 会把动作 id 限定为
+`plugin.id.action` 的形式。
+
+用 `platforms = ["linux", "macos", "windows"]` 声明插件可以运行的平台。
+构建命令、动作、事件钩子、窗格和链接处理器也可以声明自己的 `platforms`;
+条目级的 platforms 覆盖顶层列表。没有顶层 `platforms` 的本地插件在链接
+时会给出警告。
+
+`command` 的值是 argv 数组。Herdr 不会通过 shell 运行它们,所以除非你的
+命令自己启动 shell,否则没有 shell 展开。语言相关的行为放到你的脚本或
+二进制里。
+
+## 第一个插件
+
+从一个包含 `herdr-plugin.toml` 和一个可执行脚本或程序的目录开始:
+
+```text
+my-plugin/
+  herdr-plugin.toml
+  index.js
+```
+
+```toml
+id = "example.workspace-tools"
+name = "Workspace Tools"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Small workspace helpers"
+platforms = ["linux", "macos", "windows"]
+
+[[actions]]
+id = "list-workspaces"
+title = "List workspaces"
+contexts = ["workspace"]
+command = ["node", "index.js"]
+```
+
+在命令内部通过 `HERDR_BIN_PATH` 回调 Herdr:
+
+```js
+const { spawnSync } = require("node:child_process");
+
+const herdr = process.env.HERDR_BIN_PATH ?? "herdr";
+const result = spawnSync(herdr, ["workspace", "list"], {
+  encoding: "utf8",
+  stdio: ["ignore", "pipe", "pipe"],
+});
+
+process.stdout.write(result.stdout);
+process.stderr.write(result.stderr);
+process.exit(result.status ?? 1);
+```
+
+这个示例用了 Node,但插件本身完全不要求 Node。清单可以启动 Bash、
+PowerShell、Python、Rust、Go、Lua、Bun 或用户机器上可用的任何其他命令。
+
+## 安装与链接
+
+安装一个示例插件:
+
+```bash
+herdr plugin install ogulcancelik/herdr-plugin-examples/agent-telegram-notify
+herdr plugin config-dir examples.agent-telegram-notify
+herdr plugin list
+herdr plugin action list --plugin examples.agent-telegram-notify
+```
+
+在本地编写插件时,改为链接工作目录:
+
+```bash
+herdr plugin link /path/to/plugin
+herdr plugin config-dir example.layout
+herdr plugin action list --plugin example.layout
+herdr plugin action invoke example.layout.apply
+herdr plugin pane open --plugin example.layout --entrypoint board
+herdr plugin log list --plugin example.layout
+```
+
+`plugin install` 只接受 GitHub 简写,比如 `owner/repo/subdir`。它用 `git`
+克隆,在交互式终端展示预览,运行受支持的构建命令,然后把检出保存到
+Herdr 管理的插件数据下并注册。非交互式安装用 `--yes`。重新安装 GitHub
+管理的插件会替换该托管检出。不允许覆盖安装到本地链接的插件之上;请先
+unlink 或 uninstall 本地插件。`plugin install` 和 `plugin link` 会创建
+插件的配置和状态目录,`plugin config-dir <id>` 打印配置目录,方便安装
+文档和 shell 脚本使用。
+
+`plugin uninstall <id-or-source>` 注销插件。对 GitHub 管理的安装,它还会
+删除托管检出,并且既接受插件 id,也接受与 install 相同的
+`owner/repo[/subdir...]` 简写。`plugin unlink <id>` 只注销插件、不动文件,
+对本地开发很有用。v1 没有单独的 `plugin update`;要刷新托管插件,请从
+GitHub 重新安装。
+
+示例菜谱仓库是 `ogulcancelik/herdr-plugin-examples`。它在子目录中包含
+多个独立示例插件,包括 `agent-telegram-notify`、`github-link-preview` 和
+`dev-layout-bootstrap`。这些是供复制的示例,不是持续维护的官方插件。
+
+## 构建命令
+
+构建命令在 GitHub `plugin install` 过程中运行,时机在确认之后、Herdr
+注册插件之前。如果构建命令失败,安装中止,插件不会被注册。`plugin link`
+不运行构建命令;本地作者自己构建工作树。构建命令可以生成文件,但在
+安装预览之后修改 `herdr-plugin.toml` 会导致安装中止。构建失败时会显示
+插件 id、构建序号、工作目录、命令、退出状态或 spawn 错误,以及截断后的
+stdout/stderr,不会解读工具输出。
+
+构建命令同样是普通的 argv 命令,但它们不会收到运行时插件上下文或
+Herdr socket 环境变量。插件作者应在文档中说明所需的系统工具,比如
+`cargo`、`npm`、`bun` 或 `lua`;Herdr 报告构建失败,但不会安装缺失的
+工具链。
+
+## 命令与环境
+
+运行时命令以插件目录为工作目录执行。Herdr 注入 `HERDR_SOCKET_PATH`、
+`HERDR_BIN_PATH`、`HERDR_ENV=1`、`HERDR_PLUGIN_ID`、`HERDR_PLUGIN_ROOT`、
+`HERDR_PLUGIN_CONFIG_DIR`、`HERDR_PLUGIN_STATE_DIR`、
+`HERDR_PLUGIN_CONTEXT_JSON`,以及可用时的 `HERDR_WORKSPACE_ID`、
+`HERDR_TAB_ID` 和 `HERDR_PANE_ID`。动作命令还会收到
+`HERDR_PLUGIN_ACTION_ID`;事件钩子收到 `HERDR_PLUGIN_EVENT` 和
+`HERDR_PLUGIN_EVENT_JSON`;窗格命令收到 `HERDR_PLUGIN_ENTRYPOINT_ID`。
+
+`HERDR_PLUGIN_ROOT` 是已安装或已链接的插件目录。不要把用户凭据或持久
+状态放在那里,因为 GitHub 安装的插件根目录是托管的源码检出。把 `.env`
+这类用户可编辑的配置放在 `HERDR_PLUGIN_CONFIG_DIR` 下,把本地运行时
+状态放在 `HERDR_PLUGIN_STATE_DIR` 下。Herdr 会创建这些目录,并在旧版
+插件配置位置存在时把内容初始化到 `HERDR_PLUGIN_CONFIG_DIR`,但不会校验、
+同步或删除其中的内容。文件格式和生命周期归插件所有。
+
+`HERDR_PLUGIN_CONTEXT_JSON` 在本次调用可用时,可以包含工作区、标签页、
+聚焦窗格、worktree、智能体、选中文本、点击的 URL 和链接处理器字段。
+shell 插件可以从各个环境变量读取常用 id,或解析上下文 JSON 获取完整结构。
+
+当插件需要从 Node、PowerShell、Bash 或其他运行时可移植地调用 Herdr 时,
+使用 `HERDR_BIN_PATH`。`HERDR_SOCKET_PATH` 背后的原始 socket 传输是
+操作系统相关的: Unix 客户端连接 Unix socket 路径,Windows 客户端连接
+命名管道。通过 `HERDR_BIN_PATH` 的 CLI 调用可以避开这种传输差异。可用
+命令见 [CLI 参考](/zh-cn/docs/cli-reference/),原始请求结构见
+[socket API](/zh-cn/docs/socket-api/)。
+
+## 窗格
+
+清单中窗格的 `placement` 默认为 `overlay`,它在活动窗格上方打开一个
+临时的缩放覆盖层,关闭时恢复之前的焦点和缩放。`plugin.pane.open` 请求
+可以用 `overlay`、`split`、`tab` 或 `zoomed` 覆盖清单的 placement。
+
+插件窗格打开后就是普通的 Herdr 窗格。插件可以通过 socket 或 CLI 调用
+`pane.move`、`pane.swap`、`pane.resize`、`pane.zoom` 等标准窗格 API;
+窗格跨标签页或工作区移动时,Herdr 会让插件窗格的所有权跟随底层窗格。
+
+在 Windows 上,构建命令、动作命令和事件命令会在裸命令位于 `PATH` 上时
+解析常见的 `PATHEXT` shim,比如 `npm.cmd`、`bun.cmd` 和 `pnpm.cmd`。
+窗格命令使用 Herdr 常规的 Windows 窗格启动器,仍然必须是有效的 Windows
+argv 命令。
+
+## 按键绑定
+
+把某个键绑定到已安装的插件动作:
+
+```toml
+[[keys.command]]
+key = "prefix+l"
+type = "plugin_action"
+command = "example.layout.apply"
+description = "apply layout"
+```
+
+## 链接处理器
+
+用 `[[link_handlers]]` 把对匹配终端 URL 的修饰键点击路由到插件动作,
+而不是在浏览器中打开 URL。修饰键点击的修饰键在所有平台上都是 Control,
+包括 macOS,因为被捕获的终端鼠标上报无法把 Command/Super 和普通点击
+区分开。`pattern` 是对被点击 URL 匹配的 Rust 正则表达式,`action` 必须
+指向同一插件声明的动作。链接处理器动作在 `HERDR_PLUGIN_CONTEXT_JSON`
+中收到 `invocation_source = "link_click"`、`clicked_url` 和
+`link_handler_id`;shell 插件也可以读取 `HERDR_PLUGIN_CLICKED_URL` 和
+`HERDR_PLUGIN_LINK_HANDLER_ID`。每个插件内的处理器按清单顺序检查。
+
+## 存储
+
+v1 没有 Herdr 管理的插件存储 API。需要持久状态的插件应自己管理文件或
+数据库。
+
+## 插件市场
+
+社区插件可以在[插件市场](/plugins/)中发现,它是打了 `herdr-plugin` 主题
+标签的公开 GitHub 仓库的自动索引。插件仍然是普通的 GitHub 仓库: 发布一个
+带 `herdr-plugin.toml` 的仓库,然后分享
+`herdr plugin install owner/repo[/subdir]`。
+
+要让插件被收录,给它的公开仓库添加 GitHub 主题标签 `herdr-plugin`。索引
+每 30 分钟刷新一次。发现机制的工作方式见[插件市场](/zh-cn/docs/marketplace/)。

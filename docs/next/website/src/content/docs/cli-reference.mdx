@@ -130,6 +130,8 @@ Create a workspace without stealing focus:
 herdr workspace create --cwd ~/project --label api --no-focus
 ```
 
+A workspace is the top-level project or work context. Creating one also creates its first tab and root pane. The JSON response exposes their IDs as `.result.workspace.workspace_id`, `.result.tab.tab_id`, and `.result.root_pane.pane_id`.
+
 ## Worktrees
 
 ```bash
@@ -153,6 +155,10 @@ herdr tab focus <tab_id>
 herdr tab rename <tab_id> <label>
 herdr tab close <tab_id>
 ```
+
+A tab is another terminal layout inside a workspace. Without `--workspace`, `tab create` uses the active workspace and fails if none exists. Its JSON response exposes `.result.tab.tab_id` and `.result.root_pane.pane_id`.
+
+Workspace and tab creation, and pane splitting, leave focus unchanged by default. `--focus` selects the new layout; `--no-focus` states the default explicitly. Without `--cwd`, new terminals follow the configured `terminal.new_cwd` policy, which follows the source pane or workspace by default. Each `--env KEY=VALUE` adds or replaces that variable in the new root shell.
 
 ## Panes
 
@@ -181,14 +187,18 @@ For pane commands that accept `--current`, Herdr uses the calling pane's
 `HERDR_PANE_ID` when the command runs inside a Herdr pane. For `pane split`,
 an explicit pane id or `--pane ID` splits that pane, `--current` splits the
 calling pane, and an omitted target keeps using the UI-focused pane.
+The split response exposes the new pane ID as `.result.pane.pane_id`.
+After `pane move`, use `.result.move_result.pane.pane_id` for later commands. A cross-workspace move changes the workspace-qualified pane ID; the prior value remains at `.result.move_result.previous_pane_id`. The running process keeps its launch-time `HERDR_PANE_ID`, `HERDR_TAB_ID`, and `HERDR_WORKSPACE_ID`; Herdr retains the old pane ID as an alias for that terminal, so pane commands using `--current` still resolve it. A live agent name follows the terminal and continues to resolve after the move.
 
 Read output:
 
 ```bash
-herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N]
+herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--raw]
 herdr pane read <pane_id> --source visible --ansi
 herdr pane read <pane_id> --source recent-unwrapped --lines 120
 ```
+
+`pane read` prints UTF-8 terminal text directly. ANSI escapes are stripped by default; use `--format ansi` or `--ansi` to preserve them where the source exposes styling. The `detection` source is always plain text. For recent sources, `--lines N` selects the last N rendered terminal rows before optional unwrapping; without it, reads default to 80 rows. For `visible` and `detection`, omitting `--lines` returns the full snapshot, while specifying it keeps the last N newline-delimited lines. `agent read` uses the same output and line behavior.
 
 Send input:
 
@@ -204,8 +214,9 @@ special keys such as `enter`, `tab`, `esc`, `backspace`, `left`, `right`,
 and `shift+tab`, function keys such as `f1`, and named punctuation such as
 `minus`, `plus`, and `backtick`. Legacy `C-c` and `c-c` are accepted as
 aliases for `ctrl+c`.
+`esc` is the canonical spelling; `escape` is also accepted.
 
-`pane run` submits text plus Enter atomically. Prefer it over `send-text` plus `send-keys Enter` for commands.
+`pane run` honors live bracketed-paste mode and submits text plus Enter atomically. Prefer it over `send-text` plus `send-keys Enter` for commands; the separate send operations remain low-level and non-submitting.
 
 Report agent state from custom hooks:
 
@@ -218,7 +229,22 @@ herdr pane report-agent <pane_id> \
   [--seq N] \
   [--agent-session-id ID] \
   [--agent-session-path PATH]
+
+herdr pane report-agent-session <pane_id> \
+  --source ID \
+  --agent LABEL \
+  [--seq N] \
+  [--agent-session-id ID] \
+  [--agent-session-path PATH] \
+  [--session-start-source SOURCE]
+
+herdr pane release-agent <pane_id> \
+  --source ID \
+  --agent LABEL \
+  [--seq N]
 ```
+
+`report-agent-session` updates native session identity without reporting lifecycle state. `release-agent` ends that source's lifecycle authority when its agent process exits.
 
 `pane get`, `pane list`, `agent get`, and `agent list` include a read-only `agent_session` object when an official integration has reported a native session reference. If no native session reference is stored, the field is omitted.
 
@@ -253,23 +279,34 @@ Metadata text is normalized before storage. Herdr trims surrounding whitespace, 
 
 ## Agents
 
+For the pane-versus-agent model and complete orchestration examples, see [Agent automation](/docs/agent-automation/).
+
 ```bash
 herdr agent list
 herdr agent get <target>
 herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]
-herdr agent send <target> <text>
+herdr agent send-keys <target> <key> [key ...]
+herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]
 herdr agent rename <target> <name>|--clear
 herdr agent focus <target>
-herdr agent wait <target> --status <idle|working|blocked|unknown> [--timeout MS]
+herdr agent wait <target> [--until STATUS]... [--timeout MS]
 herdr agent attach <target> [--takeover]
-herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>
+herdr agent start <name> --kind KIND --pane ID [--timeout MS] [-- <agent-args...>]
 herdr agent explain <target> [--json|--verbose]
 herdr agent explain --file PATH --agent LABEL [--json|--verbose]
 ```
 
-Agent targets can be terminal IDs, unique agent names, detected or reported agent labels, or legacy pane IDs. Names and labels are agent identities. Terminal IDs and legacy pane IDs are low-level escape hatches.
+Agent targets are either a unique live agent name or the pane ID that currently hosts the agent. Terminal IDs and bare agent-kind labels are not agent targets. Agents started through `agent start` require a name; manually launched agents remain unnamed and use their pane ID.
 
-`agent read` reads the resolved terminal stream. `agent send` writes literal text to that stream. `agent get`, `agent focus`, `agent wait`, and `agent attach` require the resolved terminal to have agent identity. `agent rename` can assign that identity.
+`agent start` activates an existing available shell pane: the pane's interactive shell must own the foreground, with no foreground command, editor, or agent running. Topology must be created separately. Names are unique among live agents and must match `[a-z][a-z0-9_-]{0,31}`. The kind selects Herdr's canonical interactive executable, while arguments after `--` are passed to that executable. Supported kinds are `pi`, `claude`, `codex`, `gemini`, `cursor`, `devin`, `agy`, `cline`, `omp`, `mastracode`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`, `kilo`, `qodercli`, and `maki`. A name follows the current pane occupant and is cleared when that agent exits, is released, or is replaced. Temporary detection uncertainty does not clear it.
+
+Start returns only after the expected agent owns the same terminal and is ready for interactive input. The default startup timeout is 30000 milliseconds; explicit values must be greater than 3000 and no more than 300000.
+
+`agent prompt` honors live bracketed-paste mode and submits text plus encoded Enter atomically, including while the agent is working. With `--wait`, a prompt sent from a non-working state must produce an observed lifecycle change within five seconds or Herdr returns `agent_prompt_stalled`; a caller timeout of five seconds or less keeps the normal `timeout` error. After activity is observed, it waits for the first requested settled status. It does not track individual turns. If the agent is already working, completion of that active turn may satisfy the wait. `--until` narrows the matching states and is rejected unless `--wait` is also present. Standalone `agent wait` returns immediately when the current status matches. Both default to `idle`, `done`, or `blocked`; use `--until unknown` explicitly when needed.
+
+`idle` means ready for input after its tab has been seen in the focused Herdr UI; `done` is the same underlying idle state after unseen background work completes. Focusing that tab or targeting it with `pane focus` / `agent focus` marks it seen; reading it through the CLI does not. `blocked` means Herdr recognized an approval or question UI. `unknown` means an agent is present but Herdr cannot classify it confidently, not that its work succeeded.
+
+`agent send-keys` sends logical terminal keys such as `enter`, `up`, `esc`, or `ctrl+c`. Herdr validates every key before writing any bytes. `agent read` reads the resolved terminal stream, and `agent rename` names an already detected agent.
 
 `agent explain` asks the running server to classify the same bottom-buffer detection snapshot used by screen detection, so live output reflects the server's active manifest cache. Because this uses the `agent.explain` socket method, restart or hand off to an updated server after upgrading Herdr before using live explain. Use `--file PATH --agent LABEL` to explain a saved fixture locally instead. The default output shows the agent, final state, manifest source and version, matched rule with its region evidence, and any fallback, skip, or warning reasons. Add `--verbose` for visible evidence flags, cached remote version, local override shadowing, remote update status, and the full evaluated-rules list with matcher and region evidence. Add `--json` for issue reports or tests.
 
@@ -299,21 +336,19 @@ the server closes the stream. Multiple observers can watch the same terminal
 without taking input, resize, scroll, or takeover authority.
 `terminal title clear` restores Herdr's default outer terminal window title.
 
-## Waits
+## Output waits
 
 Wait for output in a pane:
 
 ```bash
-herdr wait output <pane_id> --match <text> [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--regex] [--raw]
+herdr pane wait-output <pane_id> (--match <text> | --regex <pattern>) [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--raw]
 ```
 
-Wait for pane agent state:
+Use `pane wait-output` for normal commands and servers. Use `agent wait` for coding agents.
 
-```bash
-herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [--timeout MS]
-```
+`pane wait-output` checks the selected snapshot immediately, including output that already exists, then polls until it matches. The default source name is `recent`; matching treats it as unwrapped recent output from the latest 80 rendered terminal rows. `--lines` changes that row limit. `--match` finds a literal substring on one line, and `--regex` uses Rust regular-expression syntax and also matches one line at a time.
 
-Use `wait output` for normal commands and servers. Use `wait agent-status` for coding agents.
+`pane wait-output`, `agent wait`, and `agent prompt --wait` wait indefinitely when `--timeout` is omitted. A timeout or server error is emitted as JSON on stderr with exit status 1. CLI usage errors exit with status 2.
 
 ## Integrations
 
@@ -364,6 +399,8 @@ herdr plugin disable <plugin_id>
 ```
 
 `plugin install` accepts GitHub shorthand only, such as `ogulcancelik/herdr-plugin-examples/worktree-bootstrap`. It uses `git`, shows a trust preview in interactive terminals, runs supported manifest build commands, and stores GitHub installs in a Herdr-managed directory. Use `--yes` for noninteractive installs. Reinstalling a GitHub-managed plugin replaces that managed checkout. Installing over a locally linked plugin is refused. Plugin manifests must declare `min_herdr_version`; install and link fail when the plugin requires a newer Herdr binary. `plugin list` is human-readable by default; pass `--json` for the raw API response.
+
+Plugin installation and enabled state are global to the current user. A plugin installed, linked, enabled, or disabled through one Herdr session is immediately available with the same state in every session.
 
 Local development:
 
@@ -430,6 +467,8 @@ in pane or agent APIs. Native non-terminal plugin panes are a later surface.
 | `recent` | Recent scrollback with terminal wrapping. |
 | `recent-unwrapped` | Recent scrollback without soft wrapping. Best for logs. |
 | `detection` | Bottom-buffer snapshot used by agent screen detection. |
+
+These meanings apply to reads. For `pane wait-output` only, both `recent` and `recent-unwrapped` search the unwrapped recent snapshot; `recent` remains the default spelling.
 
 ## Environment variables
 

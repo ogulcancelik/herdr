@@ -1,10 +1,10 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 
+use super::model::KITTY_FLAG_REPORT_ALL_KEYS;
 use super::{KeyboardProtocol, MouseProtocolEncoding, TerminalKey};
 
 const KITTY_FLAG_REPORT_EVENT_TYPES: u16 = 0b0000_0010;
 const KITTY_FLAG_REPORT_ALTERNATE_KEYS: u16 = 0b0000_0100;
-const KITTY_FLAG_REPORT_ALL_KEYS: u16 = 0b0000_1000;
 
 /// Encode a key event for a PTY child using the pane's negotiated keyboard protocol.
 #[allow(dead_code)] // exercised in input unit tests; production uses TerminalRuntime helpers
@@ -13,6 +13,10 @@ pub fn encode_key(key: KeyEvent, protocol: KeyboardProtocol) -> Vec<u8> {
 }
 
 pub fn encode_terminal_key(key: TerminalKey, protocol: KeyboardProtocol) -> Vec<u8> {
+    if key.is_text_commit {
+        return encode_text_input(&key).unwrap_or_default();
+    }
+
     // A release event only produces bytes when the pane protocol reports event
     // types (Kitty REPORT_EVENT_TYPES). Otherwise the child expects a single
     // legacy byte per keystroke, so re-emitting it on release would double keys
@@ -22,13 +26,26 @@ pub fn encode_terminal_key(key: TerminalKey, protocol: KeyboardProtocol) -> Vec<
         return Vec::new();
     }
 
+    let kitty_first = protocol.reports_all_keys()
+        || (key.kind == crossterm::event::KeyEventKind::Release && protocol.reports_event_types());
+
+    if kitty_first {
+        if let KeyboardProtocol::Kitty { flags } = protocol {
+            if let Some(bytes) = try_encode_csi_u(&key, flags) {
+                return bytes;
+            }
+        }
+    }
+
     if let Some(bytes) = encode_text_input(&key) {
         return bytes;
     }
 
-    if let KeyboardProtocol::Kitty { flags } = protocol {
-        if let Some(bytes) = try_encode_csi_u(&key, flags) {
-            return bytes;
+    if !kitty_first {
+        if let KeyboardProtocol::Kitty { flags } = protocol {
+            if let Some(bytes) = try_encode_csi_u(&key, flags) {
+                return bytes;
+            }
         }
     }
     if key.kind == crossterm::event::KeyEventKind::Release && protocol.reports_event_types() {
@@ -838,6 +855,43 @@ mod tests {
     }
 
     #[test]
+    fn kitty_report_all_keys_encodes_printable_event_kinds() {
+        for (kind, expected) in [
+            (
+                crossterm::event::KeyEventKind::Press,
+                b"\x1b[106;1:1u".as_slice(),
+            ),
+            (
+                crossterm::event::KeyEventKind::Repeat,
+                b"\x1b[106;1:2u".as_slice(),
+            ),
+            (
+                crossterm::event::KeyEventKind::Release,
+                b"\x1b[106;1:3u".as_slice(),
+            ),
+        ] {
+            let key = KeyEvent::new_with_kind(KeyCode::Char('j'), KeyModifiers::empty(), kind);
+            assert_eq!(
+                encode_key(key, KeyboardProtocol::Kitty { flags: 15 }),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn kitty_printable_release_is_encoded_without_report_all() {
+        let release = KeyEvent::new_with_kind(
+            KeyCode::Char('j'),
+            KeyModifiers::empty(),
+            crossterm::event::KeyEventKind::Release,
+        );
+        assert_eq!(
+            encode_key(release, KeyboardProtocol::Kitty { flags: 3 }),
+            b"\x1b[106;1:3u"
+        );
+    }
+
+    #[test]
     fn kitty_shift_tab() {
         let key = KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT);
         assert_eq!(
@@ -869,13 +923,16 @@ mod tests {
     }
 
     #[test]
-    fn kitty_shift_letter_release_does_not_emit_text() {
+    fn kitty_shift_letter_release_uses_csi_u() {
         let key = KeyEvent::new_with_kind(
             KeyCode::Char('L'),
             KeyModifiers::SHIFT,
             crossterm::event::KeyEventKind::Release,
         );
-        assert_eq!(encode_key(key, KeyboardProtocol::Kitty { flags: 7 }), b"");
+        assert_eq!(
+            encode_key(key, KeyboardProtocol::Kitty { flags: 7 }),
+            b"\x1b[108:76;2:3u"
+        );
     }
 
     #[test]
@@ -893,7 +950,7 @@ mod tests {
             .with_kind(crossterm::event::KeyEventKind::Release);
         assert_eq!(
             encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 7 }),
-            b""
+            b"\x1b[63;2:3u"
         );
     }
 

@@ -1,7 +1,7 @@
 id = "codex"
-version = "2026.07.13.1"
+version = "2026.07.18.1"
 min_engine_version = 2
-updated_at = "2026-07-13T00:00:00Z"
+updated_at = "2026-07-18T00:00:00Z"
 
 [[rules]]
 id = "osc_title_blocked"
@@ -55,6 +55,15 @@ any = [
   { contains = ["do you want to"], any = [{ contains = ["yes"] }, { contains = ["❯"] }] },
   { contains = ["would you like to"], any = [{ contains = ["yes"] }, { contains = ["❯"] }] },
 ]
+
+[[rules]]
+id = "screen_working_fallback"
+state = "working"
+priority = 500
+region = "bottom_non_empty_lines(3)"
+visible_working = true
+line_regex = ['^[•◦]\s+Working \([^)]*esc to interrupt\)(?: · .*)?$']
+not = [{ contains = ["■ Conversation interrupted"] }]
 
 [[rules]]
 id = "osc_title_idle"

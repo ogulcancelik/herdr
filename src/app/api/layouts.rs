@@ -339,10 +339,15 @@ impl App {
             return PathBuf::from(cwd);
         }
         let follow_cwd = replace_target.and_then(|(_, tab_idx)| {
-            let ws = self.state.workspaces.get(ws_idx)?;
-            let tab = ws.tabs.get(tab_idx)?;
-            let pane_id = tab.layout.focused();
-            tab.follow_cwd_for_pane(pane_id, &self.state.terminals, &self.terminal_runtimes)
+            let pane_id = self
+                .state
+                .workspaces
+                .get(ws_idx)?
+                .tabs
+                .get(tab_idx)?
+                .layout
+                .focused();
+            self.launch_cwd_for_pane_in_workspace(ws_idx, pane_id)
         });
         self.resolve_new_terminal_cwd(
             follow_cwd.or_else(|| self.focused_pane_cwd_in_workspace(ws_idx)),
@@ -396,7 +401,7 @@ impl App {
             .cwd
             .as_ref()
             .map(PathBuf::from)
-            .or_else(|| self.follow_cwd_for_pane_in_workspace(ws_idx, target_pane_id));
+            .or_else(|| self.launch_cwd_for_pane_in_workspace(ws_idx, target_pane_id));
         let extra_env = super::env::normalize_launch_env(pane.env.clone())
             .map_err(|(_, message)| message.to_string())?;
         let direction = match direction {

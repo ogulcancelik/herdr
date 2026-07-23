@@ -1,0 +1,84 @@
+---
+import versions from '../data/docs-versions.json';
+import { docsRoute, docsTargetHref } from '../docs-path';
+
+const route = docsRoute(Astro.url.pathname);
+const locale = route.locale ?? 'root';
+const labels = {
+  root: { accessible: 'Documentation version', latest: 'Latest', next: 'Unreleased' },
+  ja: { accessible: 'ドキュメントのバージョン', latest: '最新', next: '未リリース' },
+  'zh-cn': { accessible: '文档版本', latest: '最新', next: '未发布' },
+}[locale];
+const scopes = versions.scopes;
+---
+
+{route.isDocs && (
+  <label class="docs-version-select">
+    <span class="sr-only">{labels.accessible}</span>
+    <select autocomplete="off" aria-label={labels.accessible}>
+      <option
+        value={docsTargetHref(route, 'stable', scopes)}
+        selected={route.target === 'stable'}
+      >
+        {labels.latest}{' '}{versions.current}
+      </option>
+      <option
+        value={docsTargetHref(route, 'preview', scopes)}
+        selected={route.target === 'preview'}
+      >
+        {labels.next}
+      </option>
+      {versions.versions
+        .filter((entry) => entry.version !== versions.current || route.target === versions.current)
+        .map((entry) => (
+          <option
+            value={docsTargetHref(route, entry.version, scopes)}
+            selected={route.target === entry.version}
+          >
+            {entry.version}
+          </option>
+        ))}
+    </select>
+  </label>
+)}
+
+<script>
+  for (const select of document.querySelectorAll<HTMLSelectElement>('.docs-version-select select')) {
+    select.addEventListener('change', () => {
+      globalThis.location.href = select.value;
+    });
+  }
+</script>
+
+<style>
+  .docs-version-select {
+    display: flex;
+    min-width: 0;
+  }
+
+  select {
+    width: 9.5rem;
+    min-width: 0;
+    border: 1px solid var(--sl-color-hairline);
+    border-radius: 4px;
+    padding: 0.4rem 1.6rem 0.4rem 0.55rem;
+    background: var(--sl-color-bg-nav);
+    color: var(--sl-color-gray-2);
+    font: inherit;
+    font-size: var(--sl-text-xs);
+    font-weight: 700;
+    text-overflow: ellipsis;
+  }
+
+  select:hover,
+  select:focus {
+    border-color: var(--sl-color-accent);
+    color: var(--sl-color-accent-high);
+  }
+
+  @media (max-width: 38rem) {
+    select {
+      width: 7.5rem;
+    }
+  }
+</style>

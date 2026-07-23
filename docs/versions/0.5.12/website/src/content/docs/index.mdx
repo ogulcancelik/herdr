@@ -1,0 +1,59 @@
+---
+title: Herdr documentation
+description: Terminal-native agent runtime and multiplexer.
+template: splash
+hero:
+  tagline: "One terminal for the whole herd: real panes, persistent sessions, SSH attach, state awareness, and CLI/socket orchestration."
+  image:
+    file: ../../../public/assets/logo.svg
+  actions:
+    - text: Install Herdr
+      link: /docs/install/
+    - text: Quick start
+      link: /docs/quick-start/
+      variant: secondary
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+Herdr is a terminal-native agent runtime and multiplexer. It gives the whole herd persistent terminal workspaces with panes, tabs, mouse control, state awareness, and an API that agents can use themselves.
+
+```bash
+curl -fsSL https://herdr.dev/install.sh | sh
+herdr
+```
+
+## Start here
+
+<CardGrid>
+  <Card title="Install">
+    Install Herdr on Linux or macOS, update it later, and verify the binary.
+
+    [Install Herdr →](/docs/install/)
+  </Card>
+  <Card title="Quick start">
+    Create your first workspace, run an agent, split panes, and detach safely.
+
+    [Start using Herdr →](/docs/quick-start/)
+  </Card>
+  <Card title="Local, SSH, and mobile">
+    Run Herdr locally, inside SSH, from your phone, or through `herdr --remote`.
+
+    [Pick a workflow →](/docs/how-to-work/)
+  </Card>
+  <Card title="Agents">
+    See supported agents, detection behavior, integrations, custom labels, and direct attach.
+
+    [Understand agents →](/docs/agents/)
+  </Card>
+  <Card title="Configuration">
+    Configure keybindings, themes, sidebar behavior, notifications, scrollback, and advanced options.
+
+    [Configure Herdr →](/docs/configuration/)
+  </Card>
+  <Card title="API">
+    Control Herdr from scripts, tools, and agents through the CLI and local socket API.
+
+    [Read the API guide →](/docs/socket-api/)
+  </Card>
+</CardGrid>

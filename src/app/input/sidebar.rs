@@ -413,7 +413,7 @@ impl AppState {
     }
 
     pub(super) fn on_agent_panel_sort_toggle(&self, col: u16, row: u16) -> bool {
-        if self.sidebar_collapsed {
+        if self.sidebar_collapsed || self.agent_view_override.is_some() {
             return false;
         }
 
@@ -450,7 +450,8 @@ impl AppState {
         let mut row_y = body.y;
         let body_bottom = body.y + body.height;
         let entries = crate::ui::agent_panel_entries(self);
-        for (index, detail) in entries.iter().enumerate().skip(self.agent_panel_scroll) {
+        let scroll = self.agent_panel_scroll.min(metrics.max_offset_from_bottom);
+        for (index, detail) in entries.iter().enumerate().skip(scroll) {
             let height = crate::ui::agent_entry_height_in_body(self, detail, body.height);
             if row_y.saturating_add(height) > body_bottom {
                 break;
@@ -742,6 +743,50 @@ mod tests {
         assert_eq!(
             app.state.agent_detail_target_at(body.y + 1),
             Some((1, 0, second_pane))
+        );
+    }
+
+    #[test]
+    fn agent_hit_testing_clamps_scroll_after_dynamic_filter_shrink() {
+        let mut app = app_for_mouse_test();
+        let first = Workspace::test_new("one");
+        let first_pane = first.tabs[0].root_pane;
+        let second = Workspace::test_new("two");
+        let second_pane = second.tabs[0].root_pane;
+        app.state.workspaces = vec![first, second];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        for (ws_idx, pane_id) in [(0, first_pane), (1, second_pane)] {
+            let terminal_id = app.state.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .detected_agent = Some(Agent::Claude);
+        }
+        app.state.agent_view_override = Some(crate::api::schema::AgentViewSetParams {
+            source: "example.views".to_string(),
+            label: None,
+            filter: Some(crate::api::schema::AgentViewFilter::Eq {
+                field: crate::api::schema::AgentViewField::Builtin(
+                    crate::api::schema::AgentViewBuiltinField::WorkspaceId,
+                ),
+                value: crate::api::schema::AgentViewValue::Context {
+                    context: crate::api::schema::AgentViewContext::CurrentWorkspaceId,
+                },
+            }),
+            sort: Vec::new(),
+        });
+        app.state.agent_panel_scroll = 10;
+        let detail_area = app.state.agent_panel_rect();
+        let body = crate::ui::agent_panel_body_rect(detail_area, false);
+
+        assert_eq!(
+            app.state.agent_detail_target_at(body.y),
+            Some((0, 0, first_pane))
         );
     }
 

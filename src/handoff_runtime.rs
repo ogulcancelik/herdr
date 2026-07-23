@@ -1,6 +1,13 @@
 #[cfg(unix)]
 use serde::{Deserialize, Serialize};
 
+/// Long-lived pane runtime transferred during server replacement.
+///
+/// Handoff preserves server-owned session state such as PTYs, processes, agent
+/// identity, and durable plugin/session metadata. It intentionally does not
+/// preserve transient coordination such as in-flight requests, waits,
+/// subscriptions, client sockets, or pane-to-pane messages; clients reconnect
+/// and retry those operations after replacement.
 #[cfg(unix)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct HandoffRuntimeState {

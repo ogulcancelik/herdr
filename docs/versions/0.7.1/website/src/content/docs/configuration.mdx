@@ -1,0 +1,527 @@
+---
+title: Configuration
+description: Configure Herdr keybindings, themes, sidebar behavior, notifications, and advanced options.
+---
+
+Herdr works without a config file. Add one when you want custom keys, themes, sidebar settings, notifications, or advanced behavior.
+
+## Config file
+
+Herdr reads config from:
+
+```text
+~/.config/herdr/config.toml
+```
+
+Print the full default config:
+
+```bash
+herdr --default-config
+```
+
+Save it as your config if you want a complete starting point:
+
+```bash
+herdr --default-config > ~/.config/herdr/config.toml
+```
+
+If a config value is invalid, Herdr falls back to a safe default and shows a startup warning.
+
+Herdr shows first-run setup when `onboarding` is missing or true. Continuing from onboarding writes `onboarding = false` and opens settings on the integrations tab. Set it when you want to skip that flow after setup.
+
+```toml
+onboarding = false
+```
+
+## Updates
+
+Linux and macOS direct installs use the stable update channel by default. Windows beta installs default to preview and cannot switch to stable until stable Windows releases are available.
+
+```toml
+[update]
+channel = "stable"
+version_check = true
+manifest_check = true
+```
+
+Set `channel = "preview"` to make `herdr update` install manually published preview builds from the current development branch. Homebrew, mise, and Nix installs ignore the preview channel and update through their package managers.
+
+Set `version_check = false` to disable background checks for new Herdr versions. Manual `herdr update` still uses the configured channel.
+
+Set `manifest_check = false` to disable background remote agent-detection manifest checks. Herdr still uses bundled manifests and local overrides.
+
+## Reload config
+
+Reload a running server after editing `config.toml`:
+
+```bash
+herdr server reload-config
+```
+
+You can also open the global menu in Herdr and choose `reload config`.
+
+Reload applies most UI settings without restarting panes. Startup-only settings still need a restart.
+
+## Terminal defaults
+
+Set the executable Herdr uses for newly created interactive panes:
+
+```toml
+[terminal]
+default_shell = "nu"
+```
+
+When unset or empty, Herdr uses `$SHELL`, then `/bin/sh`. This is an executable name or path, not a shell command line. Existing panes keep their current shell until they are recreated. Command panes still run through `/bin/sh -c`; detached custom command keybindings use Herdr's existing `/bin/sh -lc` path.
+
+Set how Herdr starts newly created interactive pane shells:
+
+```toml
+[terminal]
+shell_mode = "auto"
+```
+
+`shell_mode = "auto"` starts login shells on macOS so login-only PATH setup such as `/usr/libexec/path_helper` and Homebrew shell initialization runs in new panes. On other platforms, it keeps the existing non-login shell behavior. Use `"login"` to force login-shell startup, or `"non_login"` to opt out. Command panes, detached custom command keybindings, and explicit argv launches keep their existing command execution paths.
+
+Set the working directory policy for new panes, tabs, and workspaces:
+
+```toml
+[terminal]
+new_cwd = "follow"
+```
+
+`new_cwd = "follow"` keeps the default behavior and inherits the source pane or workspace. When there is no source workspace, Herdr starts in `$HOME`. Use `"home"` to always start in `$HOME`, `"current"` to use Herdr's process directory, or a fixed path such as `"~/Projects"`. Explicit `--cwd` values from the CLI or socket API still take precedence.
+
+## Worktrees
+
+Set the root directory Herdr uses for Git worktree checkouts created from the sidebar:
+
+```toml
+[worktrees]
+directory = "~/.herdr/worktrees"
+```
+
+Herdr creates checkouts under `<directory>/<repo>/<branch-slug>`. For sibling-style checkouts, set this to a directory such as `~/Projects/herdr-worktrees`. Relative values are resolved to an absolute path when the app applies the config.
+
+Worktree actions are available from Git workspace rows. `New worktree` creates a checkout, checks out an existing local branch when the entered branch already exists, otherwise creates the branch, opens it as a new Herdr workspace, and groups it under the source workspace. `Open worktree...` lists existing Git worktree checkouts for that repo; choosing an already-open checkout focuses it, and choosing a closed checkout opens it in the same group.
+
+Grouped worktrees still behave like normal Herdr workspaces: they can be focused, renamed, closed, and contain their own tabs and panes. The parent row is the original workspace. Closing the parent row closes the whole Herdr group, but it does not delete checkout folders or branches.
+
+Deleting a worktree checkout is explicit. Use `Delete worktree checkout...` on a grouped child workspace to run `git worktree remove`. Herdr first asks Git to remove safely. If Git refuses because the checkout has modified or untracked files, Herdr asks again before running the forced remove. Branches are not deleted.
+
+## Remote attach
+
+Remote attach manages its SSH bridge with a temporary keepalive fallback by default.
+
+```toml
+[remote]
+manage_ssh_config = true
+```
+
+When enabled, `herdr --remote` writes a private temporary SSH config that includes your `~/.ssh/config` and `/etc/ssh/ssh_config` first, then adds fallback `ServerAliveInterval` and `ServerAliveCountMax` values. Your own SSH keepalive settings win. Set `manage_ssh_config = false` to run the bridge through plain `ssh` without Herdr's generated config.
+
+## Keybindings
+
+For a guided introduction to the prefix and a vetted prefix-free setup, see [Keyboard](/docs/keyboard/).
+
+Herdr has a prefix mode similar to tmux. The default prefix is `ctrl+b`. Keybinding strings are explicit: `prefix+n` means press the configured prefix and then `n`; `ctrl+alt+n` is a direct terminal-mode shortcut.
+
+A small keybinding override looks like this:
+
+```toml
+[keys]
+prefix = "ctrl+b"
+goto = "prefix+g"
+new_tab = "prefix+c"
+next_tab = "prefix+n"
+previous_tab = "prefix+p"
+focus_pane_left = "prefix+h"
+navigate_workspace_down = "j"
+navigate_pane_down = "ctrl+j"
+split_horizontal = "prefix+minus"
+```
+
+The default keymap is prefix-first and avoids direct shortcuts that can steal input from shells, editors, tmux, or terminal apps. Common defaults include:
+
+```toml
+[keys]
+detach = "prefix+q"
+workspace_picker = "prefix+w"
+goto = "prefix+g"
+new_workspace = "prefix+shift+n"
+new_worktree = "prefix+shift+g"
+rename_workspace = "prefix+shift+w"
+close_workspace = "prefix+shift+d"
+navigate_workspace_up = "up"
+navigate_workspace_down = "down"
+navigate_pane_left = "h"
+navigate_pane_down = "j"
+navigate_pane_up = "k"
+navigate_pane_right = "l"
+remote_image_paste = "ctrl+v"
+new_tab = "prefix+c"
+previous_tab = "prefix+p"
+next_tab = "prefix+n"
+switch_tab = "prefix+1..9"
+rename_tab = "prefix+shift+t"
+close_tab = "prefix+shift+x"
+copy_mode = "prefix+["
+focus_pane_left = "prefix+h"
+focus_pane_down = "prefix+j"
+focus_pane_up = "prefix+k"
+focus_pane_right = "prefix+l"
+swap_pane_left = "prefix+shift+h"
+swap_pane_down = "prefix+shift+j"
+swap_pane_up = "prefix+shift+k"
+swap_pane_right = "prefix+shift+l"
+cycle_pane_next = "prefix+tab"
+cycle_pane_previous = "prefix+shift+tab"
+last_pane = ""
+split_vertical = "prefix+v"
+split_horizontal = "prefix+minus"
+close_pane = "prefix+x"
+zoom = "prefix+z"
+resize_mode = "prefix+r"
+toggle_sidebar = "prefix+b"
+```
+
+Optional actions are unset by default. Bind them with `prefix+` for prefix-mode behavior, or with an explicit modified chord when you intentionally want a direct shortcut:
+
+```toml
+[keys]
+previous_workspace = "prefix+shift+left"
+next_workspace = "prefix+shift+right"
+last_pane = "prefix+tab"
+open_worktree = "prefix+shift+o"
+remove_worktree = "prefix+alt+d"
+next_tab = ["prefix+n", "ctrl+alt+]"]
+```
+
+`last_pane` switches back to the last focused pane across workspaces and tabs. It is unset by default because the tmux-style pane binding `prefix+l` is already used for pane-right focus.
+
+`remote_image_paste` is only active in `herdr --remote`. It is the local-client shortcut that sends a local clipboard image to the remote pane. Set it to an empty string to disable the raw-key shortcut; terminal paste-image signals still work when the outer terminal sends them.
+
+Key strings accept plain keys, modifier combinations such as `ctrl+a`, `shift+n`, `alt+1`, `cmd+k`, and special keys such as `enter`, `tab`, `esc`, `left`, `right`, `up`, and `down`. Named punctuation such as `minus`, `comma`, `ampersand`, `plus`, and `backtick` is also accepted. Plain direct printable keys such as `n` are unsafe because they intercept typing; use `prefix+n` unless you intentionally want a direct binding. The `navigate_workspace_*` and `navigate_pane_*` fields are navigate-mode-only and may use plain keys such as `j` or `k`; they must not use `prefix+`, `esc`, `enter`, `tab`, `shift+tab`, `left`, `right`, or unmodified `1` through `9`. Left and right arrows are permanent aliases for pane-left and pane-right navigation. These navigate-mode shortcuts are independent from general action bindings such as `focus_pane_down = "prefix+j"`; when both use the same key, the navigate-mode shortcut wins while navigate mode is open. Alt, Cmd/Super, and punctuation with modifiers depend on your terminal and tmux settings.
+
+If you have old custom keybindings and want the new defaults, run `herdr config reset-keys`. Herdr backs up `config.toml`, removes `[keys]` and `[[keys.command]]`, and uses built-in v2 defaults after restart or `herdr server reload-config`.
+
+## Indexed jumps
+
+Indexed keybindings use `1..9` in normal keybinding fields:
+
+```toml
+[keys]
+switch_tab = "prefix+1..9"
+switch_workspace = "prefix+shift+1..9"
+focus_agent = "prefix+alt+1..9"
+```
+
+The legacy `[keys.indexed]` table is still parsed for compatibility, but new configs should prefer the explicit action fields.
+
+## Custom command keybindings
+
+Custom commands use the same keybinding syntax.
+
+```toml
+[[keys.command]]
+key = "prefix+alt+g"
+type = "pane"
+command = "lazygit"
+description = "run lazygit"
+```
+
+`type = "pane"` opens a temporary pane and closes it when the command exits.
+
+`type = "shell"` runs detached in the background.
+
+`type = "plugin_action"` invokes an installed plugin action id. Use the
+qualified id when action ids are not globally unique:
+
+```toml
+[[keys.command]]
+key = "prefix+l"
+type = "plugin_action"
+command = "example.layout.apply"
+description = "apply layout"
+```
+
+An optional `description` can be provided. When specified, this description is displayed in the keybind help panel (opened with `prefix+?`) in place of the default `'custom command'` label.
+
+Custom commands receive `HERDR_SOCKET_PATH`, `HERDR_BIN_PATH`, `HERDR_ACTIVE_WORKSPACE_ID`, `HERDR_ACTIVE_TAB_ID`, `HERDR_ACTIVE_PANE_ID`, and `HERDR_ACTIVE_PANE_CWD` when those values are available. Shell commands run from the focused pane's working directory when Herdr can detect it.
+
+## Theme
+
+Choose a built-in theme:
+
+```toml
+[theme]
+name = "catppuccin"
+```
+
+Built-in themes:
+
+`catppuccin`, `catppuccin-latte`, `terminal`, `tokyo-night`, `tokyo-night-day`, `dracula`, `nord`, `gruvbox`, `gruvbox-light`, `one-dark`, `one-light`, `solarized`, `solarized-light`, `kanagawa`, `kanagawa-lotus`, `rose-pine`, `rose-pine-dawn`, `vesper`.
+
+Use `terminal` when you want Herdr UI colors to follow your host terminal's ANSI palette.
+
+To let Herdr switch its own UI theme when the host terminal reports a light/dark appearance change, enable theme auto-switching:
+
+```toml
+[theme]
+name = "catppuccin"
+auto_switch = true
+light_name = "catppuccin-latte"
+dark_name = "catppuccin"
+```
+
+`auto_switch` defaults to `false`, so existing theme configs keep manual behavior. If `light_name` or `dark_name` is omitted, Herdr uses the matching built-in sibling for the configured `name` when one exists, such as `tokyo-night`/`tokyo-night-day` or `gruvbox`/`gruvbox-light`. Manual theme selection in Settings disables `auto_switch`.
+
+You can override individual colors:
+
+```toml
+[theme.custom]
+panel_bg = "reset"
+accent = "#a6e3a1"
+green = "#a6e3a1"
+blue = "#89b4fa"
+red = "#f38ba8"
+yellow = "#f9e2af"
+```
+
+Color values accept hex, named colors, `rgb(r,g,b)`, or reset aliases like `reset`, `default`, `none`, and `transparent`.
+
+## UI and sidebar
+
+The sidebar is the main Herdr dashboard. It shows workspaces, tabs, panes, and agent state.
+
+Common options:
+
+```toml
+[ui]
+sidebar_width = 32
+sidebar_min_width = 18
+sidebar_max_width = 36
+mobile_width_threshold = 64
+mouse_capture = true
+right_click_passthrough_modifier = ""
+redraw_on_focus_gained = true
+mouse_scroll_lines = 3
+confirm_close = true
+prompt_new_tab_name = true
+pane_borders = true
+pane_gaps = true
+show_agent_labels_on_pane_borders = false
+agent_panel_sort = "spaces"
+accent = "cyan"
+```
+
+`sidebar_min_width` and `sidebar_max_width` control the expanded sidebar's resize bounds in columns. The defaults are 18 and 36.
+
+`mobile_width_threshold` controls the terminal width at or below which Herdr uses the mobile single-column layout. The default is 64 columns; increase it for foldables, tablets, or wide phone terminals.
+
+The agent panel shows all agents across all spaces. `agent_panel_sort` can be `spaces` or `priority`; `workspaces` is accepted as an alias for `spaces`. `spaces` is the default and keeps agents grouped by space order. `priority` sorts by attention priority: blocked, done, working, idle, then unknown. Within the same status, agents that most recently changed state appear first.
+
+`confirm_close` controls whether closing a workspace asks for confirmation. `prompt_new_tab_name` controls whether new tabs ask for a label first.
+
+Set `mouse_capture = false` if you want your terminal to handle normal clicks, such as command-clicking URLs. With mouse capture enabled, Ctrl-click opens pane links when your terminal sends that modified click to Herdr. This includes macOS; Cmd-click is not reported separately from plain click while Herdr captures mouse input. Use Shift-Ctrl-click on Linux or Shift-Cmd-click on macOS for the terminal-native bypass path.
+
+Set `right_click_passthrough_modifier = "ctrl"` if you want Ctrl-right-click, hold, and drag gestures inside mouse-reporting pane apps to reach the app instead of opening Herdr's pane menu. The default is empty, which disables this passthrough. Supported modifiers are `ctrl`, `alt`, `cmd`, `super`, `meta`, and `hyper`; `shift` is rejected because many terminals reserve Shift+mouse for their own mouse bypass.
+
+Set `redraw_on_focus_gained = false` to avoid the visible full-screen refresh when switching back to Herdr. The default is `true` because a full redraw recovers from rare stale or dirty host terminal surfaces.
+
+Set `mouse_scroll_lines` to change how many pane scrollback lines each mouse wheel notch scrolls. The default is 3. Pane apps that request mouse reporting still receive wheel events directly. Alternate-screen apps have no scrollback to scroll; see [Scrollback](#scrollback).
+
+Set `pane_borders = false` to remove split pane borders. Set `pane_gaps = false` to make split panes share compact divider borders. With borders disabled, pane gaps use one blank terminal cell between panes. Terminal cells are usually taller than they are wide, so a one-row gap between top/bottom panes can look larger than a one-column gap between left/right panes.
+
+Set `show_agent_labels_on_pane_borders = true` if you want detected agent labels in split pane borders when no manual pane label is set.
+
+## Notifications
+
+Herdr can show popup notifications when agents finish or need input.
+
+```toml
+[ui.toast]
+delivery = "off"
+delay_seconds = 1
+
+[ui.toast.herdr]
+position = "bottom-right"
+
+[ui.toast.clipboard]
+enabled = true
+position = "bottom-center"
+```
+
+`delivery = "off"` disables popup notifications. This is the default.
+
+`delivery = "herdr"` shows a toast inside the Herdr UI. Click the toast, or bind `keys.open_notification_target`, to focus the target workspace, tab, and pane. Set `ui.toast.herdr.position` to `top-left`, `top-right`, `bottom-left`, or `bottom-right`; desktop positions are relative to the full Herdr frame.
+
+`delivery = "terminal"` asks the outer terminal to show a desktop notification. Herdr sends terminal notification escape sequences for Ghostty, iTerm2, Kitty, and WezTerm. This is useful over SSH because the local terminal owns the notification.
+
+`delivery = "system"` asks the local operating system directly. On macOS, Herdr uses `terminal-notifier` when available, then falls back to `/usr/bin/osascript`. `terminal-notifier` can activate the hosting terminal when you click the notification. On Linux, Herdr uses `notify-send` and requires `DISPLAY` or `WAYLAND_DISPLAY`.
+
+Popup notifications are for background attention. Herdr suppresses popups for the active tab.
+
+`delay_seconds` waits before sending finished or needs-input agent notifications. Herdr notifies only if the pane is still in the same state when the delay expires. Set it to `0` for instant notifications. Valid values are `0` through `3600`.
+
+Clipboard feedback is configured separately because it confirms a foreground copy action and is never sent through terminal or system delivery. Set `ui.toast.clipboard.enabled = false` to hide the copied-to-clipboard popup. Clipboard positions are `top-left`, `top-center`, `top-right`, `bottom-left`, `bottom-center`, and `bottom-right`.
+
+## Sound
+
+Sound notifications are enabled by default and are played by the local Herdr client.
+
+```toml
+[ui.sound]
+enabled = true
+```
+
+Herdr plays a done sound when an agent finishes and an attention sound when an agent needs input. Set `enabled = false` on shared machines or remote servers unless you explicitly want audio.
+
+On macOS, Herdr uses `afplay`. On Linux, Herdr tries mp3-capable players in order: `paplay`, `pw-play`, `ffplay`, `mpg123`, then `mpv`. If no player is available, sound playback is skipped and Herdr logs a warning.
+
+Custom sounds must be mp3 files. Relative paths are resolved from the config file's directory.
+
+```toml
+[ui.sound]
+path = "sounds/notification.mp3"
+done_path = "sounds/done.mp3"
+request_path = "sounds/request.mp3"
+```
+
+`path` sets one sound for all sound notifications. `done_path` and `request_path` override only the finished and needs-input sounds.
+
+Per-agent sound overrides accept `default`, `on`, or `off`. Use detected agent labels such as `claude`, `codex`, `devin`, or `droid` as keys. Droid is muted by default.
+
+```toml
+[ui.sound.agents]
+droid = "off"
+claude = "on"
+```
+
+## Scrollback
+
+Set the scrollback buffer size for newly created panes:
+
+```toml
+[advanced]
+scrollback_limit_bytes = 10485760
+```
+
+Existing panes keep their current buffer until they are recreated.
+
+Panes only show a scrollbar when the app writes to the primary screen. Full-screen apps that switch to the alternate screen (vim, htop, Claude Code with `CLAUDE_CODE_NO_FLICKER=1`) produce no scrollback, so no scrollbar appears and wheel events are routed to the app instead. Scroll with the app's own keys or UI.
+
+## Pane screen history
+
+By default, full session restart restores workspaces, tabs, panes, cwd, layout, and focus without saving pane contents.
+
+Pane screen history is off by default. Pane output can include secrets, tokens, prompts, and command output, so enable it only when you want Herdr to save recent pane contents across full server restarts:
+
+```toml
+[experimental]
+pane_history = true
+```
+
+You can also toggle it from Settings > Experiments > pane screen history.
+
+When enabled, Herdr stores saved pane history in `session-history.json` next to `session.json`.
+
+For how pane screen history differs from live persistence, snapshot restore, native agent session restore, and live handoff, see [Session state and restore](/docs/session-state/).
+
+## Nested launches
+
+Herdr normally protects you from launching Herdr inside Herdr.
+
+```toml
+[experimental]
+allow_nested = false
+```
+
+Only enable nested launches for testing.
+
+## Kitty graphics
+
+Kitty graphics support is experimental.
+
+```toml
+[experimental]
+kitty_graphics = false
+```
+
+Leave this off unless you are testing terminal image behavior.
+
+## Agent session restore
+
+Herdr can restart supported agent panes in their native conversation sessions after a Herdr server restart.
+
+```toml
+[session]
+resume_agents_on_restore = true
+```
+
+This is enabled by default. Herdr only resumes panes that reported a native session reference through an official Herdr integration. Supported resume targets are Claude Code, Codex, Cursor Agent CLI, GitHub Copilot CLI, Droid, Kimi Code CLI, Qoder CLI, Pi, Hermes Agent, OpenCode, and Kilo Code CLI. Unsupported, missing, invalid, duplicated, or stale session references restore as a normal shell in the saved pane directory.
+
+Session references are stored in the local Herdr session snapshot. They are not shown in normal pane, agent, status, or event output.
+
+For how native agent session restore differs from pane screen history and live handoff, see [Session state and restore](/docs/session-state/).
+
+## IME cursor tracking
+
+When the focused pane hides its cursor and paints its own — common in AI-agent TUIs like Claude Code, pi, codex, and Devin — macOS native input methods stop tracking the candidate window position because the outer terminal stops reporting the cursor.
+
+Set `reveal_hidden_cursor_for_cjk_ime = true` to expose the focused pane's cursor anchor to the outer terminal regardless of the pane's `?25l` request:
+
+```toml
+[experimental]
+reveal_hidden_cursor_for_cjk_ime = false
+cjk_ime_agents = []
+cjk_ime_cursor_shape = "steady_block"
+```
+
+When enabled, the cursor stays visible at the focused pane's reported position. If the pane reports no cursor position, the anchor falls back to the pane's top-left so a stable IME hint is always available.
+
+`cjk_ime_agents` is an optional allow-list. When empty, the reveal applies to any focused pane. When non-empty, the reveal only applies if the focused pane's detected agent matches one of the listed names — useful to enable the reveal only for AI-agent TUIs that paint their own cursor while leaving plain shells untouched. Accepted names: `pi`, `claude`, `codex`, `gemini`, `cursor`, `devin`, `agy`, `cline`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`, `kilo`, `qodercli`, and `qoder`. Unknown names are ignored; if the list contains no valid names, the reveal does not apply.
+
+`cjk_ime_cursor_shape` controls the DECSCUSR shape rendered for the IME anchor. Accepted values: `block`, `steady_block` (default), `underline`, `steady_underline`, `bar`, `steady_bar`.
+
+Hot-reloads through the existing `[experimental]` block.
+
+The trade-off when enabled: an extra hardware cursor is visible in the outer terminal for apps that hide the cursor without painting a replacement (vim normal mode, etc.). Pair the reveal with `cjk_ime_agents` to scope it to specific TUIs.
+
+## Prefix input source switching
+
+On macOS, prefix-mode commands can be hard to use while a non-ASCII input source is active because prefix commands are still interpreted through the host input source.
+
+Set `switch_ascii_input_source_in_prefix = true` to switch the host input source to the system ASCII-capable input source while prefix mode is active:
+
+```toml
+[experimental]
+switch_ascii_input_source_in_prefix = false
+```
+
+When enabled, Herdr switches input sources only after prefix mode is entered, then restores the previous input source when prefix mode exits. The setting is macOS-only and is a no-op on other platforms or when the system input-source switch fails.
+
+You can also toggle it from Settings > Experiments > switch to ascii input source in prefix (macOS).
+
+## Environment variables
+
+| Variable | Purpose |
+| --- | --- |
+| `HERDR_CONFIG_PATH` | Override the config file path. |
+| `HERDR_SESSION` | Select a named session for CLI commands. |
+| `HERDR_SOCKET_PATH` | Low-level socket path override. |
+| `HERDR_LOG` | Set log filtering, for example `HERDR_LOG=herdr=debug`. |
+| `HERDR_DISABLE_SOUND` | Disable sound playback even when `[ui.sound] enabled = true`. |
+
+## Logs
+
+Logs are useful when diagnosing startup warnings, integration state, or socket API behavior.
+
+Common log files:
+
+```text
+~/.config/herdr/herdr.log
+~/.config/herdr/herdr-client.log
+~/.config/herdr/herdr-server.log
+```
+
+Logs rotate automatically. Include the current log and rotated siblings when reporting issues.

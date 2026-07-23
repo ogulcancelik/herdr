@@ -126,6 +126,8 @@ herdr workspace close <workspace_id>
 herdr workspace create --cwd ~/project --label api --no-focus
 ```
 
+ワークスペースは最上位のプロジェクトまたは作業コンテキストです。作成時に最初のタブとルートペインも作られます。JSON レスポンスの `.result.workspace.workspace_id`、`.result.tab.tab_id`、`.result.root_pane.pane_id` から各 ID を取得できます。
+
 ## Worktree
 
 ```bash
@@ -150,6 +152,10 @@ herdr tab rename <tab_id> <label>
 herdr tab close <tab_id>
 ```
 
+タブはワークスペース内の別のターミナルレイアウトです。`--workspace` を省略すると、`tab create` はアクティブなワークスペースを使い、存在しなければ失敗します。JSON レスポンスの `.result.tab.tab_id` と `.result.root_pane.pane_id` から ID を取得できます。
+
+ワークスペースとタブの作成、およびペインの分割は、デフォルトではフォーカスを変えません。`--focus` は新しいレイアウトを選択し、`--no-focus` はデフォルトを明示します。`--cwd` がない場合、新しいターミナルは `terminal.new_cwd` の設定に従い、デフォルトでは元のペインまたはワークスペースを引き継ぎます。各 `--env KEY=VALUE` は新しいルートシェルの環境変数を追加または置換します。
+
 ## ペイン
 
 ```bash
@@ -173,13 +179,19 @@ herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--f
 herdr pane close <pane_id>
 ```
 
+`--current` を受け付けるペインコマンドは、Herdr ペイン内から実行した場合、呼び出し元の `HERDR_PANE_ID` を使います。`pane split` では、明示したペイン ID または `--pane ID` がそのペインを、`--current` が呼び出し元ペインを分割します。対象を省略すると UI でフォーカス中のペインを使います。分割レスポンスでは、新しいペイン ID は `.result.pane.pane_id` にあります。
+
+`pane move` の後続コマンドには `.result.move_result.pane.pane_id` を使います。別ワークスペースへの移動ではワークスペース修飾付きのペイン ID が変わり、以前の値は `.result.move_result.previous_pane_id` に残ります。実行中プロセスの `HERDR_PANE_ID`、`HERDR_TAB_ID`、`HERDR_WORKSPACE_ID` は起動時の値のままですが、Herdr は以前のペイン ID をそのターミナルの別名として保持するため、`--current` を使うペインコマンドは引き続き解決できます。ライブエージェント名もターミナルに追従します。
+
 出力を読む:
 
 ```bash
-herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N]
+herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--raw]
 herdr pane read <pane_id> --source visible --ansi
 herdr pane read <pane_id> --source recent-unwrapped --lines 120
 ```
+
+`pane read` は UTF-8 のターミナルテキストを直接出力します。デフォルトでは ANSI エスケープを除去し、ソースに装飾が含まれる場合は `--format ansi` または `--ansi` で保持します。`detection` ソースは常にプレーンテキストです。recent 系ソースでは、`--lines N` は折り返し解除の前に末尾の N 描画行を選び、省略時は 80 行です。`visible` と `detection` では、省略時にスナップショット全体を返し、指定時は改行で区切られた末尾 N 行を返します。`agent read` も同じ出力と行数の動作です。
 
 入力を送る:
 
@@ -191,7 +203,9 @@ herdr pane run <pane_id> <command>
 
 `<key>` は Herdr のキーコンボ構文を使います: `a` のような通常の印字可能キー、`enter`、`tab`、`esc`、`backspace`、`left`、`right`、`up`、`down` のような特殊キー、`ctrl+h`、`control+j`、`alt+x`、`shift+tab` のような修飾キーコード、`f1` のようなファンクションキー、そして `minus`、`plus`、`backtick` のような名前付き記号です。レガシーな `C-c` と `c-c` は `ctrl+c` のエイリアスとして受け付けられます。
 
-`pane run` はテキストと Enter をアトミックに送信します。コマンドには `send-text` + `send-keys Enter` よりこちらを使ってください。
+標準表記は `esc` ですが、`escape` も使えます。
+
+`pane run` は現在の bracketed paste モードを尊重し、テキストと Enter をアトミックに送信します。コマンドには `send-text` + `send-keys Enter` よりこちらを使ってください。個別の送信操作は低レベルのままで、コマンドを送信しません。
 
 カスタムフックからエージェント状態を報告する:
 
@@ -204,7 +218,22 @@ herdr pane report-agent <pane_id> \
   [--seq N] \
   [--agent-session-id ID] \
   [--agent-session-path PATH]
+
+herdr pane report-agent-session <pane_id> \
+  --source ID \
+  --agent LABEL \
+  [--seq N] \
+  [--agent-session-id ID] \
+  [--agent-session-path PATH] \
+  [--session-start-source SOURCE]
+
+herdr pane release-agent <pane_id> \
+  --source ID \
+  --agent LABEL \
+  [--seq N]
 ```
+
+`report-agent-session` はライフサイクル状態を報告せずにネイティブセッション識別子を更新します。`release-agent` は、そのエージェントプロセスが終了したときに、そのソースのライフサイクル権限を終了します。
 
 公式インテグレーションがネイティブセッション参照を報告している場合、`pane get`、`pane list`、`agent get`、`agent list` は読み取り専用の `agent_session` オブジェクトを含みます。ネイティブセッション参照が保存されていない場合、このフィールドは省略されます。
 
@@ -237,23 +266,34 @@ herdr pane report-metadata <pane_id> \
 
 ## エージェント
 
+ペインとエージェントの使い分けや一連の連携例は、[エージェント自動化](/ja/docs/agent-automation/) を参照してください。
+
 ```bash
 herdr agent list
 herdr agent get <target>
 herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]
-herdr agent send <target> <text>
+herdr agent send-keys <target> <key> [key ...]
+herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]
 herdr agent rename <target> <name>|--clear
 herdr agent focus <target>
-herdr agent wait <target> --status <idle|working|blocked|unknown> [--timeout MS]
+herdr agent wait <target> [--until STATUS]... [--timeout MS]
 herdr agent attach <target> [--takeover]
-herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>
+herdr agent start <name> --kind KIND --pane ID [--timeout MS] [-- <agent-args...>]
 herdr agent explain <target> [--json|--verbose]
 herdr agent explain --file PATH --agent LABEL [--json|--verbose]
 ```
 
-エージェントターゲットには、ターミナル ID、一意なエージェント名、検出または報告されたエージェントラベル、レガシーなペイン ID が使えます。名前とラベルはエージェントのアイデンティティです。ターミナル ID とレガシーペイン ID は低レベルな逃げ道です。
+エージェントターゲットは、一意なライブエージェント名、または現在そのエージェントをホストしているペイン ID です。ターミナル ID とエージェント kind のラベルだけでは指定できません。`agent start` で起動するエージェントには名前が必須で、手動で起動したエージェントは名前なしのままペイン ID で指定します。
 
-`agent read` は解決されたターミナルストリームを読みます。`agent send` はそのストリームにリテラルのテキストを書き込みます。`agent get`、`agent focus`、`agent wait`、`agent attach` は、解決されたターミナルがエージェントのアイデンティティを持つことを要求します。`agent rename` はそのアイデンティティを割り当てられます。
+`agent start` は既存の利用可能なシェルペインを起動対象にします。対話シェル自身がフォアグラウンドを所有し、フォアグラウンドのコマンド、エディタ、エージェントが動いていない必要があります。トポロジーは別に作成します。名前はライブエージェント間で一意で、`[a-z][a-z0-9_-]{0,31}` に一致する必要があります。対応する kind は `pi`、`claude`、`codex`、`gemini`、`cursor`、`devin`、`agy`、`cline`、`omp`、`mastracode`、`opencode`、`copilot`、`kimi`、`kiro`、`droid`、`amp`、`grok`、`hermes`、`kilo`、`qodercli`、`maki` です。名前は現在のペイン占有者に属し、そのエージェントの終了、release、置換で消えます。一時的に検出できないだけでは消えません。
+
+start は、期待したエージェントが同じターミナルを所有し、対話入力の準備ができてから返ります。デフォルトの起動タイムアウトは 30000 ミリ秒で、明示する値は 3000 より大きく 300000 以下でなければなりません。
+
+`agent prompt` は現在の bracketed paste モードを尊重し、working 中でもテキストとエンコード済み Enter をアトミックに送信します。`--wait` を使う場合、non-working 状態から送信したプロンプトは 5 秒以内に観測可能なライフサイクル変化を起こす必要があり、変化がなければ Herdr は `agent_prompt_stalled` を返します。呼び出し側のタイムアウトが 5 秒以下なら、通常の `timeout` エラーを維持します。活動を観測した後、要求された安定状態を待ちます。個々のターンは追跡しません。すでに working の場合、進行中ターンの完了が待機を満たすことがあります。`--until` は一致状態を絞り込み、`--wait` なしでは拒否されます。単独の `agent wait` は現在の状態が一致すれば即座に返ります。どちらもデフォルトは `idle`、`done`、`blocked` です。
+
+`idle` は入力待ちで、そのタブがフォーカス中の Herdr UI ですでに表示済みの状態です。`done` は同じ基礎的な idle 状態ですが、表示していないバックグラウンド作業が完了したときに使われます。そのタブをフォーカスするか `pane focus` / `agent focus` で対象にすると表示済みになりますが、CLI で読み取るだけでは変わりません。`blocked` は承認または質問 UI を Herdr が認識した状態です。`unknown` はエージェントが存在するものの確実に分類できない状態で、作業の成功を意味しません。
+
+`agent send-keys` は `enter`、`up`、`esc`、`ctrl+c` などの論理キーを送ります。Herdr は 1 バイトも書き込む前に全キーを検証します。`agent read` は解決されたターミナルストリームを読み、`agent rename` は検出済みエージェントに名前を付けます。
 
 `agent explain` は、スクリーン検出が使うのと同じ下部バッファの検出スナップショットの分類を実行中のサーバーに依頼します。そのためライブの出力はサーバーのアクティブなマニフェストキャッシュを反映します。これは `agent.explain` ソケットメソッドを使うので、Herdr のアップグレード後にライブ explain を使う前に、サーバーを再起動するか更新済みサーバーへハンドオフしてください。保存済みフィクスチャをローカルで説明するには `--file PATH --agent LABEL` を使います。デフォルトの出力には、エージェント、最終状態、マニフェストのソースとバージョン、リージョンの証拠付きでマッチしたルール、そしてフォールバック・スキップ・警告の理由が表示されます。`--verbose` を付けると、可視の証拠フラグ、キャッシュされたリモートバージョン、ローカルオーバーライドのシャドーイング、リモート更新状況、マッチャーとリージョンの証拠付きの評価済みルール全リストが表示されます。issue の報告やテストには `--json` を付けてください。
 
@@ -270,21 +310,19 @@ herdr terminal title clear
 ダイレクトアタッチからは `ctrl+b q` でデタッチします。リテラルの `ctrl+b` は `ctrl+b ctrl+b` で送ります。
 `terminal title clear` は Herdr のデフォルトの外側ターミナルウィンドウタイトルを復元します。
 
-## Wait
+## 出力待機
 
 ペインの出力を待つ:
 
 ```bash
-herdr wait output <pane_id> --match <text> [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--regex] [--raw]
+herdr pane wait-output <pane_id> (--match <text> | --regex <pattern>) [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--raw]
 ```
 
-ペインのエージェント状態を待つ:
+通常のコマンドやサーバーには `pane wait-output` を使います。コーディングエージェントには `agent wait` を使います。
 
-```bash
-herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [--timeout MS]
-```
+`pane wait-output` は選択したスナップショットを最初にすぐ検索するため、すでに存在する出力も一致します。デフォルトのソース名は `recent` で、直近 80 行の描画済みターミナル行を折り返し前の出力として扱います。`--lines` でその行数を変更できます。`--match` は 1 行内のリテラル部分文字列を検索し、`--regex` は Rust の正規表現構文で 1 行ずつ一致します。
 
-通常のコマンドやサーバーには `wait output` を使います。コーディングエージェントには `wait agent-status` を使います。
+`pane wait-output`、`agent wait`、`agent prompt --wait` は、`--timeout` を省略すると無期限に待ちます。タイムアウトまたはサーバーエラーは JSON として stderr に出力され、終了コード 1 になります。CLI 使用法のエラーは終了コード 2 です。
 
 ## インテグレーション
 
@@ -388,6 +426,8 @@ herdr plugin pane close <pane_id>
 | `recent` | ターミナルの折り返しを含む直近のスクロールバック。 |
 | `recent-unwrapped` | ソフト折り返しなしの直近のスクロールバック。ログに最適。 |
 | `detection` | エージェントのスクリーン検出が使う下部バッファのスナップショット。 |
+
+この表は読み取り時の意味です。`pane wait-output` に限り、`recent` と `recent-unwrapped` はどちらも recent の折り返し前スナップショットを検索し、デフォルト表記は `recent` です。
 
 ## 環境変数
 

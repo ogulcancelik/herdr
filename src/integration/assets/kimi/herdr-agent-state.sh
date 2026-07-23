@@ -1,17 +1,9 @@
 #!/bin/sh
-# installed by herdr
-# managed by herdr; reinstalling or updating the integration overwrites this file.
-# add custom hooks beside this file instead of editing it.
+# managed by herdr; reinstalling the integration replaces this file.
 # HERDR_INTEGRATION_ID=kimi
-# HERDR_INTEGRATION_VERSION=4
-
-set -eu
+# HERDR_INTEGRATION_VERSION=5
 
 action="${1:-}"
-hook_input_file="$(mktemp "${TMPDIR:-/tmp}/herdr-kimi-hook.XXXXXX")" || exit 0
-trap 'rm -f "$hook_input_file"' EXIT HUP INT TERM
-cat >"$hook_input_file" 2>/dev/null || true
-
 case "$action" in
   session|working|blocked|idle) ;;
   *) exit 0 ;;
@@ -22,78 +14,47 @@ esac
 [ -n "${HERDR_PANE_ID:-}" ] || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 
-HERDR_ACTION="$action" HERDR_HOOK_INPUT_FILE="$hook_input_file" python3 - <<'PY'
+python3 -c '
 import json
 import os
-import random
 import socket
+import sys
 import time
 
-source = "herdr:kimi"
-agent = "kimi"
-action = os.environ.get("HERDR_ACTION", "")
-pane_id = os.environ.get("HERDR_PANE_ID")
-socket_path = os.environ.get("HERDR_SOCKET_PATH")
-hook_input_file = os.environ.get("HERDR_HOOK_INPUT_FILE")
-
-if not pane_id or not socket_path:
-    raise SystemExit(0)
-
-hook_input = {}
-if hook_input_file:
-    try:
-        with open(hook_input_file, encoding="utf-8") as handle:
-            content = handle.read()
-        if content.strip():
-            hook_input = json.loads(content)
-    except Exception:
-        hook_input = {}
-
-session_id = hook_input.get("session_id")
-agent_session_id = session_id if isinstance(session_id, str) and session_id else None
-request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
-report_seq = time.time_ns()
-
-if action == "session":
-    if not agent_session_id:
-        raise SystemExit(0)
-    request = {
-        "id": request_id,
-        "method": "pane.report_agent_session",
-        "params": {
-            "pane_id": pane_id,
-            "source": source,
-            "agent": agent,
-            "agent_session_id": agent_session_id,
-            "seq": report_seq,
-        },
-    }
-else:
-    params = {
-        "pane_id": pane_id,
-        "source": source,
-        "agent": agent,
-        "state": action,
-        "seq": report_seq,
-    }
-    if agent_session_id:
-        params["agent_session_id"] = agent_session_id
-    request = {
-        "id": request_id,
-        "method": "pane.report_agent",
-        "params": params,
-    }
-
+action = sys.argv[1]
 try:
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(0.5)
-    client.connect(socket_path)
-    client.sendall((json.dumps(request) + "\n").encode())
-    try:
+    payload = json.load(sys.stdin)
+except Exception:
+    payload = {}
+
+session_id = payload.get("session_id")
+if not isinstance(session_id, str) or not session_id:
+    session_id = None
+
+seq = time.time_ns()
+params = {
+    "pane_id": os.environ["HERDR_PANE_ID"],
+    "source": "herdr:kimi",
+    "agent": "kimi",
+    "seq": seq,
+}
+if action == "session":
+    if session_id is None:
+        raise SystemExit(0)
+    method = "pane.report_agent_session"
+else:
+    method = "pane.report_agent"
+    params["state"] = action
+if session_id is not None:
+    params["agent_session_id"] = session_id
+
+request = json.dumps({"id": f"herdr:kimi:{seq}", "method": method, "params": params})
+try:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(0.5)
+        client.connect(os.environ["HERDR_SOCKET_PATH"])
+        client.sendall((request + "\n").encode())
         client.recv(4096)
-    except Exception:
-        pass
-    client.close()
 except Exception:
     pass
-PY
+' "$action" 2>/dev/null || true

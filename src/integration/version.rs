@@ -47,7 +47,7 @@ pub(crate) fn enforce_agent_version(
     requirement: &AgentVersionRequirement,
 ) -> io::Result<Option<String>> {
     let probe = format!("{} {}", requirement.binary, requirement.args.join(" "));
-    let output = match std::process::Command::new(requirement.binary)
+    let output = match crate::noninteractive_process::command(requirement.binary)
         .args(requirement.args)
         .output()
     {

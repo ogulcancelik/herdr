@@ -2,60 +2,37 @@
 import MobileMenuFooter from 'virtual:starlight/components/MobileMenuFooter';
 import SidebarPersister from '@astrojs/starlight/components/SidebarPersister.astro';
 import SidebarSublist from '@astrojs/starlight/components/SidebarSublist.astro';
+import versions from '../data/docs-versions.json';
+import { docsRoute, docsTargetHref } from '../docs-path';
 
 const { sidebar } = Astro.locals.starlightRoute;
 const pathname = Astro.url.pathname;
-const isPreview = pathname === '/docs/preview/' || pathname.startsWith('/docs/preview/');
-const channelSidebar = isPreview ? addPreviewOnlyItems(rewriteSidebar(sidebar)) : sidebar;
-
-function addPreviewOnlyItems(entries) {
-  return entries.map((entry) => {
-    if (entry.type !== 'group' || entry.label !== 'Start here') return entry;
-
-    const windowsBeta = {
-      type: 'link',
-      label: 'Windows beta',
-      href: '/docs/preview/windows-beta/',
-      badge: undefined,
-      isCurrent: samePath('/docs/preview/windows-beta/', pathname),
-      attrs: {},
-    };
-    const nextEntries = [];
-    for (const child of entry.entries) {
-      nextEntries.push(child);
-      if (child.type === 'link' && child.label === 'Install') {
-        nextEntries.push(windowsBeta);
-      }
-    }
-
-    return {
-      ...entry,
-      entries: nextEntries,
-    };
-  });
-}
+const route = docsRoute(pathname);
+const scopedSidebar = route.target === 'stable' ? sidebar : rewriteSidebar(sidebar);
 
 function rewriteSidebar(entries) {
-  return entries.map((entry) => {
+  return entries.flatMap((entry) => {
     if (entry.type === 'link') {
-      const href = previewHref(entry.href);
-      return {
-        ...entry,
-        href,
-        isCurrent: samePath(href, pathname),
-      };
-    }
-    const rewrittenEntries = rewriteSidebar(entry.entries);
-    return {
-      ...entry,
-      entries: rewrittenEntries,
-    };
-  });
-}
+      const linkRoute = docsRoute(entry.href);
+      if (!linkRoute.isDocs) return [entry];
+      if (linkRoute.target !== 'stable') {
+        return linkRoute.target === route.target
+          ? [{ ...entry, isCurrent: samePath(entry.href, pathname) }]
+          : [];
+      }
 
-function previewHref(href) {
-  if (!href.startsWith('/docs/') || href.startsWith('/docs/preview/')) return href;
-  return href === '/docs/' ? '/docs/preview/' : href.replace(/^\/docs\//, '/docs/preview/');
+      const localeKey = route.locale ?? 'root';
+      const availablePages = versions.scopes[route.target]?.locales[localeKey] ?? [];
+      if (!availablePages.includes(linkRoute.page)) return [];
+
+      const href = docsTargetHref({ ...linkRoute, locale: route.locale }, route.target, versions.scopes);
+      return [{ ...entry, href, isCurrent: samePath(href, pathname) }];
+    }
+
+    const rewrittenEntries = rewriteSidebar(entry.entries);
+    if (rewrittenEntries.length === 0) return [];
+    return [{ ...entry, entries: rewrittenEntries }];
+  });
 }
 
 function samePath(left, right) {
@@ -68,7 +45,7 @@ function stripTrailingSlash(path) {
 ---
 
 <SidebarPersister>
-  <SidebarSublist sublist={channelSidebar} />
+  <SidebarSublist sublist={scopedSidebar} />
 </SidebarPersister>
 
 <div class="md:sl-hidden">

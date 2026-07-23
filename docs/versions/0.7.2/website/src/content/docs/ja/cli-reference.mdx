@@ -1,0 +1,358 @@
+---
+title: CLI リファレンス
+description: セッション、ワークスペース、タブ、ペイン、通知、エージェント、wait、インテグレーション、ステータスのための Herdr コマンド。
+---
+
+Herdr の CLI は、インテグレーションやエージェントが使うのと同じローカルソケット API を通じて、実行中のサーバーと通信します。
+
+ほとんどのコマンドは JSON レスポンスを出力します。決定的な自動化が欲しいときはスクリプトから使ってください。
+
+## 起動とステータス
+
+```bash
+herdr                         # デフォルトセッションを起動またはアタッチ
+herdr --session work          # 名前付きセッションを起動またはアタッチ
+herdr --remote workbox        # SSH 越しにアタッチ (ローカルのキーバインドを使用)
+herdr --remote workbox --remote-keybindings server
+herdr --remote workbox --handoff
+herdr --no-session            # シングルプロセスの逃げ道
+herdr --default-config        # デフォルト設定を表示
+herdr update                  # 設定済みチャンネルからダウンロードしてインストール
+herdr update --handoff        # 対応する実行中サーバーでライブハンドオフにオプトイン
+herdr channel show            # stable または preview を表示
+herdr channel set preview     # プレビュービルドにオプトイン
+herdr channel set stable      # Linux/macOS の直接インストールを安定版に戻す
+herdr --version               # バージョンを表示
+```
+
+ステータスコマンド:
+
+```bash
+herdr status
+herdr status server
+herdr status client
+```
+
+## サーバー
+
+```bash
+herdr server
+herdr server stop
+herdr server reload-config
+herdr server agent-manifests [--json]
+herdr server update-agent-manifests [--json]
+herdr server reload-agent-manifests
+```
+
+`herdr server` はヘッドレスサーバーを明示的に起動します。監視下やサービス的な構成で使ってください。`reload-config` はペインを再起動せずにリロード可能な設定を適用します。`agent-manifests` は、アクティブなエージェント検出マニフェストのソース、キャッシュされたリモートバージョン、直近のリモート更新結果を表示します。`update-agent-manifests` はリモートマニフェストの更新を即座に取得し、実行中のサーバーにリロードして、更新後のマニフェスト状態を表示します。生のステータスレスポンスが欲しいときは `--json` を渡してください。`reload-agent-manifests` は、ローカルオーバーライドの編集後にエージェント検出マニフェストを実行中のサーバーにリロードします。
+
+## 通知
+
+```bash
+herdr notification show <title> [--body TEXT] [--position top-left|top-right|bottom-left|bottom-right] [--sound none|done|request]
+```
+
+`notification show` は設定済みの `[ui.toast]` 配信を使います。`--position` はアプリ内の Herdr トーストにのみ影響します。`--sound` のデフォルトは `none` で、`done` と `request` は通知が表示されたときにのみ、既存の完了音と要注意音を再生します。
+
+## セッション
+
+```bash
+herdr session list [--json]
+herdr session attach <name>
+herdr session stop <name> [--json]
+herdr session delete <name> [--json]
+```
+
+デフォルトセッションを明示的に停止する必要があるときは、セッション名として `default` を使ってください。
+
+## ワークスペース
+
+```bash
+herdr workspace list
+herdr workspace create [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [--no-focus]
+herdr workspace get <workspace_id>
+herdr workspace focus <workspace_id>
+herdr workspace rename <workspace_id> <label>
+herdr workspace close <workspace_id>
+```
+
+フォーカスを奪わずにワークスペースを作成します:
+
+```bash
+herdr workspace create --cwd ~/project --label api --no-focus
+```
+
+## Worktree
+
+```bash
+herdr worktree list [--workspace ID | --cwd PATH] [--json]
+herdr worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--focus] [--no-focus] [--json]
+herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus] [--json]
+herdr worktree remove --workspace ID [--force] [--json]
+```
+
+worktree は、Git チェックアウトの出自情報を持つ通常の Herdr ワークスペースです。`worktree create` は Git worktree のチェックアウトを作成し、ワークスペースとして開き、親リポジトリのワークスペースとグループ化します。`--branch` が既存のローカルブランチを指す場合はそれをチェックアウトし、そうでなければ `--base` または `HEAD` からブランチを作成します。`--path` がない場合、チェックアウトは `<worktrees.directory>/<repo>/<branch-slug>` の下に作成されます。
+
+`workspace close` は Herdr の状態だけを閉じます。`worktree remove` が明示的なチェックアウト削除の経路です。`git worktree remove` を実行し、ブランチは決して削除せず、Git がダーティなチェックアウトを拒否する場合は `--force` が必要です。
+
+## タブ
+
+```bash
+herdr tab list [--workspace <workspace_id>]
+herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [--no-focus]
+herdr tab get <tab_id>
+herdr tab focus <tab_id>
+herdr tab rename <tab_id> <label>
+herdr tab close <tab_id>
+```
+
+## ペイン
+
+```bash
+herdr pane list [--workspace <workspace_id>]
+herdr pane current [--pane ID|--current]
+herdr pane get <pane_id>
+herdr pane layout [--pane ID|--current]
+herdr pane process-info [--pane ID|--current]
+herdr pane neighbor --direction left|right|up|down [--pane ID|--current]
+herdr pane edges [--pane ID|--current]
+herdr pane focus --direction left|right|up|down [--pane ID|--current]
+herdr pane resize --direction left|right|up|down [--amount FLOAT] [--pane ID|--current]
+herdr pane zoom [<pane_id>|--pane ID|--current] [--toggle|--on|--off]
+herdr pane rename <pane_id> <label>|--clear
+herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--focus] [--no-focus]
+herdr pane swap --direction left|right|up|down [--pane ID|--current]
+herdr pane swap --source-pane ID --target-pane ID
+herdr pane move <pane_id> --tab <tab_id> --split right|down [--target-pane ID] [--ratio FLOAT] [--focus|--no-focus]
+herdr pane move <pane_id> --new-tab [--workspace ID] [--label TEXT] [--focus|--no-focus]
+herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--focus|--no-focus]
+herdr pane close <pane_id>
+```
+
+出力を読む:
+
+```bash
+herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N]
+herdr pane read <pane_id> --source visible --ansi
+herdr pane read <pane_id> --source recent-unwrapped --lines 120
+```
+
+入力を送る:
+
+```bash
+herdr pane send-text <pane_id> <text>
+herdr pane send-keys <pane_id> <key> [key ...]
+herdr pane run <pane_id> <command>
+```
+
+`<key>` は Herdr のキーコンボ構文を使います: `a` のような通常の印字可能キー、`enter`、`tab`、`esc`、`backspace`、`left`、`right`、`up`、`down` のような特殊キー、`ctrl+h`、`control+j`、`alt+x`、`shift+tab` のような修飾キーコード、`f1` のようなファンクションキー、そして `minus`、`plus`、`backtick` のような名前付き記号です。レガシーな `C-c` と `c-c` は `ctrl+c` のエイリアスとして受け付けられます。
+
+`pane run` はテキストと Enter をアトミックに送信します。コマンドには `send-text` + `send-keys Enter` よりこちらを使ってください。
+
+カスタムフックからエージェント状態を報告する:
+
+```bash
+herdr pane report-agent <pane_id> \
+  --source ID \
+  --agent LABEL \
+  --state idle|working|blocked|unknown \
+  [--message TEXT] \
+  [--custom-status TEXT] \
+  [--seq N] \
+  [--agent-session-id ID] \
+  [--agent-session-path PATH]
+```
+
+公式インテグレーションがネイティブセッション参照を報告している場合、`pane get`、`pane list`、`agent get`、`agent list` は読み取り専用の `agent_session` オブジェクトを含みます。ネイティブセッション参照が保存されていない場合、このフィールドは省略されます。
+
+これらのコマンドは、ペインを制御しているフォアグラウンドプロセスの cwd を解決できる場合に `foreground_cwd` を含みます。既存の `cwd` フィールドは、ラベルと follow-cwd 挙動に使われるペイン/ワークスペースの cwd のままです。
+
+意味的な状態を奪わずに、表示専用のペインメタデータを報告する:
+
+```bash
+herdr pane report-metadata <pane_id> \
+  --source ID \
+  [--agent LABEL] \
+  [--applies-to-source ID] \
+  [--title TEXT|--clear-title] \
+  [--display-agent TEXT|--clear-display-agent] \
+  [--custom-status TEXT|--clear-custom-status] \
+  [--state-label STATUS=TEXT] \
+  [--clear-state-labels] \
+  [--seq N] \
+  [--ttl-ms N]
+```
+
+`STATUS` は `idle`、`working`、`blocked`、`done`、`unknown` のいずれかです。`--agent` は権威あるエージェントラベルに対するガードです。`--applies-to-source` はアクティブなライフサイクル権威ソースに対するガードです。表示名を変えるには `--display-agent` を使ってください。
+
+メタデータのテキストは保存前に正規化されます。Herdr は前後の空白を取り除き、制御文字を除去し、`--custom-status` を 32 文字に、`--title`、`--display-agent`、各 `--state-label` の値を 80 文字に制限します。正規化後に空になった値は無視されます。
+
+`--source` と `--applies-to-source` は 80 文字以下で、ASCII の英字、数字、コロン、ドット、アンダースコア、ハイフンのみを含められます。`--ttl-ms` はメタデータを自動失効させ、`1` から `86400000` ミリ秒の間でなければなりません。置き換え・クリア・ペインのクローズまで残るべきメタデータでは省略してください。`--seq` により、Herdr は同じ `--source` からの古い報告を無視できます。古い報告は API には受理されますが、ペイン状態には無視されます。
+
+## エージェント
+
+```bash
+herdr agent list
+herdr agent get <target>
+herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]
+herdr agent send <target> <text>
+herdr agent rename <target> <name>|--clear
+herdr agent focus <target>
+herdr agent wait <target> --status <idle|working|blocked|unknown> [--timeout MS]
+herdr agent attach <target> [--takeover]
+herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>
+herdr agent explain <target> [--json|--verbose]
+herdr agent explain --file PATH --agent LABEL [--json|--verbose]
+```
+
+エージェントターゲットには、ターミナル ID、一意なエージェント名、検出または報告されたエージェントラベル、レガシーなペイン ID が使えます。名前とラベルはエージェントのアイデンティティです。ターミナル ID とレガシーペイン ID は低レベルな逃げ道です。
+
+`agent read` は解決されたターミナルストリームを読みます。`agent send` はそのストリームにリテラルのテキストを書き込みます。`agent get`、`agent focus`、`agent wait`、`agent attach` は、解決されたターミナルがエージェントのアイデンティティを持つことを要求します。`agent rename` はそのアイデンティティを割り当てられます。
+
+`agent explain` は、スクリーン検出が使うのと同じ下部バッファの検出スナップショットの分類を実行中のサーバーに依頼します。そのためライブの出力はサーバーのアクティブなマニフェストキャッシュを反映します。これは `agent.explain` ソケットメソッドを使うので、Herdr のアップグレード後にライブ explain を使う前に、サーバーを再起動するか更新済みサーバーへハンドオフしてください。保存済みフィクスチャをローカルで説明するには `--file PATH --agent LABEL` を使います。デフォルトの出力には、エージェント、最終状態、マニフェストのソースとバージョン、リージョンの証拠付きでマッチしたルール、そしてフォールバック・スキップ・警告の理由が表示されます。`--verbose` を付けると、可視の証拠フラグ、キャッシュされたリモートバージョン、ローカルオーバーライドのシャドーイング、リモート更新状況、マッチャーとリージョンの証拠付きの評価済みルール全リストが表示されます。issue の報告やテストには `--json` を付けてください。
+
+通常のターミナル、サーバー、テスト、シェル、低レベルなターミナル制御には `pane send-text`、`pane send-keys`、`pane run`、`terminal attach` を使ってください。Enter 付きでコマンドを送信したいときは `pane run` を使います。
+
+## ダイレクトターミナルアタッチ
+
+```bash
+herdr terminal attach <terminal_id> [--takeover]
+herdr terminal title set <title>
+herdr terminal title clear
+```
+
+ダイレクトアタッチからは `ctrl+b q` でデタッチします。リテラルの `ctrl+b` は `ctrl+b ctrl+b` で送ります。
+`terminal title clear` は Herdr のデフォルトの外側ターミナルウィンドウタイトルを復元します。
+
+## Wait
+
+ペインの出力を待つ:
+
+```bash
+herdr wait output <pane_id> --match <text> [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--regex] [--raw]
+```
+
+ペインのエージェント状態を待つ:
+
+```bash
+herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [--timeout MS]
+```
+
+通常のコマンドやサーバーには `wait output` を使います。コーディングエージェントには `wait agent-status` を使います。
+
+## インテグレーション
+
+```bash
+herdr integration install pi
+herdr integration install omp
+herdr integration install claude
+herdr integration install codex
+herdr integration install copilot
+herdr integration install devin
+herdr integration install droid
+herdr integration install kimi
+herdr integration install opencode
+herdr integration install kilo
+herdr integration install hermes
+herdr integration install mastracode
+herdr integration install qodercli
+herdr integration install cursor
+herdr integration uninstall pi
+herdr integration uninstall omp
+herdr integration uninstall claude
+herdr integration uninstall codex
+herdr integration uninstall copilot
+herdr integration uninstall devin
+herdr integration uninstall droid
+herdr integration uninstall kimi
+herdr integration uninstall opencode
+herdr integration uninstall kilo
+herdr integration uninstall hermes
+herdr integration uninstall mastracode
+herdr integration uninstall qodercli
+herdr integration uninstall cursor
+herdr integration status [--outdated-only]
+```
+
+## プラグイン
+
+プラグインコマンドは、ローカル実行型ワークフロープラグインをインストールして実行します。プラグインはマニフェストとプロセス外コマンドの組み合わせです。ホスト側の面は Herdr が、実装言語はプラグインが担います。
+
+プラグインのインストール、一覧、削除:
+
+```bash
+herdr plugin install <owner>/<repo>[/subdir...] [--ref REF] [--yes]
+herdr plugin list [--plugin ID] [--json]
+herdr plugin uninstall <plugin_id|owner/repo[/subdir...]>
+herdr plugin enable <plugin_id>
+herdr plugin disable <plugin_id>
+```
+
+`plugin install` は `ogulcancelik/herdr-plugin-examples/worktree-bootstrap` のような GitHub 省略記法のみを受け付けます。`git` を使い、対話的なターミナルでは信頼プレビューを表示し、サポートされるマニフェストのビルドコマンドを実行し、GitHub インストールを Herdr 管理のディレクトリに保存します。非対話的なインストールには `--yes` を使ってください。GitHub 管理プラグインの再インストールは、その管理チェックアウトを置き換えます。ローカルにリンクされたプラグインへの上書きインストールは拒否されます。プラグインのマニフェストは `min_herdr_version` を宣言しなければならず、プラグインがより新しい Herdr バイナリを要求する場合、install と link は失敗します。`plugin list` はデフォルトで人間可読です。生の API レスポンスが欲しいときは `--json` を渡してください。
+
+ローカル開発:
+
+```bash
+herdr plugin link <path> [--disabled]
+herdr plugin unlink <plugin_id>
+```
+
+`plugin link` は `herdr-plugin.toml` を含むプラグインディレクトリ、またはマニフェストへの直接パスを受け付けます。ローカルチェックアウトからプラグインを作成・テストしている間はこれが正しいコマンドです。`plugin unlink` はプラグインの登録を解除し、ファイルには触れません。`plugin uninstall` はプラグインの登録を解除し、Herdr 管理の GitHub チェックアウトファイルも削除します。GitHub インストールの場合、uninstall はプラグイン id と、install で使うのと同じ `owner/repo[/subdir...]` 省略記法の両方を受け付けます。アクション、イベントフック、ペイン、リンクハンドラーはマニフェストで宣言します。ランタイムでのアクション登録は v1 の範囲外です。
+
+設定ディレクトリ:
+
+```bash
+herdr plugin config-dir <plugin_id>
+```
+
+`plugin config-dir` はプラグインの設定ディレクトリを表示し、必要なら作成します (レガシーなプラグイン設定の場所が存在すれば、そこから初期内容を移します)。セットアップドキュメントやシェルスクリプトで、管理されたプラグインチェックアウトとは別の、`.env` ファイルなどユーザーが編集する設定のための安定したパスをユーザーに示すのに使ってください。
+
+アクション:
+
+```bash
+herdr plugin action list [--plugin ID]
+herdr plugin action invoke <action_id> [--plugin ID]
+```
+
+`plugin action invoke` は、インストール済みで有効かつプラットフォーム互換のプラグインアクションのマニフェストコマンドを起動し、開始されたコマンドのログレコードを JSON レスポンスに表示します。複数のプラグインが同じアクション id を使っている場合は、修飾されたアクション id (`plugin.id.action`) を使ってください。ローカルのアクション id はドットを含められないため、プラグイン id がドットを含んでいても修飾 id は曖昧になりません。
+
+ログ:
+
+```bash
+herdr plugin log list [--plugin ID] [--limit N]
+```
+
+管理されたターミナルペイン:
+
+```bash
+herdr plugin pane open --plugin ID --entrypoint ID [--placement overlay|split|tab|zoomed] [--workspace ID] [--target-pane PANE] [--direction right|down] [--cwd PATH] [--env KEY=VALUE] [--focus|--no-focus]
+herdr plugin pane focus <pane_id>
+herdr plugin pane close <pane_id>
+```
+
+`plugin pane open` は、プラグインがリンクされ、有効で、現在のプラットフォームと互換であることを要求します。マニフェストで宣言された `[[panes]]` コマンドを Herdr 管理のターミナルペインとして起動します。マニフェストのデフォルトは `overlay` で、アクティブなペインの上に一時的なズームオーバーレイを開きます。分割、新しいタブ、ズームされたペインとして開くこともできます。ターミナル以外のネイティブなプラグインペインは今後の対応面です。
+
+`--env KEY=VALUE` はプロセスを起動するコマンドで繰り返し指定できます。新しく起動されるプロセスにのみ適用されます。`HERDR_SOCKET_PATH`、`HERDR_BIN_PATH`、`HERDR_ENV`、`HERDR_WORKSPACE_ID`、`HERDR_TAB_ID`、`HERDR_PANE_ID`、`HERDR_PLUGIN_ID`、`HERDR_PLUGIN_ROOT`、`HERDR_PLUGIN_CONFIG_DIR`、`HERDR_PLUGIN_STATE_DIR`、`HERDR_PLUGIN_ENTRYPOINT_ID`、`HERDR_PLUGIN_CONTEXT_JSON` のような Herdr 管理の変数は、呼び出し側が与えた環境変数と衝突した場合も権威を保ちます。
+
+## 読み取りソース
+
+| ソース | 意味 |
+| --- | --- |
+| `visible` | 現在レンダリングされている画面。UI のフィードバックループに最適。 |
+| `recent` | ターミナルの折り返しを含む直近のスクロールバック。 |
+| `recent-unwrapped` | ソフト折り返しなしの直近のスクロールバック。ログに最適。 |
+| `detection` | エージェントのスクリーン検出が使う下部バッファのスナップショット。 |
+
+## 環境変数
+
+| 変数 | 目的 |
+| --- | --- |
+| `HERDR_CONFIG_PATH` | 設定ファイルパスを上書きする。 |
+| `HERDR_SESSION` | CLI コマンドの名前付きセッションを選択する。 |
+| `HERDR_SOCKET_PATH` | 低レベルなソケットパスの上書き。 |
+| `HERDR_ENV` | Herdr 管理のペインプロセス内で `1` に設定される。 |
+| `HERDR_PANE_ID` | 実行中ペインプロセスの公開ペイン id。 |
+| `HERDR_TAB_ID` | 実行中ペインプロセスの公開タブ id。 |
+| `HERDR_WORKSPACE_ID` | 実行中ペインプロセスの公開ワークスペース id。 |
+| `HERDR_LOG` | ログフィルターを設定する。例: `HERDR_LOG=herdr=debug`。 |
+| `HERDR_DISABLE_SOUND` | サウンド通知が有効でも音の再生を無効にする。 |

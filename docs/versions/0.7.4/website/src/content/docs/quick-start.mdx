@@ -1,0 +1,69 @@
+---
+title: Quick start
+description: Create your first Herdr workspace and run agents in persistent terminal panes.
+---
+
+If Herdr is not installed yet, see [Install](/docs/install/). Then start Herdr from any project directory:
+
+```bash
+herdr
+```
+
+Herdr launches or attaches to your default background session. You do not manage sockets. If you detach, agents keep running.
+
+## Create a workspace
+
+When a session has no workspaces, Herdr opens one automatically. A workspace is a project-level container for tabs, panes, and agents. Give each active project its own workspace; this keeps agent state readable in the sidebar.
+
+## Use the mouse
+
+Herdr is mouse-native, so start by clicking. Click panes, tabs, workspaces, and agents to focus them. Drag split borders to resize. Right-click for context menus, including splitting panes and creating tabs. Drag-select text to copy it to your clipboard; double-click a token to copy it directly. Copying does not require Ctrl+C.
+
+Ctrl-click opens pane links when your terminal sends the modified click to Herdr. This works for OSC 8 hyperlinks and visible `http://` or `https://` URLs. On macOS, use Ctrl-click for Herdr-handled pane links while mouse capture is enabled; Cmd-click is only available through the terminal-native bypass path, such as Shift-Cmd-click or `ui.mouse_capture = false`.
+
+If you configure `ui.right_click_passthrough_modifier`, that modifier plus right-click sends right-click, hold, and drag gestures to mouse-reporting pane apps.
+
+## Run an agent
+
+Start your coding agent in a pane:
+
+```bash
+claude
+```
+
+Or `codex`, `pi`, `opencode`, or any other [supported agent](/docs/agents/). Herdr detects it automatically. The sidebar shows whether each agent is `working`, `blocked`, `done`, or `idle` — across every workspace, so you always know which project needs you.
+
+## Keyboard control
+
+Keyboard control is optional; the mouse covers everything. Press `ctrl+b` to enter prefix mode, then press an action key.
+
+Common actions:
+
+| Action | Key |
+| --- | --- |
+| Split right | `prefix+v` |
+| Split down | `prefix+minus` |
+| New tab | `prefix+c` |
+| Next / previous tab | `prefix+n` / `prefix+p` |
+| Workspace navigation | `prefix+w` |
+| New workspace | `prefix+shift+n` |
+| Detach client | `prefix+q` |
+
+New to the prefix idea? [Keyboard](/docs/keyboard/) explains what it is, why multiplexers use one, and how to go prefix-free. Press `prefix+?` inside Herdr to see every active binding, and `prefix+[` to copy from the keyboard in copy mode.
+
+## Detach and come back
+
+Press `prefix+q` or simply close your terminal window. The Herdr server and every agent keep running. Run `herdr` again to reattach to the same session.
+
+To actually end the session and stop its panes:
+
+```bash
+herdr server stop
+```
+
+## Where next
+
+- [Concepts](/docs/concepts/) — the workspace, tab, pane, and agent model in two minutes.
+- [How to work with Herdr](/docs/how-to-work/) — local, SSH, phone, and `herdr --remote` workflows.
+- [Agents](/docs/agents/) — supported agents, detection, and integrations that improve state accuracy.
+- [Configuration](/docs/configuration/) — keybindings, themes, notifications, and everything else.

@@ -583,7 +583,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "herdr"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "base64",
  "bincode",
@@ -600,6 +600,7 @@ dependencies = [
  "regex",
  "schemars",
  "serde",
+ "serde_ignored",
  "serde_json",
  "sha2",
  "tokio",
@@ -1451,6 +1452,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "serde_ignored"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "115dffd5f3853e06e746965a20dcbae6ee747ae30b543d91b0e089668bb07798"
+dependencies = [
+ "serde",
+ "serde_core",
 ]
 
 [[package]]

@@ -2,7 +2,7 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=kilo
-// HERDR_INTEGRATION_VERSION=2
+// HERDR_INTEGRATION_VERSION=3
 
 import net from "node:net";
 
@@ -48,6 +48,9 @@ function request(method, params) {
     return Promise.resolve();
   }
 
+  const socketEndpoint =
+    process.platform === "win32" ? `\\\\.\\pipe\\${socketPath}` : socketPath;
+
   const requestId = `${SOURCE}:${Date.now()}:${Math.floor(Math.random() * 1_000_000)
     .toString()
     .padStart(6, "0")}`;
@@ -64,7 +67,7 @@ function request(method, params) {
   };
 
   return new Promise((resolve) => {
-    const client = net.createConnection(socketPath, () => {
+    const client = net.createConnection(socketEndpoint, () => {
       client.write(`${JSON.stringify(request)}\n`);
     });
 

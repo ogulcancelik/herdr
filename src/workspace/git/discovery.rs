@@ -216,7 +216,7 @@ fn strip_git_config_comment(value: &str) -> &str {
 }
 
 fn git_trimmed_stdout(repo_root: &Path, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new("git")
+    let output = crate::noninteractive_process::command("git")
         .arg("-C")
         .arg(repo_root)
         .args(args)

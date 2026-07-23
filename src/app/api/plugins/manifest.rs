@@ -1,7 +1,7 @@
 use crate::api::schema::{
     InstalledPluginInfo, PluginManifestAction, PluginManifestBuild, PluginManifestEventHook,
-    PluginManifestLinkHandler, PluginManifestPane, PluginPanePlacement, PluginPlatform,
-    PluginSourceInfo, PluginSourceKind,
+    PluginManifestLinkHandler, PluginManifestPane, PluginManifestStartup, PluginPanePlacement,
+    PluginPlatform, PluginSourceInfo, PluginSourceKind,
 };
 use crate::popup_size::PopupSize;
 
@@ -22,6 +22,8 @@ struct RawPluginManifest {
     #[serde(default)]
     build: Vec<RawPluginManifestBuild>,
     #[serde(default)]
+    startup: Vec<RawPluginManifestStartup>,
+    #[serde(default)]
     actions: Vec<RawPluginManifestAction>,
     #[serde(default)]
     events: Vec<RawPluginManifestEventHook>,
@@ -33,6 +35,13 @@ struct RawPluginManifest {
 
 #[derive(serde::Deserialize)]
 struct RawPluginManifestBuild {
+    #[serde(default)]
+    platforms: Option<Vec<RawPlatform>>,
+    command: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawPluginManifestStartup {
     #[serde(default)]
     platforms: Option<Vec<RawPlatform>>,
     command: Vec<String>,
@@ -151,6 +160,11 @@ pub(crate) fn load_plugin_manifest(
         .into_iter()
         .map(normalize_manifest_build)
         .collect::<Result<Vec<_>, _>>()?;
+    let startup = raw
+        .startup
+        .into_iter()
+        .map(normalize_manifest_startup)
+        .collect::<Result<Vec<_>, _>>()?;
     let mut actions = raw
         .actions
         .into_iter()
@@ -163,7 +177,14 @@ pub(crate) fn load_plugin_manifest(
         .into_iter()
         .map(normalize_manifest_event)
         .collect::<Result<Vec<_>, _>>()?;
-    events.sort_by(|a, b| a.on.cmp(&b.on).then_with(|| a.command.cmp(&b.command)));
+    events.sort_by(|a, b| {
+        a.on.cmp(&b.on).then_with(|| {
+            a.command
+                .iter()
+                .map(|arg| arg.trim())
+                .cmp(b.command.iter().map(|arg| arg.trim()))
+        })
+    });
     let mut panes = raw
         .panes
         .into_iter()
@@ -195,6 +216,7 @@ pub(crate) fn load_plugin_manifest(
         enabled,
         platforms,
         build,
+        startup,
         actions,
         events,
         panes,
@@ -243,6 +265,14 @@ fn normalize_manifest_build(
     Ok(PluginManifestBuild { platforms, command })
 }
 
+fn normalize_manifest_startup(
+    startup: RawPluginManifestStartup,
+) -> Result<PluginManifestStartup, (&'static str, String)> {
+    let platforms = normalize_platforms(startup.platforms)?;
+    let command = normalize_command(startup.command)?;
+    Ok(PluginManifestStartup { platforms, command })
+}
+
 pub(super) fn normalize_plugin_source(
     plugin: &InstalledPluginInfo,
     source: PluginSourceInfo,
@@ -262,12 +292,7 @@ pub(super) fn normalize_plugin_source(
     let plugin_root = std::path::PathBuf::from(&plugin.plugin_root)
         .canonicalize()
         .map_err(|err| ("invalid_plugin_source", err.to_string()))?;
-    let expected = crate::session::data_dir()
-        .join("plugins")
-        .join("github")
-        .join(crate::api::schema::plugin_managed_path_component(
-            &plugin.plugin_id,
-        ))
+    let expected = crate::plugin_paths::managed_checkout_path(&plugin.plugin_id)
         .canonicalize()
         .map_err(|err| ("invalid_plugin_source", err.to_string()))?;
     if managed_path != expected {
@@ -534,10 +559,6 @@ fn platform_name(p: PluginPlatform) -> &'static str {
 }
 
 fn normalize_command(command: Vec<String>) -> Result<Vec<String>, (&'static str, String)> {
-    let command = command
-        .into_iter()
-        .map(|arg| arg.trim().to_string())
-        .collect::<Vec<_>>();
     if command.is_empty() || command.iter().any(|arg| arg.is_empty()) {
         return Err((
             "invalid_plugin_command",
@@ -560,7 +581,7 @@ fn non_empty_trimmed(
     }
 }
 
-pub(super) fn normalize_plugin_id(value: &str) -> Option<String> {
+pub(crate) fn normalize_plugin_id(value: &str) -> Option<String> {
     normalize_identifier(value, PLUGIN_ID_MAX_CHARS)
 }
 

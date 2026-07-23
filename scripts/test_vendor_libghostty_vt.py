@@ -8,7 +8,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from scripts.vendor_libghostty_vt import ensure_dist_archive, parse_archive_root
+from scripts.vendor_libghostty_vt import (
+    ensure_dist_archive,
+    parse_archive_root,
+    require_clean_checkout,
+)
 
 
 class VendorLibghosttyVtTests(unittest.TestCase):
@@ -30,14 +34,42 @@ class VendorLibghosttyVtTests(unittest.TestCase):
             dist.mkdir(parents=True)
             (dist / "libghostty-vt-1.3.2-main-+deadbeef0.tar.gz").write_bytes(b"stale")
 
+            def git_output(command: list[str], **_kwargs: object) -> str:
+                if command[1] == "status":
+                    return ""
+                return "0123456789abcdef\n"
+
             with (
                 mock.patch("scripts.vendor_libghostty_vt.subprocess.run"),
                 mock.patch(
                     "scripts.vendor_libghostty_vt.subprocess.check_output",
-                    return_value="0123456789abcdef\n",
+                    side_effect=git_output,
                 ),
             ):
                 with self.assertRaisesRegex(FileNotFoundError, "HEAD 012345678"):
+                    ensure_dist_archive(repo)
+
+    def test_require_clean_checkout_rejects_tracked_and_untracked_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            with mock.patch(
+                "scripts.vendor_libghostty_vt.subprocess.check_output",
+                return_value=" M src/terminal.zig\n?? local.patch\n",
+            ):
+                with self.assertRaisesRegex(ValueError, "refusing to vendor from dirty checkout"):
+                    require_clean_checkout(repo)
+
+    def test_ensure_dist_archive_rejects_checkout_dirtied_by_build(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            with (
+                mock.patch("scripts.vendor_libghostty_vt.subprocess.run"),
+                mock.patch(
+                    "scripts.vendor_libghostty_vt.subprocess.check_output",
+                    side_effect=["", "0123456789abcdef\n", " M generated.txt\n"],
+                ),
+            ):
+                with self.assertRaisesRegex(ValueError, "refusing to vendor from dirty checkout"):
                     ensure_dist_archive(repo)
 
     def test_vendored_tree_contains_required_upstream_files(self) -> None:

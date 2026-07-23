@@ -122,9 +122,19 @@ impl Config {
             }
         };
 
-        match toml::from_str::<Config>(&content) {
-            Ok(config) => {
-                let mut diagnostics = unknown_top_level_section_diagnostics_from_str(&content);
+        match deserialize_with_ignored::<Config, _>(toml::Deserializer::new(&content)) {
+            Ok((config, ignored_keys)) => {
+                let (unknown_sections, mut diagnostics) =
+                    unknown_top_level_sections_from_str(&content);
+                diagnostics.extend(unknown_config_key_diagnostics(
+                    ignored_keys
+                        .into_iter()
+                        .filter(|path| {
+                            !matches!(path.as_slice(), [ConfigKeyPathSegment::Key(key)] if unknown_sections.contains(key))
+                        })
+                        .collect(),
+                    None,
+                ));
                 diagnostics.extend(config.collect_diagnostics());
                 LoadedConfig {
                     config,
@@ -193,6 +203,11 @@ pub fn config_diagnostic_summary(diagnostics: &[String]) -> Option<String> {
         } else {
             " invalid; keeping current config"
         }
+    } else if diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.starts_with("unknown config key "))
+    {
+        " has unknown keys"
     } else {
         ""
     };
@@ -233,6 +248,7 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
 
     let mut config = Config::default();
     let mut diagnostics = unknown_top_level_section_diagnostics(table);
+    diagnostics.extend(unknown_top_level_config_key_diagnostics(table));
     let mut invalid_sections = Vec::new();
 
     if let Some(value) = table.get("onboarding") {
@@ -332,12 +348,23 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
     })
 }
 
-fn unknown_top_level_section_diagnostics_from_str(content: &str) -> Vec<String> {
-    content
-        .parse::<toml::Value>()
-        .ok()
-        .and_then(|value| value.as_table().map(unknown_top_level_section_diagnostics))
-        .unwrap_or_default()
+fn unknown_top_level_sections_from_str(content: &str) -> (Vec<String>, Vec<String>) {
+    let Ok(value) = content.parse::<toml::Value>() else {
+        return (Vec::new(), Vec::new());
+    };
+    let Some(table) = value.as_table() else {
+        return (Vec::new(), Vec::new());
+    };
+
+    let mut keys = Vec::new();
+    let mut diagnostics = Vec::new();
+    for (key, value) in table {
+        if let Some(diagnostic) = unknown_top_level_section_diagnostic(key, value) {
+            keys.push(key.clone());
+            diagnostics.push(diagnostic);
+        }
+    }
+    (keys, diagnostics)
 }
 
 fn unknown_top_level_section_diagnostics(
@@ -374,6 +401,107 @@ fn unknown_top_level_section_diagnostic(key: &str, value: &toml::Value) -> Optio
     }
 }
 
+fn unknown_top_level_config_key_diagnostics(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Vec<String> {
+    let paths = table
+        .iter()
+        .filter(|(key, value)| {
+            !KNOWN_TOP_LEVEL_CONFIG_KEYS.contains(&key.as_str())
+                && unknown_top_level_section_diagnostic(key, value).is_none()
+        })
+        .map(|(key, _)| vec![ConfigKeyPathSegment::Key(key.clone())])
+        .collect();
+    unknown_config_key_diagnostics(paths, None)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum ConfigKeyPathSegment {
+    Key(String),
+    Index(usize),
+}
+
+fn config_key_path(path: &serde_ignored::Path<'_>) -> Vec<ConfigKeyPathSegment> {
+    fn visit(path: &serde_ignored::Path<'_>, segments: &mut Vec<ConfigKeyPathSegment>) {
+        match path {
+            serde_ignored::Path::Root => {}
+            serde_ignored::Path::Seq { parent, index } => {
+                visit(parent, segments);
+                segments.push(ConfigKeyPathSegment::Index(*index));
+            }
+            serde_ignored::Path::Map { parent, key } => {
+                visit(parent, segments);
+                segments.push(ConfigKeyPathSegment::Key(key.clone()));
+            }
+            serde_ignored::Path::Some { parent }
+            | serde_ignored::Path::NewtypeStruct { parent }
+            | serde_ignored::Path::NewtypeVariant { parent } => visit(parent, segments),
+        }
+    }
+
+    let mut segments = Vec::new();
+    visit(path, &mut segments);
+    segments
+}
+
+fn format_config_key_path(path: &[ConfigKeyPathSegment]) -> String {
+    path.iter()
+        .map(|segment| match segment {
+            ConfigKeyPathSegment::Key(key)
+                if !key.is_empty()
+                    && key.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+                    }) =>
+            {
+                key.clone()
+            }
+            ConfigKeyPathSegment::Key(key) => toml::Value::String(key.clone()).to_string(),
+            ConfigKeyPathSegment::Index(index) => index.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn unknown_config_key_diagnostics(
+    paths: Vec<Vec<ConfigKeyPathSegment>>,
+    section: Option<&str>,
+) -> Vec<String> {
+    let mut paths: Vec<Vec<ConfigKeyPathSegment>> = paths
+        .into_iter()
+        .map(|mut path| {
+            if let Some(section) = section {
+                path.insert(0, ConfigKeyPathSegment::Key(section.to_string()));
+            }
+            path
+        })
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+        .into_iter()
+        .map(|path| {
+            format!(
+                "unknown config key {}; ignoring key",
+                format_config_key_path(&path)
+            )
+        })
+        .collect()
+}
+
+fn deserialize_with_ignored<'de, T, D>(
+    deserializer: D,
+) -> Result<(T, Vec<Vec<ConfigKeyPathSegment>>), D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    let mut ignored = Vec::new();
+    let value = serde_ignored::deserialize(deserializer, |path| {
+        ignored.push(config_key_path(&path));
+    })?;
+    Ok((value, ignored))
+}
+
 fn load_live_section<T>(
     table: &toml::map::Map<String, toml::Value>,
     section: &'static str,
@@ -388,8 +516,11 @@ fn load_live_section<T>(
         return;
     };
 
-    match value.clone().try_into::<T>() {
-        Ok(section_config) => apply(section_config),
+    match deserialize_with_ignored(value.clone()) {
+        Ok((section_config, ignored_keys)) => {
+            diagnostics.extend(unknown_config_key_diagnostics(ignored_keys, Some(section)));
+            apply(section_config);
+        }
         Err(err) => {
             diagnostics.push(format!(
                 "invalid {label}: {err}; keeping current {section} settings"
@@ -625,6 +756,32 @@ mod tests {
     }
 
     #[test]
+    fn config_diagnostic_summary_reports_unknown_keys_compactly() {
+        let diagnostics = vec![
+            "unknown config key ui.mouse_captur; ignoring key".to_string(),
+            "unknown config key keys.new_tabb; ignoring key".to_string(),
+        ];
+
+        assert_eq!(
+            config_diagnostic_summary(&diagnostics).as_deref(),
+            Some("config.toml has unknown keys; herdr config check")
+        );
+    }
+
+    #[test]
+    fn config_diagnostic_summary_keeps_mixed_diagnostics_generic() {
+        let diagnostics = vec![
+            "invalid ui config: invalid type: string; keeping current ui settings".to_string(),
+            "unknown config key keys.new_tabb; ignoring key".to_string(),
+        ];
+
+        assert_eq!(
+            config_diagnostic_summary(&diagnostics).as_deref(),
+            Some("config.toml; herdr config check")
+        );
+    }
+
+    #[test]
     fn config_diagnostic_summary_reports_default_fallback() {
         let diagnostics = vec![
             "config parse error: TOML parse error at line 33, column 8\n   |\n33 | type = \"popup\"\n   |        ^^^^^^^\nunknown variant `popup`; using defaults"
@@ -731,22 +888,86 @@ delivery = "herdr"
     }
 
     #[test]
-    fn load_live_config_does_not_warn_about_unknown_top_level_scalar_values() {
+    fn load_live_config_warns_about_unknown_keys_and_applies_known_siblings() {
         let loaded = load_live_config_from_str(
-            r#"
+            r##"
 plugin = []
 
+[theme.custom]
+accentt = "#ffffff"
+
+[advanced]
+scrollback_lines = 42
+
+[keys]
+fullscreen = "prefix+z"
+new_tabb = "prefix+t"
+
+[[keys.command]]
+key = "prefix+g"
+command = "git status"
+descrption = "status"
+
+[ui]
+mouse_capture = false
+mouse_captur = true
+"foo.bar" = true
+"foo.?.bar" = false
+
 [ui.toast]
-delivery = "herdr"
-"#,
+enabled = true
+delivry = "system"
+
+[ui.sidebar.agents.rows_by_agent]
+claude = [["terminal_title"]]
+"##,
         )
         .unwrap();
 
-        assert!(loaded.diagnostics.is_empty());
+        assert_eq!(
+            loaded.diagnostics,
+            vec![
+                "unknown config key plugin; ignoring key",
+                "unknown config key theme.custom.accentt; ignoring key",
+                "unknown config key keys.command.0.descrption; ignoring key",
+                "unknown config key keys.new_tabb; ignoring key",
+                "unknown config key ui.\"foo.?.bar\"; ignoring key",
+                "unknown config key ui.\"foo.bar\"; ignoring key",
+                "unknown config key ui.mouse_captur; ignoring key",
+                "unknown config key ui.toast.delivry; ignoring key",
+            ]
+        );
+        assert!(loaded.invalid_sections.is_empty());
+        assert_eq!(loaded.config.advanced.scrollback_limit_bytes, 42);
+        assert!(!loaded.config.ui.mouse_capture);
         assert_eq!(
             loaded.config.ui.toast.delivery,
             super::super::ToastDelivery::Herdr
         );
+        assert!(loaded
+            .config
+            .keybinds()
+            .zoom
+            .bindings
+            .iter()
+            .any(|binding| binding.label == "prefix+z"));
+    }
+
+    #[test]
+    fn load_live_config_discards_ignored_keys_from_an_invalid_section() {
+        let loaded = load_live_config_from_str(
+            r#"
+[ui]
+mouse_capture = "yes"
+mouse_captur = true
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(loaded.diagnostics.len(), 1);
+        assert!(loaded.diagnostics[0].contains("invalid ui config"));
+        assert!(!loaded.diagnostics[0].starts_with("unknown config key"));
+        assert_eq!(loaded.invalid_sections, vec!["ui"]);
     }
 
     #[test]

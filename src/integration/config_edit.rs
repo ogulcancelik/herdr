@@ -749,18 +749,26 @@ pub(crate) fn build_kimi_config_with_hooks(content: &str, hook_path: &Path) -> S
 
     result.push_str(KIMI_CONFIG_BLOCK_BEGIN);
     result.push('\n');
-    for (event, action) in KIMI_HOOK_EVENTS {
-        result.push_str(&kimi_hook_table(event, hook_path, action));
+    for (event, matcher, action) in KIMI_HOOK_EVENTS {
+        result.push_str(&kimi_hook_table(event, matcher, hook_path, action));
     }
     result.push_str(KIMI_CONFIG_BLOCK_END);
     result.push('\n');
     result
 }
 
-pub(crate) fn kimi_hook_table(event: &str, hook_path: &Path, action: &str) -> String {
+pub(crate) fn kimi_hook_table(
+    event: &str,
+    matcher: Option<&str>,
+    hook_path: &Path,
+    action: &str,
+) -> String {
     let command = hook_command(hook_path, Some(action));
+    let matcher = matcher
+        .map(|matcher| format!("matcher = {}\n", toml_basic_string(matcher)))
+        .unwrap_or_default();
     format!(
-        "[[hooks]]\nevent = {}\ncommand = {}\ntimeout = 10\n\n",
+        "[[hooks]]\nevent = {}\n{matcher}command = {}\ntimeout = 10\n\n",
         toml_basic_string(event),
         toml_basic_string(&command)
     )

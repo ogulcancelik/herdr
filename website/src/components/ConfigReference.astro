@@ -1,6 +1,8 @@
 ---
 import stableReference from '../data/config-reference.json';
 import previewReference from '../data/config-reference-preview.json';
+import versionReferences from '../data/config-reference-versions.json';
+import { docsVersion } from '../docs-path';
 
 interface Props {
   placeholder?: string;
@@ -14,9 +16,16 @@ const {
   keyCountLabel = 'keys',
 } = Astro.props;
 
-const reference = Astro.url.pathname.includes('/docs/preview/')
+const version = docsVersion(Astro.url.pathname);
+const archivedReferences = versionReferences as Record<string, typeof stableReference>;
+const reference = version === 'preview'
   ? previewReference
-  : stableReference;
+  : version === 'stable'
+    ? stableReference
+    : archivedReferences[version];
+if (!reference) {
+  throw new Error(`documentation version ${version} has no archived configuration reference`);
+}
 const totalKeys = reference.sections.reduce((sum, section) => sum + section.keys.length, 0);
 ---
 

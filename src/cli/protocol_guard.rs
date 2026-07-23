@@ -64,13 +64,13 @@ mod tests {
     #[test]
     fn older_server_error_preserves_request_id_and_guidance() {
         let response = mismatch_response(
-            "cli:wait:agent-status",
+            "cli:agent:wait",
             crate::protocol::PROTOCOL_VERSION - 1,
             "Run the session stop command, then restart.",
         )
         .unwrap();
 
-        assert_eq!(response.id, "cli:wait:agent-status");
+        assert_eq!(response.id, "cli:agent:wait");
         assert_eq!(response.error.code, "protocol_mismatch");
         assert!(response.error.message.contains(&format!(
             "client protocol {}",

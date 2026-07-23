@@ -1,0 +1,448 @@
+---
+title: 配置
+description: 配置 Herdr 的按键绑定、主题、侧边栏行为、通知和高级选项。
+---
+
+Herdr 无需配置文件即可使用。当你想自定义按键、主题、侧边栏布局、通知或高级行为时，再添加配置文件。
+
+在查找某项设置或按键绑定？请在[配置参考](/docs/config-reference/)中搜索，其中列出了每个键、类型、默认值和允许值。本页重点介绍设置方法、常用配置方案，以及需要比参考表格更详细说明的配置结构。
+
+## 配置文件
+
+Herdr 从以下位置读取配置：
+
+```text
+Linux and macOS: ~/.config/herdr/config.toml
+Windows:          %APPDATA%\herdr\config.toml
+```
+
+运行 `herdr --help` 可查看系统解析后的配置路径。
+
+打印完整的默认配置：
+
+```bash
+herdr --default-config
+```
+
+如果想从完整配置开始，可以将其保存为你的配置文件：
+
+```bash
+herdr --default-config > ~/.config/herdr/config.toml
+```
+
+如果配置值无效，Herdr 会回退到安全的默认值，并显示启动警告。
+
+当 `onboarding` 缺失或为 true 时，Herdr 会显示首次运行设置。继续完成引导会写入 `onboarding = false`，并打开设置中的集成标签页。完成设置后，如果想跳过此流程，请设置该值。
+
+```toml
+onboarding = false
+```
+
+## 重载配置
+
+编辑 `config.toml` 后，重载正在运行的服务器：
+
+```bash
+herdr server reload-config
+```
+
+你也可以打开 Herdr 的全局菜单并选择 `reload config`。
+
+重载会在不重启窗格的情况下应用大多数 UI 设置。仅启动时生效的设置仍需重启。
+
+## 终端默认值
+
+设置 Herdr 创建新交互式窗格时使用的可执行文件：
+
+```toml
+[terminal]
+default_shell = "nu"
+```
+
+未设置或值为空时，Herdr 会依次使用 `$SHELL`、Unix 上的 `/bin/sh` 或 Windows 上的 PowerShell。该值是可执行文件名或路径，而不是 shell 命令行。现有窗格会保留当前 shell，直到重新创建。自定义命令按键绑定中的字符串在 Unix 上通过 `/bin/sh -c` 执行窗格命令，通过 `/bin/sh -lc` 执行分离式命令；在 Windows 上则通过 `cmd.exe /d /c` 执行。
+
+设置 Herdr 如何启动新建交互式窗格的 shell：
+
+```toml
+[terminal]
+shell_mode = "auto"
+```
+
+`shell_mode = "auto"` 会在 macOS 上启动登录 shell，让 `/usr/libexec/path_helper` 等仅登录时生效的 PATH 设置和 Homebrew shell 初始化在新窗格中运行。在其他平台上，它会保持现有的非登录 shell 行为。使用 `"login"` 强制以登录 shell 启动，或使用 `"non_login"` 禁用登录 shell。命令窗格、分离式自定义命令按键绑定和显式 argv 启动仍使用现有的命令执行路径。
+
+设置新窗格、标签页和工作区的工作目录策略：
+
+```toml
+[terminal]
+new_cwd = "follow"
+```
+
+`new_cwd = "follow"` 保持默认行为，并继承来源窗格或工作区。没有来源工作区时，Herdr 从 `$HOME` 启动。使用 `"home"` 可始终从 `$HOME` 启动，使用 `"current"` 可采用 Herdr 的进程目录，也可以指定 `"~/Projects"` 这样的固定路径。CLI 或 socket API 显式提供的 `--cwd` 值仍然优先。
+
+## Worktree
+
+设置 Herdr 从侧边栏创建 Git worktree 检出时使用的根目录：
+
+```toml
+[worktrees]
+directory = "~/.herdr/worktrees"
+```
+
+Herdr 会在 `<directory>/<repo>/<branch-slug>` 下创建检出。若要使用同级目录风格的检出，请将其设置为 `~/Projects/herdr-worktrees` 这样的目录。应用配置时，相对路径会解析为绝对路径。
+
+Git 工作区行提供 worktree 操作。`New worktree` 会创建检出：如果输入的分支已存在，则检出该本地分支，否则创建该分支；随后将其作为新的 Herdr 工作区打开，并归组到来源工作区下。`Open worktree...` 会列出该仓库现有的 Git worktree 检出；选择已打开的检出会聚焦它，选择尚未打开的检出会在同一组中打开它。
+
+归组的 worktree 仍像普通 Herdr 工作区一样工作：可以聚焦、重命名和关闭，也可以拥有自己的标签页和窗格。父行是原始工作区。关闭父行会关闭整个 Herdr 组，但不会删除检出目录或分支。
+
+删除 worktree 检出需要显式操作。在归组的子工作区上使用 `Delete worktree checkout...` 来运行 `git worktree remove`。Herdr 会先请求 Git 安全删除。如果 Git 因检出中存在已修改或未跟踪的文件而拒绝，Herdr 会在强制删除前再次确认。分支不会被删除。
+
+## 远程连接
+
+远程连接默认使用临时保活设置和连接复用兜底来管理 SSH 连接。
+
+```toml
+[remote]
+manage_ssh_config = true
+```
+
+启用后，`herdr --remote` 会写入一份私有的临时 SSH 配置：先包含你的 `~/.ssh/config` 和 `/etc/ssh/ssh_config`，再添加兜底的 `ServerAliveInterval` 和 `ServerAliveCountMax` 值。你自己的保活设置优先。Herdr 还会为每次远程连接使用私有的 OpenSSH control socket，以复用首次通过身份验证的连接。设置 `manage_ssh_config = false` 可通过普通 `ssh` 进行远程连接，不使用 Herdr 生成的配置或 control socket。
+
+## 按键绑定
+
+有关前缀键的引导式介绍和经过验证的免前缀配置，请参阅[键盘](/docs/keyboard/)。
+
+Herdr 提供类似 tmux 的前缀模式。默认前缀是 `ctrl+b`。按键绑定字符串是显式的：`prefix+n` 表示先按配置的前缀，再按 `n`；`ctrl+alt+n` 则是终端模式下的直接快捷键。
+
+一个简短的按键绑定覆盖如下：
+
+```toml
+[keys]
+prefix = "ctrl+b"
+goto = "prefix+g"
+new_tab = "prefix+c"
+next_tab = "prefix+n"
+previous_tab = "prefix+p"
+focus_pane_left = "prefix+h"
+navigate_workspace_down = "j"
+navigate_pane_down = "ctrl+j"
+split_horizontal = "prefix+minus"
+```
+
+默认键位以前缀为主，因此 Herdr 不会抢占 shell、编辑器、tmux 或终端应用的输入。在[配置参考](/docs/config-reference/)中搜索 `keys.` 可查看每个动作及其默认绑定。应用内帮助面板可通过 `prefix+?` 打开，其中会显示当前生效的绑定。
+
+当一个动作需要多个快捷键时，绑定也可以是数组：
+
+```toml
+[keys]
+next_tab = ["prefix+n", "ctrl+alt+]"]
+```
+
+可选动作默认不设置。使用 `prefix+` 可获得前缀模式行为；当你确实需要直接快捷键时，请使用显式的修饰组合键。
+
+按键字符串支持普通按键、`ctrl+a`、`shift+n`、`alt+1`、`cmd+k` 等修饰组合键，以及 `enter`、`tab`、`esc`、`left`、`right`、`up`、`down` 等特殊键。也支持 `minus`、`comma`、`ampersand`、`plus`、`backtick` 等命名标点。直接绑定 `n` 这样的普通可打印键并不安全，因为它会拦截输入；除非你有意设置直接绑定，否则请使用 `prefix+n`。`navigate_workspace_*` 和 `navigate_pane_*` 字段仅在导航模式中生效，可以使用 `j` 或 `k` 等普通按键；它们不得使用 `prefix+`、`esc`、`enter`、`tab`、`shift+tab`、`left`、`right`，也不得使用无修饰键的 `1` 到 `9`。左右方向键是向左和向右导航窗格的永久别名。这些导航模式快捷键独立于 `focus_pane_down = "prefix+j"` 等通用动作绑定；两者使用同一按键时，打开导航模式后，导航模式快捷键优先。Alt、Cmd/Super 以及带修饰键的标点取决于你的终端和 tmux 设置。
+
+如果你已有旧的自定义按键绑定，并想使用新的默认值，请运行 `herdr config reset-keys`。Herdr 会备份 `config.toml`，移除 `[keys]` 和 `[[keys.command]]`，并在重启或执行 `herdr server reload-config` 后使用内置的 v2 默认值。
+
+## 索引跳转
+
+索引式按键绑定在普通按键绑定字段中使用 `1..9`：
+
+```toml
+[keys]
+switch_tab = "prefix+1..9"
+switch_workspace = "prefix+shift+1..9"
+focus_agent = "prefix+alt+1..9"
+```
+
+旧版 `[keys.indexed]` 表仍会出于兼容性而解析，但新配置应优先使用显式的动作字段。
+
+## 自定义命令按键绑定
+
+自定义命令使用相同的按键绑定语法。
+
+```toml
+[[keys.command]]
+key = "prefix+alt+g"
+type = "popup"
+command = "lazygit"
+description = "run lazygit"
+width = "80%"
+height = "80%"
+```
+
+`type = "popup"` 会打开一个会话级模态弹窗,而不改变标签页布局。
+弹窗会接收包括 Escape 在内的所有终端输入,直到命令退出。
+`width` 和 `height` 是可选的;省略时默认为终端大小的一半,数字表示终端单元格数,`"80%"` 这样的字符串表示终端区域的百分比。
+尺寸包含弹窗边框,过小的值会限制为弹窗最小尺寸。
+弹窗命令不会收到 `HERDR_PANE_ID`;可使用 `HERDR_ACTIVE_PANE_ID` 引用底层平铺窗格。
+
+在 Unix 和 macOS 上,还可以打开一个临时终端,而无需添加分割或标签页:
+
+```toml
+[[keys.command]]
+key = "prefix+t"
+type = "popup"
+command = "exec \"${SHELL:-sh}\""
+description = "open scratch terminal"
+width = "80%"
+height = "80%"
+```
+
+在 Windows 上,请改用 `command = "powershell.exe -NoLogo"` 之类的 shell 命令。
+退出 shell 即可关闭弹窗并恢复平铺终端视图。
+
+`type = "pane"` 会打开一个临时窗格，并在命令退出时关闭它。
+
+`type = "shell"` 会在后台分离运行。
+
+`type = "plugin_action"` 会调用已安装插件的动作 id。当动作 id 并非全局唯一时，请使用限定 id：
+
+```toml
+[[keys.command]]
+key = "prefix+l"
+type = "plugin_action"
+command = "example.layout.apply"
+description = "apply layout"
+```
+
+可以提供可选的 `description`。指定后，该描述会在按键绑定帮助面板（通过 `prefix+?` 打开）中显示，替代默认的 `'custom command'` 标签。
+
+在相应值可用时，自定义命令会收到 `HERDR_SOCKET_PATH`、`HERDR_BIN_PATH`、`HERDR_ACTIVE_WORKSPACE_ID`、`HERDR_ACTIVE_TAB_ID`、`HERDR_ACTIVE_PANE_ID` 和 `HERDR_ACTIVE_PANE_CWD`。当 Herdr 能检测到聚焦窗格的工作目录时，shell 命令会从该目录运行。
+
+在 Windows 上，自定义命令字符串使用 `cmd.exe /d /c`，因此环境变量应采用 `%HERDR_BIN_PATH%` 语法。若要运行 PowerShell 语法，请显式调用它，例如 `powershell.exe -NoProfile -Command "..."`。
+
+## 主题
+
+选择内置主题：
+
+```toml
+[theme]
+name = "catppuccin"
+```
+
+在[配置参考](/docs/config-reference/)中搜索 `theme.name` 可查看所有内置主题。如果想让 Herdr UI 颜色跟随宿主终端的 ANSI 调色板，请使用 `terminal`。
+
+要让 Herdr 在宿主终端报告明暗外观变化时自动切换自身的 UI 主题，请启用主题自动切换：
+
+```toml
+[theme]
+name = "catppuccin"
+auto_switch = true
+light_name = "catppuccin-latte"
+dark_name = "catppuccin"
+```
+
+`auto_switch` 默认为 `false`，因此现有主题配置会保持手动行为。如果省略 `light_name` 或 `dark_name`，且配置的 `name` 存在对应的内置姊妹主题，Herdr 会使用该主题，例如 `tokyo-night`/`tokyo-night-day` 或 `gruvbox`/`gruvbox-light`。在设置中手动选择主题会禁用 `auto_switch`。
+
+你可以覆盖单个颜色：
+
+```toml
+[theme.custom]
+panel_bg = "reset"
+accent = "#a6e3a1"
+green = "#a6e3a1"
+blue = "#89b4fa"
+red = "#f38ba8"
+yellow = "#f9e2af"
+```
+
+颜色值支持十六进制、命名颜色、`rgb(r,g,b)`，以及 `reset`、`default`、`none`、`transparent` 等重置别名。
+
+## UI 与侧边栏
+
+侧边栏是 Herdr 的主仪表盘。在[配置参考](/docs/config-reference/)中搜索 `ui.`，可查看尺寸、折叠模式、Agent 面板排序、鼠标行为、窗格边框和其他显示设置。
+
+### 侧边栏行布局
+
+展开的桌面侧边栏会将 `rows` 中的每个内层数组渲染为一行。以下是完整的默认布局：
+
+```toml
+[ui.sidebar.agents]
+row_gap = 0
+rows = [
+  ["state_icon", "workspace", "tab"],
+  ["agent"],
+]
+
+[ui.sidebar.spaces]
+row_gap = 0
+rows = [
+  ["state_icon", "workspace"],
+  ["branch", "git_status"],
+]
+```
+
+Agent 行支持以下内置 token：
+
+- `state_icon` — 智能体语义状态的彩色图标。
+- `state_text` — `idle`、`working`、`blocked`、`done` 或 `unknown`；如果报告中包含显示标签，也会一并显示。
+- `workspace` — 工作区名称。
+- `tab` — 标签页名称（如有）。
+- `pane` — 窗格名称（如有）。
+- `agent` — 检测到或报告的智能体显示名称。
+- `terminal_title` — 经过安全规范化的最新 OSC 0/2 终端标题。
+- `terminal_title_stripped` — 从终端标题开头移除一个可识别的活动或旋转指示符字形及其后空白后的结果。
+- `$name` — 名为 `name` 的自定义窗格元数据。
+
+Space 行支持以下内置 token：
+
+- `state_icon` — Space 汇总后智能体状态的彩色图标。
+- `state_text` — Space 汇总后智能体状态的文本。
+- `workspace` — 工作区名称。
+- `branch` — Git 分支（如有）。
+- `git_status` — 非零时显示 Git ahead 和 behind 数量。
+- `$name` — 名为 `name` 的自定义工作区元数据。
+
+token 会按配置顺序渲染。Herdr 通常使用 ` · ` 分隔相邻值，并在 `state_icon` 后使用一个空格。缺失值及其分隔符会消失；当一行中的所有 token 都没有值时，该行会消失。每个布局最多可包含 16 行，每行最多可包含 16 个 token。
+
+`row_gap` 分别控制 Agent 和 Space 面板中条目之间的空白终端行数。默认值为 `0`，会紧密排列条目；设为 `1` 可恢复之前的间距。它不会在 `rows` 声明的内容行之间添加间距。连续缩进的 worktree 子项仍会作为一个 Space 组紧密排列。
+
+在 `rows_by_agent` 下为已知智能体覆盖完整的 Agent 布局：
+
+```toml
+[ui.sidebar.agents]
+rows = [
+  ["state_icon", "agent", "state_text"],
+  ["workspace", "tab"],
+]
+
+[ui.sidebar.agents.rows_by_agent]
+claude = [
+  ["state_icon", "agent", "state_text"],
+  ["terminal_title_stripped"],
+  ["workspace", "tab"],
+]
+```
+
+覆盖项会替换 `rows`，而不是扩展它。覆盖项的键是区分大小写的规范智能体 ID，例如 `claude`、`codex` 和 `pi`。不接受 `claude-code` 等检测别名。没有覆盖项的智能体（包括自定义报告的智能体）会使用 `rows`。
+
+自定义 `$name` token 是动态值，而不是字面文本。先将 token 添加到布局，再通过脚本或插件报告其值：
+
+```toml
+[ui.sidebar.agents]
+rows = [
+  ["state_icon", "agent", "$model"],
+  ["$summary"],
+  ["workspace", "tab"],
+]
+```
+
+```bash
+herdr pane report-metadata <pane_id> \
+  --source my-agent-hook \
+  --token model=opus \
+  --token summary="reviewing authentication"
+```
+
+自定义 Space token 可用同样的方式通过 `herdr workspace report-metadata` 报告。未报告的自定义 token 会直接消失。元数据报告方只提供值，不能选择行或样式。有关清除、顺序和过期值的信息，请参阅 [CLI 参考：报告元数据](/docs/cli-reference/#panes)。
+
+侧边栏行设置仅影响展开的桌面侧边栏。折叠视图和移动视图仍使用紧凑布局。
+
+## 通知
+
+当后台智能体完成任务或需要输入时，Herdr 可以通知你：
+
+```toml
+[ui.toast]
+delivery = "herdr"
+delay_seconds = 1
+
+[ui.toast.herdr]
+position = "bottom-right"
+```
+
+选择 `herdr` 可使用应用内 toast，选择 `terminal` 可使用适合 SSH 场景的外层终端通知，选择 `system` 可使用本地操作系统通知服务，选择 `off` 可禁用弹出通知。Herdr 会抑制活动标签页的弹出通知。在[配置参考](/docs/config-reference/)中搜索 `ui.toast`，可查看位置、延迟行为和剪贴板反馈设置。
+
+## 声音
+
+声音通知通过本地 Herdr 客户端播放。自定义声音必须是 mp3 文件；相对路径从配置文件所在目录解析。
+
+```toml
+[ui.sound]
+path = "sounds/notification.mp3"
+done_path = "sounds/done.mp3"
+request_path = "sounds/request.mp3"
+```
+
+`path` 为所有声音通知设置同一种声音。`done_path` 和 `request_path` 只覆盖完成和需要输入时的声音。
+
+按智能体覆盖声音设置时，可使用 `default`、`on` 或 `off`。键应使用检测到的智能体标签，例如 `claude`、`codex`、`devin` 或 `droid`。Droid 默认静音。
+
+```toml
+[ui.sound.agents]
+droid = "off"
+claude = "on"
+```
+
+## 高级配置
+
+在[配置参考](/docs/config-reference/)中搜索回滚缓冲区限制、嵌套启动以及其他高级或实验性设置。启用窗格屏幕历史前，请参阅[会话状态与恢复](/docs/session-state/)；该指南说明了保存窗格内容带来的安全取舍。
+
+## Kitty graphics
+
+面向已连接本地客户端的 Kitty graphics 渲染是一项实验性功能，默认禁用：
+
+```toml
+[experimental]
+kitty_graphics = true
+```
+
+仅在测试终端图像行为时启用。
+
+## 智能体会话恢复
+
+默认情况下，Herdr 会在服务器重启后恢复受支持的智能体对话：
+
+```toml
+[session]
+resume_agents_on_restore = true
+```
+
+只有通过官方集成获得有效原生会话引用的窗格才能恢复；其他窗格会作为普通 shell 恢复。有关受支持的智能体和持久化行为，请参阅[会话状态与恢复](/docs/session-state/)。
+
+## IME 光标跟踪
+
+在 macOS 上，隐藏硬件光标的 AI 智能体 TUI 可能导致原生输入法候选窗口无法跟随聚焦窗格。使用以下设置可为这些窗格显示光标锚点：
+
+```toml
+[experimental]
+reveal_hidden_cursor_for_cjk_ime = true
+cjk_ime_agents = ["claude", "pi", "codex"]
+```
+
+限制 `cjk_ime_agents` 可以避免在无关应用中额外显示硬件光标。在[配置参考](/docs/config-reference/)中搜索这些键，可查看接受的智能体名称和光标形状。
+
+## 前缀输入源切换
+
+在 macOS 上，当前缀命令和由前缀启动的模式处于活动状态时，Herdr 可以临时切换到系统中支持 ASCII 的输入源：
+
+```toml
+[experimental]
+switch_ascii_input_source_in_prefix = true
+```
+
+返回终端输入或进入文本字段时，Herdr 会恢复之前的输入源。此设置在其他平台上无效。
+
+## 环境变量
+
+| 变量 | 用途 |
+| --- | --- |
+| `HERDR_CONFIG_PATH` | 覆盖配置文件路径。 |
+| `HERDR_SESSION` | 为 CLI 命令选择命名会话。 |
+| `HERDR_SOCKET_PATH` | 覆盖底层 socket 路径。 |
+| `HERDR_LOG` | 设置日志过滤，例如 `HERDR_LOG=herdr=debug`。 |
+| `HERDR_DISABLE_SOUND` | 即使 `[ui.sound] enabled = true` 也禁用声音播放。 |
+
+## 日志
+
+日志有助于诊断启动警告、集成状态或 socket API 行为。
+
+常见日志文件：
+
+```text
+~/.config/herdr/herdr.log
+~/.config/herdr/herdr-client.log
+~/.config/herdr/herdr-server.log
+```
+
+日志会自动轮转。报告问题时，请附上当前日志和轮转后的同级日志文件。

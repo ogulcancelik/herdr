@@ -1,0 +1,117 @@
+---
+title: Windows 测试版
+description: Windows 原生支持的现状、受支持的工作流和已知限制。
+---
+
+Windows 原生支持是实验性的测试版。
+
+Windows 上的 Herdr 使用 ConPTY 和 Windows 的进程/运行时行为,而不是 Herdr 最初围绕构建的 Unix PTY 模型。有些 Herdr 功能可以干净地映射到 Windows,有些则不行。这个预览并不承诺每个 Linux/macOS 功能都会在 Windows 上得到完整支持。
+
+测试版的目标是从真实使用中学习: 安装成功率、窗格可靠性、智能体工作流、bug 数量、缺失的功能,以及 Windows 用户是否从 Herdr 获得了足够的价值。基于这些反馈,Windows 支持可能升级为稳定版,可能在成熟前保持仅预览,也可能在维护成本不合理时被缩减。
+
+用 PowerShell 安装 Windows 原生测试版构建:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://herdr.dev/install.ps1 | iex"
+```
+
+Windows 测试版构建只通过预览通道发布。在 Windows 上,Herdr 默认使用预览通道,且不会修改你的配置。安装器将发布版本保存在 `%USERPROFILE%\.herdr\packages\standalone\releases` 下,让 `%LOCALAPPDATA%\Programs\Herdr\bin` 指向当前版本,并保留少量旧版本,以免运行中的进程阻塞更新。
+
+对于内部测试,`HERDR_MANIFEST_URL` 可以让安装器指向自定义清单,而不是 Herdr 的稳定或预览清单。
+
+## 测试版支持
+
+| 能力 | 状态 |
+| --- | --- |
+| 本地持久会话 | 测试版 |
+| 通过 ConPTY 的原生窗格 | 测试版 |
+| Windows Terminal / PowerShell 应用连接 | 测试版 |
+| `cmd.exe` 窗格 | 测试版 |
+| 启动 cwd 和工作区标签 | 测试版 |
+| 窗格启动 cwd | 测试版 |
+| 智能体命令发现 | 测试版 |
+| 智能体自报告集成 | 测试版 |
+| 智能体进程树检测 | 测试版 |
+| 从已知 cwd 检测 Git/worktree | 测试版 |
+| 插件 | 预览 |
+| 窗格屏幕历史 | 测试版 |
+| 嵌套启动覆盖 | 测试版 |
+
+Windows 智能体进程检测会扫描窗格 shell 的后代进程,识别直接运行的智能体和常见的命令包装器。它对 Codex、Claude 等智能体很有用,但和 Unix 前台进程组检测不是一回事。
+
+插件以预览状态支持在清单中声明 `windows` 平台。GitHub 安装、本地链接、构建命令、动作、事件和插件窗格在 Windows 上尽力而为。命令是 argv 命令,必须兼容 Windows;`npm`、`bun`、`node` 之类的 Node 包 shim 只要在 `PATH` 上就应该能用,而使用 `sh` 或 Bash 的 Unix 专用示例需要 Windows 专用的替代方案。平台过滤器会跳过不支持的构建命令,并对不支持的动作或窗格返回 `platform_unsupported`。
+
+## 部分支持
+
+| 能力 | 状态 |
+| --- | --- |
+| shell `cd` 之后的实时 cwd | 部分支持 |
+| 通过 shell 集成/OSC7 的实时 cwd | 测试版 |
+| 向智能体粘贴剪贴板图像 | 未验证 |
+| CJK 隐藏光标显示 | 测试版 |
+| Kitty graphics 渲染 | 未验证 |
+
+Herdr 可以在正确的目录中启动窗格,并能从你启动 Herdr 的目录创建初始工作区。启动之后 PowerShell 的目录变化则不同: Herdr 能检查的进程字段无法可靠跟踪后续的逻辑 `cd` 变化。实时 cwd 上报请使用 Herdr 集成或提示符 shell 集成。
+
+Windows Terminal 可能为特定智能体支持图像粘贴路径,但 Herdr 自己的剪贴板图像读取器尚未在 Windows 上接通。在 Windows 剪贴板桥实现并测试之前,请把 `alt+v` 图像粘贴视为未验证。远程剪贴板图像桥是独立功能,仍然绑定于 Unix/macOS 的 `herdr --remote`。
+
+Kitty graphics 仍是实验性功能,尚未宣称支持 Windows。除非你专门在 Windows Terminal 中测试图像渲染,否则保持 `experimental.kitty_graphics = false`。
+
+## 已知注意事项
+
+### 光标渲染
+
+Windows 终端通过 ConPTY 运行 Herdr,在活跃的全屏重绘期间,原生终端光标可能闪烁、跳动,或短暂显示旧位置。Herdr 默认的 `host_cursor = "auto"` 会在原生 Windows 构建和 WSL 上把 Herdr 光标绘制为终端单元格内容,而其他 Linux 和 macOS 客户端继续使用原生终端光标。Windows 上的取舍是:在 Herdr 内得到稳定的不闪烁光标,但不使用外层终端的原生闪烁、形状和光标颜色。
+
+要在原生 Windows 或 WSL 上改回外层终端光标,请设置:
+
+```toml
+[ui]
+host_cursor = "native"
+```
+
+### 键盘和鼠标
+
+Windows 终端并不都以相同形式报告带修饰键的按键。Herdr 在 Windows Terminal 和 Windows 上的 Alacritty 中保留鼠标报告和 `ctrl+j`,但 `shift+enter` 只有在外层终端把它报告为独立的修饰 Enter 键时才有效。如果 Windows 或终端把它报告为普通 Enter,Herdr 会转发普通 Enter。
+
+## 复制与粘贴
+
+Herdr 的窗格文本复制在 Windows 测试版上可用。在窗格内拖选文本即可通过 Herdr 复制。
+
+文本粘贴请在 Windows Terminal 中使用 `ctrl+shift+v`。多行文本粘贴是带括号的 (bracketed),因此 shell 和智能体提示符会把它作为一次粘贴接收,而不是逐行提交。按住 `shift` 再右键,可以使用外层终端的粘贴操作,而不把点击发给 Herdr。
+
+## Windows 测试版不支持
+
+| 能力 | 状态 |
+| --- | --- |
+| 直接终端附加 | 不支持 |
+| Windows 二进制的 `herdr --remote` | 不支持 |
+| 实时服务器交接 | 不支持 |
+| Unix 文件描述符交接 | 不支持 |
+| Unix 前台进程组 | 不支持 |
+| 远程剪贴板图像桥 | 不支持 |
+| 前缀输入法切换 | 不支持 |
+| 签名二进制 / 规避 SmartScreen | 不支持 |
+
+在 Windows 上进行远程工作,请 SSH 到服务器并在那里运行 `herdr`:
+
+```powershell
+ssh you@server
+herdr
+```
+
+这种模式下 Herdr 运行在远程主机上。Windows 原生的 `herdr --remote` 不在测试版范围内。
+
+Windows 更新通过 Windows 安装器进行,并更新带版本号的安装联接点。更新后请重启运行中的 Herdr 会话。实时交接仅限 Unix。
+
+## 报告 Windows 测试版问题
+
+请包含:
+
+- Herdr 版本。
+- Windows 版本。
+- 终端应用。
+- Shell,比如 PowerShell 或 cmd。
+- 是否使用了命名的 `HERDR_SESSION`。
+- 相关的 Herdr 日志。
+- 精确的复现步骤。

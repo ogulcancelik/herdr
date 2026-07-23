@@ -76,7 +76,7 @@ Herdr 把内置扩展写入:
 ~/.pi/agent/extensions/herdr-agent-state.ts
 ```
 
-如果设置了 `PI_CODING_AGENT_DIR`,Herdr 会改为写入 `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts`。extensions 目录必须已经存在。卸载只删除那个扩展文件。
+如果设置了 `PI_CODING_AGENT_DIR`,Herdr 会改为写入 `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts`。如果 Pi agent 目录已经存在,Herdr 会创建 extensions 目录。卸载只删除那个扩展文件。
 
 ## OMP
 
@@ -92,7 +92,7 @@ Herdr 把内置扩展写入:
 ~/.omp/agent/extensions/herdr-omp-agent-state.ts
 ```
 
-如果设置了 `PI_CODING_AGENT_DIR`,Herdr 会改为写入 `$PI_CODING_AGENT_DIR/extensions/herdr-omp-agent-state.ts`。extensions 目录必须已经存在。卸载只删除那个扩展文件。
+如果设置了 `PI_CODING_AGENT_DIR`,Herdr 会改为写入 `$PI_CODING_AGENT_DIR/extensions/herdr-omp-agent-state.ts`。如果 OMP agent 目录已经存在,Herdr 会创建 extensions 目录。卸载只删除那个扩展文件。
 
 OMP 集成通过 Herdr 的 socket API 上报智能体标签 `omp`、生命周期状态和原生会话身份。它不需要对 `omp` 可执行文件做原生进程检测,并且 Herdr 可以在服务器重启后用 `omp --resume=<session>` 恢复 OMP 窗格。
 

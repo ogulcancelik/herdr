@@ -1,0 +1,37 @@
+---
+title: Marketplace
+description: Publish and share Herdr plugins, and get listed when the marketplace launches.
+---
+
+The Herdr plugin marketplace is a discoverable index of installable plugins. It
+is not live yet. This page is how to be ready for it.
+
+## Share a plugin today
+
+The marketplace adds discovery on top of installation; it does not replace it.
+Anyone can already install your plugin straight from GitHub:
+
+```bash
+herdr plugin install owner/repo[/subdir...]
+```
+
+Publish a normal public GitHub repository with a `herdr-plugin.toml` manifest at
+its root, or in a subdirectory, and that command works now. See
+[Plugins](/docs/plugins/) for the manifest and authoring reference.
+
+## Get listed when it launches
+
+If you want your plugin to appear in the website marketplace when discovery
+launches, add the GitHub topic `herdr-plugin` to your repository now. That
+topic is the signal the future index will use for discovery, so tagging a
+public plugin today means it can be listed when the marketplace goes live.
+
+## What a listing will show
+
+A marketplace card will surface your plugin's `id`, `name`, `description`,
+declared `platforms`, and a link back to the source repository. Getting that
+manifest metadata right today is what makes your listing accurate later. Declare
+`platforms` honestly, because the index will use it to show where a plugin runs.
+
+Plugins stay ordinary GitHub repositories. The marketplace is a discovery and
+trust layer on top of the same `herdr plugin install` path you can use now.

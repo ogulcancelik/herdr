@@ -12,7 +12,10 @@ use super::{
     text::{display_width_u16, middle_elide, truncate_end},
     widgets::{panel_contrast_fg, render_panel_shell},
 };
-use crate::app::state::{AppState, NavigatorRow, NavigatorStateFilter, NavigatorTarget};
+use crate::app::state::{
+    navigator_display_lines, AppState, NavigatorDisplayLine, NavigatorRow, NavigatorStateFilter,
+    NavigatorTarget,
+};
 use crate::terminal::TerminalRuntimeRegistry;
 
 pub(super) fn render_navigator_overlay(
@@ -33,9 +36,11 @@ pub(super) fn render_navigator_overlay(
     render_search(app, frame, search);
 
     if body.height > 0 {
+        let rows = app.navigator_rows_from(terminal_runtimes);
+        let lines = navigator_display_lines(&rows);
         render_separator(frame, Rect::new(inner.x, search.y + 1, inner.width, 1), app);
-        render_rows(app, terminal_runtimes, frame, body);
-        render_navigator_scrollbar(app, terminal_runtimes, frame, body);
+        render_rows(app, &rows, &lines, frame, body);
+        render_navigator_scrollbar(app, lines.len(), frame, body);
     }
     render_detail(app, terminal_runtimes, frame, detail);
     render_footer(app, frame, footer);
@@ -137,23 +142,33 @@ fn render_separator(frame: &mut Frame, area: Rect, app: &AppState) {
 
 fn render_rows(
     app: &AppState,
-    terminal_runtimes: &TerminalRuntimeRegistry,
+    rows: &[NavigatorRow],
+    lines: &[NavigatorDisplayLine],
     frame: &mut Frame,
     body: Rect,
 ) {
-    let rows = app.navigator_rows_from(terminal_runtimes);
-    let start = app.navigator.scroll.min(rows.len());
-    let end = rows.len().min(start.saturating_add(body.height as usize));
-    for (visible_idx, row) in rows[start..end].iter().enumerate() {
-        let idx = start + visible_idx;
+    let start = app.navigator.scroll.min(lines.len());
+    let end = lines.len().min(start.saturating_add(body.height as usize));
+    for (visible_idx, line) in lines[start..end].iter().enumerate() {
+        let NavigatorDisplayLine::Row(idx) = *line else {
+            continue;
+        };
         let y = body.y + visible_idx as u16;
         let rect = Rect::new(body.x, y, body.width, 1);
         let selected = idx == app.navigator.selected;
-        render_row(app, frame, rect, row, selected);
+        render_row(app, frame, rect, rows, idx, selected);
     }
 }
 
-fn render_row(app: &AppState, frame: &mut Frame, rect: Rect, row: &NavigatorRow, selected: bool) {
+fn render_row(
+    app: &AppState,
+    frame: &mut Frame,
+    rect: Rect,
+    rows: &[NavigatorRow],
+    idx: usize,
+    selected: bool,
+) {
+    let row = &rows[idx];
     let p = &app.palette;
     frame.render_widget(Clear, rect);
     let base_style = if selected {
@@ -166,8 +181,23 @@ fn render_row(app: &AppState, frame: &mut Frame, rect: Rect, row: &NavigatorRow,
     } else {
         Style::default().fg(p.overlay0).bg(p.panel_bg)
     };
+    let filter_active =
+        app.navigator.state_filter.is_some() || !app.navigator.query.trim().is_empty();
+    let context_only = filter_active && !row.matched;
     let text_style = if selected {
         base_style.add_modifier(Modifier::BOLD)
+    } else if context_only {
+        let dimmed = Style::default().fg(p.overlay0).bg(p.panel_bg);
+        if row.is_workspace {
+            dimmed.add_modifier(Modifier::BOLD)
+        } else {
+            dimmed
+        }
+    } else if row.is_workspace {
+        Style::default()
+            .fg(p.accent)
+            .bg(p.panel_bg)
+            .add_modifier(Modifier::BOLD)
     } else if row.is_current {
         Style::default()
             .fg(p.text)
@@ -179,35 +209,43 @@ fn render_row(app: &AppState, frame: &mut Frame, rect: Rect, row: &NavigatorRow,
     let (status_icon, status_style) = agent_icon(row.status, row.seen, app.spinner_tick, p);
     let status_style = if selected {
         base_style.add_modifier(Modifier::BOLD)
+    } else if context_only {
+        Style::default().fg(p.overlay0).bg(p.panel_bg)
     } else {
         status_style.bg(p.panel_bg)
     };
 
-    let prefix = if row.is_workspace {
-        if row.expanded {
-            "▾"
-        } else {
-            "▸"
-        }
-    } else if row.depth > 0 {
-        "├─"
-    } else {
-        "  "
-    };
+    let prefix = tree_prefix(rows, idx);
     let current = if row.is_current { "◆" } else { " " };
-    let marker = if selected { "→" } else { " " };
-    let indent = "  ".repeat(row.depth as usize);
-    let left_fixed = format!(" {indent}{prefix} {marker} {current} ");
+    let gutter = format!(" {current} ");
+    let gutter_style = if selected {
+        base_style
+    } else if row.is_current {
+        Style::default().fg(p.accent).bg(p.panel_bg)
+    } else {
+        dim_style
+    };
+    // Branch glyphs recede one shade below the workspace caret so the
+    // structure stays behind the labels.
+    let tree_style = if selected {
+        base_style
+    } else if row.is_workspace {
+        dim_style
+    } else {
+        Style::default().fg(p.surface1).bg(p.panel_bg)
+    };
     let meta_width = metadata_width(rect.width);
     let left_budget = rect
         .width
         .saturating_sub(meta_width)
-        .saturating_sub(display_width_u16(&left_fixed))
+        .saturating_sub(display_width_u16(&format!("{gutter}{prefix} ")))
         .saturating_sub(3) as usize;
     let title = truncate_end(&row.label, left_budget);
 
     let spans = vec![
-        Span::styled(left_fixed, dim_style),
+        Span::styled(gutter, gutter_style),
+        Span::styled(prefix, tree_style),
+        Span::styled(" ", base_style),
         Span::styled(status_icon, status_style),
         Span::raw(" "),
         Span::styled(title, text_style),
@@ -224,7 +262,7 @@ fn render_row(app: &AppState, frame: &mut Frame, rect: Rect, row: &NavigatorRow,
         let meta = truncate_end(&row.meta, meta_width.saturating_sub(2) as usize);
         let meta_style = if selected {
             base_style
-        } else if row.is_workspace || row.is_tab {
+        } else if context_only || row.is_workspace || row.is_tab {
             Style::default().fg(p.overlay0).bg(p.panel_bg)
         } else {
             Style::default()
@@ -238,26 +276,56 @@ fn render_row(app: &AppState, frame: &mut Frame, rect: Rect, row: &NavigatorRow,
     }
 }
 
-fn render_navigator_scrollbar(
-    app: &AppState,
-    terminal_runtimes: &TerminalRuntimeRegistry,
-    frame: &mut Frame,
-    body: Rect,
-) {
+/// Tree prefix for a navigator row: expand caret for workspaces, connected
+/// branch glyphs for children (`├──`, `└──` for the last sibling, with `│`
+/// continuation lines under ancestors that have more siblings below).
+fn tree_prefix(rows: &[NavigatorRow], idx: usize) -> String {
+    let row = &rows[idx];
+    if row.is_workspace {
+        return if row.expanded { "▾" } else { "▸" }.to_string();
+    }
+    if row.depth == 0 {
+        return "  ".to_string();
+    }
+    let mut prefix = String::new();
+    for level in 1..row.depth {
+        prefix.push_str(if has_following_sibling_at_depth(rows, idx, level) {
+            "│  "
+        } else {
+            "   "
+        });
+    }
+    prefix.push_str(if has_following_sibling_at_depth(rows, idx, row.depth) {
+        "├──"
+    } else {
+        "└──"
+    });
+    prefix
+}
+
+/// Whether another row at `depth` follows `idx` before the subtree at that
+/// depth ends (a row shallower than `depth` closes the subtree).
+fn has_following_sibling_at_depth(rows: &[NavigatorRow], idx: usize, depth: u8) -> bool {
+    rows[idx + 1..]
+        .iter()
+        .take_while(|row| row.depth >= depth)
+        .any(|row| row.depth == depth)
+}
+
+fn render_navigator_scrollbar(app: &AppState, line_count: usize, frame: &mut Frame, body: Rect) {
     if body.width <= 1 || body.height == 0 {
         return;
     }
-    let rows = app.navigator_rows_from(terminal_runtimes).len();
     let viewport = body.height as usize;
-    if rows <= viewport {
+    if line_count <= viewport {
         return;
     }
     let metrics = crate::pane::ScrollMetrics {
         viewport_rows: viewport,
-        offset_from_bottom: rows
+        offset_from_bottom: line_count
             .saturating_sub(viewport)
             .saturating_sub(app.navigator.scroll),
-        max_offset_from_bottom: rows.saturating_sub(viewport),
+        max_offset_from_bottom: line_count.saturating_sub(viewport),
     };
     if !should_show_scrollbar(metrics) {
         return;
@@ -502,4 +570,79 @@ fn render_footer(app: &AppState, frame: &mut Frame, area: Rect) {
         ])
     };
     frame.render_widget(Paragraph::new(line), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::detect::AgentState;
+
+    fn row(depth: u8, is_workspace: bool) -> NavigatorRow {
+        NavigatorRow {
+            target: NavigatorTarget::Workspace { ws_idx: 0 },
+            depth,
+            label: String::new(),
+            meta: String::new(),
+            status: AgentState::Idle,
+            seen: true,
+            is_current: false,
+            is_workspace,
+            is_tab: false,
+            expanded: true,
+            search_text: String::new(),
+            matched: true,
+        }
+    }
+
+    fn multi_tab_rows() -> Vec<NavigatorRow> {
+        vec![
+            row(0, true),  // workspace
+            row(1, false), // tab a
+            row(2, false), // pane
+            row(2, false), // pane (last in tab a)
+            row(1, false), // tab b (last tab)
+            row(2, false), // pane (last in tab b)
+            row(0, true),  // workspace
+            row(1, false), // pane (single child)
+        ]
+    }
+
+    #[test]
+    fn workspace_rows_use_expand_caret() {
+        let rows = multi_tab_rows();
+        assert_eq!(tree_prefix(&rows, 0), "▾");
+        let mut collapsed = rows.clone();
+        collapsed[0].expanded = false;
+        assert_eq!(tree_prefix(&collapsed, 0), "▸");
+    }
+
+    #[test]
+    fn middle_children_get_branch_glyph() {
+        let rows = multi_tab_rows();
+        assert_eq!(tree_prefix(&rows, 1), "├──");
+        assert_eq!(tree_prefix(&rows, 2), "│  ├──");
+    }
+
+    #[test]
+    fn last_children_get_terminator_glyph() {
+        let rows = multi_tab_rows();
+        assert_eq!(tree_prefix(&rows, 3), "│  └──");
+        assert_eq!(tree_prefix(&rows, 4), "└──");
+        assert_eq!(tree_prefix(&rows, 7), "└──");
+    }
+
+    #[test]
+    fn spine_stops_after_last_ancestor_sibling() {
+        let rows = multi_tab_rows();
+        assert_eq!(tree_prefix(&rows, 5), "   └──");
+    }
+
+    #[test]
+    fn next_workspace_does_not_extend_previous_subtree() {
+        // The pane at idx 5 is last in its workspace even though another
+        // workspace with children follows.
+        let rows = multi_tab_rows();
+        assert!(!has_following_sibling_at_depth(&rows, 5, 1));
+        assert!(!has_following_sibling_at_depth(&rows, 5, 2));
+    }
 }

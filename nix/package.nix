@@ -26,6 +26,10 @@ let
         '') entries}
       '';
   };
+  darwinToolchain = lib.optionals stdenv.hostPlatform.isDarwin [
+    cctools
+    xcbuild
+  ];
 in
 rustPlatform.buildRustPackage {
   pname = "herdr";
@@ -55,11 +59,7 @@ rustPlatform.buildRustPackage {
   nativeBuildInputs = [
     git
     pkg-config
-  ]
-  ++ lib.optionals stdenv.hostPlatform.isDarwin [
-    cctools
-    xcbuild
-  ];
+  ] ++ darwinToolchain;
 
   env = {
     LIBGHOSTTY_VT_OPTIMIZE = "ReleaseFast";
@@ -81,7 +81,7 @@ rustPlatform.buildRustPackage {
   meta = {
     description = "Terminal workspace manager for AI coding agents";
     homepage = "https://herdr.dev";
-    license = lib.licenses.agpl3Plus;
+    license = lib.licenses.asl20;
     mainProgram = "herdr";
     platforms = lib.platforms.linux ++ lib.platforms.darwin;
   };

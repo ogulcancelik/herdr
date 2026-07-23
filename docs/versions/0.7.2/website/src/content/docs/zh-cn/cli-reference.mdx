@@ -1,0 +1,358 @@
+---
+title: CLI 参考
+description: 用于会话、工作区、标签页、窗格、通知、智能体、等待、集成和状态的 Herdr 命令。
+---
+
+Herdr 的 CLI 通过与集成和智能体相同的本地 socket API 与运行中的服务器通信。
+
+大多数命令输出 JSON 响应。需要确定性自动化时,从脚本中使用它们。
+
+## 启动与状态
+
+```bash
+herdr                         # 启动或连接默认会话
+herdr --session work          # 启动或连接命名会话
+herdr --remote workbox        # 通过 SSH 连接,使用本地按键绑定
+herdr --remote workbox --remote-keybindings server
+herdr --remote workbox --handoff
+herdr --no-session            # 单进程逃生舱
+herdr --default-config        # 打印默认配置
+herdr update                  # 从配置的通道下载并安装
+herdr update --handoff        # 对受支持的运行中服务器启用实时交接
+herdr channel show            # 打印 stable 或 preview
+herdr channel set preview     # 启用预览构建
+herdr channel set stable      # 把 Linux/macOS 直接安装切回稳定版
+herdr --version               # 打印版本
+```
+
+状态命令:
+
+```bash
+herdr status
+herdr status server
+herdr status client
+```
+
+## 服务器
+
+```bash
+herdr server
+herdr server stop
+herdr server reload-config
+herdr server agent-manifests [--json]
+herdr server update-agent-manifests [--json]
+herdr server reload-agent-manifests
+```
+
+`herdr server` 显式运行无界面服务器,适合被监管或服务式的部署。`reload-config` 在不重启窗格的情况下应用可重载设置。`agent-manifests` 显示生效的智能体检测清单来源、缓存的远程版本和最近的远程更新结果。`update-agent-manifests` 立即拉取远程清单更新,重载到运行中的服务器,并打印更新后的清单状态;要原始状态响应就加 `--json`。`reload-agent-manifests` 在编辑本地覆盖后,把智能体检测清单重载到运行中的服务器。
+
+## 通知
+
+```bash
+herdr notification show <title> [--body TEXT] [--position top-left|top-right|bottom-left|bottom-right] [--sound none|done|request]
+```
+
+`notification show` 使用配置的 `[ui.toast]` 投递方式。`--position` 只影响 Herdr 应用内的 toast。`--sound` 默认为 `none`;`done` 和 `request` 只在通知实际显示时播放已有的完成音和需要关注音。
+
+## 会话
+
+```bash
+herdr session list [--json]
+herdr session attach <name>
+herdr session stop <name> [--json]
+herdr session delete <name> [--json]
+```
+
+需要显式停止默认会话时,把会话名写成 `default`。
+
+## 工作区
+
+```bash
+herdr workspace list
+herdr workspace create [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [--no-focus]
+herdr workspace get <workspace_id>
+herdr workspace focus <workspace_id>
+herdr workspace rename <workspace_id> <label>
+herdr workspace close <workspace_id>
+```
+
+不抢占焦点地创建工作区:
+
+```bash
+herdr workspace create --cwd ~/project --label api --no-focus
+```
+
+## Worktree
+
+```bash
+herdr worktree list [--workspace ID | --cwd PATH] [--json]
+herdr worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--focus] [--no-focus] [--json]
+herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus] [--json]
+herdr worktree remove --workspace ID [--force] [--json]
+```
+
+worktree 是带有 Git 检出来源信息的普通 Herdr 工作区。`worktree create` 创建一个 Git worktree 检出,作为工作区打开,并与父仓库工作区分到一组。如果 `--branch` 指向已有的本地分支,Herdr 检出它;否则从 `--base` 或 `HEAD` 创建分支。没有 `--path` 时,Herdr 在 `<worktrees.directory>/<repo>/<branch-slug>` 下创建检出。
+
+`workspace close` 只关闭 Herdr 状态。`worktree remove` 是显式的检出删除路径;它运行 `git worktree remove`,从不删除分支,并在 Git 拒绝脏检出时要求 `--force`。
+
+## 标签页
+
+```bash
+herdr tab list [--workspace <workspace_id>]
+herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [--no-focus]
+herdr tab get <tab_id>
+herdr tab focus <tab_id>
+herdr tab rename <tab_id> <label>
+herdr tab close <tab_id>
+```
+
+## 窗格
+
+```bash
+herdr pane list [--workspace <workspace_id>]
+herdr pane current [--pane ID|--current]
+herdr pane get <pane_id>
+herdr pane layout [--pane ID|--current]
+herdr pane process-info [--pane ID|--current]
+herdr pane neighbor --direction left|right|up|down [--pane ID|--current]
+herdr pane edges [--pane ID|--current]
+herdr pane focus --direction left|right|up|down [--pane ID|--current]
+herdr pane resize --direction left|right|up|down [--amount FLOAT] [--pane ID|--current]
+herdr pane zoom [<pane_id>|--pane ID|--current] [--toggle|--on|--off]
+herdr pane rename <pane_id> <label>|--clear
+herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--focus] [--no-focus]
+herdr pane swap --direction left|right|up|down [--pane ID|--current]
+herdr pane swap --source-pane ID --target-pane ID
+herdr pane move <pane_id> --tab <tab_id> --split right|down [--target-pane ID] [--ratio FLOAT] [--focus|--no-focus]
+herdr pane move <pane_id> --new-tab [--workspace ID] [--label TEXT] [--focus|--no-focus]
+herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--focus|--no-focus]
+herdr pane close <pane_id>
+```
+
+读取输出:
+
+```bash
+herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N]
+herdr pane read <pane_id> --source visible --ansi
+herdr pane read <pane_id> --source recent-unwrapped --lines 120
+```
+
+发送输入:
+
+```bash
+herdr pane send-text <pane_id> <text>
+herdr pane send-keys <pane_id> <key> [key ...]
+herdr pane run <pane_id> <command>
+```
+
+`<key>` 使用 Herdr 的组合键语法: `a` 这类普通可打印键,`enter`、`tab`、`esc`、`backspace`、`left`、`right`、`up`、`down` 这类特殊键,`ctrl+h`、`control+j`、`alt+x`、`shift+tab` 这类修饰组合键,`f1` 这类功能键,以及 `minus`、`plus`、`backtick` 这类命名标点。旧式的 `C-c` 和 `c-c` 作为 `ctrl+c` 的别名被接受。
+
+`pane run` 把文本和回车作为一个原子操作提交。发送命令时优先用它,而不是 `send-text` 加 `send-keys Enter`。
+
+从自定义钩子上报智能体状态:
+
+```bash
+herdr pane report-agent <pane_id> \
+  --source ID \
+  --agent LABEL \
+  --state idle|working|blocked|unknown \
+  [--message TEXT] \
+  [--custom-status TEXT] \
+  [--seq N] \
+  [--agent-session-id ID] \
+  [--agent-session-path PATH]
+```
+
+当官方集成上报了原生会话引用时,`pane get`、`pane list`、`agent get` 和 `agent list` 会包含一个只读的 `agent_session` 对象。没有存储原生会话引用时,该字段被省略。
+
+当 Herdr 能解析控制窗格的前台进程的 cwd 时,这些命令会包含 `foreground_cwd`。已有的 `cwd` 字段仍然是用于标签和 follow-cwd 行为的窗格/工作区 cwd。
+
+上报仅用于展示的窗格元数据,而不接管语义状态:
+
+```bash
+herdr pane report-metadata <pane_id> \
+  --source ID \
+  [--agent LABEL] \
+  [--applies-to-source ID] \
+  [--title TEXT|--clear-title] \
+  [--display-agent TEXT|--clear-display-agent] \
+  [--custom-status TEXT|--clear-custom-status] \
+  [--state-label STATUS=TEXT] \
+  [--clear-state-labels] \
+  [--seq N] \
+  [--ttl-ms N]
+```
+
+`STATUS` 是 `idle`、`working`、`blocked`、`done` 或 `unknown` 之一。`--agent` 是对权威智能体标签的守卫。`--applies-to-source` 是对活动生命周期权威来源的守卫。用 `--display-agent` 修改可见名称。
+
+元数据文本在存储前会被规范化。Herdr 去掉首尾空白、移除控制字符、把 `--custom-status` 截断到 32 个字符,把 `--title`、`--display-agent` 和每个 `--state-label` 的值截断到 80 个字符。规范化后为空的值被忽略。
+
+`--source` 和 `--applies-to-source` 必须不超过 80 个字符,并且只能包含 ASCII 字母、数字、冒号、点、下划线和连字符。`--ttl-ms` 让元数据自动过期,取值必须在 `1` 到 `86400000` 毫秒之间。想让元数据一直保留到被替换、清除或窗格关闭时,省略它。`--seq` 让 Herdr 忽略来自同一 `--source` 的过期上报;过期上报会被 API 接受,但被窗格状态忽略。
+
+## 智能体
+
+```bash
+herdr agent list
+herdr agent get <target>
+herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]
+herdr agent send <target> <text>
+herdr agent rename <target> <name>|--clear
+herdr agent focus <target>
+herdr agent wait <target> --status <idle|working|blocked|unknown> [--timeout MS]
+herdr agent attach <target> [--takeover]
+herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>
+herdr agent explain <target> [--json|--verbose]
+herdr agent explain --file PATH --agent LABEL [--json|--verbose]
+```
+
+智能体目标可以是终端 ID、唯一的智能体名称、检测到或上报的智能体标签,以及旧式窗格 ID。名称和标签是智能体的身份。终端 ID 和旧式窗格 ID 是底层的逃生舱。
+
+`agent read` 读取解析出的终端流。`agent send` 向该流写入字面文本。`agent get`、`agent focus`、`agent wait` 和 `agent attach` 要求解析出的终端具有智能体身份。`agent rename` 可以赋予这个身份。
+
+`agent explain` 请求运行中的服务器对屏幕检测所用的同一份底部缓冲区检测快照进行分类,因此实时输出反映服务器生效的清单缓存。因为它使用 `agent.explain` socket 方法,升级 Herdr 后,请先重启或交接到更新后的服务器,再使用实时 explain。用 `--file PATH --agent LABEL` 可以改为在本地解释一份保存的样本。默认输出显示智能体、最终状态、清单来源和版本、匹配的规则及其区域证据,以及任何回退、跳过或警告原因。加 `--verbose` 可以看到可见证据标志、缓存的远程版本、本地覆盖的遮蔽情况、远程更新状态,以及带匹配器和区域证据的完整已评估规则列表。提交问题报告或写测试时加 `--json`。
+
+普通终端、服务器、测试、shell 或底层终端控制,请使用 `pane send-text`、`pane send-keys`、`pane run` 和 `terminal attach`。想带回车提交命令时用 `pane run`。
+
+## 直接终端附加
+
+```bash
+herdr terminal attach <terminal_id> [--takeover]
+herdr terminal title set <title>
+herdr terminal title clear
+```
+
+从直接附加中用 `ctrl+b q` 分离。用 `ctrl+b ctrl+b` 发送字面的 `ctrl+b`。
+`terminal title clear` 恢复 Herdr 默认的外层终端窗口标题。
+
+## 等待
+
+等待窗格中的输出:
+
+```bash
+herdr wait output <pane_id> --match <text> [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--regex] [--raw]
+```
+
+等待窗格的智能体状态:
+
+```bash
+herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [--timeout MS]
+```
+
+普通命令和服务器用 `wait output`。编程智能体用 `wait agent-status`。
+
+## 集成
+
+```bash
+herdr integration install pi
+herdr integration install omp
+herdr integration install claude
+herdr integration install codex
+herdr integration install copilot
+herdr integration install devin
+herdr integration install droid
+herdr integration install kimi
+herdr integration install opencode
+herdr integration install kilo
+herdr integration install hermes
+herdr integration install mastracode
+herdr integration install qodercli
+herdr integration install cursor
+herdr integration uninstall pi
+herdr integration uninstall omp
+herdr integration uninstall claude
+herdr integration uninstall codex
+herdr integration uninstall copilot
+herdr integration uninstall devin
+herdr integration uninstall droid
+herdr integration uninstall kimi
+herdr integration uninstall opencode
+herdr integration uninstall kilo
+herdr integration uninstall hermes
+herdr integration uninstall mastracode
+herdr integration uninstall qodercli
+herdr integration uninstall cursor
+herdr integration status [--outdated-only]
+```
+
+## 插件
+
+插件命令用于安装和运行本地可执行的工作流插件。插件是清单加进程外命令;Herdr 负责宿主侧,插件负责自己的实现语言。
+
+安装、列出和移除插件:
+
+```bash
+herdr plugin install <owner>/<repo>[/subdir...] [--ref REF] [--yes]
+herdr plugin list [--plugin ID] [--json]
+herdr plugin uninstall <plugin_id|owner/repo[/subdir...]>
+herdr plugin enable <plugin_id>
+herdr plugin disable <plugin_id>
+```
+
+`plugin install` 只接受 GitHub 简写,比如 `ogulcancelik/herdr-plugin-examples/worktree-bootstrap`。它使用 `git`,在交互式终端显示信任预览,运行受支持的清单构建命令,并把 GitHub 安装保存在 Herdr 管理的目录中。非交互式安装用 `--yes`。重新安装 GitHub 管理的插件会替换该托管检出。不允许覆盖安装到本地链接的插件之上。插件清单必须声明 `min_herdr_version`;当插件要求更新的 Herdr 二进制时,install 和 link 会失败。`plugin list` 默认是人类可读的;要原始 API 响应就传 `--json`。
+
+本地开发:
+
+```bash
+herdr plugin link <path> [--disabled]
+herdr plugin unlink <plugin_id>
+```
+
+`plugin link` 接受包含 `herdr-plugin.toml` 的插件目录,或直接指向清单的路径。从本地检出编写或测试插件时,它仍然是正确的命令。`plugin unlink` 注销插件、不动文件。`plugin uninstall` 注销插件,并同时删除 Herdr 管理的 GitHub 检出文件。对 GitHub 安装,uninstall 既接受插件 id,也接受与 install 相同的 `owner/repo[/subdir...]` 简写。动作、事件钩子、窗格和链接处理器在清单中声明;运行时动作注册不在 v1 范围内。
+
+配置目录:
+
+```bash
+herdr plugin config-dir <plugin_id>
+```
+
+`plugin config-dir` 打印插件的配置目录,需要时会创建它 (旧版插件配置位置存在时会从那里初始化)。在安装文档和 shell 脚本中用它给用户指出一个稳定路径,用于存放 `.env` 等用户可编辑配置,与托管的插件检出分开。
+
+动作:
+
+```bash
+herdr plugin action list [--plugin ID]
+herdr plugin action invoke <action_id> [--plugin ID]
+```
+
+`plugin action invoke` 为一个已安装、已启用、平台兼容的插件动作启动清单命令,并在 JSON 响应中打印已启动命令的日志记录。当多个插件使用相同的动作 id 时,使用限定的动作 id (`plugin.id.action`)。本地动作 id 不能包含点,所以即使插件 id 包含点,限定 id 也不会有歧义。
+
+日志:
+
+```bash
+herdr plugin log list [--plugin ID] [--limit N]
+```
+
+托管终端窗格:
+
+```bash
+herdr plugin pane open --plugin ID --entrypoint ID [--placement overlay|split|tab|zoomed] [--workspace ID] [--target-pane PANE] [--direction right|down] [--cwd PATH] [--env KEY=VALUE] [--focus|--no-focus]
+herdr plugin pane focus <pane_id>
+herdr plugin pane close <pane_id>
+```
+
+`plugin pane open` 要求插件已链接、已启用并与当前平台兼容。它把清单声明的 `[[panes]]` 命令作为 Herdr 管理的终端窗格启动。清单的默认值是 `overlay`,在活动窗格上方打开一个临时的缩放覆盖层。它也可以作为分割、新标签页或缩放窗格打开。非终端的原生插件窗格是之后的能力面。
+
+`--env KEY=VALUE` 可以在启动进程的命令上重复使用,只作用于新启动的进程。当与调用方提供的环境变量冲突时,`HERDR_SOCKET_PATH`、`HERDR_BIN_PATH`、`HERDR_ENV`、`HERDR_WORKSPACE_ID`、`HERDR_TAB_ID`、`HERDR_PANE_ID`、`HERDR_PLUGIN_ID`、`HERDR_PLUGIN_ROOT`、`HERDR_PLUGIN_CONFIG_DIR`、`HERDR_PLUGIN_STATE_DIR`、`HERDR_PLUGIN_ENTRYPOINT_ID` 和 `HERDR_PLUGIN_CONTEXT_JSON` 等 Herdr 管理的变量保持权威。
+
+## 读取来源
+
+| 来源 | 含义 |
+| --- | --- |
+| `visible` | 当前渲染的屏幕。最适合 UI 反馈循环。 |
+| `recent` | 带终端折行的最近回滚内容。 |
+| `recent-unwrapped` | 不带软折行的最近回滚内容。最适合日志。 |
+| `detection` | 智能体屏幕检测使用的底部缓冲区快照。 |
+
+## 环境变量
+
+| 变量 | 用途 |
+| --- | --- |
+| `HERDR_CONFIG_PATH` | 覆盖配置文件路径。 |
+| `HERDR_SESSION` | 为 CLI 命令选择命名会话。 |
+| `HERDR_SOCKET_PATH` | 底层 socket 路径覆盖。 |
+| `HERDR_ENV` | 在 Herdr 管理的窗格进程内设为 `1`。 |
+| `HERDR_PANE_ID` | 运行中窗格进程的公开窗格 id。 |
+| `HERDR_TAB_ID` | 运行中窗格进程的公开标签页 id。 |
+| `HERDR_WORKSPACE_ID` | 运行中窗格进程的公开工作区 id。 |
+| `HERDR_LOG` | 设置日志过滤,例如 `HERDR_LOG=herdr=debug`。 |
+| `HERDR_DISABLE_SOUND` | 即使启用了声音通知也禁用声音播放。 |

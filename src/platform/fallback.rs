@@ -27,6 +27,10 @@ pub(crate) fn pane_custom_command_pty_builder_platform(
     portable_pty::CommandBuilder::from_argv(raw_command_argv(command, "-c"))
 }
 
+pub(crate) fn interactive_shell_command(_argv: &[String], _shell_name: &str) -> Option<String> {
+    None
+}
+
 /// Unsupported platform stub.
 pub(crate) fn scrollback_editor_argv(_path: &std::path::Path) -> std::io::Result<Vec<String>> {
     Err(std::io::Error::new(
@@ -41,6 +45,10 @@ pub fn detach_server_daemon_command(_command: &mut Command) {}
 /// Unsupported platform stub.
 pub fn current_process_is_detached_server_daemon() -> bool {
     false
+}
+
+pub(crate) fn available_pane_shell(_child_pid: u32) -> Option<String> {
+    None
 }
 
 /// Unsupported platform stub.

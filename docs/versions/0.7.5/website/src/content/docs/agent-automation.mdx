@@ -1,0 +1,121 @@
+---
+title: Agent automation
+description: Use Herdr's layout, pane, and agent primitives to coordinate coding agents from scripts or other agents.
+---
+
+Herdr can act as an automation layer for coding agents. A script can control them, or one agent can create work for other agents, inspect their state, and collect their results. The important part is choosing the primitive that matches the job.
+
+## Three primitives
+
+| Primitive | Responsibility |
+| --- | --- |
+| Layout (`workspace`, `tab`, and pane topology) | Create and organize terminal locations. |
+| Pane | Control a raw terminal: run commands, send input, read output, and wait for output. |
+| Agent | Control a recognized coding agent by name or pane and lifecycle state. |
+
+A pane exists whether or not it contains an agent. An agent is the recognized process currently running inside a pane. `agent start` therefore requires an existing shell pane and never creates, splits, or moves layout.
+
+Creating a workspace also creates its first tab and root pane; creating a tab creates its root pane. Use the returned pane ID for the first process, and split only when that layout needs another terminal.
+
+Creation commands print JSON. Capture IDs from the response instead of predicting them:
+
+```bash
+created=$(herdr workspace create --cwd ~/project --label api --no-focus)
+pane_id=$(printf '%s\n' "$created" | jq -r '.result.root_pane.pane_id')
+
+split=$(herdr pane split "$pane_id" --direction right --no-focus)
+review_pane=$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id')
+```
+
+`workspace create` returns `.result.workspace`, `.result.tab`, and `.result.root_pane`. `tab create` returns `.result.tab` and `.result.root_pane`. `pane split` returns the new pane as `.result.pane`.
+
+Moving a pane to another workspace changes its workspace-qualified pane ID. After any `pane move`, continue with `.result.move_result.pane.pane_id`; the response keeps the old value at `.result.move_result.previous_pane_id`. A running process keeps its launch-time Herdr environment, but the old `HERDR_PANE_ID` remains an alias for that terminal, so `--current` stays safe. New commands can still resolve the agent by name after the move, but a wait already in progress ends with `agent_not_running`.
+
+Use pane commands for shells, tests, servers, CI watchers, and other ordinary terminal processes. Use agent commands when Herdr needs to understand which agent is running or whether it is `working`, `blocked`, `done`, `idle`, or `unknown`.
+
+## Agent identity and launch
+
+A pane ID such as `w1:p2` identifies the terminal location. An agent name such as `reviewer` is a convenient alias for the current agent in that pane. Names must match `[a-z][a-z0-9_-]{0,31}` and be unique among live agents. The alias is cleared when that agent exits, is released, or is replaced; it does not permanently rename the pane.
+
+Agent commands accept either a unique live name or the pane ID that currently hosts the agent.
+
+An available shell pane is at its interactive shell prompt: the shell itself owns the foreground, with no foreground command, editor, or agent running. Return the pane to its prompt before calling `agent start`.
+
+`--kind` selects a supported agent and its canonical executable. Supported kinds are `pi`, `claude`, `codex`, `gemini`, `cursor`, `devin`, `agy`, `cline`, `omp`, `mastracode`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`, `kilo`, `qodercli`, and `maki`. Arguments after `--` are passed unchanged to that executable.
+
+`agent start` returns only after Herdr detects the expected agent in the same terminal and marks it ready for interactive input. Startup waits for 30 seconds by default; `--timeout` must be greater than 3000 and no more than 300000 milliseconds.
+
+```bash
+herdr agent start reviewer --kind codex --pane "$review_pane" -- -m gpt-5.4
+```
+
+Agents launched manually are detected automatically and can be addressed by pane ID. Give one a name when a stable human-readable target is useful:
+
+```bash
+herdr agent get w1:p2
+herdr agent rename w1:p2 reviewer
+```
+
+## Choose the control surface
+
+| Goal | Command |
+| --- | --- |
+| Run a shell command and submit it | `pane run` |
+| Send literal text without Enter | `pane send-text` |
+| Send terminal keys or modifier chords | `pane send-keys` |
+| Wait for text or a regular expression | `pane wait-output` |
+| Start a supported agent in an existing pane | `agent start` |
+| Submit a prompt, optionally waiting for it | `agent prompt` |
+| Send keys to an agent's interactive UI | `agent send-keys` |
+| Wait for agent lifecycle state | `agent wait` |
+
+`agent prompt` submits text plus encoded Enter and honors the terminal's live bracketed-paste mode. It can prompt an agent that is already working. Use `agent send-keys` for interactions such as `esc`, `up`, `enter`, or `ctrl+c`; `escape` is accepted as an alias for `esc`. Use the pane input commands when you deliberately want raw terminal control.
+
+Pane input addresses the terminal regardless of its current occupant. Agent input resolves the live agent and rejects the operation if that agent no longer controls the pane.
+
+`agent prompt --wait` submits immediately. When the agent starts from a non-working state, Herdr first requires an observed lifecycle change within five seconds. If the state sequence does not advance, it returns `agent_prompt_stalled` instead of waiting indefinitely; a caller `--timeout` of five seconds or less returns the normal `timeout` error. After activity is observed, it waits for the requested settled status. It does not track individual turns. If the agent is already working, completion of that active turn may satisfy the wait. Standalone `agent wait` observes the current agent and returns immediately if its status already matches. Both commands default to `idle`, `done`, or `blocked`. Repeat `--until` to accept several exact states, for example `--until idle --until done`; use `--until unknown` explicitly when needed. On `agent prompt`, `--until` requires `--wait`.
+
+`idle` means the agent is ready for input and its tab has been seen in the focused Herdr UI. `done` is the same underlying idle state after background work finishes, until that tab is focused or `pane focus` / `agent focus` targets it. Reading through the CLI does not mark it seen. `blocked` means Herdr recognized an approval or question UI. `unknown` means an agent is present but Herdr cannot classify its lifecycle confidently; it does not prove successful completion. Use exact `--until` states when that distinction matters.
+
+`pane wait-output` does not interpret agent lifecycle. It polls the selected terminal snapshot and searches it immediately, so text that was already present can match. The default source name is `recent`; matching treats that source as unwrapped recent output from the latest 80 rendered terminal rows. `--lines` changes that row limit, and `--regex` uses Rust regular-expression syntax and matches one line at a time.
+
+At the CLI, both `pane read` and `agent read` print terminal text directly. The default is UTF-8 text with ANSI escapes stripped; use `--format ansi` or `--ansi` to preserve terminal escapes where the source exposes them. The `detection` source is always plain text. For recent sources, `--lines N` selects the last N rendered terminal rows before optional unwrapping; without it, reads default to 80 rows. For `visible` and `detection`, omitting `--lines` returns the full snapshot, while specifying it keeps the last N newline-delimited lines. The socket API returns the text at `.result.read.text`.
+
+## Known caveat: alternate-screen output
+
+Full-screen agents such as Claude Code and OpenCode may render in the terminal's alternate screen. Alternate-screen rows do not enter Herdr's host scrollback. If a response exceeds the visible pane, `recent` and `recent-unwrapped` cannot recover rows that the app no longer displays; increasing `--lines` does not make that history available. A larger font or smaller pane makes this more likely.
+
+Ask the agent for concise responses, enlarge the pane or use a smaller font, or use the agent's own transcript and scrolling controls. After scrolling inside the agent, use `--source visible` to read the page it currently renders.
+
+Successful `agent start`, `agent prompt`, and `agent wait` commands return the current agent at `.result.agent`. `pane wait-output` returns `.result.pane_id`, `.result.matched_line`, and the matched snapshot at `.result.read`.
+
+Wait commands have no default timeout and can wait indefinitely. On timeout or another server error, CLI commands print a JSON error to stderr and exit with status 1; invalid CLI syntax exits with status 2.
+
+## Recipes
+
+Start a helper, give it work, and wait for that work to settle:
+
+```bash
+split=$(herdr pane split --current --direction right --no-focus)
+review_pane=$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id')
+herdr agent start reviewer --kind codex --pane "$review_pane" -- -m gpt-5.4
+herdr agent prompt reviewer "Review the current diff" --wait --timeout 120000
+herdr agent read reviewer --source recent-unwrapped --lines 120
+```
+
+Wait for an agent to ask for input, inspect it, and interact with its UI:
+
+```bash
+herdr agent wait reviewer --until blocked --timeout 120000
+herdr agent read reviewer --source recent-unwrapped --lines 80
+herdr agent send-keys reviewer esc
+```
+
+Run an ordinary process and wait for its output without treating it as an agent:
+
+```bash
+herdr pane run w1:p3 "just test --watch"
+herdr pane wait-output w1:p3 --regex "passed|failed" --timeout 120000
+```
+
+See the [CLI reference](/docs/cli-reference/) for the complete command and option list. Shell completions expose the same command tree interactively.

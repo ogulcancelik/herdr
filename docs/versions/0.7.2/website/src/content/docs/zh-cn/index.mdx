@@ -1,0 +1,77 @@
+---
+title: Herdr 文档
+description: 面向 AI 编程智能体的终端工作区管理器。
+template: splash
+hero:
+  tagline: "安装、学习和配置 Herdr。从适合你的路径开始 — 无需任何终端复用器经验。"
+  image:
+    file: ../../../../public/assets/logo.svg
+  actions:
+    - text: 安装 Herdr
+      link: /zh-cn/docs/install/
+    - text: 快速开始
+      link: /zh-cn/docs/quick-start/
+      variant: secondary
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## 选择你的路径
+
+<CardGrid>
+  <Card title="第一次接触终端复用器?">
+    上手不需要学习快捷键。Herdr 以鼠标为先: 点击窗格、拖动边框、通过右键菜单分割和切换。
+
+    [快速开始 →](/zh-cn/docs/quick-start/)
+  </Card>
+  <Card title="从 tmux 或 zellij 迁移过来?">
+    这套模型你已经很熟悉了。前缀键是 `ctrl+b`,窗格会持久保留,分离和重新连接的行为都符合你的预期。
+
+    [核心概念 →](/zh-cn/docs/concepts/) · [按键绑定 →](/zh-cn/docs/configuration/#按键绑定)
+  </Card>
+</CardGrid>
+
+## 或者让你的智能体来介绍
+
+已经在用 AI 编程智能体?让它来帮你完成入门。粘贴这个提示词:
+
+```text
+Help me understand and set up Herdr. Read https://herdr.dev/agent-guide.md first, then walk me through it step by step.
+```
+
+这份指南会教你的智能体 Herdr 的概念、安装、配置和常见问题的修复方法,让它的回答保持准确,而不是即兴发挥。
+
+## 核心指南
+
+<CardGrid>
+  <Card title="智能体">
+    了解受支持的智能体、检测行为、集成、自定义标签和直接附加。
+
+    [理解智能体 →](/zh-cn/docs/agents/)
+  </Card>
+  <Card title="会话状态">
+    理解分离、重启恢复、窗格历史回放、智能体原生会话恢复和实时交接。
+
+    [对比状态路径 →](/zh-cn/docs/session-state/)
+  </Card>
+  <Card title="配置">
+    配置按键绑定、主题、侧边栏行为、通知、回滚缓冲和高级选项。
+
+    [配置 Herdr →](/zh-cn/docs/configuration/)
+  </Card>
+  <Card title="API">
+    通过 CLI 和本地 socket API,从脚本、工具和智能体控制 Herdr。
+
+    [阅读 API 指南 →](/zh-cn/docs/socket-api/)
+  </Card>
+  <Card title="插件">
+    编写本地可执行的工作流插件,带有清单声明的动作和事件钩子。
+
+    [编写插件 →](/zh-cn/docs/plugins/)
+  </Card>
+  <Card title="插件市场">
+    现在就可以从 GitHub 分享插件,为仓库打上主题标签,插件市场上线时即可收录。
+
+    [发布插件 →](/zh-cn/docs/marketplace/)
+  </Card>
+</CardGrid>

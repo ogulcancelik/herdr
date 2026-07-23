@@ -76,7 +76,7 @@ Herdr はバンドルされた拡張を次の場所に書き込みます:
 ~/.pi/agent/extensions/herdr-agent-state.ts
 ```
 
-`PI_CODING_AGENT_DIR` が設定されている場合は、代わりに `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts` に書き込みます。extensions ディレクトリはあらかじめ存在している必要があります。アンインストールはその拡張ファイルだけを削除します。
+`PI_CODING_AGENT_DIR` が設定されている場合は、代わりに `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts` に書き込みます。Pi の agent ディレクトリが存在する場合、Herdr は extensions ディレクトリを作成します。アンインストールはその拡張ファイルだけを削除します。
 
 ## OMP
 
@@ -92,7 +92,7 @@ Herdr はバンドルされた拡張を次の場所に書き込みます:
 ~/.omp/agent/extensions/herdr-omp-agent-state.ts
 ```
 
-`PI_CODING_AGENT_DIR` が設定されている場合は、代わりに `$PI_CODING_AGENT_DIR/extensions/herdr-omp-agent-state.ts` に書き込みます。extensions ディレクトリはあらかじめ存在している必要があります。アンインストールはその拡張ファイルだけを削除します。
+`PI_CODING_AGENT_DIR` が設定されている場合は、代わりに `$PI_CODING_AGENT_DIR/extensions/herdr-omp-agent-state.ts` に書き込みます。OMP の agent ディレクトリが存在する場合、Herdr は extensions ディレクトリを作成します。アンインストールはその拡張ファイルだけを削除します。
 
 OMP インテグレーションは、Herdr のソケット API を通じてエージェントラベル `omp`、ライフサイクル状態、ネイティブセッション識別を報告します。`omp` 実行ファイルのネイティブプロセス検出は不要で、Herdr はサーバー再起動後に `omp --resume=<session>` で OMP ペインを resume できます。
 

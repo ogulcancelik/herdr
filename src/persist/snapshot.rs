@@ -102,6 +102,8 @@ pub struct PaneSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_agent_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session: Option<PaneAgentSessionSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_argv: Option<Vec<String>>,
@@ -319,51 +321,51 @@ fn capture_tab(
         let cwd = tab
             .cwd_for_pane(*id, terminals, terminal_runtimes)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
-        let label = tab
+        let terminal = tab
             .panes
             .get(id)
-            .and_then(|pane| terminals.get(&pane.attached_terminal_id))
-            .and_then(|terminal| terminal.manual_label.clone());
-        let agent_name = tab
-            .panes
-            .get(id)
-            .and_then(|pane| terminals.get(&pane.attached_terminal_id))
-            .and_then(|terminal| terminal.agent_name.clone());
-        let launch_argv = tab
-            .panes
-            .get(id)
-            .and_then(|pane| terminals.get(&pane.attached_terminal_id))
-            .and_then(|terminal| terminal.launch_argv.clone());
-        let agent_session =
-            tab.panes
-                .get(id)
-                .and_then(|pane| terminals.get(&pane.attached_terminal_id))
-                .and_then(|terminal| {
-                    if let Some(authority) = terminal.hook_authority.as_ref() {
-                        if let Some(session_ref) = authority.session_ref.as_ref() {
-                            return Some(PaneAgentSessionSnapshot {
-                                source: authority.source.clone(),
-                                agent: authority.agent_label.clone(),
-                                kind: session_ref.kind,
-                                value: session_ref.value.clone(),
-                            });
-                        }
-                    }
-                    terminal.persisted_agent_session.as_ref().map(|session| {
-                        PaneAgentSessionSnapshot {
-                            source: session.source.clone(),
-                            agent: session.agent.clone(),
-                            kind: session.session_ref.kind,
-                            value: session.session_ref.value.clone(),
-                        }
-                    })
-                });
+            .and_then(|pane| terminals.get(&pane.attached_terminal_id));
+        let label = terminal.and_then(|terminal| terminal.manual_label.clone());
+        let (agent_name, managed_agent_kind) = terminal
+            .filter(|terminal| !terminal.managed_agent_launch_pending())
+            .map(|terminal| {
+                (
+                    terminal.agent_name.clone(),
+                    terminal
+                        .managed_agent_kind()
+                        .map(|agent| crate::detect::agent_label(agent).to_string()),
+                )
+            })
+            .unwrap_or_default();
+        let launch_argv = terminal.and_then(|terminal| terminal.launch_argv.clone());
+        let agent_session = terminal.and_then(|terminal| {
+            if let Some(authority) = terminal.hook_authority.as_ref() {
+                if let Some(session_ref) = authority.session_ref.as_ref() {
+                    return Some(PaneAgentSessionSnapshot {
+                        source: authority.source.clone(),
+                        agent: authority.agent_label.clone(),
+                        kind: session_ref.kind,
+                        value: session_ref.value.clone(),
+                    });
+                }
+            }
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| PaneAgentSessionSnapshot {
+                    source: session.source.clone(),
+                    agent: session.agent.clone(),
+                    kind: session.session_ref.kind,
+                    value: session.session_ref.value.clone(),
+                })
+        });
         panes.insert(
             id.raw(),
             PaneSnapshot {
                 cwd,
                 label,
                 agent_name,
+                managed_agent_kind,
                 agent_session,
                 launch_argv,
             },
@@ -557,6 +559,43 @@ mod tests {
     }
 
     #[test]
+    fn managed_agent_snapshot_omits_pending_and_persists_active_ownership() {
+        let mut state = state_with_workspaces(&["managed-snapshot"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        let now = std::time::Instant::now();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .begin_managed_agent(
+                "reviewer".into(),
+                crate::detect::Agent::Pi,
+                now,
+                std::time::Duration::ZERO,
+                std::time::Duration::from_secs(1),
+            );
+
+        let pending = capture_from_state(&state);
+        let pending_pane = &pending.workspaces[0].tabs[0].panes[&root.raw()];
+        assert_eq!(pending_pane.agent_name, None);
+        assert_eq!(pending_pane.managed_agent_kind, None);
+
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Pi),
+            crate::detect::AgentState::Idle,
+        );
+        assert!(terminal.reconcile_managed_agent_at(now, false));
+        let active = capture_from_state(&state);
+        let active_pane = &active.workspaces[0].tabs[0].panes[&root.raw()];
+        assert_eq!(active_pane.agent_name.as_deref(), Some("reviewer"));
+        assert_eq!(active_pane.managed_agent_kind.as_deref(), Some("pi"));
+    }
+
+    #[test]
     fn round_trip_empty_session() {
         let snap = SessionSnapshot {
             version: SNAPSHOT_VERSION,
@@ -606,6 +645,7 @@ mod tests {
                 cwd: PathBuf::from("/home/can/Projects/herdr"),
                 label: None,
                 agent_name: None,
+                managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
             },
@@ -616,6 +656,7 @@ mod tests {
                 cwd: PathBuf::from("/home/can/Projects/website"),
                 label: Some("website".into()),
                 agent_name: None,
+                managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
             },
@@ -1157,6 +1198,7 @@ mod tests {
                 cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test"),
                 label: None,
                 agent_name: None,
+                managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
             },
@@ -1169,6 +1211,7 @@ mod tests {
                     .unwrap_or_else(|_| PathBuf::from("/tmp")),
                 label: None,
                 agent_name: None,
+                managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
             },

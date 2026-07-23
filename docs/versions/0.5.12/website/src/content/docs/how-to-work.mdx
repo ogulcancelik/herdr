@@ -1,0 +1,103 @@
+---
+title: How to work with Herdr
+description: Run Herdr locally, inside SSH, or through remote attach.
+---
+
+Run Herdr where the work lives. Attach from wherever you are.
+
+Herdr is a background session server plus one or more terminal clients. Panes keep running in the server. Clients attach, detach, and render the session.
+
+## Local work
+
+Start Herdr from the project directory:
+
+```bash
+herdr
+```
+
+Herdr starts or attaches to your local background session automatically. You do not manage sockets. Run shells, servers, tests, and agents normally inside panes.
+
+Detach the client with `ctrl+b q`. Your panes keep running.
+
+Reattach later:
+
+```bash
+herdr
+```
+
+If you want to end the session and stop its panes, stop the server:
+
+```bash
+herdr server stop
+```
+
+## Remote work through normal SSH
+
+SSH to the machine that has the code and credentials, then run Herdr there:
+
+```bash
+ssh you@server
+herdr
+```
+
+This works like a terminal multiplexer. Your shell is remote. The Herdr server is remote. The agents and panes run on the remote machine. Detach with `ctrl+b q`, disconnect, then SSH back and run `herdr` again.
+
+Use this path when you already live inside an SSH shell, when you are on a phone or tablet SSH client, or when you want the simplest possible setup.
+
+## Work from your phone
+
+You do not need a Herdr mobile app or a web dashboard. Install any SSH client on your phone, connect to the machine where your agents run, and start Herdr there:
+
+```bash
+ssh you@server
+herdr
+```
+
+The same persistent Herdr session opens in your phone terminal. The TUI adapts to narrow screens, so you can inspect agents, switch workspaces, and check panes without leaving SSH.
+
+On iPhone, apps like [moshi](https://getmoshi.app/) work well.
+
+<div class="mobile-doc-shots">
+  <figure>
+    <img src="/assets/mobile-terminal.jpeg" alt="Herdr terminal view over SSH on a phone" loading="lazy" />
+    <figcaption>terminal over SSH</figcaption>
+  </figure>
+  <figure>
+    <img src="/assets/mobile-switcher.jpeg" alt="Herdr responsive switcher on a phone" loading="lazy" />
+    <figcaption>responsive switcher</figcaption>
+  </figure>
+</div>
+
+## Remote work from your local terminal
+
+Attach through SSH without opening a shell first:
+
+```bash
+herdr --remote workbox
+herdr --remote ssh://you@server:2222
+```
+
+Your local Herdr acts as a thin client. It connects over SSH, starts or attaches to the remote Herdr server, and streams the UI back to your local terminal.
+
+Use this path when you want one local command that opens the remote Herdr session directly.
+
+For repeat targets, put the host in your SSH config:
+
+```text
+Host workbox
+  HostName server.example.com
+  User you
+  Port 2222
+```
+
+Then attach with:
+
+```bash
+herdr --remote workbox
+```
+
+## Which path to use
+
+Use `herdr` for local work. Use `ssh you@server` then `herdr` when you want Herdr to behave like tmux on that remote shell. Use `herdr --remote <host>` when you want your local terminal to attach directly to the remote Herdr session over SSH.
+
+For remote bootstrap details, named remote sessions, custom binaries, direct terminal attach, and `--no-session`, see [Persistence and remote access](/docs/persistence-remote/).

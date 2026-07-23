@@ -1,0 +1,82 @@
+---
+title: Troubleshooting
+description: Diagnose common installation, terminal input, session, keybinding, and remote access problems.
+---
+
+Start with the versions and session status:
+
+```bash
+herdr -V
+herdr status
+```
+
+Also record your operating system, outer terminal name and version, whether the session is local or remote, and whether tmux is involved.
+
+## Enter, Tab, or Backspace fires twice
+
+Older terminal versions can emit the release of Enter, Tab, and Backspace as the same bytes as the press when an application enables Kitty keyboard event reporting. Herdr cannot distinguish those duplicate bytes after the terminal sends them.
+
+Update the outer terminal to a version containing its upstream fix:
+
+| Terminal | Minimum fixed version |
+| --- | --- |
+| kitty | 0.33.0 |
+| foot | 1.20.0 |
+| Alacritty | 0.15.0 |
+
+This is especially common with older terminal packages from long-term-support Linux distributions. See [Herdr issue #1116](https://github.com/ogulcancelik/herdr/issues/1116) for the confirmed boundary captures and upstream references. If the problem remains on a current terminal version, report the exact terminal version and whether it also happens outside Herdr.
+
+## Option+Left or Option+Right inserts `;3D` or `;3C`
+
+Terminals commonly send Alt+Left and Alt+Right as the standard modified-arrow sequences `ESC[1;3D` and `ESC[1;3C`. On macOS, the outer terminal must first be configured to treat Option as Alt. If the shell does not bind these sequences, zsh may display their remaining characters as `;3D` or `;3C`. This can happen with kitty, Alacritty, and other terminals; Herdr and tmux both preserve the original modified-arrow input.
+
+Add explicit zsh bindings if you want modified arrows to perform word navigation in every terminal and nested shell:
+
+```zsh
+bindkey $'\e[1;3D' backward-word
+bindkey $'\e[1;3C' forward-word
+```
+
+Kitty can appear to work differently outside Herdr because its automatic zsh integration adds these bindings only to shells started directly by kitty, not shells created by terminal multiplexers. Follow kitty's [manual shell integration instructions](https://sw.kovidgoyal.net/kitty/shell-integration/#manual-shell-integration), or map the keys in `kitty.conf` before they reach the shell:
+
+```text
+map alt+left send_text all \x1bb
+map alt+right send_text all \x1bf
+```
+
+Herdr deliberately does not rewrite modified arrows because terminal applications may use Alt+Left and Alt+Right directly. See [Herdr issue #1370](https://github.com/ogulcancelik/herdr/issues/1370) for the investigation.
+
+## Herdr updated, but the running session is still old
+
+Updating the binary does not always replace a compatible server that is already running. Check `herdr status`. To start the updated server, stop the session and launch Herdr again:
+
+```bash
+herdr server stop
+herdr
+```
+
+Stopping a server exits its pane processes. Named sessions use `herdr session stop <name>`. See [Install Herdr](/docs/install/#update) for updater, package-manager, and live-handoff behavior.
+
+## The `herdr` command is not found
+
+Restart the terminal so it reloads its environment, then confirm the Herdr install directory is on `PATH`. Package-manager installs must be updated and exposed through that package manager. See [Install Herdr](/docs/install/#verify).
+
+## A direct keybinding does nothing
+
+The operating system or outer terminal may consume the chord before Herdr receives it. Free the chord in that layer or choose another binding. See [Keyboard](/docs/keyboard/#going-prefix-free) for known conflicts and safe defaults.
+
+## Remote attach cannot authenticate
+
+First confirm that normal OpenSSH works with `ssh <host>`. For a passphrase-protected key in a non-interactive shell, CI job, or mobile terminal, load the key into `ssh-agent` before starting remote attach. See [Persistence and remote access](/docs/persistence-remote/#remote-attach-over-ssh).
+
+## Find diagnostic logs
+
+Herdr logs live in `~/.config/herdr/` by default:
+
+```text
+herdr.log
+herdr-client.log
+herdr-server.log
+```
+
+Set `HERDR_LOG=herdr=debug` for more detail. Include the current log and rotated siblings when reporting a problem. See [Configuration](/docs/configuration/#logs).
