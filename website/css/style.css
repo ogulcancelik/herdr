@@ -1586,14 +1586,17 @@ samp {
     border-bottom: 1px solid var(--line);
 }
 
-.community-video-thumb img {
+.community-video-image {
+    display: block;
     width: 100%;
     height: 100%;
-    object-fit: cover;
+    background-image: var(--thumbnail);
+    background-position: center;
+    background-size: cover;
     transition: transform 180ms ease;
 }
 
-.community-video-card:hover .community-video-thumb img {
+.community-video-card:hover .community-video-image {
     transform: scale(1.025);
 }
 
