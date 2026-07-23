@@ -32,7 +32,19 @@ use windows_sys::{
                 PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
             },
         },
-        UI::Shell::{CommandLineToArgvW, ShellExecuteW},
+        UI::{
+            Input::{
+                Ime::ImmGetDefaultIMEWnd,
+                KeyboardAndMouse::{
+                    GetKeyboardLayout, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+                    KEYEVENTF_KEYUP,
+                },
+            },
+            Shell::{CommandLineToArgvW, ShellExecuteW},
+            WindowsAndMessaging::{
+                GetForegroundWindow, GetWindowThreadProcessId, SendMessageW, WM_IME_CONTROL,
+            },
+        },
     },
 };
 
@@ -657,6 +669,166 @@ fn read_unicode_string(process: HANDLE, unicode: UNICODE_STRING) -> Option<Strin
     String::from_utf16(&buffer).ok()
 }
 
+// Prefix-mode ASCII input source support (see `switch_ascii_input_source_in_prefix`).
+//
+// Windows IMEs live in the terminal-emulator process, not in herdr. Empirically:
+//   - `WM_IME_CONTROL` / `IMC_GETCONVERSIONMODE` reads the real conversion mode
+//     reliably (this is what kren-select uses), so we detect state with it.
+//   - `IMC_SETCONVERSIONMODE` changes the flag value but does NOT affect real
+//     input in terminal/TSF hosts, so we cannot switch by writing the mode.
+//   - `ImmGetContext` on the foreground window returns null across the process
+//     boundary, so the ImmGetOpenStatus/ImmSetOpenStatus path is unavailable.
+// Therefore we switch the way kren-select does: inject the IME toggle key with
+// `SendInput`, which reaches the foreground input queue like a real keypress.
+//
+// The toggle key is language-specific, so we pick it from the foreground
+// keyboard layout's language id. Only Korean is mapped today; other IMEs are
+// detected and left untouched (a no-op) rather than toggled with the wrong key.
+
+/// `WM_IME_CONTROL` sub-command that reads the current IME conversion mode.
+const IMC_GETCONVERSIONMODE: usize = 0x0005;
+
+/// Conversion-mode bit set while the IME composes native characters
+/// (Hangul / kana / pinyin). Cleared means ASCII-capable direct input.
+const IME_CMODE_NATIVE: isize = 0x0001;
+
+/// Virtual key that toggles Hangul/English on Korean IMEs.
+const VK_HANGUL: u16 = 0x15;
+
+/// Primary language id (low 10 bits of a LANGID) for Korean.
+const LANG_KOREAN: u32 = 0x12;
+
+/// Whether the IME is currently composing native (non-ASCII) characters.
+///
+/// Uses a bit test rather than an equality check because Japanese and Chinese
+/// IMEs combine `IME_CMODE_NATIVE` with other bits (full-shape, katakana,
+/// roman), so the native state is not a single fixed value.
+fn native_mode_active(mode: isize) -> bool {
+    mode & IME_CMODE_NATIVE != 0
+}
+
+/// The IME toggle key for a keyboard layout language id, or `None` when the
+/// language's toggle key is not known. `langid` is the full LANGID (LOWORD of
+/// an `HKL`); the primary language is its low 10 bits.
+///
+/// Only Korean is mapped: `VK_HANGUL` is the Hangul/English toggle. Japanese
+/// (half/full-width) and Chinese use different keys per IME, so they return
+/// `None` and are left untouched instead of toggled incorrectly.
+fn toggle_key_for_language(langid: u32) -> Option<u16> {
+    match langid & 0x3FF {
+        LANG_KOREAN => Some(VK_HANGUL),
+        _ => None,
+    }
+}
+
+/// Builds the key-down then key-up `INPUT` pair for `vk`.
+fn key_tap_inputs(vk: u16) -> [INPUT; 2] {
+    let key_event = |flags| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    [key_event(0), key_event(KEYEVENTF_KEYUP)]
+}
+
+/// Injects a key-down then key-up for `vk` via `SendInput`.
+fn send_vk_tap(vk: u16) {
+    let inputs = key_tap_inputs(vk);
+    // SAFETY: `inputs` outlives the call; its `INPUT_KEYBOARD` entries have the
+    // `ki` union variant fully initialized, which is the variant SendInput reads
+    // for keyboard input. `size_of::<INPUT>()` is the required `cbSize`.
+    unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            size_of::<INPUT>() as i32,
+        );
+    }
+}
+
+pub(crate) fn pump_input_source_runloop() {}
+
+/// Switch the foreground window's IME to ASCII-capable input for prefix mode.
+///
+/// Returns `None` (nothing to restore) when there is no foreground IME, the
+/// keyboard language has no known toggle key, or the IME is already
+/// ASCII-capable, matching the macOS contract.
+pub(crate) fn switch_to_ascii_input_source() -> Option<InputSourceRestore> {
+    // SAFETY: all calls are Win32 UI functions invoked on the client's main
+    // thread. Every HWND is null-checked before use; `fg_thread` is a thread id
+    // (not a handle) used only as `GetKeyboardLayout` input, where 0 harmlessly
+    // falls back to the calling thread's layout.
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.is_null() {
+            return None;
+        }
+
+        // Pick the toggle key for the foreground keyboard language. Unknown
+        // languages (Japanese, Chinese, ...) are left untouched.
+        let fg_thread = GetWindowThreadProcessId(fg, null_mut());
+        let langid = (GetKeyboardLayout(fg_thread) as usize as u32) & 0xFFFF;
+        let Some(toggle_vk) = toggle_key_for_language(langid) else {
+            tracing::debug!(
+                langid = format!("{langid:#06x}"),
+                "prefix IME switch: no toggle key for keyboard language, leaving IME as-is"
+            );
+            return None;
+        };
+
+        // Detect native composition via the reliable read path.
+        let ime_hwnd = ImmGetDefaultIMEWnd(fg);
+        if ime_hwnd.is_null() {
+            return None;
+        }
+        let mode = SendMessageW(ime_hwnd, WM_IME_CONTROL, IMC_GETCONVERSIONMODE, 0);
+        if !native_mode_active(mode) {
+            // Already ASCII-capable; nothing to switch or restore.
+            return None;
+        }
+
+        // Toggle to ASCII by injecting the language's IME toggle key.
+        send_vk_tap(toggle_vk);
+        tracing::debug!(
+            langid = format!("{langid:#06x}"),
+            "switched host IME to ASCII for prefix mode"
+        );
+        Some(InputSourceRestore { toggle_vk })
+    }
+}
+
+/// Restores the native IME state that was active before prefix mode.
+///
+/// Only constructed by [`switch_to_ascii_input_source`] after it toggled away
+/// from native composition, so dropping it re-injects the same toggle key to go
+/// back. It deliberately does NOT re-read the conversion mode: the injected key
+/// is applied asynchronously, so a fresh read here would be stale. Mirrors the
+/// macOS "save the previous source, restore on drop" contract.
+///
+/// Note: the toggle key is injected into whatever window currently has focus, so
+/// if focus moved to another app between the switch and this restore, the toggle
+/// lands there. This matches the injection-based approach's inherent limitation
+/// (and the cross-app caveat the macOS path has too); prefix mode is short-lived,
+/// so in practice the herdr terminal is still focused.
+#[derive(Debug)]
+pub(crate) struct InputSourceRestore {
+    toggle_vk: u16,
+}
+
+impl Drop for InputSourceRestore {
+    fn drop(&mut self) {
+        send_vk_tap(self.toggle_vk);
+        tracing::debug!("restored host IME after prefix mode");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1054,6 +1226,57 @@ mod tests {
             argv0: argv.first().map(|value| (*value).to_string()),
             argv: Some(argv.iter().map(|value| (*value).to_string()).collect()),
             cmdline: Some(argv.join(" ")),
+        }
+    }
+
+    #[test]
+    fn native_mode_detected_across_cjk_ime_bit_combinations() {
+        // Korean: native composition is exactly the NATIVE bit.
+        assert!(super::native_mode_active(0x0001));
+        // Japanese hiragana: NATIVE | FULLSHAPE | ROMAN.
+        assert!(super::native_mode_active(0x0001 | 0x0008 | 0x0010));
+        // Chinese pinyin: NATIVE with other bits set.
+        assert!(super::native_mode_active(0x0001 | 0x0020));
+        // Direct ASCII input: NATIVE bit clear.
+        assert!(!super::native_mode_active(0x0000));
+        // Full-shape alphanumeric without native composition still counts as ASCII-capable.
+        assert!(!super::native_mode_active(0x0008));
+    }
+
+    #[test]
+    fn toggle_key_maps_korean_and_ignores_other_languages() {
+        // Korean (0x0412) -> Hangul/English toggle.
+        assert_eq!(
+            super::toggle_key_for_language(0x0412),
+            Some(super::VK_HANGUL)
+        );
+        // Korean with a different sublanguage still resolves by primary id.
+        assert_eq!(
+            super::toggle_key_for_language(0x0812),
+            Some(super::VK_HANGUL)
+        );
+        // Japanese (0x0411) and Chinese (0x0804) have no mapped key yet.
+        assert_eq!(super::toggle_key_for_language(0x0411), None);
+        assert_eq!(super::toggle_key_for_language(0x0804), None);
+        // English (0x0409): nothing to toggle.
+        assert_eq!(super::toggle_key_for_language(0x0409), None);
+    }
+
+    #[test]
+    fn key_tap_inputs_emit_keydown_then_keyup() {
+        let inputs = super::key_tap_inputs(super::VK_HANGUL);
+        // SAFETY: both entries are keyboard inputs, so reading the `ki` union is valid.
+        unsafe {
+            assert_eq!(inputs[0].r#type, super::INPUT_KEYBOARD);
+            assert_eq!(inputs[0].Anonymous.ki.wVk, super::VK_HANGUL);
+            assert_eq!(inputs[0].Anonymous.ki.dwFlags, 0, "first event is key-down");
+            assert_eq!(inputs[1].r#type, super::INPUT_KEYBOARD);
+            assert_eq!(inputs[1].Anonymous.ki.wVk, super::VK_HANGUL);
+            assert_eq!(
+                inputs[1].Anonymous.ki.dwFlags,
+                super::KEYEVENTF_KEYUP,
+                "second event is key-up"
+            );
         }
     }
 }
