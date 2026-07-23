@@ -410,6 +410,7 @@ mod tests {
                 g: 20,
                 b: 20,
             }),
+            ..Default::default()
         };
 
         assert!(app.start_pending_agent_resumes(false));
@@ -511,6 +512,7 @@ mod tests {
                 g: 20,
                 b: 20,
             }),
+            ..Default::default()
         };
         for terminal_id in [&active_terminal, &hidden_terminal] {
             app.state
@@ -575,6 +577,7 @@ mod tests {
                 g: 20,
                 b: 20,
             }),
+            ..Default::default()
         };
         app.state
             .terminals
@@ -635,6 +638,7 @@ mod tests {
                 g: 20,
                 b: 20,
             }),
+            ..Default::default()
         };
         app.state
             .terminals
@@ -692,6 +696,7 @@ mod tests {
                 g: 20,
                 b: 20,
             }),
+            ..Default::default()
         };
         app.state
             .terminals
@@ -752,6 +757,7 @@ mod tests {
                 g: 20,
                 b: 20,
             }),
+            ..Default::default()
         };
         app.state
             .terminals

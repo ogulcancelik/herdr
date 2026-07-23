@@ -337,6 +337,12 @@ impl From<ffi::GhosttyColorRgb> for RgbColor {
     }
 }
 
+pub fn default_palette() -> [RgbColor; 256] {
+    let mut palette = [ffi::GhosttyColorRgb::default(); 256];
+    unsafe { ffi::ghostty_color_palette_default(palette.as_mut_ptr()) };
+    palette.map(Into::into)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CellColor {
     Palette(u8),
@@ -767,6 +773,22 @@ impl Terminal {
         // SAFETY: self.raw is a live terminal handle for self's lifetime.
         unsafe {
             ffi::ghostty_terminal_vt_write(self.raw, bytes.as_ptr(), bytes.len());
+        }
+    }
+
+    pub fn set_default_palette(&mut self, palette: &[RgbColor; 256]) -> Result<(), Error> {
+        let palette = palette.map(|color| ffi::GhosttyColorRgb {
+            r: color.r,
+            g: color.g,
+            b: color.b,
+        });
+        unsafe {
+            ffi::ghostty_terminal_set(
+                self.raw,
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_COLOR_PALETTE,
+                palette.as_ptr().cast(),
+            )
+            .into_result()
         }
     }
 

@@ -198,6 +198,11 @@ impl ClientConnection {
                             self.set_host_appearance(Some(color.inferred_appearance()), false);
                     }
                 }
+                crate::raw_input::RawInputEvent::HostPaletteColors { colors } => {
+                    for &(index, color) in colors {
+                        next_theme = next_theme.with_palette_color(index, color);
+                    }
+                }
                 crate::raw_input::RawInputEvent::HostColorSchemeChanged(appearance) => {
                     changed |= self.set_host_appearance(Some(*appearance), true);
                 }

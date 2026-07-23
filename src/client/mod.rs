@@ -2135,7 +2135,8 @@ fn should_query_host_terminal_theme() -> bool {
 }
 
 fn write_host_terminal_theme_query(mut writer: impl io::Write) -> io::Result<()> {
-    writer.write_all(crate::terminal_theme::HOST_COLOR_QUERY_SEQUENCE.as_bytes())?;
+    let query = crate::terminal_theme::host_terminal_theme_query_sequence();
+    writer.write_all(query.as_bytes())?;
     writer.flush()
 }
 
@@ -2412,7 +2413,7 @@ mod tests {
         write_host_terminal_theme_query(&mut output).unwrap();
         assert_eq!(
             output,
-            crate::terminal_theme::HOST_COLOR_QUERY_SEQUENCE.as_bytes()
+            crate::terminal_theme::host_terminal_theme_query_sequence().as_bytes()
         );
     }
 

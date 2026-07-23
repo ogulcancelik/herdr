@@ -96,7 +96,8 @@ use tokio::sync::mpsc;
 
 use crate::input::{parse_terminal_key_sequence, TerminalKey};
 use crate::terminal_theme::{
-    parse_default_color_response, DefaultColorKind, HostAppearance, RgbColor,
+    parse_default_color_response, parse_palette_color_response, DefaultColorKind, HostAppearance,
+    RgbColor,
 };
 
 const ESC: u8 = 0x1b;
@@ -132,6 +133,9 @@ pub enum RawInputEvent {
     HostDefaultColor {
         kind: DefaultColorKind,
         color: RgbColor,
+    },
+    HostPaletteColors {
+        colors: Vec<(u8, RgbColor)>,
     },
     HostColorSchemeChanged(HostAppearance),
     Unsupported,
@@ -203,13 +207,13 @@ pub(crate) struct RawInputByteFramer {
     discard_until: Option<ControlStringFamily>,
     discarded_tail_bytes: usize,
     lone_escape_recently_flushed: bool,
-    host_color_replies_awaited: u8,
+    host_color_replies_awaited: u16,
     held_pending_color_esc: bool,
     host_color_scheme_change_tracking: bool,
     split_coalesced_escape: bool,
 }
 
-const HOST_COLOR_QUERY_REPLIES: u8 = 2;
+const HOST_COLOR_QUERY_REPLIES: u16 = 258;
 const MAX_ORPHANED_SGR_MOUSE_TAIL_BYTES: usize = 32;
 
 impl RawInputByteFramer {
@@ -449,7 +453,10 @@ impl RawInputByteFramer {
             let Some((event, consumed)) = extract_one_event(&self.buffer) else {
                 break;
             };
-            if matches!(event, RawInputEvent::HostDefaultColor { .. }) {
+            if matches!(
+                event,
+                RawInputEvent::HostDefaultColor { .. } | RawInputEvent::HostPaletteColors { .. }
+            ) {
                 self.host_color_replies_awaited = self.host_color_replies_awaited.saturating_sub(1);
             } else if self.host_color_scheme_change_tracking
                 && matches!(event, RawInputEvent::HostColorSchemeChanged(_))
@@ -535,23 +542,30 @@ pub fn spawn_input_reader() -> mpsc::Receiver<RawInputEvent> {
         let mut framer = RawInputFramer::for_host_input();
         framer.host_color_query_sent();
         framer.enable_host_color_scheme_change_tracking();
+        let mut pending_palette = Vec::new();
 
         loop {
             match reader.read(&mut scratch) {
                 Ok(0) => break,
                 Ok(n) => {
-                    send_raw_input_events(framer.push(&scratch[..n]), &tx);
+                    send_raw_input_events(framer.push(&scratch[..n]), &tx, &mut pending_palette);
 
                     if stdin_read_ready(&reader, input_flush_timeout_ms(&framer)) == Some(false) {
                         let had_pending = framer.has_pending_input();
                         let events = framer.flush_timeout();
                         let held_escape = had_pending && events.is_empty();
-                        send_raw_input_events(events, &tx);
+                        send_raw_input_events(events, &tx, &mut pending_palette);
+                        flush_host_palette_events(&tx, &mut pending_palette);
                         if held_escape
                             && stdin_read_ready(&reader, RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS)
                                 == Some(false)
                         {
-                            send_raw_input_events(framer.flush_timeout(), &tx);
+                            send_raw_input_events(
+                                framer.flush_timeout(),
+                                &tx,
+                                &mut pending_palette,
+                            );
+                            flush_host_palette_events(&tx, &mut pending_palette);
                         }
                     }
                 }
@@ -563,10 +577,39 @@ pub fn spawn_input_reader() -> mpsc::Receiver<RawInputEvent> {
     rx
 }
 
-fn send_raw_input_events(events: Vec<RawInputEvent>, tx: &mpsc::Sender<RawInputEvent>) {
+fn send_raw_input_events(
+    events: Vec<RawInputEvent>,
+    tx: &mpsc::Sender<RawInputEvent>,
+    pending_palette: &mut Vec<(u8, RgbColor)>,
+) {
     for event in events {
-        let _ = tx.blocking_send(event);
+        match event {
+            RawInputEvent::HostPaletteColors { colors } => {
+                pending_palette.extend(colors);
+                if pending_palette.len() == 256 {
+                    flush_host_palette_events(tx, pending_palette);
+                }
+            }
+            event @ RawInputEvent::HostDefaultColor { .. } => {
+                let _ = tx.blocking_send(event);
+            }
+            event => {
+                flush_host_palette_events(tx, pending_palette);
+                let _ = tx.blocking_send(event);
+            }
+        }
     }
+}
+
+fn flush_host_palette_events(
+    tx: &mpsc::Sender<RawInputEvent>,
+    pending_palette: &mut Vec<(u8, RgbColor)>,
+) {
+    if pending_palette.is_empty() {
+        return;
+    }
+    let colors = std::mem::take(pending_palette);
+    let _ = tx.blocking_send(RawInputEvent::HostPaletteColors { colors });
 }
 
 #[cfg(test)]
@@ -684,6 +727,14 @@ fn extract_one_event(buffer: &[u8]) -> Option<(RawInputEvent, usize)> {
 
         if let Some((kind, color)) = parse_default_color_response(seq) {
             return Some((RawInputEvent::HostDefaultColor { kind, color }, seq_len));
+        }
+        if let Some((index, color)) = parse_palette_color_response(seq) {
+            return Some((
+                RawInputEvent::HostPaletteColors {
+                    colors: vec![(index, color)],
+                },
+                seq_len,
+            ));
         }
 
         match seq {
@@ -1230,6 +1281,27 @@ mod tests {
                 g: 0x22,
                 b: 0x33
             }
+        );
+    }
+
+    #[test]
+    fn parses_host_palette_color_response() {
+        let (RawInputEvent::HostPaletteColors { colors }, consumed) =
+            extract_one_event(b"\x1b]4;7;rgb:1111/2222/3333\x1b\\").unwrap()
+        else {
+            panic!("expected host palette response");
+        };
+        assert_eq!(consumed, 26);
+        assert_eq!(
+            colors,
+            vec![(
+                7,
+                RgbColor {
+                    r: 0x11,
+                    g: 0x22,
+                    b: 0x33,
+                }
+            )]
         );
     }
 
@@ -2459,6 +2531,7 @@ mod tests {
         ));
 
         assert!(framer.push(b"\x1b").is_empty());
+        assert!(framer.flush_timeout().is_empty());
         assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
     }
 
@@ -2484,12 +2557,18 @@ mod tests {
 
     #[test]
     fn stops_holding_lone_escape_after_host_color_reply_completes() {
+        use std::fmt::Write as _;
+
         let mut framer = RawInputByteFramer::default();
         framer.host_color_query_sent();
+        let mut replies =
+            String::from("\x1b]10;rgb:6565/7b7b/8383\x1b\\\x1b]11;rgb:2424/2727/3a3a\x1b\\");
+        for index in 0..=u8::MAX {
+            let _ = write!(replies, "\x1b]4;{index};rgb:1111/2222/3333\x1b\\");
+        }
 
-        let chunks =
-            framer.push(b"\x1b]10;rgb:6565/7b7b/8383\x1b\\\x1b]11;rgb:2424/2727/3a3a\x1b\\");
-        assert_eq!(chunks.len(), 2);
+        let chunks = framer.push(replies.as_bytes());
+        assert_eq!(chunks.len(), 258);
 
         // Window closed: a later lone Escape flushes immediately.
         assert!(framer.push(b"\x1b").is_empty());

@@ -71,18 +71,18 @@ fn unix_stdin_reader_loop(
         framer.host_color_query_sent();
         framer.enable_host_color_scheme_change_tracking();
     }
+    let mut pending_palette = Vec::new();
 
     while !should_quit.load(Ordering::Acquire) {
         match reader.read(&mut scratch) {
             Ok(0) => break,
             Ok(n) => {
-                for data in framer.push(&scratch[..n]) {
-                    if event_tx
-                        .blocking_send(ClientLoopEvent::StdinInput(data))
-                        .is_err()
-                    {
-                        return;
-                    }
+                if !send_unix_input_chunks(
+                    framer.push(&scratch[..n]),
+                    &event_tx,
+                    &mut pending_palette,
+                ) {
+                    return;
                 }
 
                 let timeout_ms = idle_flush_timeout_ms(
@@ -93,28 +93,23 @@ fn unix_stdin_reader_loop(
                     let had_pending = framer.has_pending_input();
                     let chunks = framer.flush_timeout();
                     let held_escape = had_pending && chunks.is_empty();
-                    for data in chunks {
-                        if event_tx
-                            .blocking_send(ClientLoopEvent::StdinInput(data))
-                            .is_err()
-                        {
-                            return;
-                        }
+                    if !send_unix_input_chunks(chunks, &event_tx, &mut pending_palette)
+                        || !flush_unix_palette_input(&event_tx, &mut pending_palette)
+                    {
+                        return;
                     }
                     if held_escape
                         && stdin_read_ready(
                             &reader,
                             crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS,
                         ) == Some(false)
+                        && !send_unix_input_chunks(
+                            framer.flush_timeout(),
+                            &event_tx,
+                            &mut pending_palette,
+                        )
                     {
-                        for data in framer.flush_timeout() {
-                            if event_tx
-                                .blocking_send(ClientLoopEvent::StdinInput(data))
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
+                        return;
                     }
                 }
             }
@@ -126,6 +121,56 @@ fn unix_stdin_reader_loop(
             }
         }
     }
+}
+
+#[cfg(unix)]
+fn send_unix_input_chunks(
+    chunks: Vec<Vec<u8>>,
+    event_tx: &mpsc::Sender<ClientLoopEvent>,
+    pending_palette: &mut Vec<Vec<u8>>,
+) -> bool {
+    for data in chunks {
+        let palette_response = std::str::from_utf8(&data)
+            .ok()
+            .and_then(crate::terminal_theme::parse_palette_color_response)
+            .is_some();
+        if palette_response {
+            pending_palette.push(data);
+            if pending_palette.len() == 256 && !flush_unix_palette_input(event_tx, pending_palette)
+            {
+                return false;
+            }
+            continue;
+        }
+        let default_color_response = std::str::from_utf8(&data)
+            .ok()
+            .and_then(crate::terminal_theme::parse_default_color_response)
+            .is_some();
+        if !default_color_response && !flush_unix_palette_input(event_tx, pending_palette) {
+            return false;
+        }
+        if event_tx
+            .blocking_send(ClientLoopEvent::StdinInput(data))
+            .is_err()
+        {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(unix)]
+fn flush_unix_palette_input(
+    event_tx: &mpsc::Sender<ClientLoopEvent>,
+    pending_palette: &mut Vec<Vec<u8>>,
+) -> bool {
+    if pending_palette.is_empty() {
+        return true;
+    }
+    let data = std::mem::take(pending_palette).concat();
+    event_tx
+        .blocking_send(ClientLoopEvent::StdinInput(data))
+        .is_ok()
 }
 
 #[cfg(unix)]
@@ -357,6 +402,7 @@ fn windows_client_input_event_from_raw(
             Some(crate::protocol::ClientInputEvent::FocusLost)
         }
         crate::raw_input::RawInputEvent::HostDefaultColor { .. }
+        | crate::raw_input::RawInputEvent::HostPaletteColors { .. }
         | crate::raw_input::RawInputEvent::HostColorSchemeChanged(_)
         | crate::raw_input::RawInputEvent::Unsupported => None,
     }
@@ -417,6 +463,33 @@ mod tests {
             ClientLoopEvent::StdinInput(d) => assert_eq!(d, data),
             _ => panic!("expected StdinInput event"),
         }
+    }
+
+    #[test]
+    fn palette_replies_are_forwarded_as_one_input_batch() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut pending = Vec::new();
+        assert!(send_unix_input_chunks(
+            vec![
+                b"\x1b]4;0;rgb:1111/2222/3333\x1b\\".to_vec(),
+                b"\x1b]4;1;rgb:4444/5555/6666\x1b\\".to_vec(),
+            ],
+            &tx,
+            &mut pending,
+        ));
+        assert!(rx.try_recv().is_err());
+
+        assert!(flush_unix_palette_input(&tx, &mut pending));
+        let ClientLoopEvent::StdinInput(data) = rx.try_recv().unwrap() else {
+            panic!("expected palette input batch");
+        };
+        assert_eq!(
+            data.windows(4)
+                .filter(|window| *window == b"\x1b]4;")
+                .count(),
+            2
+        );
+        assert!(pending.is_empty());
     }
 
     #[test]

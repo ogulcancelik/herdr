@@ -891,6 +891,7 @@ mod tests {
                 g: colors.background.g,
                 b: colors.background.b,
             }),
+            ..Default::default()
         }
     }
 
@@ -1486,6 +1487,7 @@ mod tests {
                 g: 0x22,
                 b: 0x33,
             }),
+            ..Default::default()
         };
 
         pane.apply_host_terminal_theme(host_theme);

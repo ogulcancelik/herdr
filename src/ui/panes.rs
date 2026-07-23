@@ -1400,6 +1400,7 @@ mod tests {
                 g: 14,
                 b: 16,
             }),
+            ..Default::default()
         };
         let expected_style = automatic_selection_style(&palette, host_theme);
         let selection = Some(Selection::range(PaneId::from_raw(1), 0, 0, 2, None));
@@ -1465,6 +1466,7 @@ mod tests {
                     g: 14,
                     b: 16,
                 }),
+                ..Default::default()
             },
         );
 
