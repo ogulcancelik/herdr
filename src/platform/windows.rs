@@ -744,11 +744,23 @@ fn send_vk_tap(vk: u16) {
     // SAFETY: `inputs` outlives the call; its `INPUT_KEYBOARD` entries have the
     // `ki` union variant fully initialized, which is the variant SendInput reads
     // for keyboard input. `size_of::<INPUT>()` is the required `cbSize`.
-    unsafe {
+    let sent = unsafe {
         SendInput(
             inputs.len() as u32,
             inputs.as_ptr(),
             size_of::<INPUT>() as i32,
+        )
+    };
+    // SendInput returns how many events it actually queued; a short count means
+    // injection was blocked (e.g. by UIPI) and the IME did not toggle. Warn so
+    // a stuck-ASCII/stuck-native IME leaves a diagnostic trail instead of a
+    // silent "success".
+    if sent as usize != inputs.len() {
+        tracing::warn!(
+            vk,
+            sent,
+            expected = inputs.len(),
+            "SendInput did not inject the full IME toggle key tap"
         );
     }
 }
