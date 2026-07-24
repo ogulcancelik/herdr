@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: herdr maintainers <maintainers@herdr.dev>
+Date: Fri, 24 Jul 2026 00:00:00 +0000
+Subject: [PATCH] disable private Win32 input mode
+
+ConPTY's undocumented 0x4 creation flag asks the host to translate VT input
+into Win32 INPUT_RECORDs. Herdr panes consume VT input directly, and older
+ConPTY versions drop enhanced Kitty keyboard sequences while this mode is set.
+
+Herdr issue: https://github.com/ogulcancelik/herdr/issues/1533
+Vendored base: portable-pty 0.9.0
+---
+ vendor/portable-pty/src/win/psuedocon.rs | 5 +----
+ 1 file changed, 1 insertion(+), 4 deletions(-)
+
+diff --git a/vendor/portable-pty/src/win/psuedocon.rs b/vendor/portable-pty/src/win/psuedocon.rs
+index 133eab52..284f37f6 100644
+--- a/vendor/portable-pty/src/win/psuedocon.rs
++++ b/vendor/portable-pty/src/win/psuedocon.rs
+@@ -26,7 +26,6 @@ pub type HPCON = HANDLE;
+ 
+ pub const PSUEDOCONSOLE_INHERIT_CURSOR: DWORD = 0x1;
+ pub const PSEUDOCONSOLE_RESIZE_QUIRK: DWORD = 0x2;
+-pub const PSEUDOCONSOLE_WIN32_INPUT_MODE: DWORD = 0x4;
+ #[allow(dead_code)]
+ pub const PSEUDOCONSOLE_PASSTHROUGH_MODE: DWORD = 0x8;
+ 
+@@ -77,9 +76,7 @@ impl PsuedoCon {
+                 size,
+                 input.as_raw_handle() as _,
+                 output.as_raw_handle() as _,
+-                PSUEDOCONSOLE_INHERIT_CURSOR
+-                    | PSEUDOCONSOLE_RESIZE_QUIRK
+-                    | PSEUDOCONSOLE_WIN32_INPUT_MODE,
++                PSUEDOCONSOLE_INHERIT_CURSOR | PSEUDOCONSOLE_RESIZE_QUIRK,
+                 &mut con,
+             )
+         };
+-- 
+2.50.1

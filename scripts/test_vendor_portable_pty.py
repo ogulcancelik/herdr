@@ -111,6 +111,17 @@ class VendorPortablePtyTests(unittest.TestCase):
         self.assertIn('ConPtyFuncs::open(Path::new("kernel32.dll"))', text)
         self.assertNotIn('Path::new("conpty.dll")', text)
 
+    def test_windows_conpty_does_not_enable_private_win32_input_mode(self) -> None:
+        project_root = Path(__file__).resolve().parent.parent
+        source = project_root / "vendor" / "portable-pty" / "src" / "win" / "psuedocon.rs"
+        text = source.read_text()
+
+        self.assertIn(
+            "PSUEDOCONSOLE_INHERIT_CURSOR | PSEUDOCONSOLE_RESIZE_QUIRK", text
+        )
+        self.assertNotIn("PSEUDOCONSOLE_WIN32_INPUT_MODE", text)
+        self.assertNotIn("0x4", text)
+
 
 if __name__ == "__main__":
     unittest.main()

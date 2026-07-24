@@ -73,3 +73,41 @@ python3 -m unittest scripts.test_vendor_portable_pty
 ```
 
 On Windows, also run `cargo test raw_arg_appends_unescaped_windows_command_tail`.
+
+## 0003 disable private Win32 input mode
+
+status: active
+
+patch: `vendor/patches/portable-pty/0003-disable-win32-input-mode.patch`
+
+herdr issue: https://github.com/ogulcancelik/herdr/issues/1533
+
+upstream discussion: none
+
+upstream pr: none
+
+vendored base: `portable-pty 0.9.0`
+
+local files:
+
+- `vendor/portable-pty/src/win/psuedocon.rs`
+
+reason: `portable-pty` creates ConPTY instances with the undocumented `0x4`
+Win32 input mode flag. That mode asks ConPTY to translate terminal input into
+Win32 input records, but Herdr panes consume VT input directly. On the older
+ConPTY in Windows Server 2022, enabling the flag drops Kitty keyboard sequences
+for modified and cursor keys after an application requests enhanced input.
+
+remove when: upstream `portable-pty` stops enabling the private flag by default,
+upstream exposes a supported way to disable it, or Herdr replaces the Windows
+PTY backend.
+
+verification:
+
+```sh
+python3 -m unittest scripts.test_vendor_portable_pty
+```
+
+On the diagnostic draft PR for issue 1533, also run the
+`windows-conpty-enhanced-input` matrix. Windows Server 2022 and Windows Server
+2025 must both deliver the semantic enhanced-key sequences and raw controls.
