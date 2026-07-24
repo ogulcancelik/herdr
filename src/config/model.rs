@@ -911,9 +911,10 @@ pub struct ExperimentalConfig {
     /// to an ASCII-capable mode so prefix commands are read as ASCII even when
     /// an IME is active, then restore the previous input source when prefix
     /// mode exits. On macOS this selects the ASCII-capable keyboard layout; on
-    /// Windows it toggles a Korean IME between Hangul and English (other IME
-    /// languages are detected and left unchanged). macOS and Windows only; a
-    /// no-op elsewhere and a best-effort no-op if the switch fails.
+    /// Windows it switches the IME to English (ASCII) input. Windows support is
+    /// currently limited to the Korean IME; with an IME for any other language,
+    /// the input source is left unchanged. macOS and Windows only; a no-op
+    /// elsewhere and a best-effort no-op if the switch fails.
     /// Default: false.
     pub switch_ascii_input_source_in_prefix: bool,
 }

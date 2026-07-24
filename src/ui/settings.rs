@@ -526,6 +526,6 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
 
-        assert!(rendered.contains("switch to ascii input source in prefix (macOS) [✓]"));
+        assert!(rendered.contains("switch to ascii input source in prefix (macOS/Windows) [✓]"));
     }
 }

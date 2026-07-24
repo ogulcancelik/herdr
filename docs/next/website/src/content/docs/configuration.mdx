@@ -439,7 +439,11 @@ On macOS and Windows, Herdr can temporarily switch to an ASCII-capable input sou
 switch_ascii_input_source_in_prefix = true
 ```
 
-On macOS this switches to the current ASCII-capable keyboard layout; on Windows it toggles a Korean IME between Hangul and English (other IME languages are detected and left unchanged). Herdr restores the previous input source when returning to terminal input or entering a text field. This setting has no effect on other platforms.
+On macOS this switches to the current ASCII-capable keyboard layout; on Windows it switches the IME to English (ASCII) input. Herdr restores the previous input source when returning to terminal input or entering a text field. This setting has no effect on other platforms.
+
+:::caution[Windows support is Korean IME only]
+On Windows, support is currently limited to the Korean IME. With an IME for any other language, this setting leaves the input source unchanged.
+:::
 
 ## Environment variables
 
