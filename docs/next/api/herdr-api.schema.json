@@ -6898,6 +6898,12 @@
               },
               "type": "array"
             },
+            "homepage": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "link_handlers": {
               "items": {
                 "$ref": "#/schemas/success_response/$defs/PluginManifestLinkHandler"

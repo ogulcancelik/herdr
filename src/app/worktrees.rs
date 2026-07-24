@@ -1748,6 +1748,7 @@ mod tests {
                 version: "0.1.0".into(),
                 min_herdr_version: "0.7.0".into(),
                 description: None,
+                homepage: None,
                 manifest_path: manifest_path.display().to_string(),
                 plugin_root: plugin_root.display().to_string(),
                 enabled: true,

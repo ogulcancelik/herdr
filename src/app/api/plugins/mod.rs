@@ -967,6 +967,87 @@ platforms = ["linux", "macos", "windows"]
     }
 
     #[test]
+    fn plugin_manifest_accepts_and_trims_homepage() {
+        let root = unique_temp_path("plugin-homepage-valid");
+        write_manifest_content(
+            &root,
+            r#"
+id = "example.homepage-valid"
+name = "Homepage valid"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+platforms = ["linux", "macos"]
+homepage = "  https://example.com/docs  "
+"#,
+        );
+
+        let plugin = load_plugin_manifest(&root.display().to_string(), true)
+            .expect("valid homepage should load");
+        assert_eq!(plugin.homepage.as_deref(), Some("https://example.com/docs"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn plugin_manifest_homepage_defaults_to_none() {
+        for (name, line) in [("missing", ""), ("empty", "homepage = \"  \"")] {
+            let root = unique_temp_path(&format!("plugin-homepage-{name}"));
+            write_manifest_content(
+                &root,
+                &format!(
+                    r#"
+id = "example.homepage-{name}"
+name = "Homepage {name}"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+platforms = ["linux", "macos"]
+{line}
+"#
+                ),
+            );
+
+            let plugin = load_plugin_manifest(&root.display().to_string(), true)
+                .expect("manifest without homepage should load");
+            assert_eq!(plugin.homepage, None);
+
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn plugin_manifest_rejects_invalid_homepage() {
+        for (name, value) in [
+            ("scheme", "ftp://example.com"),
+            ("relative", "example.com/docs"),
+            ("bare", "https://"),
+            ("spaced", "https://example.com/a b"),
+        ] {
+            let root = unique_temp_path(&format!("plugin-homepage-bad-{name}"));
+            write_manifest_content(
+                &root,
+                &format!(
+                    r#"
+id = "example.homepage-bad-{name}"
+name = "Homepage bad {name}"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+platforms = ["linux", "macos"]
+homepage = "{value}"
+"#
+                ),
+            );
+
+            let result = load_plugin_manifest(&root.display().to_string(), true);
+            assert!(
+                matches!(result, Err(("invalid_plugin_homepage", _))),
+                "expected invalid_plugin_homepage for {name}"
+            );
+
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
     fn plugin_manifest_preserves_whitespace_only_command_arguments() {
         let root = unique_temp_path("plugin-whitespace-argv");
         write_manifest_content(

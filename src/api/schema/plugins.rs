@@ -42,6 +42,8 @@ pub struct InstalledPluginInfo {
     pub min_herdr_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<String>,
     pub manifest_path: String,
     pub plugin_root: String,
     pub enabled: bool,

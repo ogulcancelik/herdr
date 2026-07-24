@@ -18,6 +18,8 @@ struct RawPluginManifest {
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
+    homepage: Option<String>,
+    #[serde(default)]
     platforms: Option<Vec<RawPlatform>>,
     #[serde(default)]
     build: Vec<RawPluginManifestBuild>,
@@ -154,6 +156,7 @@ pub(crate) fn load_plugin_manifest(
         .description
         .map(|description| description.trim().to_string())
         .filter(|description| !description.is_empty());
+    let homepage = validate_homepage(raw.homepage.as_deref())?;
     let platforms = normalize_platforms(raw.platforms)?;
     let build = raw
         .build
@@ -211,6 +214,7 @@ pub(crate) fn load_plugin_manifest(
         version,
         min_herdr_version,
         description,
+        homepage,
         manifest_path: manifest_path.display().to_string(),
         plugin_root: plugin_root.display().to_string(),
         enabled,
@@ -224,6 +228,30 @@ pub(crate) fn load_plugin_manifest(
         source: Default::default(),
         warnings,
     })
+}
+
+fn validate_homepage(value: Option<&str>) -> Result<Option<String>, (&'static str, String)> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let rest = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"));
+    let valid = matches!(rest, Some(rest) if !rest.is_empty())
+        && !value
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control());
+    if !valid {
+        return Err((
+            "invalid_plugin_homepage",
+            format!("homepage must be an absolute http(s) URL, got '{value}'"),
+        ));
+    }
+    Ok(Some(value.to_string()))
 }
 
 fn validate_min_herdr_version(value: Option<&str>) -> Result<String, (&'static str, String)> {

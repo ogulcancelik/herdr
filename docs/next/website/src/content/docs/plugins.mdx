@@ -100,6 +100,8 @@ action = "apply"
 ```
 
 Top-level `id`, `name`, `version`, and `min_herdr_version` are required.
+`homepage` is optional: an absolute `http(s)` URL for the plugin's docs or
+website, shown in `herdr plugin list`.
 Set `min_herdr_version` to the oldest Herdr version that supports the plugin
 APIs, event names, and manifest fields your plugin uses. Herdr refuses to link
 or install a plugin when its minimum version is newer than the current binary.

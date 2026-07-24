@@ -1169,6 +1169,9 @@ fn print_plugin_list_human(response: &serde_json::Value) -> std::io::Result<i32>
             "  config: {}",
             crate::plugin_paths::plugin_config_dir(&plugin.plugin_id).display()
         );
+        if let Some(homepage) = &plugin.homepage {
+            println!("  homepage: {homepage}");
+        }
         for warning in plugin.warnings {
             println!("  warning: {warning}");
         }
@@ -1208,6 +1211,9 @@ fn print_install_preview(
     eprintln!("  id: {}", plugin.plugin_id);
     eprintln!("  name: {}", plugin.name);
     eprintln!("  version: {}", plugin.version);
+    if let Some(homepage) = &plugin.homepage {
+        eprintln!("  homepage: {homepage}");
+    }
     if let (Some(owner), Some(repo)) = (&source.owner, &source.repo) {
         let subdir = source
             .subdir
@@ -1688,6 +1694,7 @@ mod tests {
             version: "0.1.0".to_string(),
             min_herdr_version: crate::build_info::BASE_VERSION.to_string(),
             description: None,
+            homepage: None,
             manifest_path: format!("/tmp/{id}/herdr-plugin.toml"),
             plugin_root: format!("/tmp/{id}"),
             enabled: true,
