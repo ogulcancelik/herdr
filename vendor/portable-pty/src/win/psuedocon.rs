@@ -9,7 +9,7 @@ use std::ffi::OsString;
 use std::io::Error as IoError;
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::{mem, ptr};
 use winapi::shared::minwindef::DWORD;
@@ -49,7 +49,30 @@ fn load_conpty() -> ConPtyFuncs {
         "this system does not support conpty.  Windows 10 October 2018 or newer is required",
     );
 
+    if let Some(path) = app_local_conpty_path() {
+        match ConPtyFuncs::open(&path) {
+            Ok(conpty) => return conpty,
+            Err(error) => log::warn!(
+                "failed to load app-local ConPTY from {}: {error:?}; using system ConPTY",
+                path.display()
+            ),
+        }
+    }
+
     kernel
+}
+
+fn app_local_conpty_path() -> Option<PathBuf> {
+    let executable_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let host_arch = match std::env::consts::ARCH {
+        "x86" => "x86",
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        _ => return None,
+    };
+    let dll = executable_dir.join("conpty.dll");
+    let host = executable_dir.join(host_arch).join("OpenConsole.exe");
+    (dll.is_file() && host.is_file()).then_some(dll)
 }
 
 lazy_static! {

@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, converted_to_draft]
   push:
     branches: [master, windows]
     paths-ignore:
@@ -173,3 +173,107 @@ jobs:
           $ErrorActionPreference = "Stop"
           $exe = Join-Path $PWD "target\x86_64-pc-windows-msvc\debug\herdr.exe"
           .\scripts\windows_smoke_conpty_path.ps1 -ExePath $exe -Session "ci-windows-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+
+  windows-conpty-enhanced-input:
+    name: ConPTY enhanced input (${{ matrix.os }})
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+          use-cache: false
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+          key: conpty-input-${{ matrix.os }}
+
+      - name: Build Herdr
+        run: cargo build --locked --target x86_64-pc-windows-msvc
+
+      - name: Verify invalid app-local ConPTY falls back
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = Join-Path $PWD "target\x86_64-pc-windows-msvc\debug\herdr.exe"
+          $exeDir = Split-Path -Parent $exe
+          $dll = Join-Path $exeDir "conpty.dll"
+          $hostDir = Join-Path $exeDir "x64"
+          $consoleHost = Join-Path $hostDir "OpenConsole.exe"
+          if ((Test-Path $dll) -or (Test-Path $consoleHost)) {
+            throw "invalid sibling fallback test refuses to overwrite existing ConPTY files"
+          }
+          New-Item -ItemType Directory -Force -Path $hostDir | Out-Null
+          [System.IO.File]::WriteAllBytes($dll, [byte[]](0x48, 0x45, 0x52, 0x44, 0x52))
+          [System.IO.File]::WriteAllBytes($consoleHost, [byte[]](0x48, 0x45, 0x52, 0x44, 0x52))
+          try {
+            .\scripts\windows_smoke_conpty_path.ps1 `
+              -ExePath $exe `
+              -Session "ci-conpty-fallback-${{ matrix.os }}-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          } finally {
+            Remove-Item -Force $dll, $consoleHost -ErrorAction SilentlyContinue
+            Remove-Item -Force $hostDir -ErrorAction SilentlyContinue
+          }
+
+      - name: Stage official app-local ConPTY
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $packageUrl = "https://github.com/microsoft/terminal/releases/download/v1.24.11911.0/Microsoft.Windows.Console.ConPTY.1.24.260710001.nupkg"
+          $expectedHash = "9382ad7becb7e4d84e300578d8e4f4df28f43d979d9055d978c42913c47e0e9d"
+          $package = Join-Path $env:RUNNER_TEMP "Microsoft.Windows.Console.ConPTY.nupkg"
+          $archive = Join-Path $env:RUNNER_TEMP "Microsoft.Windows.Console.ConPTY.zip"
+          $expanded = Join-Path $env:RUNNER_TEMP "Microsoft.Windows.Console.ConPTY"
+          Invoke-WebRequest -Uri $packageUrl -OutFile $package
+          $actualHash = (Get-FileHash -Algorithm SHA256 $package).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) {
+            throw "ConPTY package hash mismatch: expected $expectedHash, got $actualHash"
+          }
+          Copy-Item $package $archive
+          Expand-Archive -Path $archive -DestinationPath $expanded
+
+          $exeDir = Join-Path $PWD "target\x86_64-pc-windows-msvc\debug"
+          Copy-Item (Join-Path $expanded "runtimes\win-x64\native\conpty.dll") $exeDir
+          $hostDir = Join-Path $exeDir "x64"
+          New-Item -ItemType Directory -Force -Path $hostDir | Out-Null
+          Copy-Item (Join-Path $expanded "build\native\runtimes\x64\OpenConsole.exe") $hostDir
+
+      - name: Probe enhanced pane input
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = Join-Path $PWD "target\x86_64-pc-windows-msvc\debug\herdr.exe"
+          $consoleHost = Join-Path (Split-Path -Parent $exe) "x64\OpenConsole.exe"
+          $report = Join-Path $PWD "artifacts\conpty-input-${{ matrix.os }}.json"
+          .\scripts\windows_conpty_enhanced_input_probe.ps1 `
+            -ExePath $exe `
+            -Session "ci-conpty-${{ matrix.os }}-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" `
+            -ReportPath $report `
+            -ExpectedConsoleHostPath $consoleHost
+
+      - name: Upload probe report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: conpty-input-${{ matrix.os }}
+          path: artifacts/conpty-input-${{ matrix.os }}.json
+          if-no-files-found: warn
