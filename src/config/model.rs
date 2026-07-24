@@ -909,11 +909,15 @@ pub struct ExperimentalConfig {
     /// Cursor shape rendered for the IME anchor when
     /// `reveal_hidden_cursor_for_cjk_ime` is enabled. Default: "steady_block".
     pub cjk_ime_cursor_shape: ImeCursorShape,
-    /// While prefix mode is active, temporarily switch the macOS host input
-    /// source to an ASCII-capable keyboard layout so prefix commands are read
-    /// as ASCII even when a CJK IME is active, then restore the previous input
-    /// source when prefix mode exits. macOS only; a no-op elsewhere and a
-    /// best-effort no-op if the switch fails. Default: false.
+    /// While prefix mode is active, temporarily switch the host input source
+    /// to an ASCII-capable mode so prefix commands are read as ASCII even when
+    /// an IME is active, then restore the previous input source when prefix
+    /// mode exits. On macOS this selects the ASCII-capable keyboard layout; on
+    /// Windows it switches the IME to English (ASCII) input. Windows support is
+    /// currently limited to the Korean IME; with an IME for any other language,
+    /// the input source is left unchanged. macOS and Windows only; a no-op
+    /// elsewhere and a best-effort no-op if the switch fails.
+    /// Default: false.
     pub switch_ascii_input_source_in_prefix: bool,
 }
 

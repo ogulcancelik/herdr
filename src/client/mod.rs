@@ -1366,7 +1366,8 @@ async fn run_client_loop(
         .set_nonblocking(false)
         .map_err(ClientError::ConnectionFailed)?;
 
-    // This (foreground) client owns the prefix ASCII input-source switch; a no-op on non-macOS.
+    // This (foreground) client owns the prefix ASCII input-source switch
+    // (implemented on macOS and Windows; a no-op on other platforms).
     use crate::platform::PrefixInputSource;
     let mut prefix_input_source = crate::platform::RealPrefixInputSource::default();
 
