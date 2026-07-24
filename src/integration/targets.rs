@@ -1196,6 +1196,14 @@ pub(crate) fn uninstall_mastracode() -> io::Result<MastracodeUninstallResult> {
     })
 }
 
+/// The exact SessionStart command the grok hook config registers. Shared
+/// with integration-status validation so a config that does not invoke the
+/// installed script with the `session` action is reported as outdated.
+pub(crate) fn grok_session_hook_command(hook_path: &Path) -> String {
+    let quoted_hook_path = shell_single_quote(&hook_path.display().to_string());
+    format!("sh {quoted_hook_path} session")
+}
+
 pub(crate) fn install_grok() -> io::Result<GrokInstallPaths> {
     let dir = grok_dir()?;
     if !dir.is_dir() {
@@ -1216,8 +1224,7 @@ pub(crate) fn install_grok() -> io::Result<GrokInstallPaths> {
     make_executable(&hook_path)?;
 
     let config_path = hooks_dir.join(GROK_HOOK_CONFIG_INSTALL_NAME);
-    let quoted_hook_path = shell_single_quote(&hook_path.display().to_string());
-    let session_command = format!("sh {quoted_hook_path} session");
+    let session_command = grok_session_hook_command(&hook_path);
     let config = json!({
         "hooks": {
             "SessionStart": [

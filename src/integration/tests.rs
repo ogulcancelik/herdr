@@ -3677,6 +3677,26 @@ fn grok_status_reports_outdated_when_hook_config_missing_or_broken() {
     .unwrap();
     assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
 
+    // Config that mentions the script name without invoking it, and one that
+    // invokes it without the required `session` action: both are
+    // nonfunctional, so neither may report current.
+    fs::write(
+        &config_path,
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo herdr-agent-state.sh"}]}]}}"#,
+    )
+    .unwrap();
+    assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
+    let hook_path = grok_dir.join("hooks").join(GROK_HOOK_INSTALL_NAME);
+    fs::write(
+        &config_path,
+        format!(
+            r#"{{"hooks":{{"SessionStart":[{{"hooks":[{{"type":"command","command":"sh '{}'"}}]}}]}}}}"#,
+            hook_path.display()
+        ),
+    )
+    .unwrap();
+    assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
+
     // Reinstall repairs both files.
     install_grok().unwrap();
     assert_eq!(grok_state(), IntegrationStatusKind::Current);

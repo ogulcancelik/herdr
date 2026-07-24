@@ -408,7 +408,9 @@ fn grok_hook_config_is_valid(hook_path: &Path) -> bool {
                 hooks.iter().any(|hook| {
                     hook.get("command")
                         .and_then(|command| command.as_str())
-                        .is_some_and(|command| command.contains(super::GROK_HOOK_INSTALL_NAME))
+                        .is_some_and(|command| {
+                            command == super::targets::grok_session_hook_command(hook_path)
+                        })
                 })
             })
     })
