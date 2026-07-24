@@ -292,6 +292,8 @@ fn main() {
     $report.kitty_ctrl_u = Send-KeyAndObserve -PaneId $kittyPane -Key "ctrl+u" -ExpectedHex "1b5b3131373b353a3175"
     $report.kitty_up = Send-KeyAndObserve -PaneId $kittyPane -Key "up" -ExpectedHex "1b5b313b313a3141"
     $report.kitty_escape = Send-KeyAndObserve -PaneId $kittyPane -Key "esc" -ExpectedHex "1b5b323775"
+    $report.raw_kitty_alt_v = Send-RawAndObserve -PaneId $kittyPane -Text ([char]27 + "[118;3:1u") -ExpectedHex "1b5b3131383b333a3175"
+    $report.raw_kitty_ctrl_u = Send-RawAndObserve -PaneId $kittyPane -Text ([char]27 + "[117;5:1u") -ExpectedHex "1b5b3131373b353a3175"
     $report.raw_alt_v = Send-RawAndObserve -PaneId $kittyPane -Text ([char]27 + "v") -ExpectedHex "1b76"
     $report.raw_ctrl_u = Send-RawAndObserve -PaneId $kittyPane -Text ([string][char]0x15) -ExpectedHex "15"
 
@@ -315,6 +317,8 @@ fn main() {
         -or -not $report.kitty_ctrl_u.delivered `
         -or -not $report.kitty_up.delivered `
         -or -not $report.kitty_escape.delivered `
+        -or -not $report.raw_kitty_alt_v.delivered `
+        -or -not $report.raw_kitty_ctrl_u.delivered `
         -or -not $report.raw_alt_v.delivered `
         -or -not $report.raw_ctrl_u.delivered
 } finally {
