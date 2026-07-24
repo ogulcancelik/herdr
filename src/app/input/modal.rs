@@ -101,6 +101,8 @@ pub(super) fn open_global_menu(state: &mut AppState) {
 
 pub(super) fn open_keybind_help(state: &mut AppState) {
     state.keybind_help.scroll = 0;
+    state.keybind_help.query.clear();
+    state.keybind_help.search_focused = false;
     state.mode = Mode::KeybindHelp;
 }
 
@@ -284,7 +286,56 @@ pub(crate) fn insert_navigator_search_text(
     state.select_first_navigator_match_from(terminal_runtimes);
 }
 
-pub(crate) fn handle_keybind_help_key(state: &mut AppState, key: KeyEvent) {
+pub(crate) fn insert_keybind_help_query_text(state: &mut AppState, text: &str) {
+    if !state.keybind_help.search_focused {
+        return;
+    }
+    state
+        .keybind_help
+        .query
+        .extend(text.chars().filter(|ch| !ch.is_control()));
+    state.keybind_help.scroll = 0;
+}
+
+pub(super) fn keybind_help_back(state: &mut AppState) {
+    if state.keybind_help.search_focused {
+        state.keybind_help.query.clear();
+        state.keybind_help.search_focused = false;
+        state.keybind_help.scroll = 0;
+    } else {
+        leave_modal(state);
+    }
+}
+
+pub(crate) fn handle_keybind_help_key(state: &mut AppState, key: TerminalKey) {
+    if state.keybind_help.search_focused {
+        let text_char = keybind_help_text_char(key);
+        match key.code {
+            KeyCode::Up => state.scroll_keybind_help(-1),
+            KeyCode::Down => state.scroll_keybind_help(1),
+            KeyCode::PageUp => state.scroll_keybind_help(-8),
+            KeyCode::PageDown => state.scroll_keybind_help(8),
+            KeyCode::Home => state.keybind_help.scroll = 0,
+            KeyCode::End => state.keybind_help.scroll = state.keybind_help_max_scroll(),
+            KeyCode::Backspace => {
+                state.keybind_help.query.pop();
+                state.keybind_help.scroll = 0;
+            }
+            KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
+                state.keybind_help.query.clear();
+                state.keybind_help.scroll = 0;
+            }
+            KeyCode::Esc => keybind_help_back(state),
+            KeyCode::Enter => leave_modal(state),
+            _ => {
+                if let Some(character) = text_char {
+                    insert_keybind_help_query_text(state, &character.to_string());
+                }
+            }
+        }
+        return;
+    }
+
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => state.scroll_keybind_help(-1),
         KeyCode::Down | KeyCode::Char('j') => state.scroll_keybind_help(1),
@@ -292,9 +343,28 @@ pub(crate) fn handle_keybind_help_key(state: &mut AppState, key: KeyEvent) {
         KeyCode::PageDown => state.scroll_keybind_help(8),
         KeyCode::Home => state.keybind_help.scroll = 0,
         KeyCode::End => state.keybind_help.scroll = state.keybind_help_max_scroll(),
-        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') => leave_modal(state),
+        KeyCode::Char('/') if key.modifiers.is_empty() => {
+            state.keybind_help.search_focused = true;
+            state.keybind_help.scroll = 0;
+        }
+        KeyCode::Esc => keybind_help_back(state),
+        KeyCode::Enter => leave_modal(state),
+        _ if keybind_help_text_char(key) == Some('?') => leave_modal(state),
         _ => {}
     }
+}
+
+fn keybind_help_text_char(key: TerminalKey) -> Option<char> {
+    if !key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
+        return None;
+    }
+    if let Some(character) = key.shifted_codepoint.and_then(char::from_u32) {
+        return Some(character);
+    }
+    let KeyCode::Char(character) = key.code else {
+        return None;
+    };
+    Some(character)
 }
 
 pub(super) fn open_rename_workspace(
@@ -1652,6 +1722,122 @@ mod tests {
             KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT),
         );
         assert_eq!(state.name_input, "websiteZ");
+    }
+
+    #[test]
+    fn keybind_help_slash_focuses_filter_and_preserves_vim_scroll() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybind_help.query = "stale".into();
+        state.keybind_help.search_focused = true;
+        state.view.terminal_area = Rect::new(0, 0, 100, 30);
+
+        open_keybind_help(&mut state);
+        handle_keybind_help_key(
+            &mut state,
+            TerminalKey::new(KeyCode::Char('j'), KeyModifiers::empty()),
+        );
+        assert_eq!(state.keybind_help.scroll, 1);
+        handle_keybind_help_key(
+            &mut state,
+            TerminalKey::new(KeyCode::Char('k'), KeyModifiers::empty()),
+        );
+        assert_eq!(state.keybind_help.scroll, 0);
+
+        handle_keybind_help_key(
+            &mut state,
+            TerminalKey::new(KeyCode::Char('w'), KeyModifiers::empty()),
+        );
+        assert!(state.keybind_help.query.is_empty());
+
+        handle_keybind_help_key(
+            &mut state,
+            TerminalKey::new(KeyCode::Char('/'), KeyModifiers::empty()),
+        );
+        for character in "work".chars() {
+            state.keybind_help.scroll = 2;
+            handle_keybind_help_key(
+                &mut state,
+                TerminalKey::new(KeyCode::Char(character), KeyModifiers::empty()),
+            );
+        }
+
+        assert!(state.keybind_help.search_focused);
+        assert_eq!(state.keybind_help.query, "work");
+        assert_eq!(state.keybind_help.scroll, 0);
+    }
+
+    #[test]
+    fn keybind_help_query_supports_backspace_clear_and_sanitized_paste() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_keybind_help(&mut state);
+        handle_keybind_help_key(
+            &mut state,
+            TerminalKey::new(KeyCode::Char('/'), KeyModifiers::empty()),
+        );
+
+        insert_keybind_help_query_text(&mut state, "work\nspace");
+        assert_eq!(state.keybind_help.query, "workspace");
+
+        handle_keybind_help_key(
+            &mut state,
+            TerminalKey::new(KeyCode::Backspace, KeyModifiers::empty()),
+        );
+        assert_eq!(state.keybind_help.query, "workspac");
+
+        handle_keybind_help_key(
+            &mut state,
+            TerminalKey::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        );
+        assert!(state.keybind_help.query.is_empty());
+    }
+
+    #[test]
+    fn keybind_help_escape_leaves_search_before_closing() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_keybind_help(&mut state);
+        state.keybind_help.search_focused = true;
+        state.keybind_help.query = "work".into();
+
+        handle_keybind_help_key(
+            &mut state,
+            TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+        assert_eq!(state.mode, Mode::KeybindHelp);
+        assert!(!state.keybind_help.search_focused);
+        assert!(state.keybind_help.query.is_empty());
+
+        handle_keybind_help_key(
+            &mut state,
+            TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn enhanced_shifted_question_mark_closes_keybind_help_when_not_searching() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_keybind_help(&mut state);
+
+        handle_keybind_help_key(
+            &mut state,
+            TerminalKey::new(KeyCode::Char('/'), KeyModifiers::SHIFT)
+                .with_shifted_codepoint('?' as u32),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+
+        open_keybind_help(&mut state);
+        handle_keybind_help_key(
+            &mut state,
+            TerminalKey::new(KeyCode::Char('/'), KeyModifiers::empty()),
+        );
+        handle_keybind_help_key(
+            &mut state,
+            TerminalKey::new(KeyCode::Char('/'), KeyModifiers::SHIFT)
+                .with_shifted_codepoint('?' as u32),
+        );
+
+        assert_eq!(state.keybind_help.query, "?");
     }
 
     #[test]
