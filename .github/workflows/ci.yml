@@ -218,19 +218,19 @@ jobs:
           $exeDir = Split-Path -Parent $exe
           $dll = Join-Path $exeDir "conpty.dll"
           $hostDir = Join-Path $exeDir "x64"
-          $host = Join-Path $hostDir "OpenConsole.exe"
-          if ((Test-Path $dll) -or (Test-Path $host)) {
+          $consoleHost = Join-Path $hostDir "OpenConsole.exe"
+          if ((Test-Path $dll) -or (Test-Path $consoleHost)) {
             throw "invalid sibling fallback test refuses to overwrite existing ConPTY files"
           }
           New-Item -ItemType Directory -Force -Path $hostDir | Out-Null
           [System.IO.File]::WriteAllBytes($dll, [byte[]](0x48, 0x45, 0x52, 0x44, 0x52))
-          [System.IO.File]::WriteAllBytes($host, [byte[]](0x48, 0x45, 0x52, 0x44, 0x52))
+          [System.IO.File]::WriteAllBytes($consoleHost, [byte[]](0x48, 0x45, 0x52, 0x44, 0x52))
           try {
             .\scripts\windows_smoke_conpty_path.ps1 `
               -ExePath $exe `
               -Session "ci-conpty-fallback-${{ matrix.os }}-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           } finally {
-            Remove-Item -Force $dll, $host -ErrorAction SilentlyContinue
+            Remove-Item -Force $dll, $consoleHost -ErrorAction SilentlyContinue
             Remove-Item -Force $hostDir -ErrorAction SilentlyContinue
           }
 
@@ -262,13 +262,13 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $exe = Join-Path $PWD "target\x86_64-pc-windows-msvc\debug\herdr.exe"
-          $host = Join-Path (Split-Path -Parent $exe) "x64\OpenConsole.exe"
+          $consoleHost = Join-Path (Split-Path -Parent $exe) "x64\OpenConsole.exe"
           $report = Join-Path $PWD "artifacts\conpty-input-${{ matrix.os }}.json"
           .\scripts\windows_conpty_enhanced_input_probe.ps1 `
             -ExePath $exe `
             -Session "ci-conpty-${{ matrix.os }}-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" `
             -ReportPath $report `
-            -ExpectedConsoleHostPath $host
+            -ExpectedConsoleHostPath $consoleHost
 
       - name: Upload probe report
         if: always()
