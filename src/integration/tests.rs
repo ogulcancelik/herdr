@@ -103,6 +103,7 @@ fn clear_integration_path_env() {
     std::env::remove_var(QODERCLI_CONFIG_DIR_ENV_VAR);
     std::env::remove_var(CURSOR_CONFIG_DIR_ENV_VAR);
     std::env::remove_var(GROK_CONFIG_DIR_ENV_VAR);
+    std::env::remove_var(GROK_HOME_ENV_VAR);
 }
 
 fn kimi_hook_command(hook_path: &Path, action: &str) -> String {
@@ -3625,14 +3626,10 @@ fn grok_v1_integration_status_is_current() {
     let _lock = integration_env_lock();
     let base = unique_base();
     let grok_dir = base.join(".grok");
-    let hooks_dir = grok_dir.join("hooks");
-    fs::create_dir_all(&hooks_dir).unwrap();
-    fs::write(
-        hooks_dir.join(GROK_HOOK_INSTALL_NAME),
-        "#!/bin/sh\n# HERDR_INTEGRATION_ID=grok\n# HERDR_INTEGRATION_VERSION=1\n",
-    )
-    .unwrap();
+    fs::create_dir_all(&grok_dir).unwrap();
     std::env::set_var(GROK_CONFIG_DIR_ENV_VAR, &grok_dir);
+    // A real install writes both the hook script and hooks/herdr.json.
+    install_grok().unwrap();
 
     let statuses = installed_integration_statuses();
     let grok = statuses
@@ -3642,6 +3639,80 @@ fn grok_v1_integration_status_is_current() {
     assert_eq!(grok.state, IntegrationStatusKind::Current);
     assert_eq!(grok.installed_version, Some(GROK_INTEGRATION_VERSION));
 
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn grok_status_reports_outdated_when_hook_config_missing_or_broken() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let grok_dir = base.join(".grok");
+    fs::create_dir_all(&grok_dir).unwrap();
+    std::env::set_var(GROK_CONFIG_DIR_ENV_VAR, &grok_dir);
+    install_grok().unwrap();
+    let config_path = grok_dir.join("hooks").join(GROK_HOOK_CONFIG_INSTALL_NAME);
+
+    let grok_state = || {
+        installed_integration_statuses()
+            .into_iter()
+            .find(|status| status.target == crate::api::schema::IntegrationTarget::Grok)
+            .expect("grok integration status")
+            .state
+    };
+
+    // Missing config: grok never runs the hook, so the install is not current.
+    fs::remove_file(&config_path).unwrap();
+    assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
+
+    // Corrupt config.
+    fs::write(&config_path, "{not json").unwrap();
+    assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
+
+    // Config that no longer references the hook script.
+    fs::write(
+        &config_path,
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo other"}]}]}}"#,
+    )
+    .unwrap();
+    assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
+
+    // Reinstall repairs both files.
+    install_grok().unwrap();
+    assert_eq!(grok_state(), IntegrationStatusKind::Current);
+
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn grok_dir_honors_grok_home_after_config_dir_seam() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home_dir = base.join("grok-home");
+    fs::create_dir_all(&home_dir).unwrap();
+    std::env::remove_var(GROK_CONFIG_DIR_ENV_VAR);
+    std::env::set_var(GROK_HOME_ENV_VAR, &home_dir);
+
+    // The grok CLI reads its config (and hooks/) from $GROK_HOME, so the
+    // integration must install there too.
+    let installed = install_grok().unwrap();
+    assert_eq!(
+        installed.hook_path,
+        home_dir.join("hooks").join(GROK_HOOK_INSTALL_NAME)
+    );
+
+    // The herdr-level test seam still wins over GROK_HOME when set.
+    let seam_dir = base.join("seam");
+    fs::create_dir_all(&seam_dir).unwrap();
+    std::env::set_var(GROK_CONFIG_DIR_ENV_VAR, &seam_dir);
+    let installed = install_grok().unwrap();
+    assert_eq!(
+        installed.hook_path,
+        seam_dir.join("hooks").join(GROK_HOOK_INSTALL_NAME)
+    );
+
+    std::env::remove_var(GROK_HOME_ENV_VAR);
     clear_integration_path_env();
     let _ = fs::remove_dir_all(base);
 }

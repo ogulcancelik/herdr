@@ -379,6 +379,41 @@ pub(crate) fn print_outdated_update_notice() -> bool {
     true
 }
 
+/// Whether the herdr-owned grok hook config next to the installed hook
+/// script still registers it: `hooks/herdr.json` must exist, parse as JSON,
+/// and carry a SessionStart command entry that references the hook script.
+fn grok_hook_config_is_valid(hook_path: &Path) -> bool {
+    let Some(hooks_dir) = hook_path.parent() else {
+        return false;
+    };
+    let config_path = hooks_dir.join(super::GROK_HOOK_CONFIG_INSTALL_NAME);
+    let Ok(content) = fs::read_to_string(&config_path) else {
+        return false;
+    };
+    let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return false;
+    };
+    let Some(entries) = config
+        .get("hooks")
+        .and_then(|hooks| hooks.get("SessionStart"))
+        .and_then(|entries| entries.as_array())
+    else {
+        return false;
+    };
+    entries.iter().any(|entry| {
+        entry
+            .get("hooks")
+            .and_then(|hooks| hooks.as_array())
+            .is_some_and(|hooks| {
+                hooks.iter().any(|hook| {
+                    hook.get("command")
+                        .and_then(|command| command.as_str())
+                        .is_some_and(|command| command.contains(super::GROK_HOOK_INSTALL_NAME))
+                })
+            })
+    })
+}
+
 pub(crate) fn integration_status_at(
     target: crate::api::schema::IntegrationTarget,
     path: PathBuf,
@@ -397,11 +432,22 @@ pub(crate) fn integration_status_at(
     let installed_version = fs::read_to_string(&path)
         .ok()
         .and_then(|content| parse_integration_version(&content));
-    let state = if installed_version.is_some_and(|version| version >= expected_version) {
+    let mut state = if installed_version.is_some_and(|version| version >= expected_version) {
         super::IntegrationStatusKind::Current
     } else {
         super::IntegrationStatusKind::Outdated
     };
+
+    // Grok only invokes the hook when the herdr-owned `hooks/herdr.json`
+    // registers it, so a current hook script with a missing or broken config
+    // is a nonfunctional install: report it as outdated so `herdr integration
+    // status` flags it and a reinstall rewrites both files.
+    if target == crate::api::schema::IntegrationTarget::Grok
+        && state == super::IntegrationStatusKind::Current
+        && !grok_hook_config_is_valid(&path)
+    {
+        state = super::IntegrationStatusKind::Outdated;
+    }
 
     super::IntegrationStatus {
         target,
