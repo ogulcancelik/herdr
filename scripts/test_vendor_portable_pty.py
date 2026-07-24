@@ -103,11 +103,15 @@ class VendorPortablePtyTests(unittest.TestCase):
                 f"stderr:\n{result.stderr}",
             )
 
-    def test_windows_conpty_loader_does_not_probe_path_conpty_dll(self) -> None:
+    def test_windows_conpty_loader_uses_only_controlled_sources(self) -> None:
         project_root = Path(__file__).resolve().parent.parent
         source = project_root / "vendor" / "portable-pty" / "src" / "win" / "psuedocon.rs"
         text = source.read_text()
 
+        self.assertIn("std::env::current_exe()", text)
+        self.assertIn('.join("conpty.dll")', text)
+        self.assertIn('.join("OpenConsole.exe")', text)
+        self.assertIn("ConPtyFuncs::open(&path)", text)
         self.assertIn('ConPtyFuncs::open(Path::new("kernel32.dll"))', text)
         self.assertNotIn('Path::new("conpty.dll")', text)
 

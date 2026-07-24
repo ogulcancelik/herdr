@@ -4,7 +4,9 @@ param(
 
     [string] $Session = "conpty-input-$([guid]::NewGuid().ToString('N'))",
 
-    [string] $ReportPath = ""
+    [string] $ReportPath = "",
+
+    [string] $ExpectedConsoleHostPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -309,6 +311,16 @@ fn main() {
         }
     })
     $report.runner_console_hosts = $consoleHosts
+    $appLocalHostRequired = -not [string]::IsNullOrWhiteSpace($ExpectedConsoleHostPath)
+    if ($appLocalHostRequired) {
+        $expectedConsoleHost = (Resolve-Path $ExpectedConsoleHostPath).Path
+        $report.expected_console_host = $expectedConsoleHost
+        $report.app_local_console_host = @($consoleHosts | Where-Object {
+            $_.name -ieq "OpenConsole" -and $_.path -ieq $expectedConsoleHost
+        }).Count -gt 0
+    } else {
+        $report.app_local_console_host = $null
+    }
 
     $failed = -not $report.legacy_alt_v.delivered `
         -or -not $report.device_attributes_response `
@@ -320,7 +332,8 @@ fn main() {
         -or -not $report.raw_kitty_alt_v.delivered `
         -or -not $report.raw_kitty_ctrl_u.delivered `
         -or -not $report.raw_alt_v.delivered `
-        -or -not $report.raw_ctrl_u.delivered
+        -or -not $report.raw_ctrl_u.delivered `
+        -or ($appLocalHostRequired -and -not $report.app_local_console_host)
 } finally {
     if ($null -ne $server) {
         try {

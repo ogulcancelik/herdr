@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: herdr maintainers <maintainers@herdr.dev>
+Date: Tue, 23 Jun 2026 00:00:00 +0000
+Subject: [PATCH] control ConPTY loading
+
+Load an app-local ConPTY from the executable directory when Herdr ships a
+matching architecture host, otherwise use the ConPTY functions exported by
+kernel32.dll. Never probe for a bare conpty.dll through the DLL search path.
+
+Herdr issues: https://github.com/ogulcancelik/herdr/issues/761
+              https://github.com/ogulcancelik/herdr/issues/1533
+Vendored base: portable-pty 0.9.0
+---
+ vendor/portable-pty/src/win/psuedocon.rs | 32 ++++++++++++++++++------
+ 1 file changed, 24 insertions(+), 8 deletions(-)
+
+diff --git a/vendor/portable-pty/src/win/psuedocon.rs b/vendor/portable-pty/src/win/psuedocon.rs
+index 0000000..0000000 100644
+--- a/vendor/portable-pty/src/win/psuedocon.rs
++++ b/vendor/portable-pty/src/win/psuedocon.rs
+@@ -9,7 +9,7 @@ use std::ffi::OsString;
+ use std::io::Error as IoError;
+ use std::os::windows::ffi::OsStringExt;
+ use std::os::windows::io::{AsRawHandle, FromRawHandle};
+-use std::path::Path;
++use std::path::{Path, PathBuf};
+ use std::sync::Mutex;
+ use std::{mem, ptr};
+ use winapi::shared::minwindef::DWORD;
+@@ -49,14 +49,30 @@ fn load_conpty() -> ConPtyFuncs {
+         "this system does not support conpty.  Windows 10 October 2018 or newer is required",
+     );
+ 
+-    // We prefer to use a sideloaded conpty.dll and openconsole.exe host deployed
+-    // alongside the application.  We check for this after checking for kernel
+-    // support so that we don't try to proceed and do something crazy.
+-    if let Ok(sideloaded) = ConPtyFuncs::open(Path::new("conpty.dll")) {
+-        sideloaded
+-    } else {
+-        kernel
++    if let Some(path) = app_local_conpty_path() {
++        match ConPtyFuncs::open(&path) {
++            Ok(conpty) => return conpty,
++            Err(error) => log::warn!(
++                "failed to load app-local ConPTY from {}: {error:?}; using system ConPTY",
++                path.display()
++            ),
++        }
+     }
++
++    kernel
++}
++
++fn app_local_conpty_path() -> Option<PathBuf> {
++    let executable_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
++    let host_arch = match std::env::consts::ARCH {
++        "x86" => "x86",
++        "x86_64" => "x64",
++        "aarch64" => "arm64",
++        _ => return None,
++    };
++    let dll = executable_dir.join("conpty.dll");
++    let host = executable_dir.join(host_arch).join("OpenConsole.exe");
++    (dll.is_file() && host.is_file()).then_some(dll)
+ }
+ 
+ lazy_static! {
+-- 
+2.50.1
