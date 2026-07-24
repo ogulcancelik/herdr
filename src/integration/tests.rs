@@ -3697,6 +3697,18 @@ fn grok_status_reports_outdated_when_hook_config_missing_or_broken() {
     .unwrap();
     assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
 
+    // Correct command but not a command-type hook: grok will not execute it.
+    let session_command = grok_session_hook_command(&hook_path);
+    fs::write(
+        &config_path,
+        format!(
+            r#"{{"hooks":{{"SessionStart":[{{"hooks":[{{"type":"http","command":{}}}]}}]}}}}"#,
+            serde_json::to_string(&session_command).unwrap()
+        ),
+    )
+    .unwrap();
+    assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
+
     // Reinstall repairs both files.
     install_grok().unwrap();
     assert_eq!(grok_state(), IntegrationStatusKind::Current);

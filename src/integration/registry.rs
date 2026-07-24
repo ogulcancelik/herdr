@@ -406,11 +406,17 @@ fn grok_hook_config_is_valid(hook_path: &Path) -> bool {
             .and_then(|hooks| hooks.as_array())
             .is_some_and(|hooks| {
                 hooks.iter().any(|hook| {
-                    hook.get("command")
-                        .and_then(|command| command.as_str())
-                        .is_some_and(|command| {
-                            command == super::targets::grok_session_hook_command(hook_path)
-                        })
+                    let is_command_hook = hook
+                        .get("type")
+                        .and_then(|hook_type| hook_type.as_str())
+                        .is_some_and(|hook_type| hook_type == "command");
+                    is_command_hook
+                        && hook
+                            .get("command")
+                            .and_then(|command| command.as_str())
+                            .is_some_and(|command| {
+                                command == super::targets::grok_session_hook_command(hook_path)
+                            })
                 })
             })
     })
