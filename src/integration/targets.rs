@@ -1200,3 +1200,26 @@ pub(crate) fn uninstall_mastracode() -> io::Result<MastracodeUninstallResult> {
         updated_hooks,
     })
 }
+
+pub(crate) fn install_jcode() -> io::Result<JcodeInstallPaths> {
+    let jcode_home = jcode_dir()?;
+    let hooks_dir = jcode_home.join("hooks");
+    fs::create_dir_all(&hooks_dir)?;
+
+    let hook_path = hooks_dir.join(JCODE_HOOK_INSTALL_NAME);
+    fs::write(&hook_path, JCODE_HOOK_ASSET)?;
+    make_executable(&hook_path)?;
+
+    Ok(JcodeInstallPaths { hook_path })
+}
+
+pub(crate) fn uninstall_jcode() -> io::Result<JcodeUninstallResult> {
+    let jcode_home = jcode_dir()?;
+    let hook_path = jcode_home.join("hooks").join(JCODE_HOOK_INSTALL_NAME);
+    let removed_hook_file = remove_file_if_exists(&hook_path)?;
+
+    Ok(JcodeUninstallResult {
+        hook_path,
+        removed_hook_file,
+    })
+}

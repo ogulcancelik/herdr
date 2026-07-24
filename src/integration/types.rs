@@ -74,6 +74,17 @@ pub(crate) struct CursorInstallPaths {
 }
 
 #[derive(Debug)]
+pub(crate) struct JcodeInstallPaths {
+    pub hook_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct JcodeUninstallResult {
+    pub hook_path: PathBuf,
+    pub removed_hook_file: bool,
+}
+
+#[derive(Debug)]
 pub(crate) struct CursorUninstallResult {
     pub hook_path: PathBuf,
     pub hooks_path: PathBuf,

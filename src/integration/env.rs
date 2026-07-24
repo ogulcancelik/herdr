@@ -73,6 +73,10 @@ pub(crate) fn droid_dir() -> io::Result<PathBuf> {
     Ok(home_dir()?.join(".factory"))
 }
 
+pub(crate) fn jcode_dir() -> io::Result<PathBuf> {
+    Ok(home_dir()?.join(".jcode"))
+}
+
 pub(crate) fn config_dir_from_env_or_home(
     env_var: &str,
     home_relative_segments: &[&str],
