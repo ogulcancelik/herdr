@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, converted_to_draft]
   push:
     branches: [master, windows]
     paths-ignore:
@@ -173,3 +173,58 @@ jobs:
           $ErrorActionPreference = "Stop"
           $exe = Join-Path $PWD "target\x86_64-pc-windows-msvc\debug\herdr.exe"
           .\scripts\windows_smoke_conpty_path.ps1 -ExePath $exe -Session "ci-windows-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+
+  windows-conpty-enhanced-input:
+    name: ConPTY enhanced input (${{ matrix.os }})
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+          use-cache: false
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+          key: conpty-input-${{ matrix.os }}
+
+      - name: Build Herdr
+        run: cargo build --locked --target x86_64-pc-windows-msvc
+
+      - name: Probe enhanced pane input
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = Join-Path $PWD "target\x86_64-pc-windows-msvc\debug\herdr.exe"
+          $report = Join-Path $PWD "artifacts\conpty-input-${{ matrix.os }}.json"
+          .\scripts\windows_conpty_enhanced_input_probe.ps1 `
+            -ExePath $exe `
+            -Session "ci-conpty-${{ matrix.os }}-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" `
+            -ReportPath $report
+
+      - name: Upload probe report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc39830 # v7
+        with:
+          name: conpty-input-${{ matrix.os }}
+          path: artifacts/conpty-input-${{ matrix.os }}.json
+          if-no-files-found: warn
