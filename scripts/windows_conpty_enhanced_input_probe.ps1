@@ -288,7 +288,7 @@ fn main() {
     $kittyPane = New-ProbePane -Mode "kitty"
     $report.kitty_initial = Wait-PaneText -PaneId $kittyPane -Needle "1b5b3f3775"
     $kittyInitialHex = Get-LatestProbeHex -PaneText $report.kitty_initial
-    $report.device_attributes_response = $kittyInitialHex -match "^1b5b3f(?:3[0-9]|3b)+63"
+    $report.device_attributes_response = $kittyInitialHex -match "1b5b3f(?:3[0-9]|3b)+63"
     $report.kitty_query_response = $kittyInitialHex.Contains("1b5b3f3775")
     $report.kitty_alt_v = Send-KeyAndObserve -PaneId $kittyPane -Key "alt+v" -ExpectedHex "1b5b3131383b333a3175"
     $report.kitty_ctrl_u = Send-KeyAndObserve -PaneId $kittyPane -Key "ctrl+u" -ExpectedHex "1b5b3131373b353a3175"
